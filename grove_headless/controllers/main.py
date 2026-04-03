@@ -75,6 +75,7 @@ class GroveHeadlessAPI(http.Controller):
         "/grove/api/v1/products",
         type="http",
         auth="public",
+        website=True,
         methods=["GET"],
         csrf=False,
     )
@@ -131,6 +132,7 @@ class GroveHeadlessAPI(http.Controller):
         "/grove/api/v1/products/<int:product_id>",
         type="http",
         auth="public",
+        website=True,
         methods=["GET"],
         csrf=False,
     )
@@ -172,6 +174,7 @@ class GroveHeadlessAPI(http.Controller):
         "/grove/api/v1/cart",
         type="http",
         auth="public",
+        website=True,
         methods=["GET"],
         csrf=False,
     )
@@ -214,6 +217,7 @@ class GroveHeadlessAPI(http.Controller):
         "/grove/api/v1/cart",
         type="http",
         auth="public",
+        website=True,
         methods=["POST"],
         csrf=False,
     )
