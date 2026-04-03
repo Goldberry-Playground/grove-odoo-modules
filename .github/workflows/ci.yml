@@ -21,6 +21,48 @@ jobs:
       - name: Ruff format check
         run: ruff format --check . --line-length 120
 
+  validate-tenant-config:
+    name: Validate Tenant Slug Map
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify tenant slug map is consistent
+        run: |
+          python3 -c "
+          import ast, sys
+
+          # Parse the tenant slug map from website.py
+          with open('grove_headless/models/website.py') as f:
+              content = f.read()
+
+          # Extract the _TENANT_SLUGS dict
+          tree = ast.parse(content)
+          slug_map = None
+          for node in ast.walk(tree):
+              if isinstance(node, ast.Assign):
+                  for target in node.targets:
+                      if isinstance(target, ast.Name) and target.id == '_TENANT_SLUGS':
+                          slug_map = ast.literal_eval(node.value)
+
+          if not slug_map:
+              print('ERROR: _TENANT_SLUGS not found in website.py')
+              sys.exit(1)
+
+          print(f'Tenant slugs: {slug_map}')
+          required = {'goldberry', 'ggg', 'nursery'}
+          missing = required - set(slug_map.keys())
+          if missing:
+              print(f'ERROR: Missing required tenant slugs: {missing}')
+              sys.exit(1)
+
+          for slug, name in slug_map.items():
+              if not name.strip():
+                  print(f'ERROR: Empty website name for slug \"{slug}\"')
+                  sys.exit(1)
+
+          print('All tenant slugs valid')
+          "
+
   validate-manifests:
     name: Validate Module Manifests
     runs-on: ubuntu-latest
