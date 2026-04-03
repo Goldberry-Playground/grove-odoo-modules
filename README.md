@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/Goldberry-Playground/grove-odoo-modules/actions/workflows/ci.yml/badge.svg)](https://github.com/Goldberry-Playground/grove-odoo-modules/actions/workflows/ci.yml)
 
-Custom Odoo 19 modules powering the Gather at the Grove multi-tenant ecosystem — three businesses (Goldberry Grove Farm, GGG Woodworking, At The Grove Nursery) on a single Odoo instance.
+Custom Odoo 19 modules powering the Gather at the Grove multi-tenant ecosystem — three businesses (Goldberry Grove Farm, George George George Woodworking LLC, At The Grove Nursery LLC) on a single Odoo instance.
 
 ## Modules
 
