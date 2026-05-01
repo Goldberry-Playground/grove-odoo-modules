@@ -6,15 +6,23 @@ on:
   push:
     branches: [main]
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.12"
+
 jobs:
   lint:
-    name: Lint Python
+    name: Ruff (lint + format)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
       - run: pip install ruff
       - name: Ruff check
         run: ruff check . --select E,F,I --line-length 120
@@ -22,69 +30,151 @@ jobs:
         run: ruff format --check . --line-length 120
 
   validate-tenant-config:
-    name: Validate Tenant Slug Map
+    name: Validate tenant slug map
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
       - name: Verify tenant slug map is consistent
         run: |
-          python3 -c "
-          import ast, sys
-
-          # Parse the tenant slug map from website.py
-          with open('grove_headless/models/website.py') as f:
-              content = f.read()
-
-          # Extract the _TENANT_SLUGS dict
-          tree = ast.parse(content)
+          python3 - <<'PY'
+          import ast, sys, pathlib
+          src = pathlib.Path('grove_headless/models/website.py').read_text()
+          tree = ast.parse(src)
           slug_map = None
           for node in ast.walk(tree):
               if isinstance(node, ast.Assign):
-                  for target in node.targets:
-                      if isinstance(target, ast.Name) and target.id == '_TENANT_SLUGS':
+                  for t in node.targets:
+                      if isinstance(t, ast.Name) and t.id == '_TENANT_SLUGS':
                           slug_map = ast.literal_eval(node.value)
-
           if not slug_map:
-              print('ERROR: _TENANT_SLUGS not found in website.py')
-              sys.exit(1)
-
-          print(f'Tenant slugs: {slug_map}')
+              sys.exit('_TENANT_SLUGS not found in website.py')
           required = {'goldberry', 'ggg', 'nursery'}
           missing = required - set(slug_map.keys())
           if missing:
-              print(f'ERROR: Missing required tenant slugs: {missing}')
-              sys.exit(1)
-
+              sys.exit(f'Missing required tenant slugs: {missing}')
           for slug, name in slug_map.items():
               if not name.strip():
-                  print(f'ERROR: Empty website name for slug \"{slug}\"')
-                  sys.exit(1)
-
-          print('All tenant slugs valid')
-          "
+                  sys.exit(f'Empty website name for slug "{slug}"')
+          print(f'Tenant slugs valid: {slug_map}')
+          PY
 
   validate-manifests:
-    name: Validate Module Manifests
+    name: Validate module manifests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Parse all __manifest__.py files
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Parse and validate __manifest__.py files
         run: |
-          python3 -c "
+          python3 - <<'PY'
           import ast, glob, sys
           manifests = glob.glob('*/__manifest__.py')
           if not manifests:
-              print('No manifests found')
-              sys.exit(0)
+              sys.exit('No manifests found — repo layout changed?')
+          fail = False
           for f in manifests:
               try:
-                  with open(f) as fh:
-                      data = ast.literal_eval(fh.read())
-                  assert 'name' in data, 'missing name'
-                  assert 'version' in data, 'missing version'
-                  assert data.get('installable', True), 'not installable'
-                  print(f'{f}: valid ({data[\"name\"]} v{data[\"version\"]})')
+                  data = ast.literal_eval(open(f).read())
+                  for k in ('name', 'version', 'depends'):
+                      if k not in data:
+                          raise AssertionError(f'missing required key: {k}')
+                  if not data.get('installable', True):
+                      raise AssertionError('module is not installable')
+                  if not data['version'].startswith('19.'):
+                      raise AssertionError(f"version {data['version']} does not target Odoo 19")
+                  print(f'  {f}: ok — {data["name"]} v{data["version"]}')
               except Exception as e:
-                  print(f'{f}: INVALID - {e}')
-                  sys.exit(1)
-          "
+                  print(f'  {f}: FAIL — {e}')
+                  fail = True
+          if fail:
+              sys.exit(1)
+          PY
+
+  validate-xml-data-files:
+    name: Validate XML data files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: Parse all data XML files referenced in manifests
+        run: |
+          python3 - <<'PY'
+          import ast, glob, sys, xml.etree.ElementTree as ET
+          fail = False
+          for manifest_path in glob.glob('*/__manifest__.py'):
+              module_dir = manifest_path.rsplit('/', 1)[0]
+              data = ast.literal_eval(open(manifest_path).read())
+              for relpath in data.get('data', []):
+                  full = f'{module_dir}/{relpath}'
+                  if not relpath.endswith('.xml'):
+                      continue
+                  try:
+                      ET.parse(full)
+                      print(f'  {full}: ok')
+                  except Exception as e:
+                      print(f'  {full}: FAIL — {e}')
+                      fail = True
+          if fail:
+              sys.exit(1)
+          PY
+
+  install-smoke-test:
+    name: Install module against Odoo 19
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: odoo
+          POSTGRES_PASSWORD: odoo
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U odoo"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: grove-odoo-modules
+
+      - name: Boot Odoo 19 container with this module mounted
+        run: |
+          docker run -d --name odoo \
+            --network host \
+            -v "$PWD/grove-odoo-modules:/mnt/extra-addons" \
+            -e HOST=localhost \
+            -e USER=odoo \
+            -e PASSWORD=odoo \
+            odoo:19 \
+            -- --addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons \
+               --without-demo=all \
+               --init=grove_headless \
+               --stop-after-init \
+               --log-level=warn
+          for i in $(seq 1 60); do
+            if ! docker ps -q --filter name=odoo --filter status=running | grep -q .; then
+              break
+            fi
+            sleep 5
+          done
+
+      - name: Verify exit status
+        run: |
+          status=$(docker inspect odoo --format '{{.State.ExitCode}}')
+          echo "Odoo init exited: $status"
+          if [ "$status" != "0" ]; then
+            echo "::group::Odoo logs"
+            docker logs odoo
+            echo "::endgroup::"
+            exit 1
+          fi
