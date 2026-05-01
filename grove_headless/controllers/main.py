@@ -22,10 +22,17 @@ PRODUCT_DETAIL_FIELDS = PRODUCT_LIST_FIELDS + [
     "grove_seo_description",
     "categ_id",
     "currency_id",
-    "qty_available",
     "website_url",
     "image_1920",
 ]
+
+# Fields only present when the `stock` module is installed.
+OPTIONAL_STOCK_FIELDS = ["qty_available"]
+
+
+def _available_fields(model, fields):
+    """Filter `fields` to those that actually exist on the model."""
+    return [f for f in fields if f in model._fields]
 
 
 def _json_response(data, status=200):
@@ -157,12 +164,16 @@ class GroveHeadlessAPI(http.Controller):
         if not product:
             return _json_response({"error": "Product not found"}, status=404)
 
-        data = _serialize_product(product, PRODUCT_DETAIL_FIELDS)
+        detail_fields = PRODUCT_DETAIL_FIELDS + _available_fields(product, OPTIONAL_STOCK_FIELDS)
+        data = _serialize_product(product, detail_fields)
         data["image_url"] = f"/web/image/product.template/{product.id}/image_1920"
         data["variants"] = []
 
+        variant_fields = ["id", "display_name", "default_code", "lst_price"] + _available_fields(
+            request.env["product.product"], OPTIONAL_STOCK_FIELDS
+        )
         for variant in product.product_variant_ids:
-            variant_vals = variant.read(["id", "name", "default_code", "lst_price", "qty_available"])[0]
+            variant_vals = variant.read(variant_fields)[0]
             variant_vals["image_url"] = f"/web/image/product.product/{variant.id}/image_128"
             data["variants"].append(variant_vals)
 
@@ -179,8 +190,9 @@ class GroveHeadlessAPI(http.Controller):
         csrf=False,
     )
     def cart_get(self, **_kwargs):
-        website = request.website
-        sale_order = website.sale_get_order()
+        # request.cart is a lazy proxy injected by website_sale's ir_http override.
+        # Resolves to the session's current cart or an empty recordset.
+        sale_order = request.cart
 
         if not sale_order:
             return _json_response({"lines": [], "amount_total": 0, "currency": None})
@@ -191,7 +203,7 @@ class GroveHeadlessAPI(http.Controller):
                 {
                     "id": line.id,
                     "product_id": line.product_id.id,
-                    "product_name": line.product_id.name,
+                    "product_name": line.product_id.display_name,
                     "quantity": line.product_uom_qty,
                     "price_unit": line.price_unit,
                     "price_subtotal": line.price_subtotal,
@@ -227,44 +239,328 @@ class GroveHeadlessAPI(http.Controller):
         except json.JSONDecodeError:
             return _json_response({"error": "Invalid JSON body"}, status=400)
 
-        product_id = payload.get("product_id")
+        # Accept either `variant_id` (product.product) or `product_id` (product.template).
+        # The frontend currently sends `product_id` from the detail page, so we resolve
+        # template → default variant when no explicit variant is given.
+        variant_id = payload.get("variant_id")
+        template_id = payload.get("product_id")
         quantity = payload.get("quantity", 1)
 
-        if not product_id:
-            return _json_response({"error": "product_id is required"}, status=400)
+        if not (variant_id or template_id):
+            return _json_response({"error": "Either variant_id or product_id is required"}, status=400)
 
         try:
-            product_id = int(product_id)
             quantity = float(quantity)
+            if variant_id is not None:
+                variant_id = int(variant_id)
+            if template_id is not None:
+                template_id = int(template_id)
         except (ValueError, TypeError):
-            return _json_response({"error": "Invalid product_id or quantity"}, status=400)
+            return _json_response({"error": "Invalid id or quantity"}, status=400)
+
+        current_company = request.website.company_id
+        company_domain = [("company_id", "in", [current_company.id, False])]
+
+        if variant_id is not None:
+            variant = (
+                request.env["product.product"]
+                .sudo()
+                .with_company(current_company)
+                .search(
+                    [("id", "=", variant_id), *company_domain],
+                    limit=1,
+                )
+            )
+        else:
+            template = (
+                request.env["product.template"]
+                .sudo()
+                .with_company(current_company)
+                .search(
+                    [
+                        ("id", "=", template_id),
+                        ("website_published", "=", True),
+                        *company_domain,
+                    ],
+                    limit=1,
+                )
+            )
+            variant = template.product_variant_id  # default variant
+
+        if not variant:
+            return _json_response({"error": "Product not found"}, status=404)
+
+        sale_order = request.cart or request.website._create_cart()
+        sale_order._cart_add(product_id=variant.id, quantity=quantity)
+
+        return self.cart_get()
+
+    # ── Orders ───────────────────────────────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/orders",
+        type="http",
+        auth="public",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def order_create(self, **_kwargs):
+        """Create a draft sale.order from a posted cart payload.
+
+        Body shape:
+            {
+              "contact": {"name": "...", "email": "...", "phone": "..."},
+              "shipping": {"street": "...", "city": "...", "state": "WV",
+                           "zip": "...", "country": "US"},
+              "billing":  {...} | null,            # null = same as shipping
+              "payment_method": "card",            # informational; real payment in later sprint
+              "items": [{"variant_id": 2, "quantity": 1}, ...]
+            }
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+
+        contact = payload.get("contact") or {}
+        items = payload.get("items") or []
+
+        if not contact.get("email") or not contact.get("name"):
+            return _json_response({"error": "contact.name and contact.email are required"}, status=400)
+        if not isinstance(items, list) or not items:
+            return _json_response({"error": "items must be a non-empty list"}, status=400)
 
         website = request.website
         current_company = website.company_id
+        env = request.env
 
-        # Verify product exists, is published, and belongs to current company
-        product = (
-            request.env["product.product"]
+        # Resolve partner: find an existing partner scoped to this company by
+        # email so we don't read/write across tenants. We deliberately do NOT
+        # overwrite an existing partner's attributes from a public POST — that
+        # would let anyone with a customer's email mutate their record. Instead
+        # we either reuse the existing partner as-is, or create a fresh one.
+        Partner = env["res.partner"].sudo().with_company(current_company)
+        existing_partner = Partner.search(
+            [
+                ("email", "=", contact["email"]),
+                ("company_id", "in", [current_company.id, False]),
+            ],
+            limit=1,
+        )
+        partner_vals = _partner_vals_from_payload(env, contact, payload.get("shipping"))
+        if existing_partner:
+            partner = existing_partner
+        else:
+            partner = Partner.create({**partner_vals, "company_id": current_company.id})
+
+        # Resolve billing partner: if a billing address is explicitly provided,
+        # always create a child invoice contact. Otherwise reuse main partner.
+        billing_partner = partner
+        if payload.get("billing"):
+            billing_vals = _partner_vals_from_payload(env, contact, payload["billing"])
+            billing_partner = Partner.create(
+                {**billing_vals, "parent_id": partner.id, "type": "invoice", "company_id": current_company.id}
+            )
+
+        # Pick the "Online" sales team if it exists for this company.
+        team = (
+            env["crm.team"]
             .sudo()
-            .with_company(current_company)
             .search(
-                [
-                    ("id", "=", product_id),
-                    ("website_published", "=", True),
-                    ("company_id", "in", [current_company.id, False]),
-                ],
+                [("name", "=", "Online"), ("company_id", "=", current_company.id)],
                 limit=1,
             )
         )
 
-        if not product:
-            return _json_response({"error": "Product not found"}, status=404)
+        order_vals = {
+            "partner_id": partner.id,
+            "partner_invoice_id": billing_partner.id,
+            "partner_shipping_id": partner.id,
+            "company_id": current_company.id,
+            "website_id": website.id,
+            "note": _format_payment_note(payload.get("payment_method")),
+        }
+        if team:
+            order_vals["team_id"] = team.id
 
-        sale_order = website.sale_get_order(force_create=True)
-        sale_order._cart_update(
-            product_id=product.id,
-            set_qty=quantity,
+        SaleOrder = env["sale.order"].sudo().with_company(current_company)
+        order = SaleOrder.create(order_vals)
+
+        # Build order lines. Validate every variant up front so partial orders
+        # never get persisted.
+        line_vals = []
+        for raw_item in items:
+            try:
+                variant_id = int(raw_item.get("variant_id"))
+                quantity = float(raw_item.get("quantity") or 1)
+            except (TypeError, ValueError):
+                order.unlink()
+                return _json_response(
+                    {"error": "Each item needs numeric variant_id and quantity"},
+                    status=400,
+                )
+
+            variant = (
+                env["product.product"]
+                .sudo()
+                .with_company(current_company)
+                .search(
+                    [("id", "=", variant_id), ("company_id", "in", [current_company.id, False])],
+                    limit=1,
+                )
+            )
+            if not variant:
+                order.unlink()
+                return _json_response({"error": f"Product variant {variant_id} not found"}, status=404)
+
+            line_vals.append(
+                {
+                    "order_id": order.id,
+                    "product_id": variant.id,
+                    "product_uom_qty": quantity,
+                }
+            )
+
+        env["sale.order.line"].sudo().create(line_vals)
+        order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
+
+        # Ensure a portal access token exists — required to fetch order details
+        # later via GET without exposing PII through id-enumeration.
+        access_token = order._portal_ensure_token()
+
+        return _json_response(
+            {
+                "id": order.id,
+                "name": order.name,
+                "state": order.state,
+                "access_token": access_token,
+                "amount_untaxed": order.amount_untaxed,
+                "amount_tax": order.amount_tax,
+                "amount_total": order.amount_total,
+                "currency": {
+                    "id": order.currency_id.id,
+                    "name": order.currency_id.name,
+                },
+                "line_count": len(order.order_line),
+            }
         )
 
-        # Return the updated cart
-        return self.cart_get()
+    @http.route(
+        "/grove/api/v1/orders/<int:order_id>",
+        type="http",
+        auth="public",
+        website=True,
+        methods=["GET"],
+        csrf=False,
+    )
+    def order_get(self, order_id, **kwargs):
+        """Return public-safe order details for the confirmation page.
+
+        Requires an `access_token` query param matching the order's token to
+        prevent PII leak via incremental id enumeration. The token is returned
+        in the order_create response and embedded in the success-page URL.
+        """
+        access_token = kwargs.get("access_token")
+        if not access_token:
+            return _json_response({"error": "access_token is required"}, status=403)
+
+        website = request.website
+        current_company = website.company_id
+
+        order = (
+            request.env["sale.order"]
+            .sudo()
+            .with_company(current_company)
+            .search(
+                [
+                    ("id", "=", order_id),
+                    ("company_id", "=", current_company.id),
+                    ("access_token", "=", access_token),
+                ],
+                limit=1,
+            )
+        )
+        if not order:
+            return _json_response({"error": "Order not found"}, status=404)
+
+        lines = [
+            {
+                "id": line.id,
+                "product_name": line.product_id.display_name,
+                "quantity": line.product_uom_qty,
+                "price_unit": line.price_unit,
+                "price_subtotal": line.price_subtotal,
+            }
+            for line in order.order_line
+        ]
+
+        return _json_response(
+            {
+                "id": order.id,
+                "name": order.name,
+                "state": order.state,
+                "contact": {
+                    "name": order.partner_id.name,
+                    "email": order.partner_id.email,
+                },
+                "lines": lines,
+                "amount_untaxed": order.amount_untaxed,
+                "amount_tax": order.amount_tax,
+                "amount_total": order.amount_total,
+                "currency": {
+                    "id": order.currency_id.id,
+                    "name": order.currency_id.name,
+                },
+            }
+        )
+
+
+def _partner_vals_from_payload(env, contact, address):
+    """Build res.partner write/create vals from contact + address dicts."""
+    vals = {
+        "name": contact.get("name"),
+        "email": contact.get("email"),
+        "phone": contact.get("phone") or False,
+    }
+    if not address:
+        return vals
+
+    vals.update(
+        {
+            "street": address.get("street") or False,
+            "street2": address.get("street2") or False,
+            "city": address.get("city") or False,
+            "zip": address.get("zip") or False,
+        }
+    )
+
+    country_code = (address.get("country") or "").upper()
+    if country_code:
+        country = env["res.country"].sudo().search([("code", "=", country_code)], limit=1)
+        if country:
+            vals["country_id"] = country.id
+            state_code = (address.get("state") or "").upper()
+            if state_code:
+                state = (
+                    env["res.country.state"]
+                    .sudo()
+                    .search(
+                        [("code", "=", state_code), ("country_id", "=", country.id)],
+                        limit=1,
+                    )
+                )
+                if state:
+                    vals["state_id"] = state.id
+    return vals
+
+
+def _format_payment_note(payment_method):
+    """Render the chosen payment method as a human-readable order note.
+
+    Real payment integration lands in a later sprint; for now we just record
+    what the customer selected so staff can follow up.
+    """
+    if not payment_method:
+        return False
+    return f"Payment method requested: {payment_method}"

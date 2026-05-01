@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.0.0",
+    "version": "19.0.1.1.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -15,11 +15,16 @@
     "license": "LGPL-3",
     "depends": [
         "base",
+        "account",
         "website_sale",
         "website",
     ],
     "data": [
         "security/ir.model.access.csv",
+        "data/grove_companies.xml",
+        "data/grove_product_categories.xml",
+        "data/grove_product_attributes.xml",
+        "data/grove_taxes.xml",
         "views/product_template_views.xml",
     ],
     "installable": True,
