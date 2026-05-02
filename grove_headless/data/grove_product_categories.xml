@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <data noupdate="1">
+
+        <!--
+            Grove Product Category Hierarchy
+            =================================
+            Matches the nursery's inventory structure and the Sales Tracker
+            spreadsheet categories. Used by the headless storefront for
+            catalog navigation and by Odoo for default accounting rules.
+        -->
+
+        <!-- ── Top-level categories ──────────────────────────────── -->
+
+        <record id="categ_plants" model="product.category">
+            <field name="name">Plants</field>
+        </record>
+
+        <record id="categ_supplies" model="product.category">
+            <field name="name">Supplies</field>
+        </record>
+
+        <record id="categ_services" model="product.category">
+            <field name="name">Services</field>
+        </record>
+
+        <!-- ── Plant sub-categories ──────────────────────────────── -->
+
+        <record id="categ_trees" model="product.category">
+            <field name="name">Trees</field>
+            <field name="parent_id" ref="categ_plants" />
+        </record>
+
+        <record id="categ_shrubs" model="product.category">
+            <field name="name">Shrubs</field>
+            <field name="parent_id" ref="categ_plants" />
+        </record>
+
+        <record id="categ_hedging" model="product.category">
+            <field name="name">Hedging</field>
+            <field name="parent_id" ref="categ_plants" />
+        </record>
+
+        <record id="categ_root_stock" model="product.category">
+            <field name="name">Root Stock</field>
+            <field name="parent_id" ref="categ_plants" />
+        </record>
+
+        <record id="categ_mixed" model="product.category">
+            <field name="name">Mixed</field>
+            <field name="parent_id" ref="categ_plants" />
+        </record>
+
+    </data>
+</odoo>

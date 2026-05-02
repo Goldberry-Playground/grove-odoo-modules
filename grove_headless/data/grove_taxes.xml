@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <data noupdate="1">
+
+        <!--
+            West Virginia Sales Tax Configuration
+            =======================================
+            WV state sales tax: 6%
+            Municipal tax: 1% (varies by municipality)
+            Combined: 7% on all retail sales
+
+            Creates a tax group + two component taxes applied together.
+            The fiscal position for wholesale/ag exemption can be added
+            later once the exemption rules are confirmed.
+        -->
+
+        <!-- ── Tax Group ─────────────────────────────────────────── -->
+
+        <record id="tax_group_wv_sales" model="account.tax.group">
+            <field name="name">WV Sales Tax</field>
+            <field name="sequence">10</field>
+        </record>
+
+        <!-- ── Tax Components ────────────────────────────────────── -->
+
+        <record id="tax_wv_state_6" model="account.tax">
+            <field name="name">WV State Sales Tax 6%</field>
+            <field name="type_tax_use">sale</field>
+            <field name="amount_type">percent</field>
+            <field name="amount">6.0</field>
+            <field name="tax_group_id" ref="tax_group_wv_sales" />
+            <field name="company_id" ref="base.main_company" />
+            <field name="description">WV 6%</field>
+            <field name="sequence">10</field>
+            <field name="active">True</field>
+        </record>
+
+        <record id="tax_wv_municipal_1" model="account.tax">
+            <field name="name">WV Municipal Tax 1%</field>
+            <field name="type_tax_use">sale</field>
+            <field name="amount_type">percent</field>
+            <field name="amount">1.0</field>
+            <field name="tax_group_id" ref="tax_group_wv_sales" />
+            <field name="company_id" ref="base.main_company" />
+            <field name="description">Muni 1%</field>
+            <field name="sequence">20</field>
+            <field name="active">True</field>
+        </record>
+
+    </data>
+</odoo>

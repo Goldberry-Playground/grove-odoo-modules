@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <data noupdate="1">
+
+        <!--
+            Grove Multi-Company + Multi-Website Bootstrap
+            ==============================================
+            Creates the 3 companies and their matching Website records
+            on first install of grove_headless. noupdate="1" means these
+            records won't be overwritten on module upgrade — the user can
+            freely customize domains, logos, and tax config afterward.
+
+            Odoo creates a default company (id=1) and website (id=1) on
+            database init. We repurpose the default company as Goldberry
+            Grove Farm (the primary business) and create two new ones.
+        -->
+
+        <!-- ── Companies ─────────────────────────────────────────── -->
+
+        <!-- Update the default company to be Goldberry Grove Farm -->
+        <record id="base.main_company" model="res.company">
+            <field name="name">Goldberry Grove Farm</field>
+            <field name="street">Goldberry Grove</field>
+            <field name="state_id" ref="base.state_us_49" /><!-- West Virginia -->
+            <field name="country_id" ref="base.us" />
+            <field name="currency_id" ref="base.USD" />
+        </record>
+
+        <!-- Update the default partner to match -->
+        <record id="base.main_partner" model="res.partner">
+            <field name="name">Goldberry Grove Farm</field>
+        </record>
+
+        <!-- Company 2: George George George Woodworking -->
+        <record id="company_ggg" model="res.company">
+            <field name="name">George George George Woodworking</field>
+            <field name="parent_id" ref="base.main_company" />
+            <field name="state_id" ref="base.state_us_49" />
+            <field name="country_id" ref="base.us" />
+            <field name="currency_id" ref="base.USD" />
+        </record>
+
+        <!-- Company 3: At The Grove Nursery -->
+        <record id="company_nursery" model="res.company">
+            <field name="name">At The Grove Nursery</field>
+            <field name="parent_id" ref="base.main_company" />
+            <field name="state_id" ref="base.state_us_49" />
+            <field name="country_id" ref="base.us" />
+            <field name="currency_id" ref="base.USD" />
+        </record>
+
+        <!-- ── Websites ──────────────────────────────────────────── -->
+
+        <!--
+            Update the default website (created by website module) to be
+            Goldberry's. The name MUST match _TENANT_SLUGS in
+            grove_headless/models/website.py for X-Grove-Tenant routing.
+        -->
+        <record id="website.default_website" model="website">
+            <field name="name">Goldberry Grove Farm</field>
+            <field name="company_id" ref="base.main_company" />
+            <field name="domain">goldberrygrove.farm</field>
+        </record>
+
+        <!-- Website 2: GGG Woodworking -->
+        <record id="website_ggg" model="website">
+            <field name="name">George George George Woodworking</field>
+            <field name="company_id" ref="company_ggg" />
+            <field name="domain">woodworkingeorge.com</field>
+        </record>
+
+        <!-- Website 3: At The Grove Nursery -->
+        <record id="website_nursery" model="website">
+            <field name="name">At The Grove Nursery</field>
+            <field name="company_id" ref="company_nursery" />
+            <field name="domain">atthegrovenursery.com</field>
+        </record>
+
+    </data>
+</odoo>
