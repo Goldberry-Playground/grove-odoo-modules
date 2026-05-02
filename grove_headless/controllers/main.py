@@ -258,6 +258,13 @@ class GroveHeadlessAPI(http.Controller):
         except (ValueError, TypeError):
             return _json_response({"error": "Invalid id or quantity"}, status=400)
 
+        # Guard against negative or zero quantities — _cart_add interprets a
+        # negative value as a removal, which would let an unauthenticated POST
+        # delete arbitrary lines from someone else's session cart. Updates
+        # and removals belong in dedicated endpoints, not the add handler.
+        if quantity <= 0:
+            return _json_response({"error": "quantity must be a positive number"}, status=400)
+
         current_company = request.website.company_id
         company_domain = [("company_id", "in", [current_company.id, False])]
 
@@ -388,12 +395,13 @@ class GroveHeadlessAPI(http.Controller):
         order = SaleOrder.create(order_vals)
 
         # Build order lines. Validate every variant up front so partial orders
-        # never get persisted.
-        line_vals = []
+        # never get persisted. Fetch all referenced variants in a single query
+        # rather than one search per item — orders with many lines were doing
+        # N round trips against product.product.
+        parsed_items: list[tuple[int, float]] = []
         for raw_item in items:
             try:
-                variant_id = int(raw_item.get("variant_id"))
-                quantity = float(raw_item.get("quantity") or 1)
+                parsed_items.append((int(raw_item.get("variant_id")), float(raw_item.get("quantity") or 1)))
             except (TypeError, ValueError):
                 order.unlink()
                 return _json_response(
@@ -401,26 +409,36 @@ class GroveHeadlessAPI(http.Controller):
                     status=400,
                 )
 
-            variant = (
-                env["product.product"]
-                .sudo()
-                .with_company(current_company)
-                .search(
-                    [("id", "=", variant_id), ("company_id", "in", [current_company.id, False])],
-                    limit=1,
-                )
-            )
-            if not variant:
-                order.unlink()
-                return _json_response({"error": f"Product variant {variant_id} not found"}, status=404)
+        if any(qty <= 0 for _, qty in parsed_items):
+            order.unlink()
+            return _json_response({"error": "Each item quantity must be positive"}, status=400)
 
-            line_vals.append(
-                {
-                    "order_id": order.id,
-                    "product_id": variant.id,
-                    "product_uom_qty": quantity,
-                }
+        wanted_ids = {variant_id for variant_id, _ in parsed_items}
+        variants = (
+            env["product.product"]
+            .sudo()
+            .with_company(current_company)
+            .search(
+                [("id", "in", list(wanted_ids)), ("company_id", "in", [current_company.id, False])],
             )
+        )
+        found_ids = set(variants.ids)
+        missing = wanted_ids - found_ids
+        if missing:
+            order.unlink()
+            return _json_response(
+                {"error": f"Product variant(s) not found: {sorted(missing)}"},
+                status=404,
+            )
+
+        line_vals = [
+            {
+                "order_id": order.id,
+                "product_id": variant_id,
+                "product_uom_qty": quantity,
+            }
+            for variant_id, quantity in parsed_items
+        ]
 
         env["sale.order.line"].sudo().create(line_vals)
         order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
