@@ -125,7 +125,7 @@ jobs:
           PY
 
   install-smoke-test:
-    name: Install module against Odoo 19
+    name: Install + test module against Odoo 19
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -146,8 +146,12 @@ jobs:
         with:
           path: grove-odoo-modules
 
-      - name: Boot Odoo 19 container with this module mounted
+      - name: Boot Odoo 19 with grove_headless installed and run unit tests
         run: |
+          # --test-enable runs every test discovered under grove_headless/tests/.
+          # --test-tags filters to only this module's suite (avoids pulling in
+          # base Odoo's slow tests). post_install ensures data files are loaded
+          # before tests look up seeded websites.
           docker run -d --name odoo \
             --network host \
             -v "$PWD/grove-odoo-modules:/mnt/extra-addons" \
@@ -158,8 +162,11 @@ jobs:
             -- --addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons \
                --without-demo=all \
                --init=grove_headless \
+               --test-enable \
+               --test-tags='/grove_headless' \
                --stop-after-init \
                --log-level=warn
+          # Tests can take longer than install — give it 5 minutes.
           for i in $(seq 1 60); do
             if ! docker ps -q --filter name=odoo --filter status=running | grep -q .; then
               break
