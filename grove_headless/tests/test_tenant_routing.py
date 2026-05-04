@@ -8,6 +8,7 @@ transaction each test (rolled back at teardown). Run via:
 The CI install-smoke-test job in .github/workflows/ci.yml runs them on
 every PR.
 """
+
 from odoo.tests.common import TransactionCase, tagged
 
 
