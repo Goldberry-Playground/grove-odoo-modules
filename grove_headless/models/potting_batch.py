@@ -130,23 +130,28 @@ class GrovePottingBatch(models.Model):
 
         Reuses the first matching BOM so repeat potting days for the same
         variant pair don't litter the catalog with identical BOMs.
+
+        Domain pre-filters by `bom_line_ids.product_id` so reshuffled BOMs
+        from a prior batch don't mask our valid newer ones, and we sort
+        `id desc` so when multiple valid candidates exist the freshest
+        wins (defense in depth against future drift).
         """
         self.ensure_one()
         Bom = self.env["mrp.bom"]
-        existing = Bom.search(
+        candidates = Bom.search(
             [
                 ("product_id", "=", self.target_product_id.id),
                 ("type", "=", "normal"),
                 ("company_id", "in", (self.company_id.id, False)),
+                ("bom_line_ids.product_id", "=", self.source_product_id.id),
             ],
-            limit=1,
+            order="id desc",
         )
-        if existing:
-            # Verify the existing BOM still maps to our source variant —
-            # if someone reshuffled it, fall through and create a new one.
-            lines = existing.bom_line_ids
-            if len(lines) == 1 and lines.product_id == self.source_product_id:
-                return existing
+        # Confirm shape: exactly one line, mapping source → target. Drops
+        # multi-component BOMs that happened to include the source variant.
+        for bom in candidates:
+            if len(bom.bom_line_ids) == 1 and bom.bom_line_ids.product_id == self.source_product_id:
+                return bom
         return Bom.create(
             {
                 "product_tmpl_id": self.target_product_id.product_tmpl_id.id,

@@ -29,9 +29,13 @@ class TestPottingBatch(TransactionCase):
         return self.env["grove.potting.batch"].create(vals)
 
     def test_sequence_assigns_reference(self):
+        # `PB/` is the deliberate prefix from data/grove_sequences.xml;
+        # asserting on it catches both the "sequence didn't run" failure
+        # (fallback would be the placeholder, no slash) and the "sequence
+        # ran with the wrong prefix" silent regression.
         batch = self._make_batch()
-        self.assertTrue(batch.name and batch.name != "New")
-        self.assertIn("PB/", batch.name)
+        self.assertTrue(batch.name, "Reference must be set on create")
+        self.assertTrue(batch.name.startswith("PB/"), f"Expected PB/ prefix, got {batch.name!r}")
 
     def test_successful_qty_computed(self):
         batch = self._make_batch(quantity=50, mortality=3)
@@ -88,6 +92,37 @@ class TestPottingBatch(TransactionCase):
             first.production_id.bom_id,
             second.production_id.bom_id,
             "Repeat potting days must not create duplicate BOMs",
+        )
+
+    def test_bom_lookup_skips_reshuffled_match(self):
+        """If the cached BOM gets reshuffled, the next batch creates a fresh one
+        instead of repeatedly falling through to grow the BOM catalog forever
+        (regression for the oldest-first search ordering bug)."""
+        first = self._make_batch(quantity=10)
+        first.action_confirm()
+        original_bom = first.production_id.bom_id
+
+        # Tamper with the cached BOM — add a second line so it no longer
+        # matches the (one-line, source → target) shape we cache by.
+        rogue_component = self.env["product.product"].create({"name": "Rogue Add-on", "type": "consu"})
+        original_bom.write({"bom_line_ids": [(0, 0, {"product_id": rogue_component.id, "product_qty": 1.0})]})
+
+        # Next batch must NOT reuse the tampered BOM.
+        second = self._make_batch(quantity=5)
+        second.action_confirm()
+        self.assertNotEqual(
+            second.production_id.bom_id,
+            original_bom,
+            "Reshuffled BOMs must be skipped, not silently reused",
+        )
+
+        # And a third batch should now reuse the second's (clean) BOM.
+        third = self._make_batch(quantity=3)
+        third.action_confirm()
+        self.assertEqual(
+            third.production_id.bom_id,
+            second.production_id.bom_id,
+            "After tamper-skip, the new clean BOM should be the cache target",
         )
 
     def test_cannot_confirm_twice(self):
