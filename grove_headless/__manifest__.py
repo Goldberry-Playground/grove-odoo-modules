@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.1.0",
+    "version": "19.0.1.2.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -9,6 +9,9 @@
         per-website / per-company isolation so each Grove brand (Goldberry,
         George GGG, Nursery) gets its own scoped data through the same API
         surface.
+
+        Also pulls in `mrp` (Manufacturing) so kit BOMs work for bundled
+        nursery products like starter crates — see scripts/seed_kit_boms.py.
     """,
     "author": "Gathering at the Grove",
     "website": "https://goldberrygrove.farm",
@@ -18,6 +21,9 @@
         "account",
         "website_sale",
         "website",
+        # mrp provides mrp.bom (Bills of Materials), required for Kit-type
+        # BOMs that bundle multiple variants behind one storefront line item.
+        "mrp",
     ],
     "data": [
         "security/ir.model.access.csv",
