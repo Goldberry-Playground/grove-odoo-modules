@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.2.0",
+    "version": "19.0.1.3.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -22,8 +22,13 @@
         "website_sale",
         "website",
         # mrp provides mrp.bom (Bills of Materials), required for Kit-type
-        # BOMs that bundle multiple variants behind one storefront line item.
+        # BOMs that bundle multiple variants behind one storefront line item,
+        # and for the variant→variant transformation in potting-up batches.
         "mrp",
+        # stock provides stock.scrap + the warehouse menu we hang under.
+        # Transitive via sale/mrp but listed explicitly because we use it
+        # directly (stock.scrap.create, stock.group_stock_user ACLs).
+        "stock",
     ],
     "data": [
         "security/ir.model.access.csv",
@@ -31,7 +36,9 @@
         "data/grove_product_categories.xml",
         "data/grove_product_attributes.xml",
         "data/grove_taxes.xml",
+        "data/grove_sequences.xml",
         "views/product_template_views.xml",
+        "views/potting_batch_views.xml",
     ],
     "installable": True,
     "application": False,
