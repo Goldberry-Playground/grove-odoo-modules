@@ -32,6 +32,7 @@
     ],
     "data": [
         "security/ir.model.access.csv",
+        "security/grove_security_rules.xml",
         "data/grove_companies.xml",
         "data/grove_product_categories.xml",
         "data/grove_product_attributes.xml",

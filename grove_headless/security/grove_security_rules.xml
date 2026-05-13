@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+
+    <!--
+        Potting-batch multi-company isolation.
+
+        Without this rule a user in any company that has stock.group_stock_user
+        could read/write potting batches across every other Grove company
+        (Goldberry, GGG, Nursery). The CSV ACL grants the group full CRUD on
+        the model, so company scoping has to come from an ir.rule.
+
+        Domain follows the standard Odoo OOTB pattern (matches what sale.order
+        and stock.picking use): allow rows for any of the user's allowed
+        companies, plus rows with no company set. The model declares
+        `company_id` as required so the `False` branch never matches in
+        practice, but keeping the leg means a future relaxation of that
+        requirement won't silently fail closed.
+
+        `global = True` makes the rule apply to every user (including admin
+        within their company context). Without it, admins would bypass the
+        check entirely.
+    -->
+    <record id="grove_potting_batch_rule_company" model="ir.rule">
+        <field name="name">Potting Batch: multi-company</field>
+        <field name="model_id" ref="model_grove_potting_batch"/>
+        <field name="global" eval="True"/>
+        <field name="domain_force">['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]</field>
+    </record>
+
+</odoo>

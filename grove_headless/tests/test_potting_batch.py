@@ -15,8 +15,12 @@ class TestPottingBatch(TransactionCase):
         super().setUp()
         Product = self.env["product.product"]
         # Two variants of the "same" nursery plant — small pot vs larger pot.
-        self.source = Product.create({"name": "Honeycrisp 1gal Liner", "type": "consu"})
-        self.target = Product.create({"name": "Honeycrisp 3gal Pot", "type": "consu"})
+        # `company_id=False` keeps them shared across companies so the
+        # multi-company isolation test below can reference these products
+        # from any test-created company without tripping product/company
+        # consistency constraints.
+        self.source = Product.create({"name": "Honeycrisp 1gal Liner", "type": "consu", "company_id": False})
+        self.target = Product.create({"name": "Honeycrisp 3gal Pot", "type": "consu", "company_id": False})
 
     def _make_batch(self, **overrides):
         vals = {
@@ -140,3 +144,42 @@ class TestPottingBatch(TransactionCase):
         batch.action_confirm()
         with self.assertRaises(UserError):
             batch.action_cancel()
+
+    def test_multi_company_isolation(self):
+        """A user scoped to company A must not see batches from company B.
+
+        Verifies the ir.rule in security/grove_security_rules.xml — without
+        it, the CSV ACL grants stock.group_stock_user full CRUD across every
+        company in the database, leaking nursery data into Goldberry and
+        vice versa.
+        """
+        company_a = self.env["res.company"].create({"name": "Grove Test Co A"})
+        company_b = self.env["res.company"].create({"name": "Grove Test Co B"})
+
+        # A user who can only see company_a. Same stock.group_stock_user
+        # group the CSV grants — this is the realistic threat model.
+        user_a = self.env["res.users"].create(
+            {
+                "name": "Grove User A",
+                "login": "grove_test_user_a",
+                "company_id": company_a.id,
+                "company_ids": [(6, 0, [company_a.id])],
+                "groups_id": [(4, self.env.ref("stock.group_stock_user").id)],
+            }
+        )
+
+        batch_a = self._make_batch(quantity=10, company_id=company_a.id)
+        batch_b = self._make_batch(quantity=10, company_id=company_b.id)
+
+        visible = (
+            self.env["grove.potting.batch"]
+            .with_user(user_a)
+            .with_company(company_a)
+            .search([("id", "in", [batch_a.id, batch_b.id])])
+        )
+        self.assertIn(batch_a, visible, "User A must see their own company's batch")
+        self.assertNotIn(
+            batch_b,
+            visible,
+            "User A must NOT see another company's batch — ir.rule isolation failed",
+        )
