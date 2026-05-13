@@ -124,8 +124,8 @@ jobs:
               sys.exit(1)
           PY
 
-  install-smoke-test:
-    name: Install module against Odoo 19
+  install-and-test:
+    name: Install + run module tests against Odoo 19
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -146,7 +146,12 @@ jobs:
         with:
           path: grove-odoo-modules
 
-      - name: Boot Odoo 19 container with this module mounted
+      # --test-enable runs every Odoo test tagged at_install / post_install
+      # during this init. --test-tags=/grove_headless scopes execution to
+      # our module's tests only (the core Odoo suite is enormous and
+      # irrelevant to us). --log-level=info surfaces individual test
+      # failures in the run log; --log-level=warn would swallow them.
+      - name: Boot Odoo 19 container, install grove_headless, run its tests
         run: |
           docker run -d --name odoo \
             --network host \
@@ -158,8 +163,10 @@ jobs:
             -- --addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons \
                --without-demo=all \
                --init=grove_headless \
+               --test-enable \
+               --test-tags=/grove_headless \
                --stop-after-init \
-               --log-level=warn
+               --log-level=info
           for i in $(seq 1 60); do
             if ! docker ps -q --filter name=odoo --filter status=running | grep -q .; then
               break
@@ -167,13 +174,19 @@ jobs:
             sleep 5
           done
 
-      - name: Verify exit status
+      - name: Verify exit status and surface logs on failure
         run: |
           status=$(docker inspect odoo --format '{{.State.ExitCode}}')
-          echo "Odoo init exited: $status"
+          echo "Odoo init+test exited: $status"
           if [ "$status" != "0" ]; then
             echo "::group::Odoo logs"
             docker logs odoo
             echo "::endgroup::"
             exit 1
           fi
+          # Even on exit 0, surface test result lines so reviewers can see
+          # what ran. Odoo logs each test class with a "Module loaded" or
+          # "Running tests" prefix.
+          echo "::group::Test summary"
+          docker logs odoo 2>&1 | grep -E "(odoo.tests|FAIL|PASS|tests/test_|Module grove_headless)" || true
+          echo "::endgroup::"
