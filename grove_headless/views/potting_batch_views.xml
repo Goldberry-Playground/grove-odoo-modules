@@ -1,0 +1,122 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+
+    <!-- Form: one row per potting event. Designed for fast data entry on
+         potting day — required fields up top, mortality field always visible
+         (don't bury it behind a tab; nursery staff need to log losses fast). -->
+    <record id="view_grove_potting_batch_form" model="ir.ui.view">
+        <field name="name">grove.potting.batch.form</field>
+        <field name="model">grove.potting.batch</field>
+        <field name="arch" type="xml">
+            <form string="Potting-up Batch">
+                <header>
+                    <button
+                        name="action_confirm"
+                        string="Confirm &amp; Post"
+                        type="object"
+                        class="oe_highlight"
+                        invisible="state != 'draft'"
+                    />
+                    <button
+                        name="action_cancel"
+                        string="Cancel"
+                        type="object"
+                        invisible="state != 'draft'"
+                    />
+                    <field name="state" widget="statusbar" statusbar_visible="draft,done" />
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1>
+                            <field name="name" readonly="True" />
+                        </h1>
+                    </div>
+                    <group>
+                        <group string="Variants">
+                            <field name="source_product_id" options="{'no_create': True}" />
+                            <field name="target_product_id" options="{'no_create': True}" />
+                        </group>
+                        <group string="Counts">
+                            <field name="quantity" />
+                            <field name="mortality" />
+                            <field name="successful_qty" />
+                        </group>
+                    </group>
+                    <group>
+                        <field name="date" />
+                        <field name="company_id" groups="base.group_multi_company" />
+                    </group>
+                    <group string="Audit Trail" invisible="state != 'done'">
+                        <field name="production_id" readonly="True" />
+                        <field name="scrap_id" readonly="True" invisible="not scrap_id" />
+                    </group>
+                    <group string="Notes">
+                        <field name="notes" nolabel="1" />
+                    </group>
+                </sheet>
+                <div class="oe_chatter">
+                    <field name="message_follower_ids" />
+                    <field name="message_ids" />
+                </div>
+            </form>
+        </field>
+    </record>
+
+    <!-- List: recent batches, mortality visible so spikes are obvious. -->
+    <record id="view_grove_potting_batch_list" model="ir.ui.view">
+        <field name="name">grove.potting.batch.list</field>
+        <field name="model">grove.potting.batch</field>
+        <field name="arch" type="xml">
+            <list string="Potting-up Batches" default_order="date desc">
+                <field name="name" />
+                <field name="date" />
+                <field name="source_product_id" />
+                <field name="target_product_id" />
+                <field name="quantity" sum="Total Potted" />
+                <field name="mortality" sum="Total Mortality" />
+                <field name="successful_qty" sum="Successfully Potted" />
+                <field name="state" decoration-success="state == 'done'" decoration-muted="state == 'cancel'" widget="badge" />
+            </list>
+        </field>
+    </record>
+
+    <record id="view_grove_potting_batch_search" model="ir.ui.view">
+        <field name="name">grove.potting.batch.search</field>
+        <field name="model">grove.potting.batch</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="name" />
+                <field name="source_product_id" />
+                <field name="target_product_id" />
+                <filter string="Draft" name="filter_draft" domain="[('state', '=', 'draft')]" />
+                <filter string="Done" name="filter_done" domain="[('state', '=', 'done')]" />
+                <group expand="0" string="Group By">
+                    <filter string="Source Variant" name="group_source" context="{'group_by': 'source_product_id'}" />
+                    <filter string="Target Variant" name="group_target" context="{'group_by': 'target_product_id'}" />
+                    <filter string="Date" name="group_date" context="{'group_by': 'date:month'}" />
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_grove_potting_batch" model="ir.actions.act_window">
+        <field name="name">Potting-up Batches</field>
+        <field name="res_model">grove.potting.batch</field>
+        <field name="view_mode">list,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">Log a potting-up batch</p>
+            <p>Record when nursery plants are potted from one container size into another
+               (e.g. 1gal liners → 3gal pots). Posting the batch transfers inventory between
+               variants and scraps any plants lost in the process.</p>
+        </field>
+    </record>
+
+    <menuitem
+        id="menu_grove_potting_batch"
+        name="Potting-up Batches"
+        parent="stock.menu_stock_warehouse_mgmt"
+        action="action_grove_potting_batch"
+        sequence="80"
+    />
+
+</odoo>

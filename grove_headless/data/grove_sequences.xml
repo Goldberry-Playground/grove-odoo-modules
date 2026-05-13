@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo noupdate="1">
+
+    <!-- Auto-generated reference for potting-up batches. Format PB/2026/0001
+         keeps the year prefix so a season's batches sort cleanly in lists. -->
+    <record id="seq_grove_potting_batch" model="ir.sequence">
+        <field name="name">Grove Potting Batch</field>
+        <field name="code">grove.potting.batch</field>
+        <field name="prefix">PB/%(range_year)s/</field>
+        <field name="padding">4</field>
+        <field name="use_date_range" eval="True" />
+        <field name="number_increment">1</field>
+        <field name="number_next">1</field>
+    </record>
+
+</odoo>

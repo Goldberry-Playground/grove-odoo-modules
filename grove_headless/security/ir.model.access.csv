@@ -2,3 +2,5 @@ id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
 access_product_template_grove_public,grove_headless.product_template.public,product.model_product_template,base.group_public,1,0,0,0
 access_product_template_grove_portal,grove_headless.product_template.portal,product.model_product_template,base.group_portal,1,0,0,0
 access_product_template_grove_user,grove_headless.product_template.user,product.model_product_template,base.group_user,1,1,1,0
+access_grove_potting_batch_user,grove_headless.potting_batch.user,model_grove_potting_batch,stock.group_stock_user,1,1,1,0
+access_grove_potting_batch_manager,grove_headless.potting_batch.manager,model_grove_potting_batch,stock.group_stock_manager,1,1,1,1
