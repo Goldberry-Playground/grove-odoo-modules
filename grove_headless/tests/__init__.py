@@ -1,4 +1,2 @@
-from . import (
-    test_kit_boms,  # noqa: F401
-    test_potting_batch,  # noqa: F401
-)
+# Auto-discovered by Odoo's test runner when invoked with --test-enable.
+from . import test_tenant_routing as test_tenant_routing
