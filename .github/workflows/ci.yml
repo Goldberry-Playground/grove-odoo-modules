@@ -10,6 +10,9 @@ concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  contents: read
+
 env:
   PYTHON_VERSION: "3.12"
 
@@ -17,12 +20,18 @@ jobs:
   lint:
     name: Lint Python
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
-      - run: pip install ruff
+          cache: pip
+          cache-dependency-path: requirements-ci.txt
+      - name: Install ruff
+        run: pip install -r requirements-ci.txt
       - name: Ruff check
         run: ruff check . --select E,F,I --line-length 120
       - name: Ruff format check
@@ -31,9 +40,12 @@ jobs:
   validate-tenant-config:
     name: Validate Tenant Slug Map
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Verify tenant slug map is consistent
@@ -63,9 +75,12 @@ jobs:
   validate-manifests:
     name: Validate Module Manifests
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Parse and validate __manifest__.py files
@@ -97,9 +112,12 @@ jobs:
   validate-xml-data-files:
     name: Validate XML data files
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Setup Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
       - name: Parse all data XML files referenced in manifests
@@ -127,6 +145,8 @@ jobs:
   install-smoke-test:
     name: Install + test module against Odoo 19
     runs-on: ubuntu-latest
+    timeout-minutes: 20
+    needs: [lint, validate-tenant-config, validate-manifests, validate-xml-data-files]
     services:
       postgres:
         image: postgres:17
@@ -142,7 +162,8 @@ jobs:
           --health-timeout 5s
           --health-retries 5
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository into grove-odoo-modules/
+        uses: actions/checkout@v4
         with:
           path: grove-odoo-modules
 
