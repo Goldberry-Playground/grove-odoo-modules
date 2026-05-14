@@ -124,8 +124,8 @@ jobs:
               sys.exit(1)
           PY
 
-  install-and-test:
-    name: Install + run module tests against Odoo 19
+  install-smoke-test:
+    name: Install + test module against Odoo 19
     runs-on: ubuntu-latest
     services:
       postgres:
@@ -147,12 +147,17 @@ jobs:
           path: grove-odoo-modules
 
       # --test-enable runs every Odoo test tagged at_install / post_install
-      # during this init. --test-tags=/grove_headless scopes execution to
-      # our module's tests only (the core Odoo suite is enormous and
-      # irrelevant to us). --log-level=info surfaces individual test
-      # failures in the run log; --log-level=warn would swallow them.
-      - name: Boot Odoo 19 container, install grove_headless, run its tests
+      # during this init. --test-tags scopes execution to grove_headless
+      # only (core Odoo's suite is enormous and irrelevant). log-level=info
+      # surfaces individual test failures in the run log; log-level=warn
+      # would swallow them — that's the one substantive deviation from
+      # the simpler version on main.
+      - name: Boot Odoo 19 with grove_headless installed and run unit tests
         run: |
+          # --test-enable runs every test discovered under grove_headless/tests/.
+          # --test-tags filters to only this module's suite (avoids pulling in
+          # base Odoo's slow tests). post_install ensures data files are loaded
+          # before tests look up seeded websites.
           docker run -d --name odoo \
             --network host \
             -v "$PWD/grove-odoo-modules:/mnt/extra-addons" \
@@ -164,9 +169,10 @@ jobs:
                --without-demo=all \
                --init=grove_headless \
                --test-enable \
-               --test-tags=/grove_headless \
+               --test-tags='/grove_headless' \
                --stop-after-init \
                --log-level=info
+          # Tests can take longer than install — give it 5 minutes.
           for i in $(seq 1 60); do
             if ! docker ps -q --filter name=odoo --filter status=running | grep -q .; then
               break
