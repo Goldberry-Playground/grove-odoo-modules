@@ -1,10 +1,45 @@
 import json
 import logging
+import re
 
 from odoo import http
 from odoo.http import Response, request
 
 _logger = logging.getLogger(__name__)
+
+# Defense-in-depth caps on contact/address fields. Must mirror the BFF's limits
+# (see @grove/odoo-client) — anyone with a valid API key can call this endpoint
+# directly, so we never trust the BFF to have already enforced these.
+MAX_NAME = 200
+MAX_EMAIL = 254
+MAX_PHONE = 30
+MAX_STREET = 200
+MAX_CITY = 100
+MAX_STATE = 50
+MAX_ZIP = 20
+MAX_COUNTRY = 100
+
+EMAIL_RE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
+
+
+def _check_lengths(values: dict, limits: dict) -> str | None:
+    """Return an error message if any value in `values` is not a valid bounded string.
+
+    Non-string non-None values fail the same as too-long strings — anyone with
+    a valid API key (auth="bearer") can hit the controller directly with junk
+    types like `{"name": 5, "zip": 28801}`, so `len(v)` on a non-string would
+    raise TypeError and surface as a 500 with a Werkzeug traceback.
+    """
+    for key, limit in limits.items():
+        v = values.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, str):
+            return f"{key} must be a string"
+        if len(v) > limit:
+            return f"{key} exceeds {limit} characters"
+    return None
+
 
 # Fields exposed in the public product list (keep minimal for performance)
 PRODUCT_LIST_FIELDS = [
@@ -194,6 +229,12 @@ class GroveHeadlessAPI(http.Controller):
         # Resolves to the session's current cart or an empty recordset.
         sale_order = request.cart
 
+        # Cross-company safety: a session cookie originating from another tenant
+        # resolves to a sale.order in that tenant's company. Don't render lines
+        # from another company's cart — fall through to the empty shape.
+        if sale_order and sale_order.company_id != request.website.company_id:
+            return _json_response({"lines": [], "amount_total": 0, "currency": None})
+
         if not sale_order:
             return _json_response({"lines": [], "amount_total": 0, "currency": None})
 
@@ -297,7 +338,15 @@ class GroveHeadlessAPI(http.Controller):
         if not variant:
             return _json_response({"error": "Product not found"}, status=404)
 
-        sale_order = request.cart or request.website._create_cart()
+        # Cross-company safety mirror of cart_get: a session cookie that
+        # leaked in from another tenant resolves to a foreign-company cart
+        # that we must NOT mutate. Discard it and start a fresh cart scoped
+        # to this website's company so the line goes to the right tenant.
+        sale_order = request.cart
+        if sale_order and sale_order.company_id != request.website.company_id:
+            sale_order = request.website._create_cart()
+        elif not sale_order:
+            sale_order = request.website._create_cart()
         sale_order._cart_add(product_id=variant.id, quantity=quantity)
 
         return self.cart_get()
@@ -307,13 +356,26 @@ class GroveHeadlessAPI(http.Controller):
     @http.route(
         "/grove/api/v1/orders",
         type="http",
-        auth="public",
+        auth="bearer",
         website=True,
         methods=["POST"],
         csrf=False,
     )
     def order_create(self, **_kwargs):
         """Create a draft sale.order from a posted cart payload.
+
+        Auth: requires a valid API key via `Authorization: Bearer <key>` header.
+        The Next.js BFF (see @grove/odoo-client) sends this header on every
+        request; the key resolves to the Odoo user it was issued for. We use
+        `auth="bearer"` (not `auth="user"`) because in Odoo 19 only the
+        `bearer` auth method actually parses the Authorization header for an
+        API key — `auth="user"` only honours session cookies. This prevents
+        unauthenticated POSTs from the public internet creating sale.order
+        and res.partner records (and bypassing the BFF / rate limits) against
+        any of the three tenant companies. Cart endpoints stay `auth="public"`
+        because they rely on website_sale's session-cookie cart proxy
+        (`request.cart`), and `order_get` stays `auth="public"` because its
+        gate is the per-order portal access_token.
 
         Body shape:
             {
@@ -337,6 +399,38 @@ class GroveHeadlessAPI(http.Controller):
             return _json_response({"error": "contact.name and contact.email are required"}, status=400)
         if not isinstance(items, list) or not items:
             return _json_response({"error": "items must be a non-empty list"}, status=400)
+
+        # Defense in depth: re-validate email format and field lengths even
+        # though the BFF already does this. Anyone with a valid API key can
+        # POST here directly, so we cannot trust the caller. `isinstance`
+        # before `fullmatch` because a non-string email (e.g. int from a
+        # misbehaving client) would otherwise raise TypeError → 500.
+        if not isinstance(contact["email"], str) or not EMAIL_RE.fullmatch(contact["email"]):
+            return _json_response({"error": "contact.email is not a valid email address"}, status=400)
+
+        contact_limits = {"name": MAX_NAME, "email": MAX_EMAIL, "phone": MAX_PHONE}
+        err = _check_lengths(contact, contact_limits)
+        if err:
+            return _json_response({"error": f"contact.{err}"}, status=400)
+
+        address_limits = {
+            "street": MAX_STREET,
+            "street2": MAX_STREET,
+            "city": MAX_CITY,
+            "state": MAX_STATE,
+            "zip": MAX_ZIP,
+            "country": MAX_COUNTRY,
+        }
+        shipping = payload.get("shipping") or {}
+        if shipping:
+            err = _check_lengths(shipping, address_limits)
+            if err:
+                return _json_response({"error": f"shipping.{err}"}, status=400)
+        billing = payload.get("billing") or {}
+        if billing:
+            err = _check_lengths(billing, address_limits)
+            if err:
+                return _json_response({"error": f"billing.{err}"}, status=400)
 
         website = request.website
         current_company = website.company_id
