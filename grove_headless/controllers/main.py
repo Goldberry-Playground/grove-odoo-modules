@@ -50,6 +50,7 @@ PRODUCT_LIST_FIELDS = [
     "website_published",
     "grove_featured",
     "image_128",
+    "grove_slug",
 ]
 
 PRODUCT_DETAIL_FIELDS = PRODUCT_LIST_FIELDS + [
@@ -141,6 +142,11 @@ class GroveHeadlessAPI(http.Controller):
             except (ValueError, TypeError):
                 pass
 
+        if kwargs.get("slug"):
+            slug = str(kwargs["slug"]).strip().lower()
+            if slug:
+                domain.append(("grove_slug", "=", slug))
+
         limit = min(int(kwargs.get("limit", 40)), 200)
         offset = int(kwargs.get("offset", 0))
 
@@ -157,6 +163,7 @@ class GroveHeadlessAPI(http.Controller):
             data = _serialize_product(product, PRODUCT_LIST_FIELDS)
             if data:
                 data["image_url"] = f"/web/image/product.template/{product.id}/image_128"
+                data["slug"] = data.pop("grove_slug", "") or ""
                 items.append(data)
 
         return _json_response(

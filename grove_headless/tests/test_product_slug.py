@@ -7,7 +7,7 @@ The CI install-smoke-test job in .github/workflows/ci.yml runs them on
 every PR.
 """
 
-from odoo.tests.common import TransactionCase, tagged
+from odoo.tests.common import HttpCase, TransactionCase, get_db_name, tagged
 
 
 @tagged("grove_headless", "grove_slug", "post_install", "-at_install")
@@ -74,3 +74,67 @@ class TestGroveSlug(TransactionCase):
         product.flush_recordset()
         product.invalidate_recordset(["grove_slug"])
         self.assertEqual(product.grove_slug, "shagbark-hickory-syrup")
+
+
+@tagged("grove_headless", "grove_slug", "post_install", "-at_install")
+class TestProductSlugEndpoint(HttpCase):
+    def setUp(self):
+        super().setUp()
+        # Seed a published product belonging to the Goldberry company so that
+        # X-Grove-Tenant: goldberry routes to it. The Goldberry company is the
+        # default `base.main_company` (renamed by data/grove_companies.xml).
+        company = self.env.ref("base.main_company")
+        self.product = self.env["product.template"].create(
+            {
+                "name": "Test Shagbark Syrup",
+                "website_published": True,
+                "sale_ok": True,
+                "list_price": 28.0,
+                "company_id": company.id,
+            }
+        )
+
+    def _headers(self, **extra):
+        # X-Odoo-Database tells the Odoo HTTP layer which DB to dispatch to
+        # when the request has no session cookie. Without it the router
+        # returns 404 ("No database is selected"). HttpCase only sets the DB
+        # via session cookie after `self.authenticate(...)`, which we don't
+        # need for these public endpoints.
+        headers = {"X-Odoo-Database": get_db_name(), "X-Grove-Tenant": "goldberry"}
+        headers.update(extra)
+        return headers
+
+    def test_slug_query_returns_one_product(self):
+        """GET /grove/api/v1/products?slug=<slug> returns the matching product."""
+        response = self.url_open(
+            "/grove/api/v1/products?slug=test-shagbark-syrup",
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["count"], 1)
+        self.assertEqual(body["results"][0]["slug"], "test-shagbark-syrup")
+        self.assertEqual(body["results"][0]["name"], "Test Shagbark Syrup")
+
+    def test_unknown_slug_returns_empty_list(self):
+        """Unknown slug returns count=0 (not 404)."""
+        response = self.url_open(
+            "/grove/api/v1/products?slug=does-not-exist",
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body["count"], 0)
+        self.assertEqual(body["results"], [])
+
+    def test_list_response_includes_slug_for_all_items(self):
+        """Every item in /grove/api/v1/products (no slug query) carries its slug."""
+        response = self.url_open(
+            "/grove/api/v1/products",
+            headers=self._headers(),
+        )
+        body = response.json()
+        self.assertGreaterEqual(body["count"], 1)
+        for item in body["results"]:
+            self.assertIn("slug", item)
+            self.assertIsInstance(item["slug"], str)
