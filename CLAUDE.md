@@ -32,4 +32,4 @@ ruff format --check . --line-length 120
 ## Related Repos
 
 - **odoocker**: `Goldberry-Playground/odoocker-goldberrygrove` — infrastructure, Docker Compose, nginx
-- **grove-websites**: (planned) — React frontends that consume these API endpoints
+- **grove-sites**: `Goldberry-Playground/grove-sites` — Next.js 15 monorepo (hub + 3 tenant storefronts) that consumes these API endpoints via `packages/odoo-client`
