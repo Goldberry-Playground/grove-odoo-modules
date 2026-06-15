@@ -35,7 +35,7 @@ Custom Odoo 19 modules powering the **Gather at the Grove** multi-tenant ecosyst
            ▼                  ▼                  ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                  grove_headless API                          │
-│              /grove/api/v1/*  (auth=public)                  │
+│   /grove/api/v1/*  (auth=public, orders POST=bearer)         │
 │                                                             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
 │  │ Products API  │  │  Cart API    │  │ Health Check │      │
@@ -55,19 +55,20 @@ Each React website sends an `X-Grove-Tenant` header. The `grove_headless` module
 
 | Module | Version | Purpose | Status |
 |--------|---------|---------|--------|
-| `grove_headless` | 19.0.1.0.0 | REST API for headless React storefronts (products, cart, health) | Active |
+| `grove_headless` | 19.0.1.3.0 | REST API + multi-tenant routing + nursery potting-batch workflow | Active |
 
 ### grove_headless
 
-**Depends on:** `base`, `website_sale`, `website`
+**Depends on:** `base`, `account`, `website_sale`, `website`, `mrp`, `stock`
 
 **What it does:**
 
 - Exposes 7 JSON API endpoints under `/grove/api/v1/`: health, products list/detail, cart get/add, order create, order detail (token-gated)
-- Adds custom fields to `product.template`: `grove_featured` (Boolean), `grove_seo_description` (Text, translatable)
+- Adds custom fields to `product.template`: `grove_featured` (Boolean), `grove_seo_description` (Text, translatable), `grove_slug` (Char, indexed — used for slug-based product lookups)
 - Overrides `website.get_current_website()` to resolve tenants via `X-Grove-Tenant` header
 - Extends the product form view with a "Grove Headless" tab for the custom fields
-- Bootstraps multi-company + multi-website records, base product categories/attributes, and WV sales tax (see `data/`)
+- Bootstraps multi-company + multi-website records, base product categories/attributes, WV sales tax, and a sequence registry (see `data/`)
+- Adds the `grove.potting.batch` workflow for nursery potting-up operations (model + views + dedicated record rules under `security/grove_security_rules.xml`)
 - Defines ACLs: public/portal = read-only, internal users = read/write/create
 
 ## Prerequisites
@@ -77,7 +78,7 @@ Each React website sends an `X-Grove-Tenant` header. The `grove_headless` module
 | Odoo | 19.0 | Community or Enterprise |
 | Python | 3.12+ | Odoo 19 requirement |
 | PostgreSQL | 15+ | Via Odoo's database |
-| Odoo modules | `base`, `website`, `website_sale` | Must be installed before `grove_headless` |
+| Odoo modules | `base`, `account`, `website`, `website_sale`, `mrp`, `stock` | Must be installed before `grove_headless` |
 | Ruff | Latest | For linting (development only) |
 
 ## Installation
@@ -199,6 +200,7 @@ Auth: public
 | `offset` | int | 0 | Pagination offset |
 | `featured` | string | — | Set to `"1"` to filter to featured products only |
 | `category_id` | int | — | Filter by `public_categ_ids` |
+| `slug` | string | — | Filter to a single product by its `grove_slug` (lowercased, exact match) |
 
 **Request Example:**
 
@@ -211,7 +213,10 @@ curl -s 'http://localhost:8069/grove/api/v1/products?limit=10&featured=1' \
 
 ```json
 {
-  "products": [
+  "count": 1,
+  "limit": 10,
+  "offset": 0,
+  "results": [
     {
       "id": 1,
       "name": "Farm Fresh Eggs",
@@ -219,15 +224,17 @@ curl -s 'http://localhost:8069/grove/api/v1/products?limit=10&featured=1' \
       "description_sale": "Free-range eggs from our pasture-raised hens",
       "grove_seo_description": "Buy fresh free-range eggs from Goldberry Grove Farm",
       "grove_featured": true,
+      "slug": "farm-fresh-eggs",
       "public_categ_ids": [[4, "Farm Products"]],
       "image_url": "/web/image/product.template/1/image_128",
       "is_published": true,
       "website_url": "/shop/farm-fresh-eggs-1"
     }
-  ],
-  "total": 1
+  ]
 }
 ```
+
+`count` is the unfiltered total matching the domain, not `len(results)` — use it for pagination math. `results[*].slug` is the same value as the underlying `grove_slug` field (renamed in the response for frontend ergonomics).
 
 ### Get Product Detail
 
@@ -302,28 +309,27 @@ curl -s 'http://localhost:8069/grove/api/v1/cart' \
 
 ```json
 {
-  "cart": {
-    "id": 5,
-    "order_line": [
-      {
-        "id": 12,
-        "product_id": [1, "Farm Fresh Eggs"],
-        "product_uom_qty": 2.0,
-        "price_unit": 6.50,
-        "price_subtotal": 13.00
-      }
-    ],
-    "amount_total": 13.00,
-    "partner_id": [3, "Public user"]
-  }
+  "lines": [
+    {
+      "id": 12,
+      "product_id": [1, "Farm Fresh Eggs"],
+      "product_uom_qty": 2.0,
+      "price_unit": 6.50,
+      "price_subtotal": 13.00
+    }
+  ],
+  "amount_total": 13.00,
+  "currency": {"id": 1, "name": "USD"}
 }
 ```
 
-**Response (no cart):**
+**Response (no cart, or a session cookie originating from another tenant — cross-company carts are not rendered):**
 
 ```json
 {
-  "cart": null
+  "lines": [],
+  "amount_total": 0,
+  "currency": null
 }
 ```
 
@@ -345,6 +351,8 @@ CSRF: disabled
 }
 ```
 
+Either `variant_id` (a `product.product` id) or `product_id` (a `product.template` id) is accepted; pass at least one. When only `product_id` is given, the default variant is resolved server-side. `quantity` defaults to `1`.
+
 **Request Example:**
 
 ```bash
@@ -355,24 +363,13 @@ curl -s -X POST 'http://localhost:8069/grove/api/v1/cart' \
   -d '{"product_id": 1, "quantity": 2}'
 ```
 
-**Response:**
-
-```json
-{
-  "cart": {
-    "id": 5,
-    "order_line": [...],
-    "amount_total": 13.00,
-    "partner_id": [3, "Public user"]
-  }
-}
-```
+**Response:** Same shape as `GET /grove/api/v1/cart` — `{ lines, amount_total, currency }`.
 
 **Error (missing fields):**
 
 ```json
 {
-  "error": "product_id and quantity are required"
+  "error": "Either variant_id or product_id is required"
 }
 ```
 
@@ -392,12 +389,14 @@ HTTP Status: 404
 
 ```
 POST /grove/api/v1/orders
-Auth: public
+Auth: bearer  (Authorization: Bearer <API_KEY>)
 Content-Type: application/json
 CSRF: disabled
 ```
 
 Creates a draft `sale.order` from a posted cart. The response includes a server-issued `access_token` that must be passed back when fetching the order detail later — this prevents PII leakage by id enumeration on the public confirmation page.
+
+**Why `bearer` and not `public`:** in Odoo 19 only `auth="bearer"` actually parses the `Authorization` header for an API key. `auth="user"` only honours session cookies; `auth="public"` would accept any caller. Using `bearer` keeps the public internet from creating `sale.order` + `res.partner` records (and bypassing the BFF / rate limits) against any tenant company. The Next.js BFF (see [`@grove/odoo-client`](https://github.com/Goldberry-Playground/grove-sites/tree/main/packages/odoo-client)) sets this header on every request. Cart endpoints stay `auth="public"` because they rely on `website_sale`'s session-cookie cart proxy; `GET /orders/<id>` stays `auth="public"` because its gate is the per-order `access_token`.
 
 **Request Body:**
 
@@ -467,32 +466,44 @@ The Ghost script uses `GHOST_URL`, `GHOST_ADMIN_EMAIL`, `GHOST_ADMIN_PASSWORD` i
 grove-odoo-modules/
 ├── grove_headless/
 │   ├── __init__.py              # Root package init
-│   ├── __manifest__.py          # Odoo module manifest
+│   ├── __manifest__.py          # Odoo module manifest (19.0.1.3.0)
 │   ├── controllers/
 │   │   ├── __init__.py
 │   │   └── main.py              # All API endpoints (products, cart, orders)
 │   ├── models/
 │   │   ├── __init__.py
-│   │   ├── product_template.py  # Custom fields (grove_featured, grove_seo_description)
-│   │   └── website.py           # Tenant resolution override
+│   │   ├── product_template.py  # Custom fields (grove_featured, grove_seo_description, grove_slug)
+│   │   ├── website.py           # Tenant resolution override
+│   │   └── potting_batch.py     # grove.potting.batch nursery workflow model
 │   ├── data/
 │   │   ├── grove_companies.xml          # 3 companies + 3 websites bootstrap
 │   │   ├── grove_product_categories.xml # Trees / Shrubs / Mixed
 │   │   ├── grove_product_attributes.xml # Size + Container attributes
-│   │   └── grove_taxes.xml              # WV state 6% + municipal 1%
+│   │   ├── grove_taxes.xml              # WV state 6% + municipal 1%
+│   │   └── grove_sequences.xml          # Sequence registry (potting batch refs, etc.)
 │   ├── security/
-│   │   └── ir.model.access.csv  # ACL rules (public, portal, internal)
-│   └── views/
-│       └── product_template_views.xml  # "Grove Headless" tab on product form
+│   │   ├── ir.model.access.csv  # ACL rules (public, portal, internal)
+│   │   └── grove_security_rules.xml  # Record rules for potting batch + multi-company scoping
+│   ├── views/
+│   │   ├── product_template_views.xml  # "Grove Headless" tab on product form
+│   │   └── potting_batch_views.xml     # Form/list/menu for grove.potting.batch
+│   └── tests/                   # Odoo TransactionCase suites
+│       ├── __init__.py
+│       ├── test_kit_boms.py
+│       ├── test_potting_batch.py
+│       ├── test_product_slug.py
+│       └── test_tenant_routing.py
 ├── scripts/                     # Idempotent operational seeders (XML-RPC / HTTP)
 │   ├── seed_sample_products.py
 │   ├── seed_payment_journals.py
 │   ├── seed_sales_teams.py
+│   ├── seed_kit_boms.py         # Kit BOMs for bundled nursery products
 │   └── setup_ghost_integration.py
 ├── .github/
 │   └── workflows/
 │       └── ci.yml               # Lint + manifest + tenant + XML data + smoke install
 ├── .ruff.toml                   # Ruff linter config
+├── requirements-ci.txt          # CI extras (pinned tooling for the smoke-install job)
 ├── CLAUDE.md                    # AI assistant context
 ├── CONTRIBUTING.md              # Contribution guidelines
 └── README.md                    # This file
@@ -535,7 +546,7 @@ from . import controllers
 - Version format: `19.0.X.Y.Z` (Odoo major . module major . minor . patch)
 - License: `LGPL-3`
 - Routes use `/grove/api/v1/` prefix
-- Auth: `public` for storefront endpoints, `user` for authenticated endpoints
+- Auth: `none` (health), `public` for storefront read endpoints (products, cart get/post, order get with `access_token` gate), `bearer` for write endpoints that mutate Odoo records on behalf of an authenticated BFF (currently `POST /orders`)
 - Company isolation: always scope queries by `request.website.company_id`
 - Return JSON via `_json_response()` helper — not Odoo's JSON-RPC wrapper
 - Define explicit field lists (`PRODUCT_LIST_FIELDS`) — never `read()` without fields
