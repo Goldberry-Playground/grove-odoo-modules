@@ -160,8 +160,7 @@ def setup_wv_sales_tax(env):
             company.account_sale_tax_id = group.id
         except Exception as exc:
             _logger.info(
-                "grove_headless: could not set account_sale_tax_id for %s (%s); "
-                "ir.default taxes_id still applies",
+                "grove_headless: could not set account_sale_tax_id for %s (%s); ir.default taxes_id still applies",
                 company.name,
                 exc,
             )

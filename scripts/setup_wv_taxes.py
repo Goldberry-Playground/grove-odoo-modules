@@ -63,8 +63,14 @@ def find_tax(models, uid, company_id, name, amount_type):
         uid,
         "account.tax",
         "search",
-        [[("name", "=", name), ("company_id", "=", company_id),
-          ("type_tax_use", "=", "sale"), ("amount_type", "=", amount_type)]],
+        [
+            [
+                ("name", "=", name),
+                ("company_id", "=", company_id),
+                ("type_tax_use", "=", "sale"),
+                ("amount_type", "=", amount_type),
+            ]
+        ],
         {"limit": 1},
     )
     return ids[0] if ids else None
@@ -75,14 +81,22 @@ def ensure_component(models, uid, company_id, name, amount, description):
     if existing:
         print(f"  SKIP {name} — exists (id={existing})")
         return existing
-    new_id = call(models, uid, "account.tax", "create", [{
-        "name": name,
-        "amount": amount,
-        "amount_type": "percent",
-        "type_tax_use": "sale",
-        "company_id": company_id,
-        "description": description,
-    }])
+    new_id = call(
+        models,
+        uid,
+        "account.tax",
+        "create",
+        [
+            {
+                "name": name,
+                "amount": amount,
+                "amount_type": "percent",
+                "type_tax_use": "sale",
+                "company_id": company_id,
+                "description": description,
+            }
+        ],
+    )
     print(f"  CREATE {name} → account.tax id={new_id}")
     return new_id
 
@@ -93,33 +107,42 @@ def ensure_group(models, uid, company_id, child_ids):
         call(models, uid, "account.tax", "write", [[existing], {"children_tax_ids": [(6, 0, child_ids)]}])
         print(f"  SKIP {WV_GROUP_NAME} — exists (id={existing}), children synced")
         return existing
-    new_id = call(models, uid, "account.tax", "create", [{
-        "name": WV_GROUP_NAME,
-        "amount_type": "group",
-        "type_tax_use": "sale",
-        "company_id": company_id,
-        "description": "WV 7%",
-        "children_tax_ids": [(6, 0, child_ids)],
-    }])
+    new_id = call(
+        models,
+        uid,
+        "account.tax",
+        "create",
+        [
+            {
+                "name": WV_GROUP_NAME,
+                "amount_type": "group",
+                "type_tax_use": "sale",
+                "company_id": company_id,
+                "description": "WV 7%",
+                "children_tax_ids": [(6, 0, child_ids)],
+            }
+        ],
+    )
     print(f"  CREATE {WV_GROUP_NAME} → account.tax id={new_id}")
     return new_id
 
 
 def set_company_default(models, uid, company_id, group_id):
-    call(models, uid, "ir.default", "set",
-         ["product.template", "taxes_id", [group_id]], {"company_id": company_id})
+    call(models, uid, "ir.default", "set", ["product.template", "taxes_id", [group_id]], {"company_id": company_id})
     print(f"  SET ir.default product.template.taxes_id = [{group_id}]")
     try:
         call(models, uid, "res.company", "write", [[company_id], {"account_sale_tax_id": group_id}])
         print(f"  SET res.company.account_sale_tax_id = {group_id}")
     except xmlrpc.client.Fault as exc:
-        print(f"  NOTE could not set account_sale_tax_id ({exc.faultString.splitlines()[-1]}); "
-              f"ir.default still applies")
+        print(
+            f"  NOTE could not set account_sale_tax_id ({exc.faultString.splitlines()[-1]}); ir.default still applies"
+        )
 
 
 def retrofit_products(models, uid, company_id, group_id):
-    tmpl_ids = call(models, uid, "product.template", "search",
-                    [[("sale_ok", "=", True), ("company_id", "in", [company_id, False])]])
+    tmpl_ids = call(
+        models, uid, "product.template", "search", [[("sale_ok", "=", True), ("company_id", "in", [company_id, False])]]
+    )
     changed = 0
     for tmpl_id in tmpl_ids:
         rec = call(models, uid, "product.template", "read", [[tmpl_id], ["taxes_id"]])[0]

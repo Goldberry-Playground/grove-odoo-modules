@@ -34,9 +34,7 @@ class TestWvSalesTax(TransactionCase):
 
     def test_new_product_defaults_to_wv_tax(self):
         """A product created in the company context defaults to the WV tax."""
-        default_tax_ids = self.env["ir.default"]._get(
-            "product.template", "taxes_id", company_id=self.company.id
-        )
+        default_tax_ids = self.env["ir.default"]._get("product.template", "taxes_id", company_id=self.company.id)
         self.assertTrue(default_tax_ids, "ir.default for product taxes_id should be set")
         default_taxes = self.env["account.tax"].browse(default_tax_ids)
         self.assertEqual(default_taxes.mapped("name"), [WV_GROUP_NAME])
