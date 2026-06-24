@@ -5,6 +5,8 @@ import re
 from odoo import http
 from odoo.http import Response, request
 
+from ..models.shipping_zones import compute_shipping_rate
+
 _logger = logging.getLogger(__name__)
 
 # Defense-in-depth caps on contact/address fields. Must mirror the BFF's limits
@@ -544,6 +546,10 @@ class GroveHeadlessAPI(http.Controller):
         env["sale.order.line"].sudo().create(line_vals)
         order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
 
+        # Apply the 12-zone shipping charge (GOL-15). No-op until the zone rate
+        # table is populated from Josh's doc — see models/shipping_zones.py.
+        _apply_shipping_line(env, order, shipping, current_company)
+
         # Ensure a portal access token exists — required to fetch order details
         # later via GET without exposing PII through id-enumeration.
         access_token = order._portal_ensure_token()
@@ -672,6 +678,78 @@ def _partner_vals_from_payload(env, contact, address):
                 if state:
                     vals["state_id"] = state.id
     return vals
+
+
+SHIPPING_PRODUCT_CODE = "GROVE-SHIP"
+
+
+def _order_weight(order) -> float:
+    """Total shippable weight (lbs) of the order's product lines."""
+    return sum(
+        (line.product_id.weight or 0.0) * line.product_uom_qty
+        for line in order.order_line
+        if line.product_id
+    )
+
+
+def _get_shipping_product(env, company):
+    """Find (or lazily create) the service product the shipping charge rides on.
+
+    Scoped per-company so each tenant's order carries its own shipping SKU.
+    Only ever runs once the zone table is configured — until then
+    `_apply_shipping_line` returns before reaching here.
+    """
+    Product = env["product.product"].sudo().with_company(company)
+    product = Product.search(
+        [
+            ("default_code", "=", SHIPPING_PRODUCT_CODE),
+            ("company_id", "in", [company.id, False]),
+        ],
+        limit=1,
+    )
+    if not product:
+        product = Product.create(
+            {
+                "name": "Shipping",
+                "default_code": SHIPPING_PRODUCT_CODE,
+                "type": "service",
+                "list_price": 0.0,
+                "sale_ok": True,
+                "purchase_ok": False,
+                "company_id": company.id,
+            }
+        )
+    return product
+
+
+def _apply_shipping_line(env, order, shipping, company):
+    """Add a shipping charge line to `order` based on the 12-zone rate table.
+
+    Returns without mutating the order when the destination has no configured
+    zone (the current state while GOL-15's rate table is pending), so the
+    headless checkout keeps working and never invents a charge. Once the table
+    in models/shipping_zones.py is filled, this charges the per-zone rate.
+    """
+    state = (shipping or {}).get("state")
+    rate = compute_shipping_rate(
+        state,
+        weight=_order_weight(order),
+        subtotal=order.amount_untaxed,
+    )
+    if rate is None:
+        return
+
+    product = _get_shipping_product(env, company)
+    env["sale.order.line"].sudo().create(
+        {
+            "order_id": order.id,
+            "product_id": product.id,
+            "name": f"Shipping ({state})",
+            "product_uom_qty": 1.0,
+            "price_unit": rate,
+        }
+    )
+    order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
 
 
 def _format_payment_note(payment_method):
