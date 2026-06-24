@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.3.0",
+    "version": "19.0.1.4.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -44,4 +44,7 @@
     "installable": True,
     "application": False,
     "auto_install": False,
+    # Binds the WV sales tax to company defaults + existing products on
+    # fresh install. The migrations/ script does the same on -u upgrade.
+    "post_init_hook": "post_init_hook",
 }
