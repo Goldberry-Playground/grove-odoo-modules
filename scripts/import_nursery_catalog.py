@@ -64,11 +64,7 @@ ODOO_USER = os.getenv("ODOO_USER", "josh@goldberrygrove.farm")
 ODOO_PASSWORD = os.getenv("ODOO_PASSWORD")
 ODOO_COMPANY = os.getenv("ODOO_COMPANY", "At The Grove Nursery")
 NURSERY_TAXES = [
-    t.strip()
-    for t in os.getenv(
-        "NURSERY_TAXES", "WV State Sales Tax 6%,WV Municipal Tax 1%"
-    ).split(",")
-    if t.strip()
+    t.strip() for t in os.getenv("NURSERY_TAXES", "WV State Sales Tax 6%,WV Municipal Tax 1%").split(",") if t.strip()
 ]
 DRY_RUN = os.getenv("DRY_RUN") == "1"
 
@@ -180,26 +176,18 @@ def call(
     args: list,
     kwargs: dict | None = None,
 ) -> Any:
-    return models.execute_kw(
-        ODOO_DB, uid, ODOO_PASSWORD, model, method, args, kwargs or {}
-    )
+    return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, model, method, args, kwargs or {})
 
 
-def lookup_id(
-    models: xmlrpc.client.ServerProxy, uid: int, model: str, domain: list, label: str
-) -> int:
+def lookup_id(models: xmlrpc.client.ServerProxy, uid: int, model: str, domain: list, label: str) -> int:
     ids = call(models, uid, model, "search", [domain], {"limit": 1})
     if not ids:
         fail(f"Could not find {model} matching {domain} ({label})")
     return ids[0]
 
 
-def get_attribute_value_id(
-    models: xmlrpc.client.ServerProxy, uid: int, attr_name: str, value_name: str
-) -> int:
-    attr_id = lookup_id(
-        models, uid, "product.attribute", [("name", "=", attr_name)], attr_name
-    )
+def get_attribute_value_id(models: xmlrpc.client.ServerProxy, uid: int, attr_name: str, value_name: str) -> int:
+    attr_id = lookup_id(models, uid, "product.attribute", [("name", "=", attr_name)], attr_name)
     return lookup_id(
         models,
         uid,
@@ -209,9 +197,7 @@ def get_attribute_value_id(
     )
 
 
-def build_attribute_lines(
-    models: xmlrpc.client.ServerProxy, uid: int, variants: list[tuple[str, str]]
-) -> list[tuple]:
+def build_attribute_lines(models: xmlrpc.client.ServerProxy, uid: int, variants: list[tuple[str, str]]) -> list[tuple]:
     """Convert variant tuples to product.template.attribute.line commands.
 
     Empty axis values are dropped so a product that only varies by Size (and
@@ -222,22 +208,12 @@ def build_attribute_lines(
 
     lines: list[tuple] = []
     if sizes:
-        size_attr_id = lookup_id(
-            models, uid, "product.attribute", [("name", "=", "Size")], "Size"
-        )
-        size_value_ids = [
-            get_attribute_value_id(models, uid, "Size", s) for s in sizes
-        ]
-        lines.append(
-            (0, 0, {"attribute_id": size_attr_id, "value_ids": [(6, 0, size_value_ids)]})
-        )
+        size_attr_id = lookup_id(models, uid, "product.attribute", [("name", "=", "Size")], "Size")
+        size_value_ids = [get_attribute_value_id(models, uid, "Size", s) for s in sizes]
+        lines.append((0, 0, {"attribute_id": size_attr_id, "value_ids": [(6, 0, size_value_ids)]}))
     if containers:
-        container_attr_id = lookup_id(
-            models, uid, "product.attribute", [("name", "=", "Container")], "Container"
-        )
-        container_value_ids = [
-            get_attribute_value_id(models, uid, "Container", c) for c in containers
-        ]
+        container_attr_id = lookup_id(models, uid, "product.attribute", [("name", "=", "Container")], "Container")
+        container_value_ids = [get_attribute_value_id(models, uid, "Container", c) for c in containers]
         lines.append(
             (
                 0,
@@ -251,9 +227,7 @@ def build_attribute_lines(
     return lines
 
 
-def resolve_sale_taxes(
-    models: xmlrpc.client.ServerProxy, uid: int, company_id: int
-) -> list[int]:
+def resolve_sale_taxes(models: xmlrpc.client.ServerProxy, uid: int, company_id: int) -> list[int]:
     """Best-effort lookup of the configured WV sale taxes for this company.
 
     Returns the tax ids that exist AND are usable by ``company_id``. Missing or
@@ -296,16 +270,12 @@ def import_product(
     product: dict[str, Any],
 ) -> None:
     sku = product["sku"]
-    existing = call(
-        models, uid, "product.template", "search", [[("default_code", "=", sku)]], {"limit": 1}
-    )
+    existing = call(models, uid, "product.template", "search", [[("default_code", "=", sku)]], {"limit": 1})
     if existing:
         print(f"  SKIP {sku} — already exists (id={existing[0]})")
         return
 
-    category_id = lookup_id(
-        models, uid, "product.category", [("name", "=", product["category"])], product["category"]
-    )
+    category_id = lookup_id(models, uid, "product.category", [("name", "=", product["category"])], product["category"])
 
     vals: dict[str, Any] = {
         "name": product["name"],
@@ -320,9 +290,7 @@ def import_product(
         "purchase_ok": True,
     }
     if product["variants"]:
-        vals["attribute_line_ids"] = build_attribute_lines(
-            models, uid, product["variants"]
-        )
+        vals["attribute_line_ids"] = build_attribute_lines(models, uid, product["variants"])
     if tax_ids:
         vals["taxes_id"] = [(6, 0, tax_ids)]
 
@@ -353,9 +321,7 @@ def main() -> None:
         return
 
     models, uid = authenticate()
-    company_id = lookup_id(
-        models, uid, "res.company", [("name", "=", ODOO_COMPANY)], ODOO_COMPANY
-    )
+    company_id = lookup_id(models, uid, "res.company", [("name", "=", ODOO_COMPANY)], ODOO_COMPANY)
     print(f"Target company_id={company_id} ({ODOO_COMPANY})")
     tax_ids = resolve_sale_taxes(models, uid, company_id)
     print(f"Applying sale taxes: {tax_ids or '(none)'}\n")
