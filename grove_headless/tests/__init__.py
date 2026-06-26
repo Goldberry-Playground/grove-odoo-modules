@@ -4,4 +4,5 @@ from . import (
     test_potting_batch,  # noqa: F401
     test_product_slug,  # noqa: F401
     test_tenant_routing,  # noqa: F401
+    test_wv_taxes,  # noqa: F401
 )
