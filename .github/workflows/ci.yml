@@ -266,7 +266,10 @@ jobs:
                --stop-after-init \
                --log-level=info
           # Tests can take longer than install — give it 5 minutes.
-          for i in $(seq 1 60); do
+          # Audit fix SC2034 (2026-06-29): loop var is intentionally unused
+          # (we just want the timeout effect). Underscore prefix is the
+          # POSIX convention shellcheck recognizes as "intentionally unused."
+          for _ in $(seq 1 60); do
             if ! docker ps -q --filter name=odoo --filter status=running | grep -q .; then
               break
             fi
