@@ -441,7 +441,9 @@ Operational helpers in `scripts/` for bootstrapping a fresh tenant. Each script 
 
 | Script | What it seeds |
 |--------|--------------|
-| `seed_sample_products.py` | 5 representative Goldberry product templates with Size + Container variants |
+| `import_grove_catalog.py` | **Real per-tenant product catalogs** from `scripts/catalogs/<tenant>.csv`. Handles goldberry / ggg / nursery in one script, uploads product photos, wires `grove_headless` fields (slug, featured, SEO). See [`scripts/catalogs/README.md`](./scripts/catalogs/README.md). |
+| `import_nursery_catalog.py` | *(legacy, nursery-only)* Superseded by `import_grove_catalog.py`; kept until first successful generic run. |
+| `seed_sample_products.py` | *(legacy)* 5 representative Goldberry demo products. Superseded by `import_grove_catalog.py` with a real `goldberry.csv`. |
 | `seed_payment_journals.py` | Cash, Card, Check, Online Payment, Invoice (Net 30) journals |
 | `seed_sales_teams.py` | Farmer's Market, Direct to Nursery, Online sales teams |
 | `setup_ghost_integration.py` | Bootstraps Ghost admin + creates a Custom Integration, prints `GHOST_CONTENT_KEY=...` |
