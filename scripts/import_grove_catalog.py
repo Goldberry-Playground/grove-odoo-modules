@@ -143,10 +143,7 @@ def truthy(value: str) -> bool:
 def tenant_from_filename(path: Path) -> str:
     tenant = path.stem
     if tenant not in TENANT_CONFIG:
-        fail(
-            f"{path.name}: unknown tenant '{tenant}'. "
-            f"Expected one of: {sorted(TENANT_CONFIG)}"
-        )
+        fail(f"{path.name}: unknown tenant '{tenant}'. Expected one of: {sorted(TENANT_CONFIG)}")
     return tenant
 
 
@@ -163,9 +160,7 @@ def parse_catalog(path: Path) -> "OrderedDict[str, dict[str, Any]]":
                 fail(f"{path}: missing required columns: {sorted(missing)}")
             unknown = header - KNOWN_COLUMNS
             if unknown:
-                warn(
-                    f"{path}: unknown columns will be ignored: {sorted(unknown)}"
-                )
+                warn(f"{path}: unknown columns will be ignored: {sorted(unknown)}")
             rows = list(reader)
     except FileNotFoundError:
         fail(f"CSV file not found: {path}")
@@ -185,10 +180,7 @@ def parse_catalog(path: Path) -> "OrderedDict[str, dict[str, Any]]":
         try:
             list_price = float(row["list_price"])
         except (ValueError, KeyError):
-            fail(
-                f"{path.name} row {i} (sku={sku}): list_price "
-                f"'{row.get('list_price', '')}' is not a number"
-            )
+            fail(f"{path.name} row {i} (sku={sku}): list_price '{row.get('list_price', '')}' is not a number")
 
         size = row.get("size", "")
         container = row.get("container", "")
@@ -271,9 +263,7 @@ def call(
     args: list,
     kwargs: dict | None = None,
 ) -> Any:
-    return models.execute_kw(
-        ODOO_DB, uid, ODOO_PASSWORD, model, method, args, kwargs or {}
-    )
+    return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, model, method, args, kwargs or {})
 
 
 def lookup_id(
@@ -289,12 +279,8 @@ def lookup_id(
     return ids[0]
 
 
-def get_attribute_value_id(
-    models: xmlrpc.client.ServerProxy, uid: int, attr_name: str, value_name: str
-) -> int:
-    attr_id = lookup_id(
-        models, uid, "product.attribute", [("name", "=", attr_name)], attr_name
-    )
+def get_attribute_value_id(models: xmlrpc.client.ServerProxy, uid: int, attr_name: str, value_name: str) -> int:
+    attr_id = lookup_id(models, uid, "product.attribute", [("name", "=", attr_name)], attr_name)
     return lookup_id(
         models,
         uid,
@@ -314,15 +300,9 @@ def build_attribute_lines(
 
     lines: list[tuple] = []
     if sizes:
-        size_attr_id = lookup_id(
-            models, uid, "product.attribute", [("name", "=", "Size")], "Size"
-        )
-        size_value_ids = [
-            get_attribute_value_id(models, uid, "Size", s) for s in sizes
-        ]
-        lines.append(
-            (0, 0, {"attribute_id": size_attr_id, "value_ids": [(6, 0, size_value_ids)]})
-        )
+        size_attr_id = lookup_id(models, uid, "product.attribute", [("name", "=", "Size")], "Size")
+        size_value_ids = [get_attribute_value_id(models, uid, "Size", s) for s in sizes]
+        lines.append((0, 0, {"attribute_id": size_attr_id, "value_ids": [(6, 0, size_value_ids)]}))
     if containers:
         container_attr_id = lookup_id(
             models,
@@ -331,9 +311,7 @@ def build_attribute_lines(
             [("name", "=", "Container")],
             "Container",
         )
-        container_value_ids = [
-            get_attribute_value_id(models, uid, "Container", c) for c in containers
-        ]
+        container_value_ids = [get_attribute_value_id(models, uid, "Container", c) for c in containers]
         lines.append(
             (
                 0,
@@ -431,9 +409,7 @@ def import_product(
         "grove_seo_description": product["grove_seo_description"],
     }
     if product["variants"]:
-        vals["attribute_line_ids"] = build_attribute_lines(
-            models, uid, product["variants"]
-        )
+        vals["attribute_line_ids"] = build_attribute_lines(models, uid, product["variants"])
     if tax_ids:
         vals["taxes_id"] = [(6, 0, tax_ids)]
 
@@ -471,10 +447,7 @@ def process_csv(csv_path: Path) -> None:
         nvar = len(p["variants"]) or 1
         img = " +photo" if p["image_path"] else ""
         feat = " ⭐" if p["grove_featured"] else ""
-        print(
-            f"  {sku}: {p['name']} (${p['list_price']:.2f}, "
-            f"{nvar} variant(s), slug={p['grove_slug']}{img}{feat})"
-        )
+        print(f"  {sku}: {p['name']} (${p['list_price']:.2f}, {nvar} variant(s), slug={p['grove_slug']}{img}{feat})")
 
     if DRY_RUN:
         print("  DRY_RUN=1 — no changes written for this file.")
@@ -490,9 +463,9 @@ def process_csv(csv_path: Path) -> None:
     )
     print(f"Target company_id={company_id} ({cfg['company_name']})")
 
-    tax_names = cfg["default_taxes"] if TAXES_OVERRIDE is None else [
-        t.strip() for t in TAXES_OVERRIDE.split(",") if t.strip()
-    ]
+    tax_names = (
+        cfg["default_taxes"] if TAXES_OVERRIDE is None else [t.strip() for t in TAXES_OVERRIDE.split(",") if t.strip()]
+    )
     tax_ids = resolve_sale_taxes(models, uid, company_id, tax_names) if tax_names else []
     print(f"Applying sale taxes: {tax_ids or '(none)'}\n")
 
@@ -513,8 +486,7 @@ def main() -> None:
         csvs = [c for c in csvs if not c.name.startswith("_")]  # skip _template.csv
         if not csvs:
             fail(f"no *.csv files found in {target} (excluding _template.csv)")
-        print(f"Found {len(csvs)} catalog file(s) in {target}: "
-              f"{[c.name for c in csvs]}")
+        print(f"Found {len(csvs)} catalog file(s) in {target}: {[c.name for c in csvs]}")
         for csv_path in csvs:
             process_csv(csv_path)
     else:
