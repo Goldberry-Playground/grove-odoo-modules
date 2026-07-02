@@ -5,7 +5,7 @@ import re
 from odoo import http
 from odoo.http import Response, request
 
-from ..models.shipping_zones import compute_shipping_rate
+from ..models.shipping_zones import compute_order_shipping, compute_shipping_rate
 
 _logger = logging.getLogger(__name__)
 
@@ -685,11 +685,7 @@ SHIPPING_PRODUCT_CODE = "GROVE-SHIP"
 
 def _order_weight(order) -> float:
     """Total shippable weight (lbs) of the order's product lines."""
-    return sum(
-        (line.product_id.weight or 0.0) * line.product_uom_qty
-        for line in order.order_line
-        if line.product_id
-    )
+    return sum((line.product_id.weight or 0.0) * line.product_uom_qty for line in order.order_line if line.product_id)
 
 
 def _get_shipping_product(env, company):
@@ -723,20 +719,24 @@ def _get_shipping_product(env, company):
 
 
 def _apply_shipping_line(env, order, shipping, company):
-    """Add a shipping charge line to `order` based on the 12-zone rate table.
+    """Add a shipping charge line to `order` from the tiered zone table.
 
-    Returns without mutating the order when the destination has no configured
-    zone (the current state while GOL-15's rate table is pending), so the
-    headless checkout keeps working and never invents a charge. Once the table
-    in models/shipping_zones.py is filled, this charges the per-zone rate.
+    Fail-safe: returns without adding a line when no rate is configured for
+    the destination or any line's tier — never a guessed charge.
     """
     state = (shipping or {}).get("state")
-    rate = compute_shipping_rate(
-        state,
-        weight=_order_weight(order),
-        subtotal=order.amount_untaxed,
-    )
-    if rate is None:
+    if not state:
+        return
+    items = [
+        (
+            line.product_id.product_tmpl_id.grove_shipping_tier or "potted",
+            line.product_uom_qty,
+        )
+        for line in order.order_line
+        if not line.display_type and line.product_id
+    ]
+    charge = compute_order_shipping(state, items)
+    if charge is None:
         return
 
     product = _get_shipping_product(env, company)
@@ -746,7 +746,7 @@ def _apply_shipping_line(env, order, shipping, company):
             "product_id": product.id,
             "name": f"Shipping ({state})",
             "product_uom_qty": 1.0,
-            "price_unit": rate,
+            "price_unit": charge,
         }
     )
     order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])

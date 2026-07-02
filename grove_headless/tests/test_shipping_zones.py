@@ -187,5 +187,28 @@ class _temp_table:
         return False
 
 
+class TestOrderShipping(unittest.TestCase):
+    RATES = {"zone_1": {"bareroot": {"base": 21.0}, "potted": {"base": 32.0}}}
+
+    def test_sums_tiers_linearly(self):
+        with _temp_table({"WV": "zone_1"}, self.RATES):
+            # 2 bareroot + 1 potted = 2*21 + 32 = 74.00
+            total = sz.compute_order_shipping("WV", [("bareroot", 2), ("potted", 1)])
+            self.assertEqual(total, 74.0)
+
+    def test_any_unpriceable_item_fails_whole_order(self):
+        rates = {"zone_1": {"bareroot": {"base": 21.0}}}  # no potted rule
+        with _temp_table({"WV": "zone_1"}, rates):
+            self.assertIsNone(sz.compute_order_shipping("WV", [("bareroot", 1), ("potted", 1)]))
+
+    def test_unmapped_state_returns_none(self):
+        with _temp_table({"WV": "zone_1"}, self.RATES):
+            self.assertIsNone(sz.compute_order_shipping("TX", [("bareroot", 1)]))
+
+    def test_zero_and_negative_qty_ignored(self):
+        with _temp_table({"WV": "zone_1"}, self.RATES):
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 0), ("potted", -2), ("bareroot", 1)]), 21.0)
+
+
 if __name__ == "__main__":
     unittest.main()

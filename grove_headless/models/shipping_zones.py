@@ -213,3 +213,24 @@ def compute_shipping_rate(
     if per_lb:
         rate += float(per_lb) * max(0.0, float(weight))
     return round(rate, 2)
+
+
+def compute_order_shipping(state: str, items: list[tuple[str, float]]) -> float | None:
+    """Total shipping for an order: sum of per-tree tier rates × qty.
+
+    Fail-safe: if ANY line can't be priced (no zone, no tier rule), return
+    None so the caller adds no shipping line at all — we never ship a
+    partial/guessed charge.
+    """
+    if zone_for_state(state) is None:
+        return None
+    total = 0.0
+    for tier, qty in items:
+        qty = float(qty)
+        if qty <= 0:
+            continue
+        rate = compute_shipping_rate(state, tier=tier)
+        if rate is None:
+            return None
+        total += rate * qty
+    return round(total, 2)
