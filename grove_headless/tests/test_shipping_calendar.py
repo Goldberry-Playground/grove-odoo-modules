@@ -44,6 +44,15 @@ class TestZipZoneMatrix(unittest.TestCase):
         self.assertEqual(sc.usda_zone_for_zip("26651-1234"), sc.usda_zone_for_zip("26651"))
 
 
+class TestShipOptionsSerializer(unittest.TestCase):
+    def test_dates_serialize_iso(self):
+        r = sc.ship_options("26651", "bareroot", date(2026, 7, 15))
+        out = sc.serialize_ship_options(r)
+        self.assertEqual(out["next_wave"]["ship_start"], "2026-11-09")
+        self.assertIsNone(out["defer_to"])
+        self.assertTrue(out["ships_now"])
+
+
 class TestShipOptions(unittest.TestCase):
     Z5_ZIP = "04101"  # Portland ME — USDA 5-ish; assert actual zone in test
     Z6_ZIP = "26651"  # Summersville WV — USDA 6

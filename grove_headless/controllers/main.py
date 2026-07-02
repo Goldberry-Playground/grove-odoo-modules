@@ -1,10 +1,12 @@
 import json
 import logging
 import re
+from datetime import date as _date
 
 from odoo import http
 from odoo.http import Response, request
 
+from ..models.shipping_calendar import serialize_ship_options, ship_options
 from ..models.shipping_zones import compute_order_shipping, compute_shipping_rate
 
 _logger = logging.getLogger(__name__)
@@ -359,6 +361,23 @@ class GroveHeadlessAPI(http.Controller):
         sale_order._cart_add(product_id=variant.id, quantity=quantity)
 
         return self.cart_get()
+
+    # ── Shipping ─────────────────────────────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/shipping/options",
+        type="http",
+        auth="public",
+        methods=["GET"],
+        csrf=False,
+    )
+    def shipping_options(self, **kwargs):
+        zip_code = kwargs.get("zip", "")
+        state = kwargs.get("state", "")
+        tier = kwargs.get("tier", "potted")
+        result = serialize_ship_options(ship_options(zip_code, tier, _date.today()))
+        result["per_tree_rate"] = compute_shipping_rate(state, tier=tier)
+        return _json_response(result)
 
     # ── Orders ───────────────────────────────────────────────────────────
 

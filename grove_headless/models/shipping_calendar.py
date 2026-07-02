@@ -154,3 +154,16 @@ def ship_options(zip_code, tier: str, today: date) -> dict:
     elif frozen:
         result["defer_to"] = _freeze_end(zone, today)
     return result
+
+
+def serialize_ship_options(result: dict) -> dict:
+    """Convert ship_options result dict dates to ISO strings for JSON serialization."""
+    out = dict(result)
+    if out.get("defer_to"):
+        out["defer_to"] = out["defer_to"].isoformat()
+    if out.get("next_wave"):
+        nw = dict(out["next_wave"])
+        for k in ("ship_start", "ship_end", "order_by"):
+            nw[k] = nw[k].isoformat()
+        out["next_wave"] = nw
+    return out
