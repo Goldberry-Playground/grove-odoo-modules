@@ -735,6 +735,8 @@ def _apply_shipping_line(env, order, shipping, company):
         for line in order.order_line
         if not line.display_type and line.product_id
     ]
+    if not items:
+        return
     charge = compute_order_shipping(state, items)
     if charge is None:
         return

@@ -1,15 +1,10 @@
-# conftest.py — allows pytest to collect pure-Python tests inside the
-# grove_headless Odoo addon without triggering the real grove_headless
-# __init__.py, which imports `odoo` (not available outside the Odoo runtime).
-#
-# The test files in grove_headless/tests/ use importlib.util.spec_from_file_location
-# to load only the pure-Python modules they need; they never import via the
-# Odoo package system.
+# conftest.py (root) — Sets up module stubs to prevent pytest from importing
+# the real grove_headless/__init__.py during collection. The main conftest is in
+# grove_headless/tests/conftest.py, scoped to that directory so stubs don't
+# affect test collection elsewhere in the repo.
 import os
 import sys
 import types
-
-_ROOT = os.path.dirname(__file__)
 
 
 def _stub_pkg(name: str, real_path: str | None = None) -> types.ModuleType:
@@ -21,21 +16,15 @@ def _stub_pkg(name: str, real_path: str | None = None) -> types.ModuleType:
 
 
 # Stub odoo and the submodules that grove_headless/__init__.py pulls in.
-for _mod in (
-    "odoo",
-    "odoo.http",
-    "odoo.fields",
-    "odoo.models",
-    "odoo.api",
-    "odoo.exceptions",
-):
+for _mod in ("odoo", "odoo.http", "odoo.fields", "odoo.models", "odoo.api", "odoo.exceptions"):
     sys.modules.setdefault(_mod, types.ModuleType(_mod))
 
-# Stub grove_headless as a package whose __path__ points to the real directory
-# so that sub-package imports resolve to the real files — but we replace only
-# the top-level __init__ so it never runs.
+# Stub grove_headless as a package so pytest doesn't import the real __init__.py.
+_ROOT = os.path.dirname(__file__)
 _gh_dir = os.path.join(_ROOT, "grove_headless")
 sys.modules.setdefault("grove_headless", _stub_pkg("grove_headless", _gh_dir))
-
-_tests_dir = os.path.join(_gh_dir, "tests")
-sys.modules.setdefault("grove_headless.tests", _stub_pkg("grove_headless.tests", _tests_dir))
+sys.modules.setdefault(
+    "grove_headless.controllers", _stub_pkg("grove_headless.controllers", os.path.join(_gh_dir, "controllers"))
+)
+sys.modules.setdefault("grove_headless.models", _stub_pkg("grove_headless.models", os.path.join(_gh_dir, "models")))
+sys.modules.setdefault("grove_headless.tests", _stub_pkg("grove_headless.tests", os.path.join(_gh_dir, "tests")))
