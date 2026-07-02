@@ -1,85 +1,72 @@
-# 12-Zone Shipping Pricing (GOL-15)
+# Shipping Zones — Live System Reference (GOL-15)
 
-Square's API can't build shipping rate profiles, so the 12-zone shipping
-pricing is implemented in the Grove headless checkout (`grove_headless`)
-instead. This doc is the fill-in template that turns Josh's
-"full 12-zone shipping pricing doc" (Obsidian vault, 2026-06-23) into the
-two tables the rate engine reads.
+Canonical design: vault **wiki/Software/Grove Shipping** (2026-07-02).
 
-## Status
+## Rate table — `data/shipping_rates.json`
 
-| Piece | State |
-| --- | --- |
-| Rate engine (`models/shipping_zones.py`) | ✅ done, unit-tested |
-| Checkout integration (`controllers/main.py` → `_apply_shipping_line`) | ✅ done, no-op until data lands |
-| Contract + coverage tests (`tests/test_shipping_zones.py`) | ✅ done |
-| **12-zone rate table (the data)** | ⛔ **BLOCKED — Rick to provide** |
+Zone rates are stored in `grove_headless/data/shipping_rates.json` and loaded at
+startup by `models/shipping_zones.py`. The file ships with provisional launch-
+hypothesis values; the morning rate-checker (`scripts/rate_check/rate_check.py`)
+replaces them with real Shippo-derived values via automated PR on its first run.
 
-The engine is fail-safe: with the tables empty, checkout adds **no** shipping
-line and behaves exactly as before. Filling the two tables below is the only
-remaining step — no further code changes are needed.
+Structure:
 
-## How to unblock (for Rick)
+```json
+{
+  "zone_N": {
+    "bareroot": {"base": <float>},
+    "potted":   {"base": <float>}
+  }
+}
+```
 
-Paste the doc's numbers into `models/shipping_zones.py`:
+Optional per-zone keys (see vault spec): `per_lb` (float), `free_over` (float).
+Keys beginning with `_` are ignored (used for comments).
 
-1. **`ZONE_BY_STATE`** — assign every US state/territory to one of the 12 zones:
+## State eligibility — `ZONE_BY_STATE` / `GREEN_STATES`
 
-   ```python
-   ZONE_BY_STATE = {
-       "WV": "zone_1", "OH": "zone_1", "KY": "zone_1",   # …
-       "PA": "zone_2", "VA": "zone_2",                    # …
-       # … through zone_12; every state in US_STATES gets exactly one zone
-   }
-   ```
+`models/shipping_zones.py` defines two complementary constants:
 
-2. **`ZONE_RATES`** — one rule per zone:
+- **`GREEN_STATES`** (21 states) — the compliance gate: we ship only to these states.
+  Any checkout address outside this set returns `None` from `compute_shipping_rate`
+  and `compute_order_shipping`, which causes the checkout to add **no** shipping line
+  (fail-safe — never a guessed charge).
+- **`ZONE_BY_STATE`** — maps each of the 21 green states to one of five rate zones
+  (`zone_1` … `zone_5`), keyed by UPS ground transit distance from zip 26651 (WV).
 
-   ```python
-   ZONE_RATES = {
-       "zone_1":  {"base": 8.00},
-       "zone_2":  {"base": 10.00, "free_over": 75.0},
-       "zone_12": {"base": 28.00, "per_lb": 0.75},
-       # …
-   }
-   ```
+Green states (alphabetical): CT, DE, IL, IN, KY, MA, MD, ME, MI, MN, NC, NH, NJ,
+NY, OH, PA, RI, VA, VT, WI, WV.
 
-   Rule fields (only `base` is required):
-   - `base` — flat charge for any order shipping to the zone.
-   - `per_lb` — optional surcharge per pound of order weight.
-   - `free_over` — optional: shipping is free when the order subtotal ≥ this.
+## Product tier — `grove_shipping_tier`
 
-Once filled, `tests/test_shipping_zones.py` automatically enforces full state
-coverage and that every zone has a rate.
+`product.template` carries a `grove_shipping_tier` selection field (`bareroot` or
+`potted`). The checkout reads this field per order line and passes it to
+`compute_order_shipping` for per-tree tiered pricing. Untagged products default to
+`potted` (never undercharged).
 
-## Open questions for Rick (confirm against the doc)
+## Shipping calendar — `models/shipping_calendar.py`
 
-1. **Zone basis** — are the 12 zones grouped by destination **state/region**
-   (what this engine assumes), or by USPS distance band, or by mileage from the
-   farm? If it's distance-from-origin rather than a fixed state map, the lookup
-   needs the origin ZIP and a distance-band table instead of `ZONE_BY_STATE`.
-2. **Weight / size rules** — flat per-zone, or per-pound / per-tier? The engine
-   supports `per_lb` today; weight *brackets* (e.g. 0–5 lb, 5–20 lb) would need
-   a small extension.
-3. **Free-shipping thresholds** — any `free_over` amounts, global or per-zone?
-4. **Territories** — do we ship to PR/VI/GU/AS/MP? They're in `US_STATES` for
-   now; drop any we don't serve.
-5. **Tax on shipping** — is the shipping charge itself taxable under WV rules?
-   (Currently the shipping line carries no tax; easy to change.)
+USDA hardiness zone (integer 2–10) is resolved from the customer's destination ZIP
+via the vendored PHZM 2023 matrix (`data/zip_usda_zone.csv`, built by
+`scripts/build_zip_zone_matrix.py`). The calendar module uses the USDA zone (not
+the rate zone) to determine:
 
-## Rate table (paste the doc here for the record)
+- **`WAVE_SCHEDULE`** — bareroot ship windows and order-by deadlines per USDA zone
+  and season (fall / spring)
+- **`FREEZE_WINDOWS`** — per-zone cold-weather no-ship ranges (conservative launch
+  defaults; tighten via data PR after nursery-manager feedback)
+- **`NO_SHIP_MONTHS`** — global January + February floor applied before zone checks
 
-| Zone | States / region | Base | Per-lb | Free over |
-| --- | --- | --- | --- | --- |
-| zone_1 |  |  |  |  |
-| zone_2 |  |  |  |  |
-| zone_3 |  |  |  |  |
-| zone_4 |  |  |  |  |
-| zone_5 |  |  |  |  |
-| zone_6 |  |  |  |  |
-| zone_7 |  |  |  |  |
-| zone_8 |  |  |  |  |
-| zone_9 |  |  |  |  |
-| zone_10 |  |  |  |  |
-| zone_11 |  |  |  |  |
-| zone_12 |  |  |  |  |
+`ship_options(zip_code, tier, today)` returns the full availability dict consumed by
+`GET /grove/api/v1/shipping/options`.
+
+## Rate-check automation
+
+`scripts/rate_check/rate_check.py` + `.github/workflows/rate-check.yml`:
+
+- Runs daily at 07:00 ET via GitHub Actions cron
+- Fetches real UPS Ground quotes from Shippo for each zone × tier parcel profile
+- If any rate drifts ≥ $1.00 from the JSON file, opens a PR to update
+  `data/shipping_rates.json` and posts a Discord notification
+- No-ops until `SHIPPO_API_KEY` and `DISCORD_WEBHOOK_URL` secrets are configured
+  in the repository (safe to merge before credentials exist)
