@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+  <record id="action_grove_buy_shipping_labels" model="ir.actions.server">
+    <field name="name">Grove: Buy Shipping Label(s)</field>
+    <field name="model_id" ref="sale.model_sale_order"/>
+    <field name="binding_model_id" ref="sale.model_sale_order"/>
+    <field name="binding_view_types">list,form</field>
+    <field name="state">code</field>
+    <field name="code">records.action_buy_shipping_labels()</field>
+  </record>
+</odoo>

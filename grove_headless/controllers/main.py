@@ -1,9 +1,16 @@
+import hmac
 import json
 import logging
+import os
 import re
+from datetime import date as _date
 
 from odoo import http
 from odoo.http import Response, request
+
+from ..models.shipping_calendar import serialize_ship_options, ship_options
+from ..models.shipping_zones import compute_order_shipping, compute_shipping_rate
+from ..models.shippo_client import is_valid_tracking
 
 _logger = logging.getLogger(__name__)
 
@@ -358,6 +365,23 @@ class GroveHeadlessAPI(http.Controller):
 
         return self.cart_get()
 
+    # ── Shipping ─────────────────────────────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/shipping/options",
+        type="http",
+        auth="public",
+        methods=["GET"],
+        csrf=False,
+    )
+    def shipping_options(self, **kwargs):
+        zip_code = kwargs.get("zip", "")
+        state = kwargs.get("state", "")
+        tier = kwargs.get("tier", "potted")
+        result = serialize_ship_options(ship_options(zip_code, tier, _date.today()))
+        result["per_tree_rate"] = compute_shipping_rate(state, tier=tier)
+        return _json_response(result)
+
     # ── Orders ───────────────────────────────────────────────────────────
 
     @http.route(
@@ -544,6 +568,11 @@ class GroveHeadlessAPI(http.Controller):
         env["sale.order.line"].sudo().create(line_vals)
         order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
 
+        # Apply the tiered 21-state shipping charge (GOL-15). Rates are loaded
+        # from data/shipping_rates.json by models/shipping_zones.py and maintained
+        # by the daily rate-checker. Fail-safe: no rate configured → no line added.
+        _apply_shipping_line(env, order, shipping, current_company)
+
         # Ensure a portal access token exists — required to fetch order details
         # later via GET without exposing PII through id-enumeration.
         access_token = order._portal_ensure_token()
@@ -634,6 +663,49 @@ class GroveHeadlessAPI(http.Controller):
             }
         )
 
+    # ── Shipping webhook ─────────────────────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/shipping/webhook",
+        type="http",
+        auth="public",
+        methods=["POST"],
+        csrf=False,
+    )
+    def shipping_webhook(self, **kwargs):
+        """Handle Shippo tracking-status webhooks.
+
+        Uses type="http" (not "json") so that Shippo receives the correct HTTP
+        status codes: errors return 4xx, success returns 200. With type="json"
+        (JSON-RPC dispatcher), all responses — including exceptions — are wrapped
+        in HTTP 200, preventing Shippo from detecting failures and retrying.
+
+        Auth: token sent via `X-Grove-Webhook-Token` request header (configure
+        this custom header in the Shippo webhook settings URL for this endpoint).
+        The token is compared with `hmac.compare_digest` to prevent timing-oracle
+        attacks. GROVE_SHIPPO_WEBHOOK_TOKEN must be set in the server environment.
+        """
+        try:
+            payload = json.loads(request.httprequest.get_data() or b"{}")
+        except (json.JSONDecodeError, ValueError):
+            return _json_response({"error": "bad json"}, status=400)
+
+        expected = os.environ.get("GROVE_SHIPPO_WEBHOOK_TOKEN", "")
+        token = request.httprequest.headers.get("X-Grove-Webhook-Token", "")
+        if not expected or not hmac.compare_digest(token, expected):
+            return _json_response({"error": "forbidden"}, status=403)
+
+        data = payload.get("data") or {}
+        tracking = data.get("tracking_number")
+        status = (data.get("tracking_status") or {}).get("status")
+        if not (tracking and status):
+            return _json_response({"ok": True, "matched": 0})
+        if not is_valid_tracking(tracking):
+            return _json_response({"ok": True, "matched": 0})
+        orders = request.env["sale.order"].sudo().search([("grove_tracking_numbers", "like", tracking)])
+        orders.write({"grove_delivery_status": status.lower()})
+        return _json_response({"ok": True, "matched": len(orders)})
+
 
 def _partner_vals_from_payload(env, contact, address):
     """Build res.partner write/create vals from contact + address dicts."""
@@ -672,6 +744,75 @@ def _partner_vals_from_payload(env, contact, address):
                 if state:
                     vals["state_id"] = state.id
     return vals
+
+
+SHIPPING_PRODUCT_CODE = "GROVE-SHIP"
+
+
+def _get_shipping_product(env, company):
+    """Find (or lazily create) the service product the shipping charge rides on.
+
+    Scoped per-company so each tenant's order carries its own shipping SKU.
+    Only ever runs once the zone table is configured — until then
+    `_apply_shipping_line` returns before reaching here.
+    """
+    Product = env["product.product"].sudo().with_company(company)
+    product = Product.search(
+        [
+            ("default_code", "=", SHIPPING_PRODUCT_CODE),
+            ("company_id", "in", [company.id, False]),
+        ],
+        limit=1,
+    )
+    if not product:
+        product = Product.create(
+            {
+                "name": "Shipping",
+                "default_code": SHIPPING_PRODUCT_CODE,
+                "type": "service",
+                "list_price": 0.0,
+                "sale_ok": True,
+                "purchase_ok": False,
+                "company_id": company.id,
+            }
+        )
+    return product
+
+
+def _apply_shipping_line(env, order, shipping, company):
+    """Add a shipping charge line to `order` from the tiered zone table.
+
+    Fail-safe: returns without adding a line when no rate is configured for
+    the destination or any line's tier — never a guessed charge.
+    """
+    state = (shipping or {}).get("state")
+    if not state:
+        return
+    items = [
+        (
+            line.product_id.product_tmpl_id.grove_shipping_tier or "potted",
+            line.product_uom_qty,
+        )
+        for line in order.order_line
+        if not line.display_type and line.product_id
+    ]
+    if not items:
+        return
+    charge = compute_order_shipping(state, items)
+    if charge is None:
+        return
+
+    product = _get_shipping_product(env, company)
+    env["sale.order.line"].sudo().create(
+        {
+            "order_id": order.id,
+            "product_id": product.id,
+            "name": f"Shipping ({state})",
+            "product_uom_qty": 1.0,
+            "price_unit": charge,
+        }
+    )
+    order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
 
 
 def _format_payment_note(payment_method):
