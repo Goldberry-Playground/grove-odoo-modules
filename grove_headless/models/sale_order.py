@@ -1,9 +1,12 @@
+import logging
 import os
 
 from odoo import fields, models
 from odoo.exceptions import UserError
 
 from . import shippo_client
+
+_logger = logging.getLogger(__name__)
 
 
 class SaleOrder(models.Model):
@@ -12,6 +15,14 @@ class SaleOrder(models.Model):
     grove_tracking_numbers = fields.Text(readonly=True, copy=False)
     grove_label_urls = fields.Text(readonly=True, copy=False)
     grove_delivery_status = fields.Char(readonly=True, copy=False)
+
+    def _persist_label_result(self, vals):
+        """Write label results through an independent cursor so they survive
+        the request-transaction rollback that follows a raised UserError.
+        Money spent at Shippo must never be unrecorded in Odoo."""
+        self.ensure_one()
+        with self.env.registry.cursor() as cr:
+            self.with_env(self.env(cr=cr)).write(vals)
 
     def action_buy_shipping_labels(self):
         """Buy one UPS Ground label per tree box via Shippo (each tree = its
@@ -56,18 +67,33 @@ class SaleOrder(models.Model):
                     purchase_plan.append((shippo_client.build_shipment_payload(address, tier), tier))
 
             # ── Pass 2: buy labels, persisting after each success ──────────
+            # Each label is committed through an independent cursor immediately
+            # after purchase, so money spent at Shippo is recorded even if a
+            # subsequent label fails and the request transaction rolls back.
             tracking, labels = [], []
             try:
                 for payload, _tier in purchase_plan:
                     result = shippo_client.buy_ups_ground_label(api_key, payload)
                     tracking.append(result["tracking_number"])
                     labels.append(result["label_url"])
+                    order._persist_label_result(
+                        {
+                            "grove_tracking_numbers": "\n".join(tracking),
+                            "grove_label_urls": "\n".join(labels),
+                            "grove_delivery_status": "label_purchased",
+                        }
+                    )
             except shippo_client.ShippoError as exc:
                 if tracking:
-                    # Persist what was ALREADY BOUGHT so money spent is never
-                    # unrecorded. The idempotency guard then blocks blind
-                    # retries; operator reconciles the partial purchase.
-                    order.write(
+                    # Labels already bought (and individually persisted above);
+                    # mark partial so the idempotency guard surfaces the problem.
+                    _logger.error(
+                        "Shippo partial purchase on %s: bought tracking numbers %s before failure: %s",
+                        order.name,
+                        tracking,
+                        exc,
+                    )
+                    order._persist_label_result(
                         {
                             "grove_tracking_numbers": "\n".join(tracking),
                             "grove_label_urls": "\n".join(labels),
@@ -79,11 +105,4 @@ class SaleOrder(models.Model):
                     f"label(s) bought (recorded on the order): {exc}"
                 ) from exc
 
-            order.write(
-                {
-                    "grove_tracking_numbers": "\n".join(tracking),
-                    "grove_label_urls": "\n".join(labels),
-                    "grove_delivery_status": "label_purchased" if tracking else False,
-                }
-            )
         return True

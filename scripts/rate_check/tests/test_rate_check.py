@@ -1,9 +1,7 @@
+import importlib.util
 import json
 import os
 import unittest
-from unittest import mock
-
-import importlib.util
 
 _PATH = os.path.join(os.path.dirname(__file__), "..", "rate_check.py")
 _spec = importlib.util.spec_from_file_location("rate_check", _PATH)

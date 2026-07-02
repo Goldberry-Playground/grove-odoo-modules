@@ -568,8 +568,9 @@ class GroveHeadlessAPI(http.Controller):
         env["sale.order.line"].sudo().create(line_vals)
         order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
 
-        # Apply the 12-zone shipping charge (GOL-15). No-op until the zone rate
-        # table is populated from Josh's doc — see models/shipping_zones.py.
+        # Apply the tiered 21-state shipping charge (GOL-15). Rates are loaded
+        # from data/shipping_rates.json by models/shipping_zones.py and maintained
+        # by the daily rate-checker. Fail-safe: no rate configured → no line added.
         _apply_shipping_line(env, order, shipping, current_company)
 
         # Ensure a portal access token exists — required to fetch order details
@@ -666,7 +667,7 @@ class GroveHeadlessAPI(http.Controller):
 
     @http.route(
         "/grove/api/v1/shipping/webhook",
-        type="json",
+        type="http",
         auth="public",
         methods=["POST"],
         csrf=False,
@@ -674,26 +675,36 @@ class GroveHeadlessAPI(http.Controller):
     def shipping_webhook(self, **kwargs):
         """Handle Shippo tracking-status webhooks.
 
+        Uses type="http" (not "json") so that Shippo receives the correct HTTP
+        status codes: errors return 4xx, success returns 200. With type="json"
+        (JSON-RPC dispatcher), all responses — including exceptions — are wrapped
+        in HTTP 200, preventing Shippo from detecting failures and retrying.
+
         Auth: token sent via `X-Grove-Webhook-Token` request header (configure
         this custom header in the Shippo webhook settings URL for this endpoint).
         The token is compared with `hmac.compare_digest` to prevent timing-oracle
         attacks. GROVE_SHIPPO_WEBHOOK_TOKEN must be set in the server environment.
         """
+        try:
+            payload = json.loads(request.httprequest.get_data() or b"{}")
+        except (json.JSONDecodeError, ValueError):
+            return _json_response({"error": "bad json"}, status=400)
+
         expected = os.environ.get("GROVE_SHIPPO_WEBHOOK_TOKEN", "")
         token = request.httprequest.headers.get("X-Grove-Webhook-Token", "")
         if not expected or not hmac.compare_digest(token, expected):
-            return {"error": "forbidden"}
-        payload = request.get_json_data() or {}
+            return _json_response({"error": "forbidden"}, status=403)
+
         data = payload.get("data") or {}
         tracking = data.get("tracking_number")
         status = (data.get("tracking_status") or {}).get("status")
         if not (tracking and status):
-            return {"ok": True, "matched": 0}
+            return _json_response({"ok": True, "matched": 0})
         if not is_valid_tracking(tracking):
-            return {"ok": True, "matched": 0}
+            return _json_response({"ok": True, "matched": 0})
         orders = request.env["sale.order"].sudo().search([("grove_tracking_numbers", "like", tracking)])
         orders.write({"grove_delivery_status": status.lower()})
-        return {"ok": True, "matched": len(orders)}
+        return _json_response({"ok": True, "matched": len(orders)})
 
 
 def _partner_vals_from_payload(env, contact, address):
@@ -736,11 +747,6 @@ def _partner_vals_from_payload(env, contact, address):
 
 
 SHIPPING_PRODUCT_CODE = "GROVE-SHIP"
-
-
-def _order_weight(order) -> float:
-    """Total shippable weight (lbs) of the order's product lines."""
-    return sum((line.product_id.weight or 0.0) * line.product_uom_qty for line in order.order_line if line.product_id)
 
 
 def _get_shipping_product(env, company):
