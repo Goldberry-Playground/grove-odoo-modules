@@ -1,0 +1,3 @@
+sku,name,category,list_price,size,container,description_sale,image_path,grove_slug,grove_featured,grove_seo_description
+EXAMPLE-SKU-001,Example Product,Trees,29.99,3 gal,Nursery Pot,"Customer-facing description. Wraps to a paragraph on the shop detail page.",images/goldberry/example.webp,example-product,true,"SEO meta description shown to search engines and social previews."
+EXAMPLE-SKU-001,Example Product,Trees,29.99,5 gal,Nursery Pot,,,,,
