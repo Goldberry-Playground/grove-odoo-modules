@@ -1,24 +1,23 @@
-"""12-zone shipping rate engine for the Grove headless checkout (GOL-15).
+"""5-zone tiered shipping rate engine for the Grove headless checkout (GOL-15).
 
-STATUS — engine COMPLETE, zone DATA BLOCKED
-===========================================
-The rate-computation plumbing below is finished and unit-tested. What is NOT
-yet here is the actual 12-zone rate table: it lives in Josh's Obsidian vault
-("wrote out the full 12-zone shipping pricing doc", daily journal 2026-06-23)
-and is not reachable from the agent runtime (not in Notion, Drive, or the
-read-only /opt/vault mount). See ``docs/shipping-zones.md`` for the fill-in
-schema and the open questions for Rick.
+STATUS — engine COMPLETE, rates in JSON
+========================================
+The rate-computation plumbing below is finished and unit-tested. Rates are
+loaded from ``data/shipping_rates.json`` with a two-tier structure (bareroot and
+potted products). Design is documented in the vault wiki at ``Software/Grove Shipping``.
 
 Fail-safe by design: while ``ZONE_BY_STATE`` / ``ZONE_RATES`` are empty,
 ``compute_shipping_rate`` returns ``None`` for every address, so the checkout
 adds NO shipping line and current behaviour is preserved — we never ship a
-wrong or guessed charge. The moment the two tables are filled from the doc the
-feature goes live with no further code changes.
+wrong or guessed charge.
 
 The engine is deliberately a pure-Python module with no Odoo imports so it can
 be unit-tested without a database (see ``tests/test_shipping_zones.py``) and so
 the rate table is one obvious source of truth a non-engineer can edit.
 """
+
+import json
+import os
 
 # ── Destination universe ────────────────────────────────────────────────────
 # Every US destination we expect to quote. Used by the test to assert that the
@@ -26,38 +25,93 @@ the rate table is one obvious source of truth a non-engineer can edit.
 # DC + the shippable territories are included; trim per the doc if the business
 # does not ship to a given territory.
 US_STATES: tuple[str, ...] = (
-    "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI",
-    "ID", "IL", "IN", "IA", "KS", "KY", "LA", "ME", "MD", "MA", "MI", "MN",
-    "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH",
-    "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA",
-    "WV", "WI", "WY",
+    "AL",
+    "AK",
+    "AZ",
+    "AR",
+    "CA",
+    "CO",
+    "CT",
+    "DE",
+    "DC",
+    "FL",
+    "GA",
+    "HI",
+    "ID",
+    "IL",
+    "IN",
+    "IA",
+    "KS",
+    "KY",
+    "LA",
+    "ME",
+    "MD",
+    "MA",
+    "MI",
+    "MN",
+    "MS",
+    "MO",
+    "MT",
+    "NE",
+    "NV",
+    "NH",
+    "NJ",
+    "NM",
+    "NY",
+    "NC",
+    "ND",
+    "OH",
+    "OK",
+    "OR",
+    "PA",
+    "RI",
+    "SC",
+    "SD",
+    "TN",
+    "TX",
+    "UT",
+    "VT",
+    "VA",
+    "WA",
+    "WV",
+    "WI",
+    "WY",
     # Territories — keep or drop per the doc.
-    "PR", "VI", "GU", "AS", "MP",
+    "PR",
+    "VI",
+    "GU",
+    "AS",
+    "MP",
 )
 
-# The 12 zones. Ids are stable keys used by ZONE_BY_STATE and ZONE_RATES;
-# labels are display-only and may be renamed to match the doc's naming.
-ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 13))
+RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 6))
+TIERS: tuple[str, ...] = ("bareroot", "potted")
+DEFAULT_TIER = "potted"  # never undercharge an untagged product
 
-ZONE_LABELS: dict[str, str] = {zid: f"Zone {zid.split('_')[1]}" for zid in ZONE_IDS}
+# Box rule (UPS additional-handling triggers at > 48.0"): documented constants
+# the packing docs and the rate-checker's reference parcels share.
+MAX_BOX_LONGEST_SIDE_IN = 48.0
+PARCEL_PROFILES = {
+    "bareroot": {"length": 48, "width": 6, "height": 6, "weight_lb": 4},
+    "potted": {"length": 30, "width": 16, "height": 16, "weight_lb": 25},
+}
 
-# ── BLOCKED DATA — fill from Josh's 12-zone doc ─────────────────────────────
-# state code -> zone id. Empty until the doc lands. Example once filled:
-#   ZONE_BY_STATE = {"WV": "zone_1", "OH": "zone_1", "PA": "zone_2", ...}
+_RATES_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "shipping_rates.json")
+
+
+def _load_rates() -> dict:
+    try:
+        with open(_RATES_PATH, encoding="utf-8") as fh:
+            data = json.load(fh)
+    except (OSError, ValueError):
+        return {}
+    return {k: v for k, v in data.items() if not k.startswith("_")}
+
+
+ZONE_RATES: dict[str, dict] = _load_rates()
+
+# state code -> zone id. Example: {"WV": "zone_1", "OH": "zone_1", "PA": "zone_2", ...}
 ZONE_BY_STATE: dict[str, str] = {}
-
-# zone id -> rate rule. Empty until the doc lands. The rule shape supports both
-# a flat per-zone charge and (optionally) weight and free-shipping-threshold
-# rules, so the doc's exact pricing can be expressed without changing code:
-#
-#   "zone_1": {
-#       "base": 8.00,         # flat charge applied for any order to this zone
-#       "per_lb": 0.0,        # optional surcharge per pound of order weight
-#       "free_over": 75.0,    # optional: free shipping when subtotal >= this
-#   }
-#
-# Only "base" is required; "per_lb" and "free_over" default to off.
-ZONE_RATES: dict[str, dict] = {}
 
 
 def is_configured() -> bool:
@@ -76,25 +130,22 @@ def zone_for_state(state: str) -> str | None:
 
 def compute_shipping_rate(
     state: str,
+    tier: str = DEFAULT_TIER,
     *,
     weight: float = 0.0,
     subtotal: float = 0.0,
 ) -> float | None:
-    """Shipping charge for a destination ``state``, or ``None`` if no zone is
-    configured for it.
+    """Per-tree shipping charge for one unit of `tier` to `state`, or None.
 
-    Returns ``None`` (not ``0.0``) for an unmapped/unconfigured destination so
-    the caller can distinguish "no shipping configured — add no line" from a
-    genuine ``0.0`` charge (a free-shipping threshold met, or a $0 zone).
-
-    ``weight`` (lbs) and ``subtotal`` (order untaxed total) are accepted now so
-    the call site is already wired for the doc's weight / free-over rules; with
-    a flat-only table they are simply ignored.
+    None (not 0.0) means "no rate configured — add no shipping line".
+    Unknown tier strings price as DEFAULT_TIER (potted) so a mistagged
+    product can never be undercharged.
     """
     zone = zone_for_state(state)
     if not zone:
         return None
-    rule = ZONE_RATES.get(zone)
+    tier_key = tier if tier in TIERS else DEFAULT_TIER
+    rule = (ZONE_RATES.get(zone) or {}).get(tier_key)
     if not rule:
         return None
 
