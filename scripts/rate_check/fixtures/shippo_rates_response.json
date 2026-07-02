@@ -1,0 +1,7 @@
+{
+  "rates": [
+    {"provider": "UPS", "servicelevel": {"token": "ups_ground"}, "amount": "14.23", "currency": "USD"},
+    {"provider": "UPS", "servicelevel": {"token": "ups_3_day_select"}, "amount": "31.10", "currency": "USD"},
+    {"provider": "USPS", "servicelevel": {"token": "usps_ground_advantage"}, "amount": "15.80", "currency": "USD"}
+  ]
+}

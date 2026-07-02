@@ -45,6 +45,17 @@ class ProductTemplate(models.Model):
             collision = record.search(domain, limit=1)
             record.grove_slug = f"{base}-{record.id}" if collision else base
 
+    # Shipping tier drives the per-tree zone rate at checkout
+    # (models/shipping_zones.py). Default "potted" = the higher tier, so an
+    # untagged product can never be undercharged.
+    grove_shipping_tier = fields.Selection(
+        [("bareroot", "Bareroot"), ("potted", "Potted")],
+        string="Grove Shipping Tier",
+        default="potted",
+        help="Bareroot ships as a 4 lb slim box; potted as a ~25 lb box. "
+        "Determines the per-tree shipping rate by destination zone.",
+    )
+
     @staticmethod
     def _slugify(value: str) -> str:
         # Lowercase → strip non-alphanumeric → collapse runs of non-alphanumeric

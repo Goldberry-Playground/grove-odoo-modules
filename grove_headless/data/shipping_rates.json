@@ -1,0 +1,8 @@
+{
+  "_comment": "PROVISIONAL launch-hypothesis rates (2026-07-02). Derivation: ceil(Shippo UPS Ground quote + 3.50 packaging + 2.00 buffer). The morning rate-checker (scripts/rate_check) replaces these with real Shippo-derived values via PR on its first run. Design: vault wiki/Software/Grove Shipping.",
+  "zone_1": {"bareroot": {"base": 21.0}, "potted": {"base": 32.0}},
+  "zone_2": {"bareroot": {"base": 22.0}, "potted": {"base": 34.0}},
+  "zone_3": {"bareroot": {"base": 23.0}, "potted": {"base": 36.0}},
+  "zone_4": {"bareroot": {"base": 24.0}, "potted": {"base": 38.0}},
+  "zone_5": {"bareroot": {"base": 25.0}, "potted": {"base": 40.0}}
+}
