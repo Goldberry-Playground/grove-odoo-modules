@@ -62,11 +62,15 @@ class TestShippingZoneEngineContract(unittest.TestCase):
                 self.assertGreaterEqual(float(rule["base"]), 0.0)
 
     def test_state_lookup_is_case_and_space_insensitive(self):
-        sz.ZONE_BY_STATE["WV"] = "zone_1"
+        import copy
+
+        saved_state = copy.deepcopy(dict(sz.ZONE_BY_STATE))
         try:
+            sz.ZONE_BY_STATE["WV"] = "zone_1"
             self.assertEqual(sz.zone_for_state(" wv "), "zone_1")
         finally:
-            sz.ZONE_BY_STATE.pop("WV", None)
+            sz.ZONE_BY_STATE.clear()
+            sz.ZONE_BY_STATE.update(saved_state)
 
     def test_flat_base_rate(self):
         with _temp_table({"WV": "zone_1"}, {"zone_1": {"potted": {"base": 8.0}}}):
@@ -84,6 +88,95 @@ class TestShippingZoneEngineContract(unittest.TestCase):
             self.assertEqual(sz.compute_shipping_rate("WV", tier="potted", subtotal=20.0), 8.0)
 
 
+class TestTwentyOneStateCoverage(unittest.TestCase):
+    """The 21-state green list and its rate coverage."""
+
+    def test_exactly_the_21_green_states_are_mapped(self):
+        GREEN = {
+            "CT",
+            "DE",
+            "IL",
+            "IN",
+            "KY",
+            "ME",
+            "MD",
+            "MA",
+            "MI",
+            "MN",
+            "NH",
+            "NJ",
+            "NY",
+            "NC",
+            "OH",
+            "PA",
+            "RI",
+            "VT",
+            "VA",
+            "WV",
+            "WI",
+        }
+        self.assertEqual(set(sz.ZONE_BY_STATE), GREEN)
+
+    def test_every_mapped_state_prices_in_both_tiers(self):
+        GREEN = {
+            "CT",
+            "DE",
+            "IL",
+            "IN",
+            "KY",
+            "ME",
+            "MD",
+            "MA",
+            "MI",
+            "MN",
+            "NH",
+            "NJ",
+            "NY",
+            "NC",
+            "OH",
+            "PA",
+            "RI",
+            "VT",
+            "VA",
+            "WV",
+            "WI",
+        }
+        for state in GREEN:
+            for tier in sz.TIERS:
+                rate = sz.compute_shipping_rate(state, tier=tier)
+                self.assertIsNotNone(rate, f"{state}/{tier} has no rate")
+                self.assertGreater(rate, 0.0)
+
+    def test_every_excluded_destination_returns_none(self):
+        for code in sz.US_STATES:
+            if code in {
+                "CT",
+                "DE",
+                "IL",
+                "IN",
+                "KY",
+                "ME",
+                "MD",
+                "MA",
+                "MI",
+                "MN",
+                "NH",
+                "NJ",
+                "NY",
+                "NC",
+                "OH",
+                "PA",
+                "RI",
+                "VT",
+                "VA",
+                "WV",
+                "WI",
+            }:
+                continue
+            self.assertIsNone(sz.compute_shipping_rate(code, tier="bareroot"), code)
+            self.assertIsNone(sz.compute_shipping_rate(code, tier="potted"), code)
+
+
 class TestShippingZoneTableCoverage(unittest.TestCase):
     """Enforced automatically once the blocked table is populated."""
 
@@ -94,9 +187,37 @@ class TestShippingZoneTableCoverage(unittest.TestCase):
 
     def test_full_state_coverage_when_configured(self):
         if not sz.is_configured():
-            self.skipTest("12-zone rate table not yet populated (GOL-15 blocked)")
-        missing = [s for s in sz.US_STATES if s not in sz.ZONE_BY_STATE]
-        self.assertFalse(missing, f"states with no zone assignment: {missing}")
+            self.skipTest("21-state rate table not yet populated (GOL-15 blocked)")
+        # Verify exactly the 21 green states are mapped, no more, no less.
+        green_states = {
+            "CT",
+            "DE",
+            "IL",
+            "IN",
+            "KY",
+            "ME",
+            "MD",
+            "MA",
+            "MI",
+            "MN",
+            "NH",
+            "NJ",
+            "NY",
+            "NC",
+            "OH",
+            "PA",
+            "RI",
+            "VT",
+            "VA",
+            "WV",
+            "WI",
+        }
+        mapped = set(sz.ZONE_BY_STATE)
+        self.assertEqual(
+            mapped,
+            green_states,
+            f"mapped states {mapped} do not match green states {green_states}",
+        )
 
     def test_every_rate_rule_targets_a_real_zone(self):
         for zone in sz.ZONE_RATES:

@@ -110,8 +110,63 @@ def _load_rates() -> dict:
 
 ZONE_RATES: dict[str, dict] = _load_rates()
 
+GREEN_STATES: frozenset[str] = frozenset(
+    {
+        "CT",
+        "DE",
+        "IL",
+        "IN",
+        "KY",
+        "ME",
+        "MD",
+        "MA",
+        "MI",
+        "MN",
+        "NH",
+        "NJ",
+        "NY",
+        "NC",
+        "OH",
+        "PA",
+        "RI",
+        "VT",
+        "VA",
+        "WV",
+        "WI",
+    }
+)
+
 # state code -> zone id. Example: {"WV": "zone_1", "OH": "zone_1", "PA": "zone_2", ...}
-ZONE_BY_STATE: dict[str, str] = {}
+ZONE_BY_STATE: dict[str, str] = {
+    # zone_1 — nearest (UPS ~2-4 from 26651)
+    "WV": "zone_1",
+    "VA": "zone_1",
+    "KY": "zone_1",
+    "NC": "zone_1",
+    "DE": "zone_1",
+    # zone_2
+    "MD": "zone_2",
+    "PA": "zone_2",
+    "OH": "zone_2",
+    "IN": "zone_2",
+    "NJ": "zone_2",
+    "NY": "zone_2",
+    # zone_3
+    "IL": "zone_3",
+    "MI": "zone_3",
+    "CT": "zone_3",
+    "RI": "zone_3",
+    # zone_4
+    "WI": "zone_4",
+    "MN": "zone_4",
+    "MA": "zone_4",
+    "VT": "zone_4",
+    "NH": "zone_4",
+    # zone_5 — farthest (UPS ~5)
+    "ME": "zone_5",
+}
+
+assert set(ZONE_BY_STATE) == GREEN_STATES
 
 
 def is_configured() -> bool:
