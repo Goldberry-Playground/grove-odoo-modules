@@ -9,6 +9,13 @@ startup by `models/shipping_zones.py`. The file ships with provisional launch-
 hypothesis values; the morning rate-checker (`scripts/rate_check/rate_check.py`)
 replaces them with real Shippo-derived values via automated PR on its first run.
 
+> **Checker owns this file.** The daily rate-check rewrites `shipping_rates.json`
+> wholesale from live Shippo quotes. Only the `base` key per tier is preserved
+> across runs. Do **not** hand-add `per_lb` or `free_over` keys directly to this
+> file while the checker is active — they will be silently dropped on the next
+> rates PR. To make those keys permanent, modify the rate-checker script itself
+> so it writes them as part of the generated output.
+
 Structure:
 
 ```json
@@ -68,5 +75,7 @@ the rate zone) to determine:
 - Fetches real UPS Ground quotes from Shippo for each zone × tier parcel profile
 - If any rate drifts ≥ $1.00 from the JSON file, opens a PR to update
   `data/shipping_rates.json` and posts a Discord notification
-- No-ops until `SHIPPO_API_KEY` and `DISCORD_WEBHOOK_URL` secrets are configured
-  in the repository (safe to merge before credentials exist)
+- Gated on `SHIPPO_API_KEY` (required — the run is skipped cleanly when absent).
+  `DISCORD_OPS_WEBHOOK_URL` is optional — the Discord notification step is
+  individually skipped when the secret is absent (safe to merge before
+  credentials exist)

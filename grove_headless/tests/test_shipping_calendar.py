@@ -100,5 +100,22 @@ class TestShipOptions(unittest.TestCase):
                 self.assertLessEqual(w["order_by"], w["ship_end"])
 
 
+class TestFreezeBoundary(unittest.TestCase):
+    """Freeze-window boundary conditions for zone-6 ZIP (26651 — Summersville WV)."""
+
+    Z6_ZIP = "26651"
+
+    def test_freeze_start_inclusive_dec15(self):
+        # zone 6 freeze starts Dec 15 (inclusive) — should not ship on that date
+        r = sc.ship_options(self.Z6_ZIP, "potted", date(2026, 12, 15))
+        self.assertFalse(r["ships_now"], "Dec 15 is freeze start and must block shipping")
+
+    def test_freeze_end_exclusive_mar1_defer_to_mar2(self):
+        # Mar 1 is still inside the freeze window; defer_to must be Mar 2
+        r = sc.ship_options(self.Z6_ZIP, "potted", date(2027, 3, 1))
+        self.assertFalse(r["ships_now"], "Mar 1 is still inside the freeze window")
+        self.assertEqual(r["defer_to"], date(2027, 3, 2))
+
+
 if __name__ == "__main__":
     unittest.main()

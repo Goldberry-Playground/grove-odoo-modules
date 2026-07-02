@@ -572,7 +572,7 @@ grove-odoo-modules/
 │   │   ├── grove_sequences.xml          # Sequence registry (potting batch refs, etc.)
 │   │   ├── shipping_rates.json          # Zone × tier rates (maintained by rate-checker)
 │   │   ├── shipping_actions.xml         # "Buy Shipping Labels" server action
-│   │   └── zip_usda_zone.csv            # PHZM 2023 ZIP→USDA-zone matrix (~33k rows)
+│   │   └── zip_usda_zone.csv            # PHZM 2023 ZIP→USDA-zone matrix (~15k rows, 21-state trim)
 │   ├── docs/
 │   │   └── shipping-zones.md    # Live system reference for the shipping engine
 │   ├── security/

@@ -1,4 +1,4 @@
-"""Tests for the 12-zone shipping rate engine (GOL-15).
+"""Tests for the tiered 5-zone shipping rate engine (GOL-15).
 
 The engine in ``models/shipping_zones.py`` is pure Python, so these are plain
 ``unittest`` cases with no DB — they run both under Odoo's ``--test-enable``
@@ -6,11 +6,11 @@ runner and standalone (``python3 -m pytest`` / direct execution). The module is
 loaded by file path so importing it never drags in the Odoo addon package.
 
 Two layers:
-  * Contract tests — assert the engine's fail-safe behaviour. These pass NOW,
-    while the rate table is still blocked/empty, and guard it from regressing.
-  * Table-coverage tests — assert the finished table is complete and self
-    consistent. They no-op while the table is empty and automatically start
-    enforcing full coverage the moment Josh's data is filled in.
+  * Contract tests — assert the engine's fail-safe behaviour. These pass at all
+    times and guard against regression on the core routing logic.
+  * Table-coverage tests — assert the finished table is complete and self-
+    consistent. They automatically enforce full coverage across all 21 green
+    states and 5 zones once the rate table is populated.
 """
 
 import importlib.util

@@ -74,3 +74,11 @@ jobs:
           body=$(head -c 1800 scripts/rate_check/out/summary.md)
           payload=$(python3 -c "import json,sys;print(json.dumps({'content':'📦 **Shipping rates drifted ≥ \$1** — review the rate-check PR\n'+sys.argv[1]}))" "$body")
           curl -sS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK"
+      - name: Discord failure alert
+        if: failure()
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK_URL }}
+        run: |
+          [ -z "$WEBHOOK" ] && { echo "::notice::no Discord webhook configured"; exit 0; }
+          payload=$(python3 -c "import json;print(json.dumps({'content':'⚠️ rate-check failed — Shippo quote error or workflow fault; rates NOT updated'}))")
+          curl -sS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK"

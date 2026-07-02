@@ -1,15 +1,15 @@
 """5-zone tiered shipping rate engine for the Grove headless checkout (GOL-15).
 
-STATUS — engine COMPLETE, rates in JSON
-========================================
-The rate-computation plumbing below is finished and unit-tested. Rates are
-loaded from ``data/shipping_rates.json`` with a two-tier structure (bareroot and
-potted products). Design is documented in the vault wiki at ``Software/Grove Shipping``.
+Rates are loaded from ``data/shipping_rates.json`` at startup with a two-tier
+structure (bareroot and potted products). The file is maintained by the daily
+rate-checker (``scripts/rate_check/rate_check.py``), which rewrites it wholesale
+from live Shippo quotes — hand-editing ``per_lb`` or ``free_over`` keys there
+while the checker is active is not safe; they will be dropped on the next rates PR.
+Design is documented in the vault wiki at ``Software/Grove Shipping``.
 
-Fail-safe by design: while ``ZONE_BY_STATE`` / ``ZONE_RATES`` are empty,
-``compute_shipping_rate`` returns ``None`` for every address, so the checkout
-adds NO shipping line and current behaviour is preserved — we never ship a
-wrong or guessed charge.
+Fail-safe by design: ``compute_shipping_rate`` returns ``None`` for any address
+whose state is outside the 21-state green list, so the checkout adds NO shipping
+line — we never emit a wrong or guessed charge.
 
 The engine is deliberately a pure-Python module with no Odoo imports so it can
 be unit-tested without a database (see ``tests/test_shipping_zones.py``) and so
@@ -170,7 +170,12 @@ assert set(ZONE_BY_STATE) == GREEN_STATES
 
 
 def is_configured() -> bool:
-    """True once both blocked tables have been populated from the doc."""
+    """True when both the zone map and rate table are populated.
+
+    ``ZONE_BY_STATE`` and ``ZONE_RATES`` are loaded at startup from
+    ``data/shipping_rates.json`` (maintained by the daily rate-checker).
+    Returns False only when the JSON file is missing or empty.
+    """
     return bool(ZONE_BY_STATE) and bool(ZONE_RATES)
 
 
