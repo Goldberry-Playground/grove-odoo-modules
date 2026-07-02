@@ -22,7 +22,10 @@ import sys
 import urllib.request
 
 PRIMARY_URL = "https://prism.oregonstate.edu/phzm/data/2023/phzm_us_zipcode_2023.csv"
-ZIP_STATE_URL = "https://raw.githubusercontent.com/scpike/us-state-county-zip/master/geo-data.csv"
+# pinned to a commit SHA so schema drift can't silently change the build
+ZIP_STATE_URL = (
+    "https://raw.githubusercontent.com/scpike/us-state-county-zip/8bd38a600ec137bb0162c0761da4ea3de3eb951f/geo-data.csv"
+)
 GREEN = {
     "CT",
     "DE",
@@ -88,6 +91,14 @@ def main() -> int:
             continue
         rows.append((zc, int(digits)))
     rows.sort()
+
+    if len(rows) < 10_000:
+        print(
+            f"ERROR: only {len(rows)} rows built — aborting (expected ~15k). "
+            "Check the secondary dataset's column names / availability.",
+            file=sys.stderr,
+        )
+        return 1
 
     with open(OUT, "w", newline="", encoding="utf-8") as fh:
         w = csv.writer(fh)

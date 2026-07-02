@@ -31,6 +31,7 @@ class TestZipZoneMatrix(unittest.TestCase):
         self.assertIsNone(sc.usda_zone_for_zip("abcde"))
         self.assertIsNone(sc.usda_zone_for_zip(""))
         self.assertIsNone(sc.usda_zone_for_zip(None))
+        self.assertIsNone(sc.usda_zone_for_zip("123456"))
 
     def test_same_state_spans_multiple_zones(self):
         # The whole reason this matrix exists: WV alone spans 5a-7a.

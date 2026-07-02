@@ -20,7 +20,7 @@ def _zip_matrix() -> dict[str, int]:
     try:
         with open(_MATRIX_PATH, newline="", encoding="utf-8") as fh:
             return {row["zip"]: int(row["zone"]) for row in csv.DictReader(fh)}
-    except (OSError, ValueError, KeyError):
+    except (OSError, ValueError, KeyError, csv.Error):
         return {}
 
 
@@ -28,7 +28,10 @@ def usda_zone_for_zip(zip_code) -> int | None:
     """Integer USDA zone (2-10) for a 5-digit ZIP, or None if unknown."""
     if not zip_code or not isinstance(zip_code, str):
         return None
-    zip5 = zip_code.strip()[:5]
-    if len(zip5) != 5 or not zip5.isdigit():
+    raw = zip_code.strip()
+    if not (len(raw) == 5 or (len(raw) == 10 and raw[5] == "-")):
+        return None
+    zip5 = raw[:5]
+    if not zip5.isdigit():
         return None
     return _zip_matrix().get(zip5)
