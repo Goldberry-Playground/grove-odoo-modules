@@ -28,3 +28,16 @@ sys.modules.setdefault(
 )
 sys.modules.setdefault("grove_headless.models", _stub_pkg("grove_headless.models", os.path.join(_gh_dir, "models")))
 sys.modules.setdefault("grove_headless.tests", _stub_pkg("grove_headless.tests", os.path.join(_gh_dir, "tests")))
+
+# The files below need a real Odoo runtime (TransactionCase etc.). They run
+# under Odoo's --test-enable runner, not pytest — exclude them from pytest
+# collection entirely so the odoo stubs above can't give them a confusing
+# half-imported death. Pure-Python tests (loaded via importlib by file path)
+# stay collected.
+collect_ignore_glob = [
+    "grove_headless/tests/test_wv_taxes.py",
+    "grove_headless/tests/test_tenant_routing.py",
+    "grove_headless/tests/test_kit_boms.py",
+    "grove_headless/tests/test_potting_batch.py",
+    "grove_headless/tests/test_product_slug.py",
+]
