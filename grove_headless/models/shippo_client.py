@@ -4,6 +4,8 @@ Injection point: pass `post=` (default requests.post) so Odoo methods and
 tests share one code path. Design: vault wiki/Software/Grove Shipping.
 """
 
+import re
+
 import requests
 
 try:
@@ -19,6 +21,15 @@ except ImportError:  # loaded standalone (tests import by file path)
     PARCEL_PROFILES = _sz.PARCEL_PROFILES
 
 API = "https://api.goshippo.com"
+
+TRACKING_RE = re.compile(r"^[A-Za-z0-9]{6,40}$")
+
+
+def is_valid_tracking(value) -> bool:
+    """Alphanumeric 6-40 chars — rejects SQL LIKE wildcards (%, _) and junk."""
+    return bool(value) and isinstance(value, str) and bool(TRACKING_RE.match(value))
+
+
 ORIGIN = {
     "name": "Goldberry Grove",
     "street1": "SET_AT_DEPLOY",  # env GROVE_SHIP_FROM_STREET overrides

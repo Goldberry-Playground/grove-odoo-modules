@@ -1,5 +1,7 @@
+import hmac
 import json
 import logging
+import os
 import re
 from datetime import date as _date
 
@@ -8,6 +10,7 @@ from odoo.http import Response, request
 
 from ..models.shipping_calendar import serialize_ship_options, ship_options
 from ..models.shipping_zones import compute_order_shipping, compute_shipping_rate
+from ..models.shippo_client import is_valid_tracking
 
 _logger = logging.getLogger(__name__)
 
@@ -669,17 +672,24 @@ class GroveHeadlessAPI(http.Controller):
         csrf=False,
     )
     def shipping_webhook(self, **kwargs):
-        import os
+        """Handle Shippo tracking-status webhooks.
 
+        Auth: token sent via `X-Grove-Webhook-Token` request header (configure
+        this custom header in the Shippo webhook settings URL for this endpoint).
+        The token is compared with `hmac.compare_digest` to prevent timing-oracle
+        attacks. GROVE_SHIPPO_WEBHOOK_TOKEN must be set in the server environment.
+        """
         expected = os.environ.get("GROVE_SHIPPO_WEBHOOK_TOKEN", "")
-        token = request.httprequest.args.get("token", "")
-        if not expected or token != expected:
+        token = request.httprequest.headers.get("X-Grove-Webhook-Token", "")
+        if not expected or not hmac.compare_digest(token, expected):
             return {"error": "forbidden"}
         payload = request.get_json_data() or {}
         data = payload.get("data") or {}
         tracking = data.get("tracking_number")
         status = (data.get("tracking_status") or {}).get("status")
         if not (tracking and status):
+            return {"ok": True, "matched": 0}
+        if not is_valid_tracking(tracking):
             return {"ok": True, "matched": 0}
         orders = request.env["sale.order"].sudo().search([("grove_tracking_numbers", "like", tracking)])
         orders.write({"grove_delivery_status": status.lower()})

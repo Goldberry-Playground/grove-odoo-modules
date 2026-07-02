@@ -71,3 +71,39 @@ class TestShippoClient(unittest.TestCase):
         posts = mock.Mock(return_value=mock.Mock(status_code=201, json=lambda: shipment, raise_for_status=lambda: None))
         with self.assertRaises(sp.ShippoError):
             sp.buy_ups_ground_label("key", sp.build_shipment_payload(self.ADDR, "bareroot"), post=posts)
+
+
+class TestTrackingValidation(unittest.TestCase):
+    """is_valid_tracking: alphanumeric 6-40 chars; rejects LIKE wildcards and junk."""
+
+    def test_valid_ups_tracking(self):
+        self.assertTrue(sp.is_valid_tracking("1Z999AA10123456784"))
+
+    def test_percent_wildcard_rejected(self):
+        self.assertFalse(sp.is_valid_tracking("%"))
+
+    def test_percent_in_tracking_rejected(self):
+        self.assertFalse(sp.is_valid_tracking("1Z999%"))
+
+    def test_empty_string_rejected(self):
+        self.assertFalse(sp.is_valid_tracking(""))
+
+    def test_none_rejected(self):
+        self.assertFalse(sp.is_valid_tracking(None))
+
+    def test_too_short_rejected(self):
+        # "abc" is only 3 chars — below the 6-char minimum
+        self.assertFalse(sp.is_valid_tracking("abc"))
+
+    def test_41_char_string_rejected(self):
+        # 41 alphanumeric chars — above the 40-char maximum
+        self.assertFalse(sp.is_valid_tracking("A" * 41))
+
+    def test_exactly_6_chars_valid(self):
+        self.assertTrue(sp.is_valid_tracking("ABCDE1"))
+
+    def test_exactly_40_chars_valid(self):
+        self.assertTrue(sp.is_valid_tracking("A" * 40))
+
+    def test_underscore_wildcard_rejected(self):
+        self.assertFalse(sp.is_valid_tracking("1Z999_AA"))
