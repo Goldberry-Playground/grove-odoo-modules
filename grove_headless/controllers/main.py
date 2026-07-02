@@ -659,6 +659,32 @@ class GroveHeadlessAPI(http.Controller):
             }
         )
 
+    # ── Shipping webhook ─────────────────────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/shipping/webhook",
+        type="json",
+        auth="public",
+        methods=["POST"],
+        csrf=False,
+    )
+    def shipping_webhook(self, **kwargs):
+        import os
+
+        expected = os.environ.get("GROVE_SHIPPO_WEBHOOK_TOKEN", "")
+        token = request.httprequest.args.get("token", "")
+        if not expected or token != expected:
+            return {"error": "forbidden"}
+        payload = request.get_json_data() or {}
+        data = payload.get("data") or {}
+        tracking = data.get("tracking_number")
+        status = (data.get("tracking_status") or {}).get("status")
+        if not (tracking and status):
+            return {"ok": True, "matched": 0}
+        orders = request.env["sale.order"].sudo().search([("grove_tracking_numbers", "like", tracking)])
+        orders.write({"grove_delivery_status": status.lower()})
+        return {"ok": True, "matched": len(orders)}
+
 
 def _partner_vals_from_payload(env, contact, address):
     """Build res.partner write/create vals from contact + address dicts."""

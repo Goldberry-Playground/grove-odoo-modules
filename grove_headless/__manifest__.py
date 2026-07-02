@@ -40,6 +40,7 @@
         "data/grove_sequences.xml",
         "views/product_template_views.xml",
         "views/potting_batch_views.xml",
+        "data/shipping_actions.xml",
     ],
     "installable": True,
     "application": False,
