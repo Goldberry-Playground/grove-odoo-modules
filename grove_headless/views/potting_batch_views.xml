@@ -90,11 +90,14 @@
                 <field name="target_product_id" />
                 <filter string="Draft" name="filter_draft" domain="[('state', '=', 'draft')]" />
                 <filter string="Done" name="filter_done" domain="[('state', '=', 'done')]" />
-                <group string="Group By">
-                    <filter string="Source Variant" name="group_source" context="{'group_by': 'source_product_id'}" />
-                    <filter string="Target Variant" name="group_target" context="{'group_by': 'target_product_id'}" />
-                    <filter string="Date" name="group_date" context="{'group_by': 'date:month'}" />
-                </group>
+                <!-- Odoo 19's search RNG dropped the <group> wrapper for
+                     group-by filters (rejects expand/string attrs and filter
+                     children); a bare separator + filters renders the same
+                     Group By section. -->
+                <separator />
+                <filter string="Source Variant" name="group_source" context="{'group_by': 'source_product_id'}" />
+                <filter string="Target Variant" name="group_target" context="{'group_by': 'target_product_id'}" />
+                <filter string="Date" name="group_date" context="{'group_by': 'date:month'}" />
             </search>
         </field>
     </record>
