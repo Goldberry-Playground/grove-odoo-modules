@@ -170,6 +170,183 @@ def setup_wv_sales_tax(env):
     _logger.info("grove_headless: WV sales tax binding ensured for %s companies", len(companies))
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Point of Sale configuration (GOL-13)
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# Stands up the two in-person sales channels so market + nursery walk-in sales
+# can be rung up:
+#
+#   * "Farmer's Market"  → crm.team "Farmer's Market"
+#   * "Nursery Counter"  → crm.team "Direct to Nursery"
+#
+# Both live in the Goldberry Grove Farm company because that is where the seeded
+# payment journals (CSH1/CARD/CHCK) and both sales teams live — in-person retail
+# bookkeeping is consolidated under the farm company and differentiated by sales
+# team/channel. (If nursery-counter revenue should instead post into the At The
+# Grove Nursery company, that is a one-way accounting decision that also needs
+# nursery-company journals seeded — out of scope here.)
+#
+# Payment methods are wired to the seeded journals. WV 7% tax is NOT set on the
+# POS config directly: POS lines inherit each product's ``taxes_id``, which the
+# WV tax binding above already defaults to the "WV Sales Tax 7%" group — so a
+# market sale is taxed 7% the same way a web order is. This keeps a single
+# source of truth for the tax and avoids a second place to forget to update.
+#
+# Idempotent: everything is found-or-created by natural key (journal code /
+# record name + company), so re-running (fresh install, ``-u`` upgrade, or the
+# run-now scripts/setup_pos.py) only fills in what is missing.
+
+POS_COMPANY_NAME = "Goldberry Grove Farm"
+
+# (journal code, journal name, journal type) for the payment journals the POS
+# settles to. Mirrors scripts/seed_payment_journals.py so the module is
+# self-sufficient in a fresh DB where that seed script has not been run.
+POS_JOURNAL_SPECS = [
+    ("CSH1", "Cash", "cash"),
+    ("CARD", "Card", "bank"),
+    ("CHCK", "Check", "bank"),
+]
+
+# (payment method label, journal code) — cash-vs-bank is derived by Odoo from
+# the linked journal's type, so we only bind the journal.
+POS_PAYMENT_METHOD_SPECS = [
+    ("Cash", "CSH1"),
+    ("Card", "CARD"),
+    ("Check", "CHCK"),
+]
+
+# (pos.config name, crm.team name) for the two in-person channels.
+POS_CONFIG_SPECS = [
+    ("Farmer's Market", "Farmer's Market"),
+    ("Nursery Counter", "Direct to Nursery"),
+]
+
+
+def _ensure_journal(env, company, code, name, jtype):
+    """Find-or-create a payment journal by code within one company."""
+    Journal = env["account.journal"].with_company(company)
+    journal = Journal.search(
+        [("code", "=", code), ("company_id", "=", company.id)],
+        limit=1,
+    )
+    if not journal:
+        journal = Journal.create(
+            {
+                "name": name,
+                "code": code,
+                "type": jtype,
+                "company_id": company.id,
+            }
+        )
+    return journal
+
+
+def _ensure_sales_team(env, company, name):
+    """Find-or-create a crm.team (sales channel) by name within one company."""
+    Team = env["crm.team"].with_company(company)
+    team = Team.search(
+        [("name", "=", name), ("company_id", "=", company.id)],
+        limit=1,
+    )
+    if not team:
+        team = Team.create({"name": name, "company_id": company.id})
+    return team
+
+
+def _ensure_payment_method(env, company, label, journal):
+    """Find-or-create a pos.payment.method bound to a journal within a company."""
+    Method = env["pos.payment.method"].with_company(company)
+    method = Method.search(
+        [("name", "=", label), ("company_id", "=", company.id)],
+        limit=1,
+    )
+    if not method:
+        method = Method.create(
+            {
+                "name": label,
+                "company_id": company.id,
+                "journal_id": journal.id,
+            }
+        )
+    elif method.journal_id != journal:
+        method.journal_id = journal.id
+    return method
+
+
+def _ensure_pos_config(env, company, name, payment_methods, team):
+    """Find-or-create a pos.config for one in-person channel.
+
+    On create, Odoo fills the operational defaults (POS journal, picking type,
+    pricelist). We then bind the payment methods and the sales team. Idempotent
+    re-runs re-assert those two links without disturbing user customization of
+    the rest of the config.
+    """
+    Config = env["pos.config"].with_company(company)
+    config = Config.search(
+        [("name", "=", name), ("company_id", "=", company.id)],
+        limit=1,
+    )
+    if not config:
+        config = Config.create({"name": name, "company_id": company.id})
+    config.write(
+        {
+            "payment_method_ids": [(6, 0, payment_methods.ids)],
+            "crm_team_id": team.id,
+        }
+    )
+    return config
+
+
+def _setup_company_pos(env, company):
+    """Stand up both in-person POS channels for a single company. Idempotent."""
+    journals = {code: _ensure_journal(env, company, code, name, jtype) for code, name, jtype in POS_JOURNAL_SPECS}
+
+    methods = env["pos.payment.method"]
+    for label, code in POS_PAYMENT_METHOD_SPECS:
+        methods |= _ensure_payment_method(env, company, label, journals[code])
+
+    configs = env["pos.config"]
+    for config_name, team_name in POS_CONFIG_SPECS:
+        team = _ensure_sales_team(env, company, team_name)
+        configs |= _ensure_pos_config(env, company, config_name, methods, team)
+
+    _logger.info(
+        "grove_headless: POS ready for company %s — %s config(s), %s payment method(s)",
+        company.name,
+        len(configs),
+        len(methods),
+    )
+    return configs
+
+
+def setup_pos_configs(env):
+    """Configure the in-person POS channels on the farm company.
+
+    Runs on fresh install (post_init_hook) and on ``-u grove_headless`` upgrade
+    (migration). Targets the Goldberry Grove Farm company where the seeded
+    journals + sales teams live. Wrapped so a POS/accounting hiccup (e.g. a
+    company without a chart of accounts in a minimal DB) can never abort the
+    module install/upgrade — the run-now scripts/setup_pos.py covers that path.
+    """
+    company = env["res.company"].search([("name", "=", POS_COMPANY_NAME)], limit=1)
+    if not company:
+        _logger.warning(
+            "grove_headless: POS setup skipped — company %r not found",
+            POS_COMPANY_NAME,
+        )
+        return
+    try:
+        _setup_company_pos(env, company)
+    except Exception as exc:  # never let POS setup abort install/upgrade
+        _logger.warning(
+            "grove_headless: skipped POS setup for company %s: %s",
+            company.name,
+            exc,
+        )
+
+
 def post_init_hook(env):
     """Run on fresh install of grove_headless."""
     setup_wv_sales_tax(env)
+    setup_pos_configs(env)
