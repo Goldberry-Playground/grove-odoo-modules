@@ -8,6 +8,7 @@ from datetime import date as _date
 from odoo import http
 from odoo.http import Response, request
 
+from ..models.newsletter import newsletter_tag_names
 from ..models.shipping_calendar import serialize_ship_options, ship_options
 from ..models.shipping_zones import compute_order_shipping, compute_shipping_rate
 from ..models.shippo_client import is_valid_tracking
@@ -25,6 +26,14 @@ MAX_CITY = 100
 MAX_STATE = 50
 MAX_ZIP = 20
 MAX_COUNTRY = 100
+
+# Newsletter opt-in caps. Brand/source/interest values become res.partner.category
+# tag names, so bound them to keep the tag table from being flooded by a caller
+# with a valid API key posting junk. Interests are also capped in count.
+MAX_BRAND = 50
+MAX_SOURCE = 100
+MAX_INTEREST = 50
+MAX_INTERESTS = 20
 
 EMAIL_RE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
 
@@ -663,6 +672,125 @@ class GroveHeadlessAPI(http.Controller):
             }
         )
 
+    # ── Newsletter ───────────────────────────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/newsletter/subscribe",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def newsletter_subscribe(self, **_kwargs):
+        """Upsert a newsletter opt-in contact and tag it for order attribution.
+
+        Auth: `auth="bearer"` mirrors `order_create` — anyone with a valid API
+        key (the Next.js BFF) may call this, but the public internet cannot
+        create/tag res.partner records across tenants. The BFF calls this
+        best-effort after a successful newsletter capture (grove-sites
+        @grove/newsletter); a failure here never blocks the subscription.
+
+        Body shape:
+            {
+              "email": "a@b.com",          # required
+              "name": "Ada",              # optional
+              "brand": "goldberry",       # tenant/brand slug
+              "interests": ["fruit", ...], # free-form interest slugs
+              "source": "homepage_footer", # capture location
+              "consent": true,            # required truthy — opt-in proof
+              "attribution": {"utm_source": "...", "utm_medium": "...", ...}
+            }
+        → 200 { partner_id, email, tags: [...], created: bool }
+
+        Behaviour:
+          - Resolves the tenant company from X-Grove-Tenant (website routing).
+          - Upserts res.partner by email within that company (idempotent). An
+            existing partner is reused as-is — we never overwrite name/email
+            from a bearer POST (same safety stance as order_create).
+          - Tags the partner with `newsletter`, `brand:<brand>`, and
+            `interest:<x>` res.partner.category records (additive) so a later
+            order carries the capture context for attribution.
+          - Records `source` + `attribution` (utm_*) as a chatter note on the
+            partner — an audit trail without a schema change.
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        if not isinstance(payload, dict):
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+
+        email = payload.get("email")
+        if not email:
+            return _json_response({"error": "email is required"}, status=400)
+        if not isinstance(email, str) or not EMAIL_RE.fullmatch(email):
+            return _json_response({"error": "email is not a valid email address"}, status=400)
+
+        # Consent is the opt-in proof — a subscribe without it must not tag the
+        # contact as a newsletter subscriber. Treat any falsy/absent value as
+        # missing consent rather than silently subscribing.
+        if not payload.get("consent"):
+            return _json_response({"error": "consent is required to subscribe"}, status=400)
+
+        err = _check_lengths(
+            payload,
+            {"email": MAX_EMAIL, "name": MAX_NAME, "brand": MAX_BRAND, "source": MAX_SOURCE},
+        )
+        if err:
+            return _json_response({"error": err}, status=400)
+
+        interests = payload.get("interests") or []
+        if not isinstance(interests, list):
+            return _json_response({"error": "interests must be a list"}, status=400)
+        if len(interests) > MAX_INTERESTS:
+            return _json_response({"error": f"interests exceeds {MAX_INTERESTS} entries"}, status=400)
+        for interest in interests:
+            if not isinstance(interest, str):
+                return _json_response({"error": "each interest must be a string"}, status=400)
+            if len(interest) > MAX_INTEREST:
+                return _json_response({"error": f"interest exceeds {MAX_INTEREST} characters"}, status=400)
+
+        current_company = request.website.company_id
+        Partner = request.env["res.partner"].sudo().with_company(current_company)
+
+        partner = Partner.search(
+            [
+                ("email", "=", email),
+                ("company_id", "in", [current_company.id, False]),
+            ],
+            limit=1,
+        )
+        created = not partner
+        if not partner:
+            name = payload.get("name") or email
+            partner = Partner.create(
+                {
+                    "name": name,
+                    "email": email,
+                    "company_id": current_company.id,
+                }
+            )
+
+        tag_names = newsletter_tag_names(payload.get("brand"), interests)
+        source = payload.get("source")
+        if isinstance(source, str) and source.strip():
+            tag_names.append(f"source:{source.strip().lower()}")
+        category_ids = _get_or_create_partner_categories(request.env, tag_names)
+        if category_ids:
+            partner.write({"category_id": [(4, cid) for cid in category_ids]})
+
+        _log_newsletter_attribution(partner, source, payload.get("attribution"))
+
+        return _json_response(
+            {
+                "partner_id": partner.id,
+                "email": partner.email,
+                "tags": tag_names,
+                "created": created,
+            }
+        )
+
     # ── Shipping webhook ─────────────────────────────────────────────────
 
     @http.route(
@@ -705,6 +833,48 @@ class GroveHeadlessAPI(http.Controller):
         orders = request.env["sale.order"].sudo().search([("grove_tracking_numbers", "like", tracking)])
         orders.write({"grove_delivery_status": status.lower()})
         return _json_response({"ok": True, "matched": len(orders)})
+
+
+def _get_or_create_partner_categories(env, names):
+    """Resolve tag names to res.partner.category ids, creating any missing ones.
+
+    res.partner.category is a global (company-less) taxonomy, so a single tag
+    is shared across tenants — the partner it hangs off is still company-scoped.
+    Fetches all existing matches in one query, then creates only the gaps.
+    """
+    unique_names = list(dict.fromkeys(n for n in names if n))
+    if not unique_names:
+        return []
+    Category = env["res.partner.category"].sudo()
+    existing = Category.search([("name", "in", unique_names)])
+    by_name = {cat.name: cat.id for cat in existing}
+    for name in unique_names:
+        if name not in by_name:
+            by_name[name] = Category.create({"name": name}).id
+    return [by_name[name] for name in unique_names]
+
+
+def _log_newsletter_attribution(partner, source, attribution):
+    """Record newsletter capture source + utm attribution as a chatter note.
+
+    A non-destructive audit trail that needs no schema change. Only posts when
+    there is something to record, and swallows errors so an attribution log
+    failure never fails an otherwise-successful opt-in (best-effort by design).
+    """
+    if not source and not attribution:
+        return
+    lines = ["<b>Newsletter opt-in</b>"]
+    if source:
+        lines.append(f"Source: {source}")
+    if isinstance(attribution, dict):
+        for key in sorted(attribution):
+            value = attribution[key]
+            if isinstance(value, (str, int, float)) and str(value).strip():
+                lines.append(f"{key}: {value}")
+    try:
+        partner.sudo().message_post(body="<br/>".join(lines))
+    except Exception:  # noqa: BLE001 — audit log is best-effort, never fatal
+        _logger.warning("newsletter attribution log failed for partner %s", partner.id, exc_info=True)
 
 
 def _partner_vals_from_payload(env, contact, address):

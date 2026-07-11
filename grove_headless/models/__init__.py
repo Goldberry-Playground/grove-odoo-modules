@@ -1,4 +1,5 @@
 from . import (
+    newsletter,  # noqa: F401  pure tag-name helper (GOL-221), no ORM models
     potting_batch,  # noqa: F401
     product_template,  # noqa: F401
     sale_order,  # noqa: F401
