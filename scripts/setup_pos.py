@@ -152,8 +152,7 @@ def main():
 
     print("\nPOS payment methods:")
     method_ids = [
-        ensure_payment_method(models, uid, company_id, label, journals[code])
-        for label, code in PAYMENT_METHOD_SPECS
+        ensure_payment_method(models, uid, company_id, label, journals[code]) for label, code in PAYMENT_METHOD_SPECS
     ]
 
     print("\nPOS configs (channels):")
