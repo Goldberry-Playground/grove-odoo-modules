@@ -172,12 +172,10 @@ def _parse_seq(lines, idx, indent):
             child, idx = _parse_block(lines, idx + 1, indent + 1)
             result.append(child)
         elif ":" in rest and not (rest.startswith("[") or rest.startswith('"') or rest.startswith("'")):
-            # inline map item: "- key: value" — reparse as a map starting here.
-            synthetic = _Line(indent + 2, rest, ln.no)
-            saved = lines[idx]
-            lines[idx] = synthetic
+            # inline map item: "- key: value" — reparse as a map by rewriting the
+            # current line to the map key at a deeper indent, then continue there.
+            lines[idx] = _Line(indent + 2, rest, ln.no)
             child, idx = _parse_map(lines, idx, indent + 2)
-            lines[idx - 1] = saved if False else lines[idx - 1]
             result.append(child)
         else:
             result.append(_scalar(rest))
@@ -318,7 +316,8 @@ def main(argv=None):
     root = args.root or (os.path.dirname(os.path.abspath(path)) or ".")
 
     try:
-        doc = parse_yaml(open(path, encoding="utf-8").read())
+        with open(path, encoding="utf-8") as fh:
+            doc = parse_yaml(fh.read())
     except YamlError as e:
         print(f"ownership-lint: parse error in {path}: {e}", file=sys.stderr)
         return 2
