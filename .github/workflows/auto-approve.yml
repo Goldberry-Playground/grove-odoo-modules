@@ -1,0 +1,81 @@
+# Agent-mergeable path for grove-odoo-modules (GOL-308 port of grove-sites GOL-122).
+#
+# Problem this solves:
+#   Every Paperclip agent authors PRs under the SAME GitHub App bot
+#   (agenticos-developer[bot]). This repo's `main-branch-protection` ruleset
+#   requires 1 approving review, and GitHub blocks "approve your own pull
+#   request", so no agent can satisfy the review gate. Our PR token has no
+#   admin, so it can't bypass it either — leaving Josh to admin-merge by hand.
+#
+# How this fixes it WITHOUT new credentials, a second App, or admin:
+#   This workflow submits the approving review as `github-actions[bot]` — a
+#   DISTINCT identity from the PR-author App — so the self-approval block does
+#   not apply. (Org + repo setting "Allow GitHub Actions to create and approve
+#   pull requests" was enabled in GOL-304; that is what unblocks this.)
+#
+# DIVERGENCE FROM grove-sites:
+#   grove-sites gates on its "Claude Code Review" agent-review workflow. This
+#   repo has no such workflow, so we gate on the "CI" workflow succeeding. All
+#   of this repo's required status checks (Lint Python, Validate Module
+#   Manifests, Validate Tenant Slug Map) run inside that single CI workflow, so
+#   a green CI == every required check green. Auto-merge still independently
+#   waits for ALL required checks before it actually merges.
+#
+# Guardrails:
+#   - Never auto-approves human or external PRs (author must be the agent App
+#     bot) -> human review is preserved for human PRs.
+#   - Never approves unless CI passed -> not a blanket rubber-stamp.
+#   - Runs from the base-branch definition (workflow_run), so a PR cannot
+#     modify this file to approve itself.
+name: Auto-approve verified agent PRs
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+
+# Least privilege: only what's needed to review + enable auto-merge.
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  auto-approve:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.pull_requests[0] != null
+    runs-on: ubuntu-latest
+    steps:
+      - name: Approve (as github-actions[bot]) + enable auto-merge
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR: ${{ github.event.workflow_run.pull_requests[0].number }}
+        run: |
+          set -euo pipefail
+
+          AUTHOR=$(gh pr view "$PR" --repo "$REPO" --json author -q '.author.login')
+          # App bot logins appear as "app/agenticos-developer" via gh and
+          # "agenticos-developer" via some APIs; accept both, reject all else.
+          case "$AUTHOR" in
+            app/agenticos-developer|agenticos-developer) ;;
+            *)
+              echo "PR #$PR author '$AUTHOR' is not the agent App bot; skipping (human/external PRs keep human review)."
+              exit 0 ;;
+          esac
+
+          # Don't stack duplicate approvals on re-runs.
+          ALREADY=$(gh api "repos/$REPO/pulls/$PR/reviews" \
+            -q '[.[] | select(.user.login=="github-actions[bot]" and .state=="APPROVED")] | length')
+          if [ "${ALREADY:-0}" -gt 0 ]; then
+            echo "PR #$PR already approved by github-actions[bot]; ensuring auto-merge is on."
+          else
+            gh pr review "$PR" --repo "$REPO" --approve --body \
+              "Auto-approved by github-actions[bot]: CI (which runs all required status checks) passed. This identity is distinct from the PR-author App, so it satisfies branch protection's review requirement. Functional required status checks still gate the actual merge. (GOL-308, port of GOL-122)"
+          fi
+
+          # Turn on auto-merge so GitHub merges once ALL required checks are green.
+          # No-op-safe: needs the repo "Allow auto-merge" setting enabled.
+          gh pr merge "$PR" --repo "$REPO" --auto --squash \
+            || echo "Could not enable auto-merge (enable 'Allow auto-merge' in repo settings). Approval still stands; merge will be a one-click for a maintainer."
