@@ -199,6 +199,21 @@ def setup_wv_sales_tax(env):
 
 POS_COMPANY_NAME = "Goldberry Grove Farm"
 
+# ── Transactional email sender identity (GOL-465) ───────────────────────────
+# Each company sends its order/receipt/ship/back-in-stock mail From a dedicated
+# `notifications@<domain>` address so transactional reputation is isolated from
+# human + marketing mail. The domains match data/grove_companies.xml (and the
+# live, registered zones — note the Woodworking domain is single-g
+# `woodworkingeorge.com`; the double-g variant is not registered). The actual
+# SMTP relay host/creds are supplied out-of-band via odoo.conf env
+# (SMTP_SERVER/SMTP_USER/SMTP_PASSWORD, FROM_FILTER left empty so Odoo keeps
+# each company's real From) once the ESP + `send.<domain>` DKIM exist.
+COMPANY_NOTIFICATION_SENDERS = {
+    "Goldberry Grove Farm": "notifications@goldberrygrove.farm",
+    "George George George Woodworking": "notifications@woodworkingeorge.com",
+    "At The Grove Nursery": "notifications@atthegrovenursery.com",
+}
+
 # (journal code, journal name, journal type) for the payment journals the POS
 # settles to. Mirrors scripts/seed_payment_journals.py so the module is
 # self-sufficient in a fresh DB where that seed script has not been run.
@@ -346,7 +361,40 @@ def setup_pos_configs(env):
         )
 
 
+def setup_transactional_senders(env):
+    """Set each company's transactional From address to notifications@<domain>.
+
+    Runs on fresh install (post_init_hook) and on ``-u grove_headless`` upgrade
+    (migration). ``res.company.email`` is the fallback From that Odoo stamps on
+    business documents (order confirmations, receipts, shipping/back-in-stock
+    notifications) when the mail template resolves the company as the sender, so
+    setting it per company keeps transactional reputation on the dedicated
+    notification domain. Idempotent: only writes when the value differs, so
+    re-running (or a user later customizing it) is safe and quiet.
+
+    This only wires the *sender identity* — the SMTP relay itself is configured
+    via odoo.conf env (SMTP_SERVER/SMTP_USER/SMTP_PASSWORD, empty FROM_FILTER).
+    """
+    Company = env["res.company"]
+    for name, sender in COMPANY_NOTIFICATION_SENDERS.items():
+        company = Company.search([("name", "=", name)], limit=1)
+        if not company:
+            _logger.warning(
+                "grove_headless: transactional sender skipped — company %r not found",
+                name,
+            )
+            continue
+        if company.email != sender:
+            company.email = sender
+            _logger.info(
+                "grove_headless: set %s transactional sender From to %s",
+                name,
+                sender,
+            )
+
+
 def post_init_hook(env):
     """Run on fresh install of grove_headless."""
     setup_wv_sales_tax(env)
     setup_pos_configs(env)
+    setup_transactional_senders(env)

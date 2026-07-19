@@ -7,5 +7,6 @@ from . import (
     test_shipping_zones,  # noqa: F401
     test_shippo_client,  # noqa: F401
     test_tenant_routing,  # noqa: F401
+    test_transactional_senders,  # noqa: F401
     test_wv_taxes,  # noqa: F401
 )
