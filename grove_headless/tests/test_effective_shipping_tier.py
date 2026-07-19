@@ -23,8 +23,7 @@ class TestEffectiveShippingTier(TransactionCase):
             }
         )
         tiers = {
-            v.product_template_variant_value_ids.name: v.grove_effective_shipping_tier
-            for v in tmpl.product_variant_ids
+            v.product_template_variant_value_ids.name: v.grove_effective_shipping_tier for v in tmpl.product_variant_ids
         }
         self.assertEqual(tiers["Bareroot"], "bareroot")
         self.assertEqual(tiers["Potted"], "potted")
