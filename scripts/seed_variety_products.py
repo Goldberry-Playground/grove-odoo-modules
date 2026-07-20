@@ -472,7 +472,8 @@ def main() -> None:
             # rejects ("cannot marshal None unless allow_none is enabled"). Use
             # JSON-RPC for this one call: it serialises null cleanly and still
             # commits server-side.
-            import json as _json, urllib.request as _ureq
+            import json as _json
+            import urllib.request as _ureq
             _payload = {
                 "jsonrpc": "2.0", "method": "call",
                 "params": {
