@@ -89,9 +89,7 @@ def test_no_cat_kwarg_adds_no_category_leaf():
 
 
 def test_cat_combines_with_zone_and_layer():
-    dom = product_domain.build_product_domain(
-        {"cat": "vines", "zone": "6", "layer": "vine"}, 7, cat_category_ids=[3]
-    )
+    dom = product_domain.build_product_domain({"cat": "vines", "zone": "6", "layer": "vine"}, 7, cat_category_ids=[3])
     assert ("public_categ_ids", "in", [3]) in dom
     assert ("grove_zone_min", "<=", 6) in dom
     assert ("grove_layer", "=", "vine") in dom

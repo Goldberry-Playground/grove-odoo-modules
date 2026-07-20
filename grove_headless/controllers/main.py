@@ -282,9 +282,7 @@ class GroveHeadlessAPI(http.Controller):
         data["variants"] = [_structure_variant(v) for v in product.product_variant_ids]
         data["facts"] = _serialize_facts(product)
         data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
-        data["categories"] = [
-            {"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids
-        ]
+        data["categories"] = [{"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids]
         data["images"] = _serialize_images(product)
 
         return _json_response(data)
