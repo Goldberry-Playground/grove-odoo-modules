@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.5.0",
+    "version": "19.0.1.8.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -29,6 +29,10 @@
         # Transitive via sale/mrp but listed explicitly because we use it
         # directly (stock.scrap.create, stock.group_stock_user ACLs).
         "stock",
+        # point_of_sale provides pos.config / pos.payment.method, used by the
+        # post_init hook to stand up the Farmer's Market + Nursery Counter
+        # in-person sales channels (GOL-13). See hooks.setup_pos_configs.
+        "point_of_sale",
     ],
     "data": [
         "security/ir.model.access.csv",
@@ -45,7 +49,8 @@
     "installable": True,
     "application": False,
     "auto_install": False,
-    # Binds the WV sales tax to company defaults + existing products on
-    # fresh install. The migrations/ script does the same on -u upgrade.
+    # Binds the WV sales tax to company defaults + existing products, and
+    # stands up the in-person POS configs (Farmer's Market / Nursery Counter),
+    # on fresh install. The migrations/ scripts do the same on -u upgrade.
     "post_init_hook": "post_init_hook",
 }

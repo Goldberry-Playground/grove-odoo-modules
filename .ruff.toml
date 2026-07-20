@@ -3,7 +3,12 @@ target-version = "py312"
 
 # Vendored third-party modules keep their upstream (OCA) style so future
 # re-vendoring stays a clean diff -- do not lint or reformat them here.
-extend-exclude = ["web_dark_mode"]
+extend-exclude = [
+    "web_dark_mode",
+    # Cross-repo shared tool kept byte-identical in grove-sites / odoocker /
+    # grove-odoo-modules (GOL-152). Style-linting it here would fork the copies.
+    "scripts/lint-ownership.py",
+]
 
 [lint]
 select = ["E", "F", "I"]

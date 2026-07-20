@@ -33,3 +33,9 @@ ruff format --check . --line-length 120
 
 - **odoocker**: `Goldberry-Playground/odoocker-goldberrygrove` — infrastructure, Docker Compose, nginx
 - **grove-sites**: `Goldberry-Playground/grove-sites` — Next.js 15 monorepo (hub + 3 tenant storefronts) that consumes these API endpoints via `packages/odoo-client`
+
+## Pull requests: Draft vs. Ready
+
+Open WIP as a **Draft** PR; only mark it **Ready** when the change is
+self-contained, you ran the smallest local verify, and you expect CI to be
+green. Full rule: [`docs/pr-policy.md`](docs/pr-policy.md).
