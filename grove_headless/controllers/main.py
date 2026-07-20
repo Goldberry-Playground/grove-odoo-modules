@@ -15,7 +15,7 @@ from ..models.newsletter import newsletter_tag_names
 from ..models.shipping_calendar import serialize_ship_options, ship_options, usda_zone_for_zip
 from ..models.shipping_zones import compute_order_shipping, compute_shipping_rate
 from ..models.shippo_client import is_valid_tracking
-from .product_domain import build_product_domain, zone_response
+from .product_domain import build_product_domain, slugify, zone_response
 
 _logger = logging.getLogger(__name__)
 
@@ -198,7 +198,18 @@ class GroveHeadlessAPI(http.Controller):
         website = request.website
         current_company = website.company_id
 
-        domain = build_product_domain(kwargs, current_company.id)
+        # ?cat=<slug> browses by website (public) category — the storefront's
+        # plant-type nav. Resolve the slug to public-category ids here (the pure
+        # domain builder can't reach the Odoo category table). An unrecognised
+        # slug resolves to [] -> the builder returns an empty set, not the whole
+        # catalog.
+        cat_category_ids = None
+        if str(kwargs.get("cat") or "").strip():
+            cat_slug = slugify(kwargs.get("cat"))
+            categories = request.env["product.public.category"].sudo().search([])
+            cat_category_ids = [c.id for c in categories if slugify(c.name) == cat_slug]
+
+        domain = build_product_domain(kwargs, current_company.id, cat_category_ids=cat_category_ids)
 
         limit = min(int(kwargs.get("limit", 40)), 200)
         offset = int(kwargs.get("offset", 0))
@@ -218,6 +229,9 @@ class GroveHeadlessAPI(http.Controller):
                 data["image_url"] = f"/web/image/product.template/{product.id}/image_128"
                 data["slug"] = data.pop("grove_slug", "") or ""
                 data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
+                data["categories"] = [
+                    {"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids
+                ]
                 data["variant_count"] = len(product.product_variant_ids)
                 data["price_min"] = min(product.product_variant_ids.mapped("lst_price"), default=product.list_price)
                 items.append(data)
@@ -268,6 +282,9 @@ class GroveHeadlessAPI(http.Controller):
         data["variants"] = [_structure_variant(v) for v in product.product_variant_ids]
         data["facts"] = _serialize_facts(product)
         data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
+        data["categories"] = [
+            {"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids
+        ]
         data["images"] = _serialize_images(product)
 
         return _json_response(data)
