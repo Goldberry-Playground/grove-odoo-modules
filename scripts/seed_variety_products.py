@@ -138,7 +138,9 @@ PRODUCTS: list[dict[str, Any]] = [
         "sku": "TREE-PERSIMMON", "code": "PERSIMMON", "name": "Persimmon",
         "internal_category": "Trees", "website_category": "Trees",
         "tags": ["Food Forest", "Silvopasture"],
-        "list_price": 40.00,
+        # Josh 2026-07-20 pricing gate (GOL-639): $40 grafted / $12 non-grafted.
+        # base = non-grafted seedling; the grafted named cultivar adds the delta.
+        "list_price": 12.00,
         "facts": {
             "botanical_name": "Diospyros kaki", "zone_min": 6, "zone_max": 9,
             "layer": "understory", "sun": "full",
@@ -146,14 +148,17 @@ PRODUCTS: list[dict[str, Any]] = [
             "soil": "Well-drained",
         },
         "cultivars": [
-            {"name": "IKKJ", "code": "IKKJ", "price_extra": 0.00, "qty": 3},
+            {"name": "Seedling", "code": "SDL", "price_extra": 0.00, "qty": 2},
+            {"name": "IKKJ", "code": "IKKJ", "price_extra": 28.00, "qty": 3},
         ],
     },
     {
         "sku": "TREE-SERVICEBERRY", "code": "SERVICEBERRY", "name": "Serviceberry",
         "internal_category": "Trees", "website_category": "Trees",
         "tags": ["Wildlife", "Native", "Food Forest"],
-        "list_price": 35.00,
+        # Josh 2026-07-20 pricing gate (GOL-639): $35 grafted / $12 non-grafted.
+        # base = non-grafted seedling; the grafted cultivar adds the delta.
+        "list_price": 12.00,
         "facts": {
             "botanical_name": "Amelanchier laevis", "zone_min": 4, "zone_max": 8,
             "layer": "understory", "sun": "partial",
@@ -161,7 +166,8 @@ PRODUCTS: list[dict[str, Any]] = [
             "soil": "Moist, well-drained",
         },
         "cultivars": [
-            {"name": "Grafted", "code": "GRF", "price_extra": 0.00, "qty": 3},
+            {"name": "Seedling", "code": "SDL", "price_extra": 0.00, "qty": 2},
+            {"name": "Grafted", "code": "GRF", "price_extra": 23.00, "qty": 3},
         ],
     },
     {
