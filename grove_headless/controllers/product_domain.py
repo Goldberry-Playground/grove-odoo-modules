@@ -12,6 +12,13 @@ def _to_int(value):
         return None
 
 
+# Valid `grove_layer` / `grove_sun` Selection values (models/product_template.py).
+# A facet value outside these sets is ignored rather than pushed into the domain,
+# mirroring the _to_int guard on the numeric filters.
+LAYER_VALUES = {"canopy", "understory", "shrub", "ground", "vine"}
+SUN_VALUES = {"full", "partial", "shade"}
+
+
 def build_product_domain(kwargs: dict, company_id: int) -> list:
     domain = [
         ("website_published", "=", True),
@@ -33,6 +40,12 @@ def build_product_domain(kwargs: dict, company_id: int) -> list:
     if zone is not None:
         domain.append(("grove_zone_min", "<=", zone))
         domain.append(("grove_zone_max", ">=", zone))
+    layer = str(kwargs.get("layer") or "").strip().lower()
+    if layer in LAYER_VALUES:
+        domain.append(("grove_layer", "=", layer))
+    sun = str(kwargs.get("sun") or "").strip().lower()
+    if sun in SUN_VALUES:
+        domain.append(("grove_sun", "=", sun))
     return domain
 
 

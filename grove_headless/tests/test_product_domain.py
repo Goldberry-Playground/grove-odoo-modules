@@ -30,6 +30,27 @@ def test_zone_filter_brackets_range():
     assert ("grove_zone_max", ">=", 6) in dom
 
 
+def test_layer_filter():
+    dom = product_domain.build_product_domain({"layer": "canopy"}, 7)
+    assert ("grove_layer", "=", "canopy") in dom
+
+
+def test_sun_filter_normalizes_case_and_whitespace():
+    dom = product_domain.build_product_domain({"sun": " Full "}, 7)
+    assert ("grove_sun", "=", "full") in dom
+
+
+def test_layer_sun_combine_with_zone():
+    dom = product_domain.build_product_domain({"zone": "6", "layer": "shrub", "sun": "partial"}, 7)
+    assert ("grove_zone_min", "<=", 6) in dom
+    assert ("grove_layer", "=", "shrub") in dom
+    assert ("grove_sun", "=", "partial") in dom
+
+
+def test_unknown_layer_sun_ignored():
+    assert product_domain.build_product_domain({"layer": "bogus", "sun": "midnight"}, 7) == BASE
+
+
 def test_bad_values_ignored():
     assert product_domain.build_product_domain({"tag_id": "x", "zone": "?"}, 7) == BASE
 
