@@ -44,6 +44,37 @@ class TestZipZoneMatrix(unittest.TestCase):
         self.assertEqual(sc.usda_zone_for_zip("26651-1234"), sc.usda_zone_for_zip("26651"))
 
 
+class TestMatrixCaching(unittest.TestCase):
+    """Regression: a transient CSV read failure must NOT be memoized (GOL-653).
+
+    The old `@lru_cache` pinned any worker that first read the matrix mid-deploy
+    (empty/unreadable file) to `{}` forever → "unknown zip" for every ZIP on
+    that worker. The loader must only cache a successful, non-empty load.
+    """
+
+    def setUp(self):
+        self._real_path = sc._MATRIX_PATH
+        self._real_cache = sc._MATRIX_CACHE
+
+    def tearDown(self):
+        sc._MATRIX_PATH = self._real_path
+        sc._MATRIX_CACHE = self._real_cache
+
+    def test_failed_load_is_not_cached_and_recovers(self):
+        # Simulate the file being unreadable (mid git-sync swap).
+        sc._MATRIX_CACHE = None
+        sc._MATRIX_PATH = os.path.join(os.path.dirname(__file__), "does-not-exist.csv")
+        self.assertEqual(sc._zip_matrix(), {})
+        self.assertIsNone(sc._MATRIX_CACHE, "empty result must not be memoized")
+
+        # File readable again → the very next call recovers, no restart needed.
+        sc._MATRIX_PATH = self._real_path
+        matrix = sc._zip_matrix()
+        self.assertTrue(matrix, "matrix should load once the CSV is readable again")
+        self.assertEqual(matrix.get("26651"), 6)
+        self.assertIs(sc._MATRIX_CACHE, matrix, "successful load must be cached")
+
+
 class TestShipOptionsSerializer(unittest.TestCase):
     def test_dates_serialize_iso(self):
         r = sc.ship_options("26651", "bareroot", date(2026, 7, 15))

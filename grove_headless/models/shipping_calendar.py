@@ -10,18 +10,31 @@ state (states span multiple USDA zones; WV alone runs 5a-7a).
 import csv
 import os
 from datetime import date, timedelta
-from functools import lru_cache
 
 _MATRIX_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "zip_usda_zone.csv")
 
+# Parsed ZIP→zone matrix, memoized once it loads successfully. We deliberately
+# do NOT cache a failed/empty load: the CSV can be momentarily unreadable while
+# git-sync atomically swaps the addon dir on deploy, and an `@lru_cache` that
+# memoized the empty-dict fallback pinned the *first* worker to hit that race
+# to "unknown zip" for every ZIP forever, while sibling Odoo workers stayed
+# correct — the per-worker zone-lookup flapping found in GOL-653 live QA. Only a
+# non-empty result is cached, so a transient miss just retries on the next call.
+_MATRIX_CACHE: "dict[str, int] | None" = None
 
-@lru_cache(maxsize=1)
+
 def _zip_matrix() -> dict[str, int]:
+    global _MATRIX_CACHE
+    if _MATRIX_CACHE:
+        return _MATRIX_CACHE
     try:
         with open(_MATRIX_PATH, newline="", encoding="utf-8") as fh:
-            return {row["zip"]: int(row["zone"]) for row in csv.DictReader(fh)}
+            matrix = {row["zip"]: int(row["zone"]) for row in csv.DictReader(fh)}
     except (OSError, ValueError, KeyError, csv.Error):
         return {}
+    if matrix:
+        _MATRIX_CACHE = matrix
+    return matrix
 
 
 def usda_zone_for_zip(zip_code) -> int | None:
