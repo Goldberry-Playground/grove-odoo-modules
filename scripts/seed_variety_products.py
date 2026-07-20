@@ -255,15 +255,32 @@ def main() -> None:
     company_id = company_ids[0]
     ctx = {"context": {"allowed_company_ids": [company_id], "company_id": company_id}}
 
-    tax_ids = call(
-        models,
-        uid,
-        "account.tax",
-        "search",
-        [[("name", "in", SALE_TAXES), ("type_tax_use", "=", "sale"), ("company_id", "=", company_id)]],
-    )
-    if len(tax_ids) != len(SALE_TAXES):
-        fail(f"Expected sale taxes {SALE_TAXES} for company {company_id}, found ids={tax_ids}")
+    # Branch-aware tax resolution: "At The Grove Nursery" can be a *branch* of a
+    # parent company and inherits the parent's sale taxes (Odoo 19 enforces
+    # tax-name uniqueness across the company branch tree, so a branch cannot own a
+    # duplicate). Resolve each expected tax to the nearest company in the parent
+    # chain instead of requiring an exact company_id match.
+    chain = []
+    _cid = company_id
+    while _cid:
+        chain.append(_cid)
+        _p = call(models, uid, "res.company", "read", [[_cid], ["parent_id"]])[0]["parent_id"]
+        _cid = _p[0] if _p else False
+    tax_ids = []
+    for _tname in SALE_TAXES:
+        _matches = call(
+            models,
+            uid,
+            "account.tax",
+            "search_read",
+            [[("name", "=", _tname), ("type_tax_use", "=", "sale"), ("company_id", "in", chain)]],
+            {"fields": ["id", "company_id"]},
+        )
+        _by = {t["company_id"][0]: t["id"] for t in _matches if t.get("company_id")}
+        _chosen = next((_by[c] for c in chain if c in _by), None)
+        tax_ids.append(_chosen)
+    if len(tax_ids) != len(SALE_TAXES) or any(t is None for t in tax_ids):
+        fail(f"Expected sale taxes {SALE_TAXES} for company {company_id} (parent chain {chain}), found ids={tax_ids}")
 
     print("\n── Prerequisites ──")
     tag_ids: dict[str, int] = {}
@@ -451,7 +468,34 @@ def main() -> None:
                 [{"product_id": variant["id"], "location_id": stock_location_id, "inventory_quantity": qty}],
                 {"context": {"inventory_mode": True, **ctx["context"]}},
             )
-            call(models, uid, "stock.quant", "action_apply_inventory", [[quant_id]], ctx)
+            # action_apply_inventory returns None, which Odoo's XML-RPC marshaller
+            # rejects ("cannot marshal None unless allow_none is enabled"). Use
+            # JSON-RPC for this one call: it serialises null cleanly and still
+            # commits server-side.
+            import json as _json
+            import urllib.request as _ureq
+
+            _payload = {
+                "jsonrpc": "2.0",
+                "method": "call",
+                "params": {
+                    "service": "object",
+                    "method": "execute_kw",
+                    "args": [ODOO_DB, uid, ODOO_PASSWORD, "stock.quant", "action_apply_inventory", [[quant_id]], ctx],
+                },
+            }
+            _r = _json.loads(
+                _ureq.urlopen(
+                    _ureq.Request(
+                        f"{ODOO_URL}/jsonrpc",
+                        data=_json.dumps(_payload).encode(),
+                        headers={"Content-Type": "application/json"},
+                    ),
+                    timeout=30,
+                ).read()
+            )
+            if _r.get("error"):
+                fail(f"action_apply_inventory jsonrpc error: {_r['error']}")
             print(f"    variant {variant_code}: {qty} @ location {stock_location_id}")
 
     print("\nDone." + (" (dry run — nothing written)" if DRY_RUN else ""))
