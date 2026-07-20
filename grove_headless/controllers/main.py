@@ -5,13 +5,17 @@ import os
 import re
 from datetime import date as _date
 
+import psycopg2
+import requests
 from odoo import http
 from odoo.http import Response, request
 
+from ..models import stripe_gateway
 from ..models.newsletter import newsletter_tag_names
-from ..models.shipping_calendar import serialize_ship_options, ship_options
+from ..models.shipping_calendar import serialize_ship_options, ship_options, usda_zone_for_zip
 from ..models.shipping_zones import compute_order_shipping, compute_shipping_rate
 from ..models.shippo_client import is_valid_tracking
+from .product_domain import build_product_domain, zone_response
 
 _logger = logging.getLogger(__name__)
 
@@ -113,6 +117,58 @@ def _serialize_product(product, fields):
     return record
 
 
+def _serialize_facts(product):
+    """Growing-facts block for the detail endpoint (catalog spec 2026-07-13)."""
+    return {
+        "botanical_name": product.grove_botanical_name or "",
+        "zone_min": product.grove_zone_min or None,
+        "zone_max": product.grove_zone_max or None,
+        "layer": product.grove_layer or "",
+        "sun": product.grove_sun or "",
+        "mature_size": product.grove_mature_size or "",
+        "spacing": product.grove_spacing or "",
+        "soil": product.grove_soil or "",
+    }
+
+
+def _structure_variant(variant):
+    """Structured variant entry: axes parsed into fields, not display-name strings."""
+    axis = {v.attribute_id.name: v.name for v in variant.product_template_variant_value_ids}
+    return {
+        "id": variant.id,
+        "display_name": variant.display_name,
+        "sku": variant.default_code or "",
+        "cultivar": axis.get("Cultivar", ""),
+        "format": axis.get("Format", ""),
+        "price": variant.lst_price,
+        "qty_available": variant.qty_available,
+        "shipping_tier": variant.grove_effective_shipping_tier,
+        "image_url": f"/web/image/product.product/{variant.id}/image_128",
+    }
+
+
+def _serialize_images(product):
+    """Gallery list: template hero first, then eCommerce media images."""
+    images = []
+    if product.image_1920:
+        images.append(
+            {
+                "id": 0,
+                "url": f"/web/image/product.template/{product.id}/image_1024",
+                "thumb_url": f"/web/image/product.template/{product.id}/image_256",
+            }
+        )
+    for media in product.product_template_image_ids:
+        images.append(
+            {
+                "id": media.id,
+                "url": f"/web/image/product.image/{media.id}/image_1024",
+                "thumb_url": f"/web/image/product.image/{media.id}/image_256",
+            }
+        )
+    return images
+
+
 class GroveHeadlessAPI(http.Controller):
     """Public JSON endpoints for the Grove headless storefronts."""
 
@@ -142,26 +198,7 @@ class GroveHeadlessAPI(http.Controller):
         website = request.website
         current_company = website.company_id
 
-        domain = [
-            ("website_published", "=", True),
-            ("sale_ok", "=", True),
-            ("company_id", "in", [current_company.id, False]),
-        ]
-
-        # Optional filters
-        if kwargs.get("featured"):
-            domain.append(("grove_featured", "=", True))
-
-        if kwargs.get("category_id"):
-            try:
-                domain.append(("public_categ_ids", "in", [int(kwargs["category_id"])]))
-            except (ValueError, TypeError):
-                pass
-
-        if kwargs.get("slug"):
-            slug = str(kwargs["slug"]).strip().lower()
-            if slug:
-                domain.append(("grove_slug", "=", slug))
+        domain = build_product_domain(kwargs, current_company.id)
 
         limit = min(int(kwargs.get("limit", 40)), 200)
         offset = int(kwargs.get("offset", 0))
@@ -180,6 +217,9 @@ class GroveHeadlessAPI(http.Controller):
             if data:
                 data["image_url"] = f"/web/image/product.template/{product.id}/image_128"
                 data["slug"] = data.pop("grove_slug", "") or ""
+                data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
+                data["variant_count"] = len(product.product_variant_ids)
+                data["price_min"] = min(product.product_variant_ids.mapped("lst_price"), default=product.list_price)
                 items.append(data)
 
         return _json_response(
@@ -225,17 +265,27 @@ class GroveHeadlessAPI(http.Controller):
         detail_fields = PRODUCT_DETAIL_FIELDS + _available_fields(product, OPTIONAL_STOCK_FIELDS)
         data = _serialize_product(product, detail_fields)
         data["image_url"] = f"/web/image/product.template/{product.id}/image_1920"
-        data["variants"] = []
-
-        variant_fields = ["id", "display_name", "default_code", "lst_price"] + _available_fields(
-            request.env["product.product"], OPTIONAL_STOCK_FIELDS
-        )
-        for variant in product.product_variant_ids:
-            variant_vals = variant.read(variant_fields)[0]
-            variant_vals["image_url"] = f"/web/image/product.product/{variant.id}/image_128"
-            data["variants"].append(variant_vals)
+        data["variants"] = [_structure_variant(v) for v in product.product_variant_ids]
+        data["facts"] = _serialize_facts(product)
+        data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
+        data["images"] = _serialize_images(product)
 
         return _json_response(data)
+
+    # ── ZIP → USDA zone ──────────────────────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/zone",
+        type="http",
+        auth="public",
+        methods=["GET"],
+        csrf=False,
+    )
+    def zone_lookup(self, **kwargs):
+        """USDA zone for a ZIP — powers the 'Will this grow for me?' widget."""
+        zip_raw = str(kwargs.get("zip", ""))
+        body, status = zone_response(zip_raw, usda_zone_for_zip(zip_raw))
+        return _json_response(body, status=status)
 
     # ── Cart ─────────────────────────────────────────────────────────────
 
@@ -432,155 +482,9 @@ class GroveHeadlessAPI(http.Controller):
         except json.JSONDecodeError:
             return _json_response({"error": "Invalid JSON body"}, status=400)
 
-        contact = payload.get("contact") or {}
-        items = payload.get("items") or []
-
-        if not contact.get("email") or not contact.get("name"):
-            return _json_response({"error": "contact.name and contact.email are required"}, status=400)
-        if not isinstance(items, list) or not items:
-            return _json_response({"error": "items must be a non-empty list"}, status=400)
-
-        # Defense in depth: re-validate email format and field lengths even
-        # though the BFF already does this. Anyone with a valid API key can
-        # POST here directly, so we cannot trust the caller. `isinstance`
-        # before `fullmatch` because a non-string email (e.g. int from a
-        # misbehaving client) would otherwise raise TypeError → 500.
-        if not isinstance(contact["email"], str) or not EMAIL_RE.fullmatch(contact["email"]):
-            return _json_response({"error": "contact.email is not a valid email address"}, status=400)
-
-        contact_limits = {"name": MAX_NAME, "email": MAX_EMAIL, "phone": MAX_PHONE}
-        err = _check_lengths(contact, contact_limits)
-        if err:
-            return _json_response({"error": f"contact.{err}"}, status=400)
-
-        address_limits = {
-            "street": MAX_STREET,
-            "street2": MAX_STREET,
-            "city": MAX_CITY,
-            "state": MAX_STATE,
-            "zip": MAX_ZIP,
-            "country": MAX_COUNTRY,
-        }
-        shipping = payload.get("shipping") or {}
-        if shipping:
-            err = _check_lengths(shipping, address_limits)
-            if err:
-                return _json_response({"error": f"shipping.{err}"}, status=400)
-        billing = payload.get("billing") or {}
-        if billing:
-            err = _check_lengths(billing, address_limits)
-            if err:
-                return _json_response({"error": f"billing.{err}"}, status=400)
-
-        website = request.website
-        current_company = website.company_id
-        env = request.env
-
-        # Resolve partner: find an existing partner scoped to this company by
-        # email so we don't read/write across tenants. We deliberately do NOT
-        # overwrite an existing partner's attributes from a public POST — that
-        # would let anyone with a customer's email mutate their record. Instead
-        # we either reuse the existing partner as-is, or create a fresh one.
-        Partner = env["res.partner"].sudo().with_company(current_company)
-        existing_partner = Partner.search(
-            [
-                ("email", "=", contact["email"]),
-                ("company_id", "in", [current_company.id, False]),
-            ],
-            limit=1,
-        )
-        partner_vals = _partner_vals_from_payload(env, contact, payload.get("shipping"))
-        if existing_partner:
-            partner = existing_partner
-        else:
-            partner = Partner.create({**partner_vals, "company_id": current_company.id})
-
-        # Resolve billing partner: if a billing address is explicitly provided,
-        # always create a child invoice contact. Otherwise reuse main partner.
-        billing_partner = partner
-        if payload.get("billing"):
-            billing_vals = _partner_vals_from_payload(env, contact, payload["billing"])
-            billing_partner = Partner.create(
-                {**billing_vals, "parent_id": partner.id, "type": "invoice", "company_id": current_company.id}
-            )
-
-        # Pick the "Online" sales team if it exists for this company.
-        team = (
-            env["crm.team"]
-            .sudo()
-            .search(
-                [("name", "=", "Online"), ("company_id", "=", current_company.id)],
-                limit=1,
-            )
-        )
-
-        order_vals = {
-            "partner_id": partner.id,
-            "partner_invoice_id": billing_partner.id,
-            "partner_shipping_id": partner.id,
-            "company_id": current_company.id,
-            "website_id": website.id,
-            "note": _format_payment_note(payload.get("payment_method")),
-        }
-        if team:
-            order_vals["team_id"] = team.id
-
-        SaleOrder = env["sale.order"].sudo().with_company(current_company)
-        order = SaleOrder.create(order_vals)
-
-        # Build order lines. Validate every variant up front so partial orders
-        # never get persisted. Fetch all referenced variants in a single query
-        # rather than one search per item — orders with many lines were doing
-        # N round trips against product.product.
-        parsed_items: list[tuple[int, float]] = []
-        for raw_item in items:
-            try:
-                parsed_items.append((int(raw_item.get("variant_id")), float(raw_item.get("quantity") or 1)))
-            except (TypeError, ValueError):
-                order.unlink()
-                return _json_response(
-                    {"error": "Each item needs numeric variant_id and quantity"},
-                    status=400,
-                )
-
-        if any(qty <= 0 for _, qty in parsed_items):
-            order.unlink()
-            return _json_response({"error": "Each item quantity must be positive"}, status=400)
-
-        wanted_ids = {variant_id for variant_id, _ in parsed_items}
-        variants = (
-            env["product.product"]
-            .sudo()
-            .with_company(current_company)
-            .search(
-                [("id", "in", list(wanted_ids)), ("company_id", "in", [current_company.id, False])],
-            )
-        )
-        found_ids = set(variants.ids)
-        missing = wanted_ids - found_ids
-        if missing:
-            order.unlink()
-            return _json_response(
-                {"error": f"Product variant(s) not found: {sorted(missing)}"},
-                status=404,
-            )
-
-        line_vals = [
-            {
-                "order_id": order.id,
-                "product_id": variant_id,
-                "product_uom_qty": quantity,
-            }
-            for variant_id, quantity in parsed_items
-        ]
-
-        env["sale.order.line"].sudo().create(line_vals)
-        order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
-
-        # Apply the tiered 21-state shipping charge (GOL-15). Rates are loaded
-        # from data/shipping_rates.json by models/shipping_zones.py and maintained
-        # by the daily rate-checker. Fail-safe: no rate configured → no line added.
-        _apply_shipping_line(env, order, shipping, current_company)
+        order, error = _create_draft_order(request.website, request.env, payload)
+        if error is not None:
+            return error
 
         # Ensure a portal access token exists — required to fetch order details
         # later via GET without exposing PII through id-enumeration.
@@ -671,6 +575,173 @@ class GroveHeadlessAPI(http.Controller):
                 },
             }
         )
+
+    # ── Stripe checkout ──────────────────────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/checkout/session",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def checkout_session(self, **_kwargs):
+        """Build a Stripe Checkout Session from a posted cart.
+
+        Body = the /orders shape plus `success_url` + `cancel_url`. We create
+        the draft sale.order first so Odoo computes the WV sales tax and the
+        tiered shipping charge, then turn its lines into explicit Stripe line
+        items (Stripe Tax is OFF — tax rides in as its own line). Charging
+        matrix: in-stock lines charge in full; preorder lines charge a flat
+        deposit with the balance saved for an off-session capture at ship time.
+
+        Auth mirrors /orders (bearer): creating orders + Stripe sessions must
+        not be reachable unauthenticated from the public internet.
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+
+        secret_key = os.environ.get("stripe_test_secret_key", "")
+        if not secret_key:
+            # Code ships before keys land (GOL-642): the endpoint is live but
+            # inert until Terra applies stripe_test_* to the QA droplet env.
+            return _json_response({"error": "Checkout is not configured yet"}, status=503)
+
+        success_url = payload.get("success_url")
+        cancel_url = payload.get("cancel_url")
+        if not success_url or not cancel_url:
+            return _json_response({"error": "success_url and cancel_url are required"}, status=400)
+
+        order, error = _create_draft_order(request.website, request.env, payload)
+        if error is not None:
+            return error
+
+        access_token = order._portal_ensure_token()
+        line_items, preorder_ids, charged_cents = _build_stripe_line_items(order)
+        if not line_items:
+            order.unlink()
+            return _json_response({"error": "Cart produced no chargeable line items"}, status=400)
+
+        # Stripe substitutes {CHECKOUT_SESSION_ID} at redirect time so the
+        # success/cancel pages can look the order up. Preserve any existing query.
+        success_url += ("&" if "?" in success_url else "?") + "session_id={CHECKOUT_SESSION_ID}"
+        cancel_url += ("&" if "?" in cancel_url else "?") + "session_id={CHECKOUT_SESSION_ID}"
+
+        try:
+            session = stripe_gateway.create_checkout_session(
+                secret_key,
+                line_items=line_items,
+                success_url=success_url,
+                cancel_url=cancel_url,
+                customer_email=order.partner_id.email,
+                setup_future_usage=bool(preorder_ids),
+                metadata={"order_id": order.id, "order_ref": order.name, "access_token": access_token},
+            )
+        except stripe_gateway.StripeError as exc:
+            # Leave the draft order for staff follow-up; return a clean 502
+            # rather than a Werkzeug traceback.
+            _logger.error("Stripe checkout session failed for order %s: %s", order.name, exc)
+            return _json_response({"error": "Payment provider error creating checkout session"}, status=502)
+
+        order.sudo().write(
+            {
+                "grove_stripe_session_id": session.get("id"),
+                "grove_stripe_payment_intent": session.get("payment_intent") or False,
+                "grove_preorder_variant_ids": ",".join(str(i) for i in preorder_ids) or False,
+                "grove_checkout_status": "pending",
+            }
+        )
+
+        return _json_response(
+            {
+                "session_id": session.get("id"),
+                "checkout_url": session.get("url"),
+                "order_id": order.id,
+                "order_ref": order.name,
+                "access_token": access_token,
+                "has_preorder": bool(preorder_ids),
+                "amount_due_today": round(charged_cents / 100.0, 2),
+                "amount_total": order.amount_total,
+                "currency": order.currency_id.name,
+            }
+        )
+
+    @http.route(
+        "/grove/api/v1/stripe/webhook",
+        type="http",
+        auth="public",
+        methods=["POST"],
+        csrf=False,
+    )
+    def stripe_webhook(self, **_kwargs):
+        """Receive Stripe Checkout webhooks.
+
+        type="http" (not "json") so Stripe sees real HTTP status codes — a
+        "json" route wraps everything in HTTP 200 and would defeat Stripe's
+        retry-on-failure. Signature-verified against the raw body, idempotent by
+        event id. Handles checkout.session.completed / .expired; on an oversold
+        in-stock line it refunds, apologises, and pings ops on Discord.
+        """
+        raw = request.httprequest.get_data() or b""
+        secret = os.environ.get("stripe_test_webhook_secret", "")
+        sig = request.httprequest.headers.get("Stripe-Signature", "")
+        try:
+            stripe_gateway.verify_webhook_signature(raw, sig, secret)
+        except stripe_gateway.StripeError as exc:
+            _logger.warning("Stripe webhook rejected: %s", exc)
+            return _json_response({"error": "signature verification failed"}, status=400)
+
+        try:
+            event = json.loads(raw or b"{}")
+        except (json.JSONDecodeError, ValueError):
+            return _json_response({"error": "bad json"}, status=400)
+
+        event_id = event.get("id")
+        event_type = event.get("type")
+        if not event_id:
+            return _json_response({"error": "missing event id"}, status=400)
+
+        env = request.env
+        Event = env["grove.stripe.event"].sudo()
+        # Fast-path dedupe covers the common retry; the UNIQUE constraint below
+        # is the real guarantee against a race between concurrent deliveries.
+        if Event.search_count([("event_id", "=", event_id)]):
+            return _json_response({"ok": True, "duplicate": True})
+
+        # Insert the id under the unique constraint inside a savepoint so a
+        # concurrent duplicate collides here (caught → 200) instead of poisoning
+        # the transaction.
+        try:
+            with env.cr.savepoint():
+                ledger = Event.create({"event_id": event_id, "event_type": event_type})
+                # Force the INSERT now so a unique-constraint collision raises
+                # inside this savepoint (where we catch it) rather than later at
+                # commit-flush, which would escape the guard.
+                env.flush_all()
+        except psycopg2.IntegrityError:
+            return _json_response({"ok": True, "duplicate": True})
+
+        session = (event.get("data") or {}).get("object") or {}
+        try:
+            if event_type == "checkout.session.completed":
+                result = _handle_session_completed(env, session)
+            elif event_type == "checkout.session.expired":
+                result = _handle_session_expired(env, session)
+            else:
+                result = "ignored"
+        except Exception:  # noqa: BLE001
+            # Roll the whole transaction back — including the ledger insert — so
+            # Stripe's retry can reprocess this event cleanly rather than seeing
+            # it recorded-but-unhandled.
+            _logger.exception("Stripe webhook %s (%s) handler failed", event_id, event_type)
+            env.cr.rollback()
+            return _json_response({"error": "handler error"}, status=500)
+
+        ledger.write({"notes": result})
+        return _json_response({"ok": True, "result": result})
 
     # ── Newsletter ───────────────────────────────────────────────────────
 
@@ -994,3 +1065,346 @@ def _format_payment_note(payment_method):
     if not payment_method:
         return False
     return f"Payment method requested: {payment_method}"
+
+
+def _create_draft_order(website, env, payload):
+    """Build a draft sale.order from a posted cart payload.
+
+    Shared by POST /orders and POST /checkout/session. Returns
+    (order, None) on success or (None, error_response) on any validation
+    failure — the caller returns the error response as-is. Never leaves a
+    partial order persisted: every variant is validated before lines are
+    written, and the order is unlinked on a late failure.
+    """
+    contact = payload.get("contact") or {}
+    items = payload.get("items") or []
+
+    if not contact.get("email") or not contact.get("name"):
+        return None, _json_response({"error": "contact.name and contact.email are required"}, status=400)
+    if not isinstance(items, list) or not items:
+        return None, _json_response({"error": "items must be a non-empty list"}, status=400)
+
+    # Defense in depth: re-validate email format and field lengths even though
+    # the BFF already does. Anyone with a valid API key can POST here directly,
+    # so we cannot trust the caller. `isinstance` before `fullmatch` because a
+    # non-string email (e.g. int from a misbehaving client) would raise → 500.
+    if not isinstance(contact["email"], str) or not EMAIL_RE.fullmatch(contact["email"]):
+        return None, _json_response({"error": "contact.email is not a valid email address"}, status=400)
+
+    contact_limits = {"name": MAX_NAME, "email": MAX_EMAIL, "phone": MAX_PHONE}
+    err = _check_lengths(contact, contact_limits)
+    if err:
+        return None, _json_response({"error": f"contact.{err}"}, status=400)
+
+    address_limits = {
+        "street": MAX_STREET,
+        "street2": MAX_STREET,
+        "city": MAX_CITY,
+        "state": MAX_STATE,
+        "zip": MAX_ZIP,
+        "country": MAX_COUNTRY,
+    }
+    shipping = payload.get("shipping") or {}
+    if shipping:
+        err = _check_lengths(shipping, address_limits)
+        if err:
+            return None, _json_response({"error": f"shipping.{err}"}, status=400)
+    billing = payload.get("billing") or {}
+    if billing:
+        err = _check_lengths(billing, address_limits)
+        if err:
+            return None, _json_response({"error": f"billing.{err}"}, status=400)
+
+    current_company = website.company_id
+
+    # Resolve partner: find an existing partner scoped to this company by email
+    # so we don't read/write across tenants. We deliberately do NOT overwrite an
+    # existing partner's attributes from a public POST — that would let anyone
+    # with a customer's email mutate their record. Reuse as-is, or create fresh.
+    Partner = env["res.partner"].sudo().with_company(current_company)
+    existing_partner = Partner.search(
+        [
+            ("email", "=", contact["email"]),
+            ("company_id", "in", [current_company.id, False]),
+        ],
+        limit=1,
+    )
+    partner_vals = _partner_vals_from_payload(env, contact, payload.get("shipping"))
+    if existing_partner:
+        partner = existing_partner
+    else:
+        partner = Partner.create({**partner_vals, "company_id": current_company.id})
+
+    # Resolve billing partner: if a billing address is explicitly provided,
+    # always create a child invoice contact. Otherwise reuse main partner.
+    billing_partner = partner
+    if payload.get("billing"):
+        billing_vals = _partner_vals_from_payload(env, contact, payload["billing"])
+        billing_partner = Partner.create(
+            {**billing_vals, "parent_id": partner.id, "type": "invoice", "company_id": current_company.id}
+        )
+
+    # Pick the "Online" sales team if it exists for this company.
+    team = (
+        env["crm.team"]
+        .sudo()
+        .search(
+            [("name", "=", "Online"), ("company_id", "=", current_company.id)],
+            limit=1,
+        )
+    )
+
+    order_vals = {
+        "partner_id": partner.id,
+        "partner_invoice_id": billing_partner.id,
+        "partner_shipping_id": partner.id,
+        "company_id": current_company.id,
+        "website_id": website.id,
+        "note": _format_payment_note(payload.get("payment_method")),
+    }
+    if team:
+        order_vals["team_id"] = team.id
+
+    SaleOrder = env["sale.order"].sudo().with_company(current_company)
+    order = SaleOrder.create(order_vals)
+
+    # Build order lines. Validate every variant up front so partial orders never
+    # get persisted. Fetch all referenced variants in a single query rather than
+    # one search per item — orders with many lines were doing N round trips.
+    parsed_items: list[tuple[int, float]] = []
+    for raw_item in items:
+        try:
+            parsed_items.append((int(raw_item.get("variant_id")), float(raw_item.get("quantity") or 1)))
+        except (TypeError, ValueError):
+            order.unlink()
+            return None, _json_response(
+                {"error": "Each item needs numeric variant_id and quantity"},
+                status=400,
+            )
+
+    if any(qty <= 0 for _, qty in parsed_items):
+        order.unlink()
+        return None, _json_response({"error": "Each item quantity must be positive"}, status=400)
+
+    wanted_ids = {variant_id for variant_id, _ in parsed_items}
+    variants = (
+        env["product.product"]
+        .sudo()
+        .with_company(current_company)
+        .search(
+            [("id", "in", list(wanted_ids)), ("company_id", "in", [current_company.id, False])],
+        )
+    )
+    found_ids = set(variants.ids)
+    missing = wanted_ids - found_ids
+    if missing:
+        order.unlink()
+        return None, _json_response(
+            {"error": f"Product variant(s) not found: {sorted(missing)}"},
+            status=404,
+        )
+
+    line_vals = [
+        {
+            "order_id": order.id,
+            "product_id": variant_id,
+            "product_uom_qty": quantity,
+        }
+        for variant_id, quantity in parsed_items
+    ]
+
+    env["sale.order.line"].sudo().create(line_vals)
+    order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
+
+    # Apply the tiered 21-state shipping charge (GOL-15). Rates load from
+    # data/shipping_rates.json (models/shipping_zones.py) and are maintained by
+    # the daily rate-checker. Fail-safe: no rate configured → no line added.
+    _apply_shipping_line(env, order, shipping, current_company)
+
+    return order, None
+
+
+# ── Stripe checkout helpers ──────────────────────────────────────────────────
+
+
+def _build_stripe_line_items(order):
+    """Turn a draft order's lines into Stripe Checkout line items.
+
+    Returns (line_items, preorder_variant_ids, charged_cents). Applies the
+    charging matrix per product line (in-stock = full price; short stock =
+    a flat deposit line at qty 1) and adds the WV sales tax as ONE explicit
+    line (Stripe Tax OFF) covering only what is charged today — preorder lines
+    contribute a deposit and no tax now; their goods + tax settle off-session
+    when they ship.
+    """
+    line_items = []
+    preorder_variant_ids = []
+    tax_today = 0.0
+    for line in order.order_line:
+        if line.display_type or not line.product_id:
+            continue
+        product = line.product_id
+        name = product.display_name
+        if product.default_code == SHIPPING_PRODUCT_CODE:
+            amount = stripe_gateway.to_cents(line.price_unit)
+            if amount <= 0:
+                continue
+            line_items.append({"name": name, "amount_cents": amount, "quantity": 1})
+            tax_today += line.price_tax
+            continue
+        amount, qty, is_preorder = stripe_gateway.line_charge(
+            line.price_unit, line.product_uom_qty, product.qty_available
+        )
+        if is_preorder:
+            preorder_variant_ids.append(product.id)
+            line_items.append({"name": f"Deposit — {name}", "amount_cents": amount, "quantity": qty})
+        else:
+            line_items.append({"name": name, "amount_cents": amount, "quantity": qty})
+            tax_today += line.price_tax
+    if tax_today > 0:
+        line_items.append({"name": "Sales tax (WV)", "amount_cents": stripe_gateway.to_cents(tax_today), "quantity": 1})
+    charged_cents = sum(li["amount_cents"] * li["quantity"] for li in line_items)
+    return line_items, preorder_variant_ids, charged_cents
+
+
+def _find_order_for_session(env, session):
+    """Reconcile a Stripe session back to its sale.order by stored session id,
+    falling back to the order_id carried in session metadata."""
+    SaleOrder = env["sale.order"].sudo()
+    session_id = session.get("id")
+    if session_id:
+        order = SaleOrder.search([("grove_stripe_session_id", "=", session_id)], limit=1)
+        if order:
+            return order
+    meta_order_id = (session.get("metadata") or {}).get("order_id")
+    if meta_order_id:
+        try:
+            return SaleOrder.browse(int(meta_order_id)).exists()
+        except (TypeError, ValueError):
+            return SaleOrder
+    return SaleOrder
+
+
+def _oversold_lines(order):
+    """Product lines that were charged in full but can no longer be fulfilled.
+
+    Excludes the shipping line and any variant recorded as a preorder deposit
+    at session time — a preorder is legitimately short on stock, only a line we
+    took full payment for and now cannot ship is an oversell.
+    """
+    preorder_ids = set()
+    for raw in (order.grove_preorder_variant_ids or "").split(","):
+        raw = raw.strip()
+        if raw.isdigit():
+            preorder_ids.add(int(raw))
+    oversold = []
+    for line in order.order_line:
+        if line.display_type or not line.product_id:
+            continue
+        product = line.product_id
+        if product.default_code == SHIPPING_PRODUCT_CODE or product.id in preorder_ids:
+            continue
+        if product.qty_available < line.product_uom_qty:
+            oversold.append(line)
+    return oversold
+
+
+def _handle_session_completed(env, session):
+    """checkout.session.completed: record the payment intent, then either
+    refund an oversell or mark the order paid/deposit-paid and confirm it."""
+    order = _find_order_for_session(env, session)
+    if not order:
+        return "order_not_found"
+
+    payment_intent = session.get("payment_intent")
+    vals = {}
+    if payment_intent:
+        vals["grove_stripe_payment_intent"] = payment_intent
+
+    oversold = _oversold_lines(order)
+    if oversold:
+        names = ", ".join(line.product_id.display_name for line in oversold)
+        refunded = False
+        if payment_intent:
+            secret_key = os.environ.get("stripe_test_secret_key", "")
+            try:
+                stripe_gateway.create_refund(
+                    secret_key,
+                    payment_intent,
+                    reason="requested_by_customer",
+                    metadata={"order_ref": order.name, "reason": "oversold"},
+                )
+                refunded = True
+            except stripe_gateway.StripeError as exc:
+                _logger.error("Oversell refund failed for %s: %s", order.name, exc)
+        vals["grove_checkout_status"] = "refunded_oversell"
+        order.write(vals)
+        note = (
+            f"Oversold: on-hand stock can no longer fulfil {names}. Payment has been "
+            f"{'refunded' if refunded else 'flagged for a MANUAL refund'} with our apologies."
+        )
+        order.message_post(body=note)
+        _notify_customer_apology(env, order, names, refunded)
+        _notify_discord(
+            f":warning: Oversold order {order.name}: {names} — "
+            f"refund {'issued' if refunded else 'FAILED, needs manual action'}."
+        )
+        return "refunded_oversell" if refunded else "oversell_refund_failed"
+
+    has_preorder = bool((order.grove_preorder_variant_ids or "").strip())
+    vals["grove_checkout_status"] = "deposit_paid" if has_preorder else "paid"
+    order.write(vals)
+    try:
+        if order.state in ("draft", "sent"):
+            order.action_confirm()
+    except Exception:  # noqa: BLE001 — payment is already recorded; don't fail the webhook
+        _logger.exception("action_confirm failed for %s (payment recorded, confirm deferred)", order.name)
+    return vals["grove_checkout_status"]
+
+
+def _handle_session_expired(env, session):
+    """checkout.session.expired: mark the draft order's checkout as expired."""
+    order = _find_order_for_session(env, session)
+    if not order:
+        return "order_not_found"
+    order.write({"grove_checkout_status": "expired"})
+    return "expired"
+
+
+def _notify_customer_apology(env, order, product_names, refunded):
+    """Best-effort customer apology email for an oversell. Never fatal — the
+    refund + chatter note stand on their own if outgoing mail is unconfigured."""
+    email = order.partner_id.email
+    if not email:
+        return
+    body = (
+        f"<p>Hi {order.partner_id.name or 'there'},</p>"
+        f"<p>We're very sorry — we sold out of {product_names} before your order "
+        f"{order.name} could be fulfilled, so we've "
+        f"{'refunded your payment in full' if refunded else 'begun refunding your payment'}. "
+        f"Please reach out and we'll help you find an alternative.</p>"
+        f"<p>— Goldberry Grove Nursery</p>"
+    )
+    try:
+        env["mail.mail"].sudo().create(
+            {
+                "subject": f"About your order {order.name}",
+                "email_to": email,
+                "body_html": body,
+                "auto_delete": True,
+            }
+        ).send()
+    except Exception:  # noqa: BLE001 — apology email is best-effort
+        _logger.warning("Oversell apology email failed for %s", order.name, exc_info=True)
+
+
+def _notify_discord(message):
+    """Best-effort ops ping. DISCORD_OPS_WEBHOOK_URL is optional; a missing URL
+    or a failed POST never breaks webhook processing."""
+    url = os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+    if not url:
+        return
+    try:
+        requests.post(url, json={"content": message}, timeout=10)
+    except Exception:  # noqa: BLE001
+        _logger.warning("Discord ops notify failed", exc_info=True)
