@@ -56,7 +56,7 @@ class SaleOrder(models.Model):
                 tmpl = line.product_id.product_tmpl_id
                 if tmpl.type == "service":  # skip the shipping-charge line itself
                     continue
-                tier = tmpl.grove_shipping_tier or "potted"
+                tier = line.product_id.grove_effective_shipping_tier or "potted"
                 qty = line.product_uom_qty
                 if qty != int(qty):
                     raise UserError(

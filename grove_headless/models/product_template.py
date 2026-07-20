@@ -1,6 +1,7 @@
 import re
 
 from odoo import api, fields, models
+from odoo.exceptions import ValidationError
 
 
 class ProductTemplate(models.Model):
@@ -55,6 +56,37 @@ class ProductTemplate(models.Model):
         help="Bareroot ships as a 4 lb slim box; potted as a ~25 lb box. "
         "Determines the per-tree shipping rate by destination zone.",
     )
+
+    # ── Growing facts (2026-07-13 catalog spec) ─────────────────────────
+    # Filterable facts live here (typed); display-only facts stay Char.
+    # Narrative content deliberately does NOT live in Odoo (Ghost, keyed
+    # by grove_slug — see the nursery product-pages spec).
+    grove_botanical_name = fields.Char(string="Botanical Name")
+    grove_zone_min = fields.Integer(string="USDA Zone Min")
+    grove_zone_max = fields.Integer(string="USDA Zone Max")
+    grove_layer = fields.Selection(
+        [
+            ("canopy", "Canopy"),
+            ("understory", "Understory"),
+            ("shrub", "Shrub"),
+            ("ground", "Ground cover"),
+            ("vine", "Vine"),
+        ],
+        string="Food Forest Layer",
+    )
+    grove_sun = fields.Selection(
+        [("full", "Full sun"), ("partial", "Partial sun"), ("shade", "Shade")],
+        string="Sun Requirement",
+    )
+    grove_mature_size = fields.Char(string="Mature Size")
+    grove_spacing = fields.Char(string="Plant Spacing")
+    grove_soil = fields.Char(string="Soil")
+
+    @api.constrains("grove_zone_min", "grove_zone_max")
+    def _check_zone_range(self):
+        for record in self:
+            if record.grove_zone_min and record.grove_zone_max and record.grove_zone_min > record.grove_zone_max:
+                raise ValidationError("USDA zone min cannot exceed zone max.")
 
     @staticmethod
     def _slugify(value: str) -> str:

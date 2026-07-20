@@ -9,9 +9,10 @@ from odoo import http
 from odoo.http import Response, request
 
 from ..models.newsletter import newsletter_tag_names
-from ..models.shipping_calendar import serialize_ship_options, ship_options
+from ..models.shipping_calendar import serialize_ship_options, ship_options, usda_zone_for_zip
 from ..models.shipping_zones import compute_order_shipping, compute_shipping_rate
 from ..models.shippo_client import is_valid_tracking
+from .product_domain import build_product_domain, zone_response
 
 _logger = logging.getLogger(__name__)
 
@@ -113,6 +114,58 @@ def _serialize_product(product, fields):
     return record
 
 
+def _serialize_facts(product):
+    """Growing-facts block for the detail endpoint (catalog spec 2026-07-13)."""
+    return {
+        "botanical_name": product.grove_botanical_name or "",
+        "zone_min": product.grove_zone_min or None,
+        "zone_max": product.grove_zone_max or None,
+        "layer": product.grove_layer or "",
+        "sun": product.grove_sun or "",
+        "mature_size": product.grove_mature_size or "",
+        "spacing": product.grove_spacing or "",
+        "soil": product.grove_soil or "",
+    }
+
+
+def _structure_variant(variant):
+    """Structured variant entry: axes parsed into fields, not display-name strings."""
+    axis = {v.attribute_id.name: v.name for v in variant.product_template_variant_value_ids}
+    return {
+        "id": variant.id,
+        "display_name": variant.display_name,
+        "sku": variant.default_code or "",
+        "cultivar": axis.get("Cultivar", ""),
+        "format": axis.get("Format", ""),
+        "price": variant.lst_price,
+        "qty_available": variant.qty_available,
+        "shipping_tier": variant.grove_effective_shipping_tier,
+        "image_url": f"/web/image/product.product/{variant.id}/image_128",
+    }
+
+
+def _serialize_images(product):
+    """Gallery list: template hero first, then eCommerce media images."""
+    images = []
+    if product.image_1920:
+        images.append(
+            {
+                "id": 0,
+                "url": f"/web/image/product.template/{product.id}/image_1024",
+                "thumb_url": f"/web/image/product.template/{product.id}/image_256",
+            }
+        )
+    for media in product.product_template_image_ids:
+        images.append(
+            {
+                "id": media.id,
+                "url": f"/web/image/product.image/{media.id}/image_1024",
+                "thumb_url": f"/web/image/product.image/{media.id}/image_256",
+            }
+        )
+    return images
+
+
 class GroveHeadlessAPI(http.Controller):
     """Public JSON endpoints for the Grove headless storefronts."""
 
@@ -142,26 +195,7 @@ class GroveHeadlessAPI(http.Controller):
         website = request.website
         current_company = website.company_id
 
-        domain = [
-            ("website_published", "=", True),
-            ("sale_ok", "=", True),
-            ("company_id", "in", [current_company.id, False]),
-        ]
-
-        # Optional filters
-        if kwargs.get("featured"):
-            domain.append(("grove_featured", "=", True))
-
-        if kwargs.get("category_id"):
-            try:
-                domain.append(("public_categ_ids", "in", [int(kwargs["category_id"])]))
-            except (ValueError, TypeError):
-                pass
-
-        if kwargs.get("slug"):
-            slug = str(kwargs["slug"]).strip().lower()
-            if slug:
-                domain.append(("grove_slug", "=", slug))
+        domain = build_product_domain(kwargs, current_company.id)
 
         limit = min(int(kwargs.get("limit", 40)), 200)
         offset = int(kwargs.get("offset", 0))
@@ -180,6 +214,9 @@ class GroveHeadlessAPI(http.Controller):
             if data:
                 data["image_url"] = f"/web/image/product.template/{product.id}/image_128"
                 data["slug"] = data.pop("grove_slug", "") or ""
+                data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
+                data["variant_count"] = len(product.product_variant_ids)
+                data["price_min"] = min(product.product_variant_ids.mapped("lst_price"), default=product.list_price)
                 items.append(data)
 
         return _json_response(
@@ -225,17 +262,27 @@ class GroveHeadlessAPI(http.Controller):
         detail_fields = PRODUCT_DETAIL_FIELDS + _available_fields(product, OPTIONAL_STOCK_FIELDS)
         data = _serialize_product(product, detail_fields)
         data["image_url"] = f"/web/image/product.template/{product.id}/image_1920"
-        data["variants"] = []
-
-        variant_fields = ["id", "display_name", "default_code", "lst_price"] + _available_fields(
-            request.env["product.product"], OPTIONAL_STOCK_FIELDS
-        )
-        for variant in product.product_variant_ids:
-            variant_vals = variant.read(variant_fields)[0]
-            variant_vals["image_url"] = f"/web/image/product.product/{variant.id}/image_128"
-            data["variants"].append(variant_vals)
+        data["variants"] = [_structure_variant(v) for v in product.product_variant_ids]
+        data["facts"] = _serialize_facts(product)
+        data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
+        data["images"] = _serialize_images(product)
 
         return _json_response(data)
+
+    # ── ZIP → USDA zone ──────────────────────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/zone",
+        type="http",
+        auth="public",
+        methods=["GET"],
+        csrf=False,
+    )
+    def zone_lookup(self, **kwargs):
+        """USDA zone for a ZIP — powers the 'Will this grow for me?' widget."""
+        zip_raw = str(kwargs.get("zip", ""))
+        body, status = zone_response(zip_raw, usda_zone_for_zip(zip_raw))
+        return _json_response(body, status=status)
 
     # ── Cart ─────────────────────────────────────────────────────────────
 
