@@ -16,6 +16,28 @@ class SaleOrder(models.Model):
     grove_label_urls = fields.Text(readonly=True, copy=False)
     grove_delivery_status = fields.Char(readonly=True, copy=False)
 
+    # Stripe Checkout linkage (GOL-642). Written when a checkout session is
+    # created; read by the webhook to reconcile session.completed/expired back
+    # to this order. copy=False so a duplicated order never inherits a payment.
+    grove_stripe_session_id = fields.Char(readonly=True, copy=False, index=True)
+    grove_stripe_payment_intent = fields.Char(readonly=True, copy=False)
+    # Variant ids charged as a preorder deposit at session creation, comma-
+    # separated. The webhook reads this to tell a legitimate preorder (stock
+    # was always short → deposit taken) apart from a true oversell (a line we
+    # charged in full can no longer be fulfilled), so it only refunds the latter.
+    grove_preorder_variant_ids = fields.Char(readonly=True, copy=False)
+    grove_checkout_status = fields.Selection(
+        [
+            ("pending", "Awaiting payment"),
+            ("paid", "Paid"),
+            ("deposit_paid", "Deposit paid (balance due at ship)"),
+            ("expired", "Checkout expired"),
+            ("refunded_oversell", "Refunded (oversold)"),
+        ],
+        readonly=True,
+        copy=False,
+    )
+
     def _persist_label_result(self, vals):
         """Write label results through an independent cursor so they survive
         the request-transaction rollback that follows a raised UserError.
