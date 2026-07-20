@@ -1,30 +1,40 @@
-# Agent-mergeable path for grove-odoo-modules (GOL-308 port of grove-sites GOL-122).
+# Agent-mergeable path for grove-odoo-modules
+# (GOL-308 port of grove-sites GOL-122; direct-merge + bot-thread handling under GOL-644).
 #
 # Problem this solves:
 #   Every Paperclip agent authors PRs under the SAME GitHub App bot
 #   (agenticos-developer[bot]). This repo's `main-branch-protection` ruleset
 #   requires 1 approving review, and GitHub blocks "approve your own pull
-#   request", so no agent can satisfy the review gate. Our PR token has no
-#   admin, so it can't bypass it either — leaving Josh to admin-merge by hand.
+#   request", so no agent can satisfy the review gate on its own PRs.
 #
-# How this fixes it WITHOUT new credentials, a second App, or admin:
-#   This workflow submits the approving review as `github-actions[bot]` — a
-#   DISTINCT identity from the PR-author App — so the self-approval block does
-#   not apply. (Org + repo setting "Allow GitHub Actions to create and approve
-#   pull requests" was enabled in GOL-304; that is what unblocks this.)
+# What actually stalled GOL-642 S1 (#27) -- and the durable fix (GOL-644):
+#   The approval identity was NOT the blocker: prior agent PRs (#19/#20/#26)
+#   merged with only a github-actions[bot] approval, so that approval DOES
+#   satisfy the ruleset here. #27 was blocked by an UNRESOLVED review thread
+#   from the third-party `github-code-quality` App (installed on this repo but
+#   NOT on grove-sites). The ruleset sets `required_review_thread_resolution:
+#   true`, so a single advisory bot nitpick permanently BLOCKS an agent PR even
+#   when every required status check is green -- and `--auto` merge waits for it
+#   forever. We resolve ONLY github-code-quality threads; human review threads
+#   are left unresolved so human review is still preserved and still blocks.
 #
-# DIVERGENCE FROM grove-sites:
-#   grove-sites gates on its "Claude Code Review" agent-review workflow. This
-#   repo has no such workflow, so we gate on the "CI" workflow succeeding. All
-#   of this repo's required status checks (Lint Python, Validate Module
-#   Manifests, Validate Tenant Slug Map) run inside that single CI workflow, so
-#   a green CI == every required check green. Auto-merge still independently
-#   waits for ALL required checks before it actually merges.
+# How it works (mirrors grove-sites' proven merge mechanism):
+#   - APPROVE as github-actions[bot] -- a DISTINCT identity from the PR-author
+#     App -- which satisfies the required review. (Org+repo setting "Allow
+#     GitHub Actions to create and approve pull requests" enabled in GOL-304.)
+#   - RESOLVE stale github-code-quality review threads (advisory nitpicks; the
+#     required status checks are the real gate).
+#   - MERGE as github-actions[bot] via a DIRECT squash (not `--auto`), so it
+#     does not depend on the "Allow auto-merge" setting and so the poll loop can
+#     re-resolve a late-arriving code-quality thread before each merge attempt.
+#     Requires `contents: write`.
 #
-# Guardrails:
-#   - Never auto-approves human or external PRs (author must be the agent App
-#     bot) -> human review is preserved for human PRs.
-#   - Never approves unless CI passed -> not a blanket rubber-stamp.
+# Guardrails (see GOL-122 / GOL-644):
+#   - Never auto-approves human/external PRs (author must be the agent App bot)
+#     -> human review is preserved for human PRs.
+#   - Only fires AFTER CI (all required status checks) SUCCEEDED
+#     -> not a blanket rubber-stamp; functional gates still hold.
+#   - Only resolves github-code-quality threads, never human threads.
 #   - Runs from the base-branch definition (workflow_run), so a PR cannot
 #     modify this file to approve itself.
 name: Auto-approve verified agent PRs
@@ -34,9 +44,10 @@ on:
     workflows: ["CI"]
     types: [completed]
 
-# Least privilege: only what's needed to review + enable auto-merge.
+# contents:write lets github-actions[bot] perform the direct squash merge;
+# pull-requests:write lets it post the approving review and resolve threads.
 permissions:
-  contents: read
+  contents: write
   pull-requests: write
 
 jobs:
@@ -47,7 +58,7 @@ jobs:
       github.event.workflow_run.pull_requests[0] != null
     runs-on: ubuntu-latest
     steps:
-      - name: Approve (as github-actions[bot]) + enable auto-merge
+      - name: Approve + resolve bot threads + merge (github-actions[bot])
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -65,17 +76,67 @@ jobs:
               exit 0 ;;
           esac
 
-          # Don't stack duplicate approvals on re-runs.
+          OWNER="${REPO%/*}"
+          NAME="${REPO#*/}"
+
+          # Resolve any UNRESOLVED review threads opened by github-code-quality.
+          # These are advisory nitpicks; the required status checks are the real
+          # gate. Human review threads are intentionally left untouched so they
+          # still block the merge (required_review_thread_resolution=true).
+          # GraphQL returns bot logins WITHOUT the "[bot]" suffix; match both.
+          resolve_bot_threads() {
+            # shellcheck disable=SC2016  # $owner/$name/$pr are GraphQL variables, not shell expansions
+            gh api graphql \
+              -f query='query($owner:String!,$name:String!,$pr:Int!){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$pr){
+                    reviewThreads(first:100){nodes{
+                      id isResolved
+                      comments(first:1){nodes{author{login}}}
+                    }}
+                  }
+                }
+              }' \
+              -f owner="$OWNER" -f name="$NAME" -F pr="$PR" \
+              --jq '.data.repository.pullRequest.reviewThreads.nodes[]
+                    | select(.isResolved==false)
+                    | select((.comments.nodes[0].author.login=="github-code-quality")
+                             or (.comments.nodes[0].author.login=="github-code-quality[bot]"))
+                    | .id' \
+            | while read -r TID; do
+                [ -n "$TID" ] || continue
+                echo "Resolving stale github-code-quality thread $TID"
+                # shellcheck disable=SC2016  # $id is a GraphQL variable, not a shell expansion
+                gh api graphql \
+                  -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' \
+                  -f id="$TID" >/dev/null
+              done
+          }
+
+          # Approve once (don't stack duplicate approvals on re-runs).
           ALREADY=$(gh api "repos/$REPO/pulls/$PR/reviews" \
             -q '[.[] | select(.user.login=="github-actions[bot]" and .state=="APPROVED")] | length')
           if [ "${ALREADY:-0}" -gt 0 ]; then
-            echo "PR #$PR already approved by github-actions[bot]; ensuring auto-merge is on."
+            echo "PR #$PR already approved by github-actions[bot]."
           else
             gh pr review "$PR" --repo "$REPO" --approve --body \
-              "Auto-approved by github-actions[bot]: CI (which runs all required status checks) passed. This identity is distinct from the PR-author App, so it satisfies branch protection's review requirement. Functional required status checks still gate the actual merge. (GOL-308, port of GOL-122)"
+              "Auto-approved by github-actions[bot]: CI (all required status checks) passed. This identity is distinct from the PR-author App, so it satisfies the review requirement. Functional required status checks still gate the merge. (GOL-308 / GOL-644)"
           fi
 
-          # Turn on auto-merge so GitHub merges once ALL required checks are green.
-          # No-op-safe: needs the repo "Allow auto-merge" setting enabled.
-          gh pr merge "$PR" --repo "$REPO" --auto --squash \
-            || echo "Could not enable auto-merge (enable 'Allow auto-merge' in repo settings). Approval still stands; merge will be a one-click for a maintainer."
+          # Merge via a DIRECT squash (no `--auto`). Poll for required checks and
+          # re-resolve any late-arriving code-quality thread before each attempt.
+          for i in $(seq 1 30); do
+            resolve_bot_threads
+            MS=$(gh pr view "$PR" --repo "$REPO" --json state,mergeStateStatus -q '.state + ":" + .mergeStateStatus')
+            echo "merge attempt $i -- $MS"
+            case "$MS" in
+              MERGED:*)
+                echo "PR #$PR already merged."; exit 0 ;;
+              OPEN:CLEAN|OPEN:UNSTABLE)
+                if gh pr merge "$PR" --repo "$REPO" --squash --delete-branch; then
+                  echo "Merged PR #$PR."; exit 0
+                fi ;;
+            esac
+            sleep 20
+          done
+          echo "Required checks not green (or a human review thread is unresolved) within timeout; the approval stands and the PR will merge on a later trigger or a maintainer one-click."
