@@ -1,23 +1,39 @@
 #!/usr/bin/env python3
-"""Seed species-level products with a Variety variant axis into Odoo.
+"""Seed species-level plant products with a Cultivar x Format variant axis.
 
-Companion to ``import_grove_catalog.py`` for the catalog shape that CSV
+Companion to ``import_grove_catalog.py`` for the catalog shape that the CSV
 importer cannot express: ONE product.template per species (Pear, Fig, ...)
-whose cultivars are values of a "Variety" attribute carrying ``price_extra``
-deltas off the base (wild) list price. This is the storefront model the
-2026-07-13 catalog session locked: the species page shows a cultivar
-dropdown (grove_headless already serialises per-variant name + lst_price);
-Type browsing (Trees / Shrubs / Vines) rides website categories, which the
-``/grove/api/v1/products?category_id=`` filter already supports.
+whose cultivars are values of a "Cultivar" attribute carrying ``price_extra``
+deltas off the base list price, crossed with a "Format" attribute (Potted /
+Bareroot) that the shipping engine bills per variant. This is the storefront
+model the 2026-07-13 catalog session locked and that ``grove_headless`` catalog
+API v1 (``_structure_variant``) serialises:
 
-Also sets what the CSV importer does not: product.tag assignments
-(Native / Food Forest / Wildlife / Silvopasture), website categories
-(public_categ_ids — NOT the internal categ_id; the storefront filters on
-public categories only), and opening on-hand quantities per variant.
+    "cultivar": axis.get("Cultivar", ""),   # -> product page dropdown
+    "format":   axis.get("Format", ""),      # -> potted/bareroot selector
+    "shipping_tier": variant.grove_effective_shipping_tier,  # Format-driven
 
-Idempotent per SKU: an existing (sku, company) template is skipped
-entirely — including its quantities — so re-running never clobbers stock
-that has since moved. To re-seed one product, archive it in Odoo first.
+The axis names MUST be exactly ``Cultivar`` and ``Format`` — the serializer
+keys on them by name, so a "Variety"/"Size" axis would come back empty and
+break the cultivar selector. Type browsing (Trees / Shrubs / Vines) rides
+website public categories, which ``/grove/api/v1/products?category_id=``
+filters on.
+
+Also sets what the CSV importer does not: the ``grove_*`` growing-facts block
+(botanical name, USDA zone range, food-forest layer, sun, mature size,
+spacing, soil) that drives the product-page spec block and the zone/tag
+facets, ``product.tag`` assignments, website categories (public_categ_ids —
+NOT the internal categ_id; the storefront filters on public categories only),
+per-variant SKUs (``PEAR-MAG-PT``), and opening on-hand quantities.
+
+This batch is potted stock only, so every template gets a single Format value
+"Potted". Bareroot siblings are added later as a second Format VALUE on the
+SAME template (a normal attribute-value add) — NOT a separate template — so
+``grove_effective_shipping_tier`` resolves them to the bareroot rate.
+
+Idempotent per template SKU: an existing (default_code, company) template is
+skipped entirely — including its quantities — so re-running never clobbers
+stock that has since moved. To re-seed one product, archive it in Odoo first.
 
 Usage
 -----
@@ -29,7 +45,7 @@ Usage
     DRY_RUN=1 python3 scripts/seed_variety_products.py
 
     # Live
-    DRY_RUN unset → creates categories/tags/attribute/products/quants.
+    DRY_RUN unset -> creates categories/tags/attributes/products/quants.
 
 Exit codes: 0 ok, 1 auth/data failure (fails loudly, never half-writes a
 product: each template + its extras is one create call + follow-up writes).
@@ -50,78 +66,134 @@ DRY_RUN = os.getenv("DRY_RUN") == "1"
 
 COMPANY_NAME = "At The Grove Nursery"
 SALE_TAXES = ["WV State Sales Tax 6%", "WV Municipal Tax 1%"]
-VARIETY_ATTR = "Variety"
-SIZE_ATTR = "Size"
-SIZE_VALUE = "3 gal"
+CULTIVAR_ATTR = "Cultivar"
+FORMAT_ATTR = "Format"
+# This is the potted batch. Bareroot becomes a second Format value later.
+FORMAT_VALUE = "Potted"
+FORMAT_ABBR = {"Potted": "PT", "Bareroot": "BR"}
 
 # Website categories are the storefront browse/filter layer (Layer 1: Type).
 # Internal categ_id stays the accounting/valuation category.
+#
+# facts: the grove_* growing-facts block (2026-07-13 catalog spec). Best-effort
+# horticultural values for USDA zone 6 (Appalachian WV); pending nursery
+# confirmation alongside the GOL-588 pricing gate. layer must be one of
+# canopy/understory/shrub/ground/vine; sun one of full/partial/shade.
+#
+# code: the species prefix for per-variant SKUs (PEAR-MAG-PT); cultivar.code
+# is the middle segment.
 # fmt: off
 PRODUCTS: list[dict[str, Any]] = [
     {
-        "sku": "VINE-KIWI", "name": "Kiwi",
+        "sku": "VINE-KIWI", "code": "KIWI", "name": "Kiwi",
         "internal_category": "Vines", "website_category": "Vines",
         "tags": ["Food Forest", "Silvopasture"],
         "list_price": 12.00,  # base = wild type
-        "varieties": [
-            {"name": "Wild", "price_extra": 0.00, "qty": 2},
-            {"name": "Fairchild (male pollinator)", "price_extra": 4.00, "qty": 1},
+        "facts": {
+            "botanical_name": "Actinidia arguta", "zone_min": 4, "zone_max": 8,
+            "layer": "vine", "sun": "partial",
+            "mature_size": "20-30 ft vine", "spacing": "10-15 ft",
+            "soil": "Moist, well-drained",
+        },
+        "cultivars": [
+            {"name": "Wild", "code": "WLD", "price_extra": 0.00, "qty": 2},
+            {"name": "Fairchild (male pollinator)", "code": "FCH", "price_extra": 4.00, "qty": 1},
         ],
     },
     {
-        "sku": "SHRUB-FIG", "name": "Fig",
+        "sku": "SHRUB-FIG", "code": "FIG", "name": "Fig",
         "internal_category": "Shrubs", "website_category": "Shrubs",
         "tags": ["Food Forest", "Silvopasture"],
         "list_price": 15.00,  # base = wild fig
-        "varieties": [
-            {"name": "Wild", "price_extra": 0.00, "qty": 3},
-            {"name": "LSU Champagne", "price_extra": 15.00, "qty": 1},
-            {"name": "Exquisito", "price_extra": 15.00, "qty": 1},
+        "facts": {
+            "botanical_name": "Ficus carica", "zone_min": 7, "zone_max": 9,
+            "layer": "shrub", "sun": "full",
+            "mature_size": "10-15 ft", "spacing": "10-12 ft",
+            "soil": "Well-drained",
+        },
+        "cultivars": [
+            {"name": "Wild", "code": "WLD", "price_extra": 0.00, "qty": 3},
+            {"name": "LSU Champagne", "code": "LSU", "price_extra": 15.00, "qty": 1},
+            {"name": "Exquisito", "code": "EXQ", "price_extra": 15.00, "qty": 1},
         ],
     },
     {
-        "sku": "TREE-PEAR", "name": "Pear",
+        "sku": "TREE-PEAR", "code": "PEAR", "name": "Pear",
         "internal_category": "Trees", "website_category": "Trees",
         "tags": [],
         "list_price": 35.00,  # all grafted cultivars, flat price
-        "varieties": [
-            {"name": "Magness", "price_extra": 0.00, "qty": 3},
-            {"name": "Warren", "price_extra": 0.00, "qty": 2},
-            {"name": "Improved Kieffer", "price_extra": 0.00, "qty": 1},
+        "facts": {
+            "botanical_name": "Pyrus communis", "zone_min": 4, "zone_max": 8,
+            "layer": "canopy", "sun": "full",
+            "mature_size": "15-20 ft", "spacing": "15-20 ft",
+            "soil": "Deep, well-drained loam",
+        },
+        "cultivars": [
+            {"name": "Magness", "code": "MAG", "price_extra": 0.00, "qty": 3},
+            {"name": "Warren", "code": "WRN", "price_extra": 0.00, "qty": 2},
+            {"name": "Improved Kieffer", "code": "KIE", "price_extra": 0.00, "qty": 1},
         ],
     },
     {
-        "sku": "TREE-PERSIMMON", "name": "Persimmon",
+        "sku": "TREE-PERSIMMON", "code": "PERSIMMON", "name": "Persimmon",
         "internal_category": "Trees", "website_category": "Trees",
         "tags": ["Food Forest", "Silvopasture"],
         "list_price": 40.00,
-        "varieties": [
-            {"name": "IKKJ", "price_extra": 0.00, "qty": 3},
+        "facts": {
+            "botanical_name": "Diospyros kaki", "zone_min": 6, "zone_max": 9,
+            "layer": "understory", "sun": "full",
+            "mature_size": "10-15 ft", "spacing": "12-15 ft",
+            "soil": "Well-drained",
+        },
+        "cultivars": [
+            {"name": "IKKJ", "code": "IKKJ", "price_extra": 0.00, "qty": 3},
         ],
     },
     {
-        "sku": "TREE-SERVICEBERRY", "name": "Serviceberry",
+        "sku": "TREE-SERVICEBERRY", "code": "SERVICEBERRY", "name": "Serviceberry",
         "internal_category": "Trees", "website_category": "Trees",
         "tags": ["Wildlife", "Native", "Food Forest"],
         "list_price": 35.00,
-        "varieties": [
-            {"name": "Grafted", "price_extra": 0.00, "qty": 3},
+        "facts": {
+            "botanical_name": "Amelanchier laevis", "zone_min": 4, "zone_max": 8,
+            "layer": "understory", "sun": "partial",
+            "mature_size": "15-25 ft", "spacing": "10-15 ft",
+            "soil": "Moist, well-drained",
+        },
+        "cultivars": [
+            {"name": "Grafted", "code": "GRF", "price_extra": 0.00, "qty": 3},
         ],
     },
     {
-        # No named cultivar yet → plain product, no Variety axis. Adding the
-        # axis later (first named cultivar) is a normal attribute-line add.
-        "sku": "SHRUB-ARONIA", "name": "Aronia",
+        # No named cultivar yet -> only the Format axis. Adding cultivars later
+        # (first named cultivar) is a normal attribute-line add.
+        "sku": "SHRUB-ARONIA", "code": "ARONIA", "name": "Aronia",
         "internal_category": "Shrubs", "website_category": "Shrubs",
         "tags": ["Wildlife", "Native"],
         "list_price": 15.00,
-        "varieties": [],
+        "facts": {
+            "botanical_name": "Aronia melanocarpa", "zone_min": 3, "zone_max": 8,
+            "layer": "shrub", "sun": "full",
+            "mature_size": "3-6 ft", "spacing": "4-6 ft",
+            "soil": "Adaptable; tolerates wet",
+        },
+        "cultivars": [],
         "qty": 2,
     },
 ]
 # fmt: on
 
 ALL_TAGS = sorted({t for p in PRODUCTS for t in p["tags"]})
+FACT_FIELDS = (
+    "botanical_name",
+    "zone_min",
+    "zone_max",
+    "layer",
+    "sun",
+    "mature_size",
+    "spacing",
+    "soil",
+)
 
 
 def fail(msg: str) -> None:
@@ -156,6 +228,15 @@ def find_or_create(models, uid, model: str, domain: list, vals: dict, label: str
     new_id = call(models, uid, model, "create", [vals])
     print(f"  + created {model} '{label}' (id={new_id})")
     return new_id
+
+
+def variant_sku(product: dict, cultivar: dict | None) -> str:
+    """PEAR-MAG-PT — species code, optional cultivar code, format abbr."""
+    parts = [product["code"]]
+    if cultivar is not None:
+        parts.append(cultivar["code"])
+    parts.append(FORMAT_ABBR[FORMAT_VALUE])
+    return "-".join(parts)
 
 
 def main() -> None:
@@ -200,25 +281,31 @@ def main() -> None:
             models, uid, "product.public.category", [("name", "=", name)], {"name": name}, f"website:{name}"
         )
 
-    variety_attr = find_or_create(
+    # Cultivar + Format axes. The serializer keys on these names exactly.
+    cultivar_attr = find_or_create(
         models,
         uid,
         "product.attribute",
-        [("name", "=", VARIETY_ATTR)],
-        {"name": VARIETY_ATTR, "display_type": "select", "create_variant": "always"},
-        VARIETY_ATTR,
+        [("name", "=", CULTIVAR_ATTR)],
+        {"name": CULTIVAR_ATTR, "display_type": "select", "create_variant": "always"},
+        CULTIVAR_ATTR,
     )
-    size_attr_ids = call(models, uid, "product.attribute", "search", [[("name", "=", SIZE_ATTR)]], {"limit": 1})
-    size_val_ids = call(
+    format_attr = find_or_create(
+        models,
+        uid,
+        "product.attribute",
+        [("name", "=", FORMAT_ATTR)],
+        {"name": FORMAT_ATTR, "display_type": "radio", "create_variant": "always"},
+        FORMAT_ATTR,
+    )
+    format_value_id = find_or_create(
         models,
         uid,
         "product.attribute.value",
-        "search",
-        [[("name", "=", SIZE_VALUE), ("attribute_id", "in", size_attr_ids)]],
-        {"limit": 1},
+        [("name", "=", FORMAT_VALUE), ("attribute_id", "=", format_attr)],
+        {"name": FORMAT_VALUE, "attribute_id": format_attr},
+        f"{FORMAT_ATTR}:{FORMAT_VALUE}",
     )
-    if not (size_attr_ids and size_val_ids):
-        fail(f"Seeded attribute '{SIZE_ATTR}' / value '{SIZE_VALUE}' not found — is grove_headless installed?")
 
     # Stock location: the company warehouse's main stock location.
     wh = call(
@@ -248,31 +335,34 @@ def main() -> None:
             print(f"  SKIP {sku} — already exists (id={existing[0]}); quantities untouched")
             continue
 
-        varieties = product["varieties"]
+        cultivars = product["cultivars"]
         base = product["list_price"]
         plan = (
-            ", ".join(f"{v['name']} ${base + v['price_extra']:.0f}×{v['qty']}" for v in varieties)
+            ", ".join(f"{c['name']} ${base + c['price_extra']:.0f}×{c['qty']}" for c in cultivars)
             or f"${base:.0f}×{product['qty']}"
         )
         if DRY_RUN:
-            print(f"  + WOULD CREATE {sku} ({product['name']}): {plan}; tags={product['tags'] or '—'}")
+            tags = product["tags"] or "—"
+            print(f"  + WOULD CREATE {sku} ({product['name']}) [{FORMAT_VALUE}]: {plan}; tags={tags}")
             continue
 
-        variety_value_ids: dict[str, int] = {}
-        for v in varieties:
-            variety_value_ids[v["name"]] = find_or_create(
+        cultivar_value_ids: dict[str, int] = {}
+        for c in cultivars:
+            cultivar_value_ids[c["name"]] = find_or_create(
                 models,
                 uid,
                 "product.attribute.value",
-                [("name", "=", v["name"]), ("attribute_id", "=", variety_attr)],
-                {"name": v["name"], "attribute_id": variety_attr},
-                f"{VARIETY_ATTR}:{v['name']}",
+                [("name", "=", c["name"]), ("attribute_id", "=", cultivar_attr)],
+                {"name": c["name"], "attribute_id": cultivar_attr},
+                f"{CULTIVAR_ATTR}:{c['name']}",
             )
 
-        attribute_lines = [(0, 0, {"attribute_id": size_attr_ids[0], "value_ids": [(6, 0, size_val_ids)]})]
-        if varieties:
+        # Every template carries the Format axis; the Cultivar axis only when
+        # there are named cultivars.
+        attribute_lines = [(0, 0, {"attribute_id": format_attr, "value_ids": [(6, 0, [format_value_id])]})]
+        if cultivars:
             attribute_lines.append(
-                (0, 0, {"attribute_id": variety_attr, "value_ids": [(6, 0, list(variety_value_ids.values()))]})
+                (0, 0, {"attribute_id": cultivar_attr, "value_ids": [(6, 0, list(cultivar_value_ids.values()))]})
             )
 
         vals: dict[str, Any] = {
@@ -290,15 +380,17 @@ def main() -> None:
             "purchase_ok": True,
             "taxes_id": [(6, 0, tax_ids)],
             "attribute_line_ids": attribute_lines,
-            # grove_shipping_tier stays at its default ("potted") — this whole
-            # batch is potted stock; bareroot siblings become separate SKUs.
+            # grove_shipping_tier stays at its default ("potted"). The Format
+            # axis drives grove_effective_shipping_tier per variant, so a later
+            # "Bareroot" Format value quotes the bareroot rate automatically.
+            **{f"grove_{f}": product["facts"][f] for f in FACT_FIELDS},
         }
         tmpl_id = call(models, uid, "product.template", "create", [vals], ctx)
         print(f"  CREATE {sku} → template id={tmpl_id} ({plan})")
 
         # price_extra lives on product.template.attribute.value (per-template).
-        for v in varieties:
-            if not v["price_extra"]:
+        for c in cultivars:
+            if not c["price_extra"]:
                 continue
             ptav = call(
                 models,
@@ -308,14 +400,15 @@ def main() -> None:
                 [
                     [
                         ("product_tmpl_id", "=", tmpl_id),
-                        ("product_attribute_value_id", "=", variety_value_ids[v["name"]]),
+                        ("product_attribute_value_id", "=", cultivar_value_ids[c["name"]]),
                     ]
                 ],
             )
-            call(models, uid, "product.template.attribute.value", "write", [ptav, {"price_extra": v["price_extra"]}])
-            print(f"    price_extra {v['name']}: +${v['price_extra']:.2f}")
+            call(models, uid, "product.template.attribute.value", "write", [ptav, {"price_extra": c["price_extra"]}])
+            print(f"    price_extra {c['name']}: +${c['price_extra']:.2f}")
 
-        # Opening quantities: one quant per variant in the company warehouse.
+        # Per-variant SKU + opening quantity: one quant per variant in the
+        # company warehouse.
         variants = call(
             models,
             uid,
@@ -325,7 +418,7 @@ def main() -> None:
             {"fields": ["product_template_variant_value_ids", "display_name"]},
         )
         for variant in variants:
-            if varieties:
+            if cultivars:
                 ptav_names = call(
                     models,
                     uid,
@@ -335,12 +428,15 @@ def main() -> None:
                     {"fields": ["name"]},
                 )
                 names = {r["name"] for r in ptav_names}
-                match = next((v for v in varieties if v["name"] in names), None)
+                match = next((c for c in cultivars if c["name"] in names), None)
                 if match is None:
-                    fail(f"{sku}: variant {variant['id']} matches no variety in {names}")
+                    fail(f"{sku}: variant {variant['id']} matches no cultivar in {names}")
                 qty = match["qty"]
             else:
+                match = None
                 qty = product["qty"]
+            variant_code = variant_sku(product, match)
+            call(models, uid, "product.product", "write", [[variant["id"]], {"default_code": variant_code}])
             quant_id = call(
                 models,
                 uid,
@@ -350,7 +446,7 @@ def main() -> None:
                 {"context": {"inventory_mode": True, **ctx["context"]}},
             )
             call(models, uid, "stock.quant", "action_apply_inventory", [[quant_id]], ctx)
-            print(f"    stock {variant['display_name']}: {qty} @ location {stock_location_id}")
+            print(f"    variant {variant_code}: {qty} @ location {stock_location_id}")
 
     print("\nDone." + (" (dry run — nothing written)" if DRY_RUN else ""))
 
