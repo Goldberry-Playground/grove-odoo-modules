@@ -64,6 +64,7 @@ jobs:
           REPO: ${{ github.repository }}
           PR: ${{ github.event.workflow_run.pull_requests[0].number }}
         run: |
+          # shellcheck disable=SC2016  # GraphQL queries below use $vars in single quotes on purpose (they are GraphQL variables, not shell expansions)
           set -euo pipefail
 
           AUTHOR=$(gh pr view "$PR" --repo "$REPO" --json author -q '.author.login')
