@@ -474,17 +474,26 @@ def main() -> None:
             # commits server-side.
             import json as _json
             import urllib.request as _ureq
+
             _payload = {
-                "jsonrpc": "2.0", "method": "call",
+                "jsonrpc": "2.0",
+                "method": "call",
                 "params": {
-                    "service": "object", "method": "execute_kw",
-                    "args": [ODOO_DB, uid, ODOO_PASSWORD, "stock.quant",
-                             "action_apply_inventory", [[quant_id]], ctx],
+                    "service": "object",
+                    "method": "execute_kw",
+                    "args": [ODOO_DB, uid, ODOO_PASSWORD, "stock.quant", "action_apply_inventory", [[quant_id]], ctx],
                 },
             }
-            _r = _json.loads(_ureq.urlopen(_ureq.Request(
-                f"{ODOO_URL}/jsonrpc", data=_json.dumps(_payload).encode(),
-                headers={"Content-Type": "application/json"}), timeout=30).read())
+            _r = _json.loads(
+                _ureq.urlopen(
+                    _ureq.Request(
+                        f"{ODOO_URL}/jsonrpc",
+                        data=_json.dumps(_payload).encode(),
+                        headers={"Content-Type": "application/json"},
+                    ),
+                    timeout=30,
+                ).read()
+            )
             if _r.get("error"):
                 fail(f"action_apply_inventory jsonrpc error: {_r['error']}")
             print(f"    variant {variant_code}: {qty} @ location {stock_location_id}")
