@@ -426,13 +426,20 @@ def main() -> None:
     # path, not the seed's job. The one scoped exception is the storefront
     # use-type category (public_categ_ids), which the seed reconciles so the
     # /shop cat-bar taxonomy stays reproducible from code alone (GOL-669).
+    # Index only ACTIVE templates: on a QA/prod db that still carries the
+    # GOL-641 archived dups, `active_test: False` would pull those archived
+    # templates into the index and `setdefault` could keep an archived id
+    # (they sort ahead of the live canonical ones), so reconcile_category
+    # would target the archived dup instead of the live storefront template
+    # and spuriously report WOULD RECATEGORIZE (GOL-671). Only the live
+    # storefront template drives the /shop cat-bar, so match on active only.
     live_templates = call(
         models,
         uid,
         "product.template",
         "search_read",
-        [[("company_id", "in", [company_id, False])]],
-        {"fields": ["id", "name", "default_code"], "context": {"active_test": False}},
+        [[("company_id", "in", [company_id, False]), ("active", "=", True)]],
+        {"fields": ["id", "name", "default_code"]},
     )
     existing_by_species: dict[str, int] = {}
     for t in live_templates:
