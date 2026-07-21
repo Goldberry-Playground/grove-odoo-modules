@@ -46,8 +46,10 @@ write).
 
 from __future__ import annotations
 
+import json as _json
 import os
 import sys
+import urllib.request as _ureq
 import xmlrpc.client
 
 ODOO_URL = os.getenv("ODOO_URL", "http://localhost:8069")
@@ -127,6 +129,29 @@ def authenticate() -> tuple[xmlrpc.client.ServerProxy, int]:
 
 def call(models, uid, model, method, args, kwargs=None):
     return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, model, method, args, kwargs or {})
+
+
+def apply_inventory(uid, quant_id, ctx) -> None:
+    """``stock.quant.action_apply_inventory`` returns None, which Odoo's XML-RPC
+    marshaller rejects ("cannot marshal None ..."). Call it over JSON-RPC, which
+    serialises null cleanly and still commits server-side (mirrors the seed)."""
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "call",
+        "params": {
+            "service": "object",
+            "method": "execute_kw",
+            "args": [ODOO_DB, uid, ODOO_PASSWORD, "stock.quant", "action_apply_inventory", [[quant_id]], {"context": ctx}],
+        },
+    }
+    r = _json.loads(
+        _ureq.urlopen(
+            _ureq.Request(f"{ODOO_URL}/jsonrpc", data=_json.dumps(payload).encode(), headers={"Content-Type": "application/json"}),
+            timeout=30,
+        ).read()
+    )
+    if r.get("error"):
+        fail(f"action_apply_inventory jsonrpc error: {r['error']}")
 
 
 class Odoo:
@@ -291,7 +316,7 @@ def add_cultivar(o: Odoo, original_id: int, name: str, price_extra: float, qty: 
                 [{"product_id": v["id"], "location_id": o.stock_location_id, "inventory_quantity": qty}],
                 {"context": {"inventory_mode": True, **o.ctx}},
             )
-            o.c("stock.quant", "action_apply_inventory", [[quant_id]], {"context": o.ctx})
+            apply_inventory(o.uid, quant_id, o.ctx)
         print(f"      + added '{name}' -> variant {code} ({fmt}) qty={qty if fmt == 'Potted' else 0}")
 
 
