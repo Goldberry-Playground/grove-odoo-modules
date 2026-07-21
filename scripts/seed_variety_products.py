@@ -31,9 +31,14 @@ This batch is potted stock only, so every template gets a single Format value
 SAME template (a normal attribute-value add) — NOT a separate template — so
 ``grove_effective_shipping_tier`` resolves them to the bareroot rate.
 
-Idempotent per template SKU: an existing (default_code, company) template is
-skipped entirely — including its quantities — so re-running never clobbers
-stock that has since moved. To re-seed one product, archive it in Odoo first.
+Idempotent per SPECIES within the company: if a template of the same species
+name already exists (case/whitespace-insensitive — 'Serviceberry' matches the
+canonical 'Service Berry'), it is skipped entirely — including its quantities —
+so re-running never clobbers stock or forks a duplicate template (the GOL-641
+regression, where SKU-only matching created parallel 178-182 templates). A
+prior run's own default_code is still honoured as a secondary guard. Extending
+an existing species (new cultivars, merged stock) is the remediation path's
+job, not the seed's. To re-seed one product, archive it in Odoo first.
 
 Usage
 -----
@@ -236,6 +241,19 @@ def find_or_create(models, uid, model: str, domain: list, vals: dict, label: str
     return new_id
 
 
+def norm_species(name: str) -> str:
+    """Normalise a species name for matching against live templates.
+
+    The live catalog carries the canonical templates (id 148-169) with names
+    like 'Service Berry' and no ``default_code``. Matching on the script's own
+    SKU (``TREE-SERVICEBERRY``) never hit them, so a re-run forked a parallel
+    'Serviceberry' template (grove_slug auto-suffixed) — the GOL-641 dup bug.
+    Collapse case and every non-alphanumeric char so 'Serviceberry' and
+    'Service Berry' both key to ``serviceberry``.
+    """
+    return "".join(ch for ch in name.lower() if ch.isalnum())
+
+
 def variant_sku(product: dict, cultivar: dict | None) -> str:
     """PEAR-MAG-PT — species code, optional cultivar code, format abbr."""
     parts = [product["code"]]
@@ -343,9 +361,36 @@ def main() -> None:
         fail(f"No warehouse for company {company_id}")
     stock_location_id = wh[0]["lot_stock_id"][0]
 
+    # Species-name index of every live template in this company. The seed must
+    # match the CANONICAL template by species (148-169) — not by its own SKU —
+    # or it forks a duplicate on every re-run (GOL-641). We do not mutate a
+    # canonical template here: extending an existing species (adding cultivars,
+    # merging stock) is the dedicated remediation path, not the seed's job.
+    live_templates = call(
+        models,
+        uid,
+        "product.template",
+        "search_read",
+        [[("company_id", "in", [company_id, False])]],
+        {"fields": ["id", "name", "default_code"], "context": {"active_test": False}},
+    )
+    existing_by_species: dict[str, int] = {}
+    for t in live_templates:
+        existing_by_species.setdefault(norm_species(t["name"]), t["id"])
+
     print("\n── Products ──")
     for product in PRODUCTS:
         sku = product["sku"]
+        species = norm_species(product["name"])
+        if species in existing_by_species:
+            print(
+                f"  SKIP {product['name']} ({sku}) — canonical template already "
+                f"exists (id={existing_by_species[species]}); not forking a "
+                f"duplicate. Extend it via the remediation path, not the seed."
+            )
+            continue
+        # Belt-and-suspenders: a prior run of THIS script (matched by its own
+        # SKU) — keeps the seed idempotent for species it legitimately created.
         existing = call(
             models,
             uid,
