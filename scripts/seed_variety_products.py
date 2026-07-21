@@ -15,9 +15,14 @@ API v1 (``_structure_variant``) serialises:
 
 The axis names MUST be exactly ``Cultivar`` and ``Format`` — the serializer
 keys on them by name, so a "Variety"/"Size" axis would come back empty and
-break the cultivar selector. Type browsing (Trees / Shrubs / Vines) rides
-website public categories, which ``/grove/api/v1/products?category_id=``
-filters on.
+break the cultivar selector. Storefront type browsing rides website public
+categories, which ``/grove/api/v1/products?category_id=`` (and its slug twin
+``?cat=<slug>``) filter on. Josh 2026-07-21 (GOL-658) locked the storefront
+cat-bar taxonomy to five *use-type* categories — Fruit Trees, Berries, Nut
+Trees, Fruiting Vines, Natives & Ornamentals — which are DECOUPLED from the
+internal accounting category (Trees / Shrubs / Vines). ``website_category``
+carries the use-type; ``internal_category`` stays the growth-habit accounting
+bucket.
 
 Also sets what the CSV importer does not: the ``grove_*`` growing-facts block
 (botanical name, USDA zone range, food-forest layer, sun, mature size,
@@ -72,8 +77,11 @@ FORMAT_ATTR = "Format"
 FORMAT_VALUE = "Potted"
 FORMAT_ABBR = {"Potted": "PT", "Bareroot": "BR"}
 
-# Website categories are the storefront browse/filter layer (Layer 1: Type).
-# Internal categ_id stays the accounting/valuation category.
+# Website categories are the storefront browse/filter layer (the /shop cat-bar,
+# GOL-658): Josh's five use-type buckets — "Fruit Trees", "Berries", "Nut
+# Trees", "Fruiting Vines", "Natives & Ornamentals". slugify() maps each to the
+# cat-bar slug (e.g. "Natives & Ornamentals" -> "natives-ornamentals"). Internal
+# categ_id stays the accounting/valuation category (growth habit).
 #
 # facts: the grove_* growing-facts block (2026-07-13 catalog spec). Best-effort
 # horticultural values for USDA zone 6 (Appalachian WV); pending nursery
@@ -86,7 +94,7 @@ FORMAT_ABBR = {"Potted": "PT", "Bareroot": "BR"}
 PRODUCTS: list[dict[str, Any]] = [
     {
         "sku": "VINE-KIWI", "code": "KIWI", "name": "Kiwi",
-        "internal_category": "Vines", "website_category": "Vines",
+        "internal_category": "Vines", "website_category": "Fruiting Vines",
         "tags": ["Food Forest", "Silvopasture"],
         "list_price": 12.00,  # base = wild type
         "facts": {
@@ -102,7 +110,7 @@ PRODUCTS: list[dict[str, Any]] = [
     },
     {
         "sku": "SHRUB-FIG", "code": "FIG", "name": "Fig",
-        "internal_category": "Shrubs", "website_category": "Shrubs",
+        "internal_category": "Shrubs", "website_category": "Fruit Trees",
         "tags": ["Food Forest", "Silvopasture"],
         "list_price": 15.00,  # base = wild fig
         "facts": {
@@ -119,7 +127,7 @@ PRODUCTS: list[dict[str, Any]] = [
     },
     {
         "sku": "TREE-PEAR", "code": "PEAR", "name": "Pear",
-        "internal_category": "Trees", "website_category": "Trees",
+        "internal_category": "Trees", "website_category": "Fruit Trees",
         "tags": [],
         "list_price": 35.00,  # all grafted cultivars, flat price
         "facts": {
@@ -136,7 +144,7 @@ PRODUCTS: list[dict[str, Any]] = [
     },
     {
         "sku": "TREE-PERSIMMON", "code": "PERSIMMON", "name": "Persimmon",
-        "internal_category": "Trees", "website_category": "Trees",
+        "internal_category": "Trees", "website_category": "Fruit Trees",
         "tags": ["Food Forest", "Silvopasture"],
         # Josh 2026-07-20 pricing gate (GOL-639): $40 grafted / $12 non-grafted.
         # base = non-grafted seedling; the grafted named cultivar adds the delta.
@@ -154,7 +162,7 @@ PRODUCTS: list[dict[str, Any]] = [
     },
     {
         "sku": "TREE-SERVICEBERRY", "code": "SERVICEBERRY", "name": "Serviceberry",
-        "internal_category": "Trees", "website_category": "Trees",
+        "internal_category": "Trees", "website_category": "Berries",
         "tags": ["Wildlife", "Native", "Food Forest"],
         # Josh 2026-07-20 pricing gate (GOL-639): $35 grafted / $12 non-grafted.
         # base = non-grafted seedling; the grafted cultivar adds the delta.
@@ -174,7 +182,7 @@ PRODUCTS: list[dict[str, Any]] = [
         # No named cultivar yet -> only the Format axis. Adding cultivars later
         # (first named cultivar) is a normal attribute-line add.
         "sku": "SHRUB-ARONIA", "code": "ARONIA", "name": "Aronia",
-        "internal_category": "Shrubs", "website_category": "Shrubs",
+        "internal_category": "Shrubs", "website_category": "Berries",
         "tags": ["Wildlife", "Native"],
         "list_price": 15.00,
         "facts": {
@@ -355,7 +363,26 @@ def main() -> None:
             {"limit": 1},
         )
         if existing:
-            print(f"  SKIP {sku} — already exists (id={existing[0]}); quantities untouched")
+            # Idempotent for stock/price (never re-touch quantities that may have
+            # moved), but DO reconcile the storefront category so a taxonomy change
+            # (GOL-658: Trees/Shrubs/Vines -> Josh's use-type buckets) lands on
+            # products seeded by an earlier run without archiving them. This is a
+            # cheap read-then-set: only writes when the category actually differs.
+            want_cat = website_cat[product["website_category"]]
+            cur = call(models, uid, "product.template", "read", [[existing[0]], ["public_categ_ids"]])[0]
+            if cur["public_categ_ids"] == [want_cat]:
+                print(f"  SKIP {sku} — already exists (id={existing[0]}); category '{product['website_category']}' ok")
+            elif DRY_RUN:
+                print(f"  ~ WOULD RECATEGORIZE {sku} (id={existing[0]}) -> '{product['website_category']}'")
+            else:
+                call(
+                    models,
+                    uid,
+                    "product.template",
+                    "write",
+                    [[existing[0]], {"public_categ_ids": [(6, 0, [want_cat])]}],
+                )
+                print(f"  ~ RECATEGORIZED {sku} (id={existing[0]}) -> '{product['website_category']}'")
             continue
 
         cultivars = product["cultivars"]
