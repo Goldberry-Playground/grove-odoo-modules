@@ -116,8 +116,8 @@ FORMAT_ABBR = {"Potted": "PT", "Bareroot": "BR"}
 POTTED_NON_GRAFTED = 15.00
 POTTED_GRAFTED = 38.00
 POTTED_PREMIUM = 42.00  # persimmon, future pawpaw
-POTTED_KIWI = 12.00     # Josh override — below the non-grafted base
-POTTED_FIG = 35.00      # Josh — ~3yr fig plants
+POTTED_KIWI = 12.00  # Josh override — below the non-grafted base
+POTTED_FIG = 35.00  # Josh — ~3yr fig plants
 # fmt: off
 PRODUCTS: list[dict[str, Any]] = [
     {

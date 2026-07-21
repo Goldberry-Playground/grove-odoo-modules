@@ -93,16 +93,28 @@ ROYAL_ORPHAN_ID = 166
 # exact in BOTH formats ($40 BR / $42 PT differ by $2, base delta is $3), so
 # IKKJ resolves to $39 BR / $42 PT — potted (the seeded batch) is exact.
 PRICE_FIX = {
-    158: {"list_price": 12.00, "bareroot_delta": -2.00,
-          "cultivar_extras": {"Fairchild (male pollinator)": 0.00}},          # Kiwi flat
-    155: {"list_price": 35.00, "bareroot_delta": -5.00,
-          "cultivar_extras": {"LSU Champagne": 0.00, "Exquisito": 0.00}},     # Fig flat
+    158: {
+        "list_price": 12.00,
+        "bareroot_delta": -2.00,
+        "cultivar_extras": {"Fairchild (male pollinator)": 0.00},
+    },  # Kiwi flat
+    155: {
+        "list_price": 35.00,
+        "bareroot_delta": -5.00,
+        "cultivar_extras": {"LSU Champagne": 0.00, "Exquisito": 0.00},
+    },  # Fig flat
     162: {"list_price": 38.00, "bareroot_delta": -3.00, "cultivar_extras": {}},  # Pear grafted flat
-    163: {"list_price": 15.00, "bareroot_delta": -3.00,
-          "cultivar_extras": {"IKKJ": 27.00}},                               # Persimmon; IKKJ -> $42 PT
-    168: {"list_price": 15.00, "bareroot_delta": -3.00,
-          "cultivar_extras": {"Grafted": 23.00}},                            # Serviceberry; grafted -> $38 PT
-    183: {"list_price": 15.00, "bareroot_delta": None, "cultivar_extras": {}},   # Aronia (Potted-only)
+    163: {
+        "list_price": 15.00,
+        "bareroot_delta": -3.00,
+        "cultivar_extras": {"IKKJ": 27.00},
+    },  # Persimmon; IKKJ -> $42 PT
+    168: {
+        "list_price": 15.00,
+        "bareroot_delta": -3.00,
+        "cultivar_extras": {"Grafted": 23.00},
+    },  # Serviceberry; grafted -> $38 PT
+    183: {"list_price": 15.00, "bareroot_delta": None, "cultivar_extras": {}},  # Aronia (Potted-only)
 }
 
 
@@ -142,8 +154,13 @@ def apply_inventory(uid, quant_id, ctx) -> None:
             "service": "object",
             "method": "execute_kw",
             "args": [
-                ODOO_DB, uid, ODOO_PASSWORD,
-                "stock.quant", "action_apply_inventory", [[quant_id]], {"context": ctx},
+                ODOO_DB,
+                uid,
+                ODOO_PASSWORD,
+                "stock.quant",
+                "action_apply_inventory",
+                [[quant_id]],
+                {"context": ctx},
             ],
         },
     }
