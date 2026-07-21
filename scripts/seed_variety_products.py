@@ -298,6 +298,28 @@ def variant_sku(product: dict, cultivar: dict | None) -> str:
     return "-".join(parts)
 
 
+def reconcile_category(models, uid, tmpl_id: int, want_cat: int, label: str, want_name: str) -> None:
+    """Set an existing template's storefront category to exactly ``want_cat``.
+
+    A cheap read-then-set that ONLY reconciles ``public_categ_ids`` (the /shop
+    cat-bar use-type taxonomy, GOL-658) and touches nothing else — never stock,
+    price, cultivars, or the internal accounting ``categ_id``. Writes only when
+    the category actually differs, so a converged catalog is a no-op re-run.
+    Both re-run branches (a live canonical template matched by species name, and
+    a prior seed run matched by its own ``default_code``) funnel through here so
+    the taxonomy is idempotently reproducible from code alone — Terra no longer
+    has to hand-write categories after a fresh QA rebuild (GOL-669).
+    """
+    cur = call(models, uid, "product.template", "read", [[tmpl_id], ["public_categ_ids"]])[0]
+    if cur["public_categ_ids"] == [want_cat]:
+        print(f"  = {label} (id={tmpl_id}) category '{want_name}' ok")
+    elif DRY_RUN:
+        print(f"  ~ WOULD RECATEGORIZE {label} (id={tmpl_id}) -> '{want_name}'")
+    else:
+        call(models, uid, "product.template", "write", [[tmpl_id], {"public_categ_ids": [(6, 0, [want_cat])]}])
+        print(f"  ~ RECATEGORIZED {label} (id={tmpl_id}) -> '{want_name}'")
+
+
 def main() -> None:
     print(f"Target: {ODOO_URL} db={ODOO_DB} company={COMPANY_NAME}  DRY_RUN={'yes' if DRY_RUN else 'NO — LIVE'}")
     models, uid = authenticate()
@@ -399,8 +421,11 @@ def main() -> None:
     # Species-name index of every live template in this company. The seed must
     # match the CANONICAL template by species (148-169) — not by its own SKU —
     # or it forks a duplicate on every re-run (GOL-641). We do not mutate a
-    # canonical template here: extending an existing species (adding cultivars,
-    # merging stock) is the dedicated remediation path, not the seed's job.
+    # canonical template's stock/price/cultivars here: extending an existing
+    # species (adding cultivars, merging stock) is the dedicated remediation
+    # path, not the seed's job. The one scoped exception is the storefront
+    # use-type category (public_categ_ids), which the seed reconciles so the
+    # /shop cat-bar taxonomy stays reproducible from code alone (GOL-669).
     live_templates = call(
         models,
         uid,
@@ -418,10 +443,27 @@ def main() -> None:
         sku = product["sku"]
         species = norm_species(product["name"])
         if species in existing_by_species:
+            tmpl_id = existing_by_species[species]
             print(
                 f"  SKIP {product['name']} ({sku}) — canonical template already "
-                f"exists (id={existing_by_species[species]}); not forking a "
-                f"duplicate. Extend it via the remediation path, not the seed."
+                f"exists (id={tmpl_id}); not forking a duplicate. Extend it via "
+                f"the remediation path, not the seed."
+            )
+            # After GOL-641's dup-merge the 6 real templates (155 Fig / 158 Kiwi
+            # / 162 Pear / 163 Persimmon / 168 Service Berry / 183 Aronia) are the
+            # demo templates with NO default_code, so they hit THIS species branch
+            # first and would otherwise never receive their use-type category —
+            # leaving the /shop cat-bar taxonomy unreproducible from code (GOL-669,
+            # which Terra previously had to hand-remediate). Reconcile the storefront
+            # category (only) here too. This is a scoped exception to "don't mutate a
+            # canonical template": price/stock/cultivars stay untouched.
+            reconcile_category(
+                models,
+                uid,
+                tmpl_id,
+                website_cat[product["website_category"]],
+                product["name"],
+                product["website_category"],
             )
             continue
         # Belt-and-suspenders: a prior run of THIS script (matched by its own
@@ -438,23 +480,15 @@ def main() -> None:
             # Idempotent for stock/price (never re-touch quantities that may have
             # moved), but DO reconcile the storefront category so a taxonomy change
             # (GOL-658: Trees/Shrubs/Vines -> Josh's use-type buckets) lands on
-            # products seeded by an earlier run without archiving them. This is a
-            # cheap read-then-set: only writes when the category actually differs.
-            want_cat = website_cat[product["website_category"]]
-            cur = call(models, uid, "product.template", "read", [[existing[0]], ["public_categ_ids"]])[0]
-            if cur["public_categ_ids"] == [want_cat]:
-                print(f"  SKIP {sku} — already exists (id={existing[0]}); category '{product['website_category']}' ok")
-            elif DRY_RUN:
-                print(f"  ~ WOULD RECATEGORIZE {sku} (id={existing[0]}) -> '{product['website_category']}'")
-            else:
-                call(
-                    models,
-                    uid,
-                    "product.template",
-                    "write",
-                    [[existing[0]], {"public_categ_ids": [(6, 0, [want_cat])]}],
-                )
-                print(f"  ~ RECATEGORIZED {sku} (id={existing[0]}) -> '{product['website_category']}'")
+            # products seeded by an earlier run without archiving them.
+            reconcile_category(
+                models,
+                uid,
+                existing[0],
+                website_cat[product["website_category"]],
+                sku,
+                product["website_category"],
+            )
             continue
 
         cultivars = product["cultivars"]
