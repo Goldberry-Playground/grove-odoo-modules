@@ -178,7 +178,8 @@ PRODUCTS: list[dict[str, Any]] = [
         },
         "cultivars": [
             {"name": "Seedling", "code": "SDL", "price_extra": 0.00, "qty": 2},
-            {"name": "IKKJ", "code": "IKKJ", "price_extra": POTTED_PREMIUM - POTTED_NON_GRAFTED, "qty": 3},  # +$27 -> $42
+            # +$27 -> $42
+            {"name": "IKKJ", "code": "IKKJ", "price_extra": POTTED_PREMIUM - POTTED_NON_GRAFTED, "qty": 3},
         ],
     },
     {
@@ -196,7 +197,8 @@ PRODUCTS: list[dict[str, Any]] = [
         },
         "cultivars": [
             {"name": "Seedling", "code": "SDL", "price_extra": 0.00, "qty": 2},
-            {"name": "Grafted", "code": "GRF", "price_extra": POTTED_GRAFTED - POTTED_NON_GRAFTED, "qty": 3},  # +$23 -> $38
+            # +$23 -> $38
+            {"name": "Grafted", "code": "GRF", "price_extra": POTTED_GRAFTED - POTTED_NON_GRAFTED, "qty": 3},
         ],
     },
     {

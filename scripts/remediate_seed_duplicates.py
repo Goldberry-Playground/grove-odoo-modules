@@ -49,7 +49,6 @@ from __future__ import annotations
 import os
 import sys
 import xmlrpc.client
-from typing import Any
 
 ODOO_URL = os.getenv("ODOO_URL", "http://localhost:8069")
 ODOO_DB = os.getenv("ODOO_DB", "odoo")
