@@ -101,6 +101,22 @@ def _json_response(data, status=200):
     )
 
 
+def _image_url(model, record, size):
+    """Return the ``/web/image`` path for ``record``'s image at ``size``, or None.
+
+    Odoo's ``/web/image/...`` route serves its OWN gray placeholder PNG at HTTP
+    200 for records with no image, so the storefront can't tell an imageless
+    product apart from a real one (a valid 200 image, so the frontend's onError
+    never fires). Gating on the image field's truthiness lets us emit null and
+    hand imageless products to the frontend's branded botanical placeholder.
+
+    ``size`` (e.g. ``"image_128"``) doubles as the presence gate: every image
+    size derives from ``image_1920``, and the served field is already loaded, so
+    checking it avoids reading extra image bytes.
+    """
+    return f"/web/image/{model}/{record.id}/{size}" if record[size] else None
+
+
 def _serialize_product(product, fields):
     """Read a product recordset into a plain dict safe for JSON."""
     vals = product.read(fields)
@@ -143,7 +159,7 @@ def _structure_variant(variant):
         "price": variant.lst_price,
         "qty_available": variant.qty_available,
         "shipping_tier": variant.grove_effective_shipping_tier,
-        "image_url": f"/web/image/product.product/{variant.id}/image_128",
+        "image_url": _image_url("product.product", variant, "image_128"),
     }
 
 
@@ -226,7 +242,7 @@ class GroveHeadlessAPI(http.Controller):
         for product in products:
             data = _serialize_product(product, PRODUCT_LIST_FIELDS)
             if data:
-                data["image_url"] = f"/web/image/product.template/{product.id}/image_128"
+                data["image_url"] = _image_url("product.template", product, "image_128")
                 data["slug"] = data.pop("grove_slug", "") or ""
                 data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
                 data["categories"] = [
@@ -278,7 +294,7 @@ class GroveHeadlessAPI(http.Controller):
 
         detail_fields = PRODUCT_DETAIL_FIELDS + _available_fields(product, OPTIONAL_STOCK_FIELDS)
         data = _serialize_product(product, detail_fields)
-        data["image_url"] = f"/web/image/product.template/{product.id}/image_1920"
+        data["image_url"] = _image_url("product.template", product, "image_1920")
         data["variants"] = [_structure_variant(v) for v in product.product_variant_ids]
         data["facts"] = _serialize_facts(product)
         data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
@@ -336,7 +352,7 @@ class GroveHeadlessAPI(http.Controller):
                     "quantity": line.product_uom_qty,
                     "price_unit": line.price_unit,
                     "price_subtotal": line.price_subtotal,
-                    "image_url": f"/web/image/product.product/{line.product_id.id}/image_128",
+                    "image_url": _image_url("product.product", line.product_id, "image_128"),
                 }
             )
 

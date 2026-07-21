@@ -1,11 +1,15 @@
 """Detail serializer: facts block + structured variants (catalog spec)."""
 
 from odoo.addons.grove_headless.controllers.main import (
+    _image_url,
     _serialize_facts,
     _serialize_images,
     _structure_variant,
 )
 from odoo.tests import TransactionCase, tagged
+
+# 1x1 transparent PNG.
+_PNG_1X1 = b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 
 
 @tagged("post_install", "-at_install")
@@ -56,3 +60,30 @@ class TestDetailSerialization(TransactionCase):
         images = _serialize_images(self.tmpl)
         self.assertEqual(images[0]["url"], f"/web/image/product.template/{self.tmpl.id}/image_1024")
         self.assertEqual(images[0]["thumb_url"], f"/web/image/product.template/{self.tmpl.id}/image_256")
+
+    def test_image_url_null_when_empty(self):
+        # Imageless product: list/detail image_url must be null, not the gray
+        # placeholder PNG Odoo's /web/image route serves at HTTP 200 (GOL-684),
+        # so the frontend can render its branded botanical placeholder.
+        self.assertIsNone(_image_url("product.template", self.tmpl, "image_128"))
+        self.assertIsNone(_image_url("product.template", self.tmpl, "image_1920"))
+        # A variant with no image (template also imageless) is null too.
+        variant = self.tmpl.product_variant_ids[0]
+        self.assertIsNone(_structure_variant(variant)["image_url"])
+
+    def test_image_url_present_when_set(self):
+        self.tmpl.image_1920 = _PNG_1X1
+        self.assertEqual(
+            _image_url("product.template", self.tmpl, "image_128"),
+            f"/web/image/product.template/{self.tmpl.id}/image_128",
+        )
+        self.assertEqual(
+            _image_url("product.template", self.tmpl, "image_1920"),
+            f"/web/image/product.template/{self.tmpl.id}/image_1920",
+        )
+        variant = self.tmpl.product_variant_ids[0]
+        variant.image_variant_1920 = _PNG_1X1
+        self.assertEqual(
+            _structure_variant(variant)["image_url"],
+            f"/web/image/product.product/{variant.id}/image_128",
+        )
