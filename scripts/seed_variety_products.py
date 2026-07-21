@@ -106,18 +106,25 @@ FORMAT_ABBR = {"Potted": "PT", "Bareroot": "BR"}
 # Encoded as: base list_price = non-grafted potted ($15); grafted cultivar
 # price_extra = +$23 (-> $38); premium (persimmon IKKJ) price_extra = +$27
 # (-> $42). Pear is grafted-only (no non-grafted variant) so its base IS $38.
-# Named-cultivar premiums (Kiwi Fairchild, Fig LSU/Exquisito) are NOT part of
-# Josh's graft rule and remain pending his confirmation — see GOL-641.
+#
+# Josh RESOLVED the two open per-cultivar premiums (interaction 6562c79b,
+# 2026-07-21 16:19):
+#   • Kiwi   — flat $10 BR / $12 PT; NO Fairchild pollinator premium.
+#   • Fig    — flat $30 BR / $35 PT (plants are ~3yr old, hence above base);
+#              NO LSU Champagne / Exquisito surcharge.
+# So Kiwi and Fig carry their own potted bases and all their cultivars are $0.
 POTTED_NON_GRAFTED = 15.00
 POTTED_GRAFTED = 38.00
 POTTED_PREMIUM = 42.00  # persimmon, future pawpaw
+POTTED_KIWI = 12.00  # Josh override — below the non-grafted base
+POTTED_FIG = 35.00  # Josh — ~3yr fig plants
 # fmt: off
 PRODUCTS: list[dict[str, Any]] = [
     {
         "sku": "VINE-KIWI", "code": "KIWI", "name": "Kiwi",
         "internal_category": "Vines", "website_category": "Fruiting Vines",
         "tags": ["Food Forest", "Silvopasture"],
-        "list_price": POTTED_NON_GRAFTED,  # $15 potted non-grafted (was $12 bareroot)
+        "list_price": POTTED_KIWI,  # $12 potted flat (Josh: $10 BR / $12 PT)
         "facts": {
             "botanical_name": "Actinidia arguta", "zone_min": 4, "zone_max": 8,
             "layer": "vine", "sun": "partial",
@@ -126,14 +133,15 @@ PRODUCTS: list[dict[str, Any]] = [
         },
         "cultivars": [
             {"name": "Wild", "code": "WLD", "price_extra": 0.00, "qty": 2},
-            {"name": "Fairchild (male pollinator)", "code": "FCH", "price_extra": 4.00, "qty": 1},
+            # Josh 6562c79b: no pollinator premium — Fairchild is flat $12 too.
+            {"name": "Fairchild (male pollinator)", "code": "FCH", "price_extra": 0.00, "qty": 1},
         ],
     },
     {
         "sku": "SHRUB-FIG", "code": "FIG", "name": "Fig",
         "internal_category": "Shrubs", "website_category": "Fruit Trees",
         "tags": ["Food Forest", "Silvopasture"],
-        "list_price": POTTED_NON_GRAFTED,  # $15 potted non-grafted
+        "list_price": POTTED_FIG,  # $35 potted flat (Josh: ~3yr plants, $30 BR / $35 PT)
         "facts": {
             "botanical_name": "Ficus carica", "zone_min": 7, "zone_max": 9,
             "layer": "shrub", "sun": "full",
@@ -141,9 +149,10 @@ PRODUCTS: list[dict[str, Any]] = [
             "soil": "Well-drained",
         },
         "cultivars": [
+            # Josh 6562c79b: all figs flat $35 potted — no cultivar surcharge.
             {"name": "Wild", "code": "WLD", "price_extra": 0.00, "qty": 3},
-            {"name": "LSU Champagne", "code": "LSU", "price_extra": 15.00, "qty": 1},
-            {"name": "Exquisito", "code": "EXQ", "price_extra": 15.00, "qty": 1},
+            {"name": "LSU Champagne", "code": "LSU", "price_extra": 0.00, "qty": 1},
+            {"name": "Exquisito", "code": "EXQ", "price_extra": 0.00, "qty": 1},
         ],
     },
     {
