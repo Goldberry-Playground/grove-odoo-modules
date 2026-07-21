@@ -87,13 +87,29 @@ FORMAT_ABBR = {"Potted": "PT", "Bareroot": "BR"}
 #
 # code: the species prefix for per-variant SKUs (PEAR-MAG-PT); cultivar.code
 # is the middle segment.
+#
+# AUTHORITATIVE PRICING MODEL — Josh 2026-07-21 (GOL-641 comment). The earlier
+# GOL-639 numbers used bareroot figures as the potted base ("lost in
+# translation"); this batch is Potted-only, so list_price/base MUST be the
+# POTTED column. Potted = Bareroot + $3.00, uniformly:
+#     Non-grafted 1yr:            $12 bareroot / $15 potted
+#     Grafted:                    $35 bareroot / $38 potted
+#     Persimmon/Pawpaw (premium): $40 bareroot / $42 potted
+# Encoded as: base list_price = non-grafted potted ($15); grafted cultivar
+# price_extra = +$23 (-> $38); premium (persimmon IKKJ) price_extra = +$27
+# (-> $42). Pear is grafted-only (no non-grafted variant) so its base IS $38.
+# Named-cultivar premiums (Kiwi Fairchild, Fig LSU/Exquisito) are NOT part of
+# Josh's graft rule and remain pending his confirmation — see GOL-641.
+POTTED_NON_GRAFTED = 15.00
+POTTED_GRAFTED = 38.00
+POTTED_PREMIUM = 42.00  # persimmon, future pawpaw
 # fmt: off
 PRODUCTS: list[dict[str, Any]] = [
     {
         "sku": "VINE-KIWI", "code": "KIWI", "name": "Kiwi",
         "internal_category": "Vines", "website_category": "Vines",
         "tags": ["Food Forest", "Silvopasture"],
-        "list_price": 12.00,  # base = wild type
+        "list_price": POTTED_NON_GRAFTED,  # $15 potted non-grafted (was $12 bareroot)
         "facts": {
             "botanical_name": "Actinidia arguta", "zone_min": 4, "zone_max": 8,
             "layer": "vine", "sun": "partial",
@@ -109,7 +125,7 @@ PRODUCTS: list[dict[str, Any]] = [
         "sku": "SHRUB-FIG", "code": "FIG", "name": "Fig",
         "internal_category": "Shrubs", "website_category": "Shrubs",
         "tags": ["Food Forest", "Silvopasture"],
-        "list_price": 15.00,  # base = wild fig
+        "list_price": POTTED_NON_GRAFTED,  # $15 potted non-grafted
         "facts": {
             "botanical_name": "Ficus carica", "zone_min": 7, "zone_max": 9,
             "layer": "shrub", "sun": "full",
@@ -126,7 +142,7 @@ PRODUCTS: list[dict[str, Any]] = [
         "sku": "TREE-PEAR", "code": "PEAR", "name": "Pear",
         "internal_category": "Trees", "website_category": "Trees",
         "tags": [],
-        "list_price": 35.00,  # all grafted cultivars, flat price
+        "list_price": POTTED_GRAFTED,  # $38 potted grafted, flat (was $35 bareroot)
         "facts": {
             "botanical_name": "Pyrus communis", "zone_min": 4, "zone_max": 8,
             "layer": "canopy", "sun": "full",
@@ -143,9 +159,9 @@ PRODUCTS: list[dict[str, Any]] = [
         "sku": "TREE-PERSIMMON", "code": "PERSIMMON", "name": "Persimmon",
         "internal_category": "Trees", "website_category": "Trees",
         "tags": ["Food Forest", "Silvopasture"],
-        # Josh 2026-07-20 pricing gate (GOL-639): $40 grafted / $12 non-grafted.
-        # base = non-grafted seedling; the grafted named cultivar adds the delta.
-        "list_price": 12.00,
+        # Josh 2026-07-21 (GOL-641): persimmon is the premium exception.
+        # base = non-grafted seedling potted ($15); IKKJ (grafted) -> $42 potted.
+        "list_price": POTTED_NON_GRAFTED,
         "facts": {
             "botanical_name": "Diospyros kaki", "zone_min": 6, "zone_max": 9,
             "layer": "understory", "sun": "full",
@@ -154,16 +170,16 @@ PRODUCTS: list[dict[str, Any]] = [
         },
         "cultivars": [
             {"name": "Seedling", "code": "SDL", "price_extra": 0.00, "qty": 2},
-            {"name": "IKKJ", "code": "IKKJ", "price_extra": 28.00, "qty": 3},
+            {"name": "IKKJ", "code": "IKKJ", "price_extra": POTTED_PREMIUM - POTTED_NON_GRAFTED, "qty": 3},  # +$27 -> $42
         ],
     },
     {
         "sku": "TREE-SERVICEBERRY", "code": "SERVICEBERRY", "name": "Serviceberry",
         "internal_category": "Trees", "website_category": "Trees",
         "tags": ["Wildlife", "Native", "Food Forest"],
-        # Josh 2026-07-20 pricing gate (GOL-639): $35 grafted / $12 non-grafted.
-        # base = non-grafted seedling; the grafted cultivar adds the delta.
-        "list_price": 12.00,
+        # Josh 2026-07-21 (GOL-641): base = non-grafted seedling potted ($15);
+        # the grafted cultivar adds +$23 -> $38 potted grafted.
+        "list_price": POTTED_NON_GRAFTED,
         "facts": {
             "botanical_name": "Amelanchier laevis", "zone_min": 4, "zone_max": 8,
             "layer": "understory", "sun": "partial",
@@ -172,7 +188,7 @@ PRODUCTS: list[dict[str, Any]] = [
         },
         "cultivars": [
             {"name": "Seedling", "code": "SDL", "price_extra": 0.00, "qty": 2},
-            {"name": "Grafted", "code": "GRF", "price_extra": 23.00, "qty": 3},
+            {"name": "Grafted", "code": "GRF", "price_extra": POTTED_GRAFTED - POTTED_NON_GRAFTED, "qty": 3},  # +$23 -> $38
         ],
     },
     {
@@ -181,7 +197,7 @@ PRODUCTS: list[dict[str, Any]] = [
         "sku": "SHRUB-ARONIA", "code": "ARONIA", "name": "Aronia",
         "internal_category": "Shrubs", "website_category": "Shrubs",
         "tags": ["Wildlife", "Native"],
-        "list_price": 15.00,
+        "list_price": POTTED_NON_GRAFTED,  # $15 potted non-grafted shrub
         "facts": {
             "botanical_name": "Aronia melanocarpa", "zone_min": 3, "zone_max": 8,
             "layer": "shrub", "sun": "full",
