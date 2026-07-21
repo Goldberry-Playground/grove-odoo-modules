@@ -36,9 +36,14 @@ This batch is potted stock only, so every template gets a single Format value
 SAME template (a normal attribute-value add) — NOT a separate template — so
 ``grove_effective_shipping_tier`` resolves them to the bareroot rate.
 
-Idempotent per template SKU: an existing (default_code, company) template is
-skipped entirely — including its quantities — so re-running never clobbers
-stock that has since moved. To re-seed one product, archive it in Odoo first.
+Idempotent per SPECIES within the company: if a template of the same species
+name already exists (case/whitespace-insensitive — 'Serviceberry' matches the
+canonical 'Service Berry'), it is skipped entirely — including its quantities —
+so re-running never clobbers stock or forks a duplicate template (the GOL-641
+regression, where SKU-only matching created parallel 178-182 templates). A
+prior run's own default_code is still honoured as a secondary guard. Extending
+an existing species (new cultivars, merged stock) is the remediation path's
+job, not the seed's. To re-seed one product, archive it in Odoo first.
 
 Usage
 -----
@@ -90,13 +95,29 @@ FORMAT_ABBR = {"Potted": "PT", "Bareroot": "BR"}
 #
 # code: the species prefix for per-variant SKUs (PEAR-MAG-PT); cultivar.code
 # is the middle segment.
+#
+# AUTHORITATIVE PRICING MODEL — Josh 2026-07-21 (GOL-641 comment). The earlier
+# GOL-639 numbers used bareroot figures as the potted base ("lost in
+# translation"); this batch is Potted-only, so list_price/base MUST be the
+# POTTED column. Potted = Bareroot + $3.00, uniformly:
+#     Non-grafted 1yr:            $12 bareroot / $15 potted
+#     Grafted:                    $35 bareroot / $38 potted
+#     Persimmon/Pawpaw (premium): $40 bareroot / $42 potted
+# Encoded as: base list_price = non-grafted potted ($15); grafted cultivar
+# price_extra = +$23 (-> $38); premium (persimmon IKKJ) price_extra = +$27
+# (-> $42). Pear is grafted-only (no non-grafted variant) so its base IS $38.
+# Named-cultivar premiums (Kiwi Fairchild, Fig LSU/Exquisito) are NOT part of
+# Josh's graft rule and remain pending his confirmation — see GOL-641.
+POTTED_NON_GRAFTED = 15.00
+POTTED_GRAFTED = 38.00
+POTTED_PREMIUM = 42.00  # persimmon, future pawpaw
 # fmt: off
 PRODUCTS: list[dict[str, Any]] = [
     {
         "sku": "VINE-KIWI", "code": "KIWI", "name": "Kiwi",
         "internal_category": "Vines", "website_category": "Fruiting Vines",
         "tags": ["Food Forest", "Silvopasture"],
-        "list_price": 12.00,  # base = wild type
+        "list_price": POTTED_NON_GRAFTED,  # $15 potted non-grafted (was $12 bareroot)
         "facts": {
             "botanical_name": "Actinidia arguta", "zone_min": 4, "zone_max": 8,
             "layer": "vine", "sun": "partial",
@@ -112,7 +133,7 @@ PRODUCTS: list[dict[str, Any]] = [
         "sku": "SHRUB-FIG", "code": "FIG", "name": "Fig",
         "internal_category": "Shrubs", "website_category": "Fruit Trees",
         "tags": ["Food Forest", "Silvopasture"],
-        "list_price": 15.00,  # base = wild fig
+        "list_price": POTTED_NON_GRAFTED,  # $15 potted non-grafted
         "facts": {
             "botanical_name": "Ficus carica", "zone_min": 7, "zone_max": 9,
             "layer": "shrub", "sun": "full",
@@ -129,7 +150,7 @@ PRODUCTS: list[dict[str, Any]] = [
         "sku": "TREE-PEAR", "code": "PEAR", "name": "Pear",
         "internal_category": "Trees", "website_category": "Fruit Trees",
         "tags": [],
-        "list_price": 35.00,  # all grafted cultivars, flat price
+        "list_price": POTTED_GRAFTED,  # $38 potted grafted, flat (was $35 bareroot)
         "facts": {
             "botanical_name": "Pyrus communis", "zone_min": 4, "zone_max": 8,
             "layer": "canopy", "sun": "full",
@@ -146,9 +167,9 @@ PRODUCTS: list[dict[str, Any]] = [
         "sku": "TREE-PERSIMMON", "code": "PERSIMMON", "name": "Persimmon",
         "internal_category": "Trees", "website_category": "Fruit Trees",
         "tags": ["Food Forest", "Silvopasture"],
-        # Josh 2026-07-20 pricing gate (GOL-639): $40 grafted / $12 non-grafted.
-        # base = non-grafted seedling; the grafted named cultivar adds the delta.
-        "list_price": 12.00,
+        # Josh 2026-07-21 (GOL-641): persimmon is the premium exception.
+        # base = non-grafted seedling potted ($15); IKKJ (grafted) -> $42 potted.
+        "list_price": POTTED_NON_GRAFTED,
         "facts": {
             "botanical_name": "Diospyros kaki", "zone_min": 6, "zone_max": 9,
             "layer": "understory", "sun": "full",
@@ -157,16 +178,17 @@ PRODUCTS: list[dict[str, Any]] = [
         },
         "cultivars": [
             {"name": "Seedling", "code": "SDL", "price_extra": 0.00, "qty": 2},
-            {"name": "IKKJ", "code": "IKKJ", "price_extra": 28.00, "qty": 3},
+            # +$27 -> $42
+            {"name": "IKKJ", "code": "IKKJ", "price_extra": POTTED_PREMIUM - POTTED_NON_GRAFTED, "qty": 3},
         ],
     },
     {
         "sku": "TREE-SERVICEBERRY", "code": "SERVICEBERRY", "name": "Serviceberry",
         "internal_category": "Trees", "website_category": "Berries",
         "tags": ["Wildlife", "Native", "Food Forest"],
-        # Josh 2026-07-20 pricing gate (GOL-639): $35 grafted / $12 non-grafted.
-        # base = non-grafted seedling; the grafted cultivar adds the delta.
-        "list_price": 12.00,
+        # Josh 2026-07-21 (GOL-641): base = non-grafted seedling potted ($15);
+        # the grafted cultivar adds +$23 -> $38 potted grafted.
+        "list_price": POTTED_NON_GRAFTED,
         "facts": {
             "botanical_name": "Amelanchier laevis", "zone_min": 4, "zone_max": 8,
             "layer": "understory", "sun": "partial",
@@ -175,7 +197,8 @@ PRODUCTS: list[dict[str, Any]] = [
         },
         "cultivars": [
             {"name": "Seedling", "code": "SDL", "price_extra": 0.00, "qty": 2},
-            {"name": "Grafted", "code": "GRF", "price_extra": 23.00, "qty": 3},
+            # +$23 -> $38
+            {"name": "Grafted", "code": "GRF", "price_extra": POTTED_GRAFTED - POTTED_NON_GRAFTED, "qty": 3},
         ],
     },
     {
@@ -184,7 +207,7 @@ PRODUCTS: list[dict[str, Any]] = [
         "sku": "SHRUB-ARONIA", "code": "ARONIA", "name": "Aronia",
         "internal_category": "Shrubs", "website_category": "Berries",
         "tags": ["Wildlife", "Native"],
-        "list_price": 15.00,
+        "list_price": POTTED_NON_GRAFTED,  # $15 potted non-grafted shrub
         "facts": {
             "botanical_name": "Aronia melanocarpa", "zone_min": 3, "zone_max": 8,
             "layer": "shrub", "sun": "full",
@@ -242,6 +265,19 @@ def find_or_create(models, uid, model: str, domain: list, vals: dict, label: str
     new_id = call(models, uid, model, "create", [vals])
     print(f"  + created {model} '{label}' (id={new_id})")
     return new_id
+
+
+def norm_species(name: str) -> str:
+    """Normalise a species name for matching against live templates.
+
+    The live catalog carries the canonical templates (id 148-169) with names
+    like 'Service Berry' and no ``default_code``. Matching on the script's own
+    SKU (``TREE-SERVICEBERRY``) never hit them, so a re-run forked a parallel
+    'Serviceberry' template (grove_slug auto-suffixed) — the GOL-641 dup bug.
+    Collapse case and every non-alphanumeric char so 'Serviceberry' and
+    'Service Berry' both key to ``serviceberry``.
+    """
+    return "".join(ch for ch in name.lower() if ch.isalnum())
 
 
 def variant_sku(product: dict, cultivar: dict | None) -> str:
@@ -351,9 +387,36 @@ def main() -> None:
         fail(f"No warehouse for company {company_id}")
     stock_location_id = wh[0]["lot_stock_id"][0]
 
+    # Species-name index of every live template in this company. The seed must
+    # match the CANONICAL template by species (148-169) — not by its own SKU —
+    # or it forks a duplicate on every re-run (GOL-641). We do not mutate a
+    # canonical template here: extending an existing species (adding cultivars,
+    # merging stock) is the dedicated remediation path, not the seed's job.
+    live_templates = call(
+        models,
+        uid,
+        "product.template",
+        "search_read",
+        [[("company_id", "in", [company_id, False])]],
+        {"fields": ["id", "name", "default_code"], "context": {"active_test": False}},
+    )
+    existing_by_species: dict[str, int] = {}
+    for t in live_templates:
+        existing_by_species.setdefault(norm_species(t["name"]), t["id"])
+
     print("\n── Products ──")
     for product in PRODUCTS:
         sku = product["sku"]
+        species = norm_species(product["name"])
+        if species in existing_by_species:
+            print(
+                f"  SKIP {product['name']} ({sku}) — canonical template already "
+                f"exists (id={existing_by_species[species]}); not forking a "
+                f"duplicate. Extend it via the remediation path, not the seed."
+            )
+            continue
+        # Belt-and-suspenders: a prior run of THIS script (matched by its own
+        # SKU) — keeps the seed idempotent for species it legitimately created.
         existing = call(
             models,
             uid,
