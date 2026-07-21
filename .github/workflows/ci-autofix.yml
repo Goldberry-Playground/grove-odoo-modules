@@ -45,8 +45,11 @@ jobs:
           AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
+          # NOTE: patterns are globs — brackets MUST be quoted so "[bot]" is a
+          # literal, not a one-char class (which never matched the real login
+          # "agenticos-developer[bot]" and silently skipped every agent PR).
           case "$AUTHOR" in
-            agenticos-developer|agenticos-developer[bot]|app/agenticos-developer) ;;
+            agenticos-developer|"agenticos-developer[bot]"|app/agenticos-developer) ;;
             *)
               echo "PR author '$AUTHOR' is not the agent App bot; skipping."
               echo "proceed=false" >> "$GITHUB_OUTPUT"; exit 0 ;;
