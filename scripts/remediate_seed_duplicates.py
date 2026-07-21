@@ -73,6 +73,36 @@ PLUM_ID = 164
 MOUNT_ROYAL = "Mount Royal"
 ROYAL_ORPHAN_ID = 166
 
+# ── Price correction (Josh, GOL-641 interaction 6562c79b, 2026-07-21 16:19) ──
+# The canonical templates predate the seed and carry stale/placeholder prices
+# (Kiwi 158 was $0.00, Fig 155 $15, Pear 162 $37 ...) with the Bareroot/Potted
+# Format axis flat (both extras $0 → bareroot == potted). Josh's authoritative
+# potted-batch model, per his answers:
+#     non-grafted 1yr        $12 BR / $15 PT
+#     grafted                $35 BR / $38 PT
+#     persimmon premium      $40 BR / $42 PT   (IKKJ; grafted exception)
+#     kiwi (override)        $10 BR / $12 PT   (flat; NO Fairchild premium)
+#     fig  (~3yr plants)     $30 BR / $35 PT   (flat; NO LSU/Exquisito premium)
+# Encoding: list_price = the POTTED price (storefront-primary); the Format
+# "Bareroot" ptav carries the negative delta to Josh's bareroot number; the
+# "Potted" ptav is pinned to $0. Named grafted/premium cultivars get an explicit
+# price_extra; premiums Josh dropped are zeroed so every variant is flat.
+# NOTE (flagged to Josh): additive attribute pricing can't make persimmon IKKJ
+# exact in BOTH formats ($40 BR / $42 PT differ by $2, base delta is $3), so
+# IKKJ resolves to $39 BR / $42 PT — potted (the seeded batch) is exact.
+PRICE_FIX = {
+    158: {"list_price": 12.00, "bareroot_delta": -2.00,
+          "cultivar_extras": {"Fairchild (male pollinator)": 0.00}},          # Kiwi flat
+    155: {"list_price": 35.00, "bareroot_delta": -5.00,
+          "cultivar_extras": {"LSU Champagne": 0.00, "Exquisito": 0.00}},     # Fig flat
+    162: {"list_price": 38.00, "bareroot_delta": -3.00, "cultivar_extras": {}},  # Pear grafted flat
+    163: {"list_price": 15.00, "bareroot_delta": -3.00,
+          "cultivar_extras": {"IKKJ": 27.00}},                               # Persimmon; IKKJ -> $42 PT
+    168: {"list_price": 15.00, "bareroot_delta": -3.00,
+          "cultivar_extras": {"Grafted": 23.00}},                            # Serviceberry; grafted -> $38 PT
+    183: {"list_price": 15.00, "bareroot_delta": None, "cultivar_extras": {}},   # Aronia (Potted-only)
+}
+
 
 def fail(msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
@@ -277,6 +307,61 @@ def archive(o: Odoo, tid: int, label: str) -> None:
     print(f"    + archived template {tid} ({t['name']})")
 
 
+def format_ptav(o: Odoo, tid: int, fmt_name: str) -> int | None:
+    rows = o.c(
+        "product.template.attribute.value",
+        "search_read",
+        [[("product_tmpl_id", "=", tid), ("attribute_id.name", "=", "Format"), ("name", "=", fmt_name)]],
+        {"fields": ["id", "price_extra"], "context": {"active_test": False}},
+    )
+    return rows[0]["id"] if rows else None
+
+
+def set_ptav_extra(o: Odoo, ptav_id: int, extra: float, label: str) -> None:
+    cur = o.c("product.template.attribute.value", "read", [[ptav_id]], {"fields": ["price_extra"]})[0]["price_extra"]
+    if abs(cur - extra) < 0.005:
+        print(f"      = {label} price_extra already ${extra:+.2f}; skipped")
+        return
+    if DRY_RUN:
+        print(f"      + WOULD set {label} price_extra ${cur:+.2f} -> ${extra:+.2f}")
+        return
+    o.c("product.template.attribute.value", "write", [[ptav_id], {"price_extra": extra}])
+    print(f"      + set {label} price_extra ${cur:+.2f} -> ${extra:+.2f}")
+
+
+def apply_price_fix(o: Odoo) -> None:
+    """Converge each canonical template to Josh's authoritative potted-batch
+    pricing. Idempotent + DRY_RUN aware: only writes values that differ."""
+    print("\n── Price correction (Josh 6562c79b) ──")
+    for tid, spec in PRICE_FIX.items():
+        t = o.template(tid)
+        print(f"  {t['name']} (id={tid}): base -> ${spec['list_price']:.2f}")
+        cur = o.c("product.template", "read", [[tid]], {"fields": ["list_price"]})[0]["list_price"]
+        if abs(cur - spec["list_price"]) < 0.005:
+            print(f"      = list_price already ${spec['list_price']:.2f}; skipped")
+        elif DRY_RUN:
+            print(f"      + WOULD set list_price ${cur:.2f} -> ${spec['list_price']:.2f}")
+        else:
+            o.c("product.template", "write", [[tid], {"list_price": spec["list_price"]}])
+            print(f"      + set list_price ${cur:.2f} -> ${spec['list_price']:.2f}")
+        # Format deltas: Potted pinned to 0, Bareroot to Josh's negative delta.
+        if spec["bareroot_delta"] is not None:
+            pot = format_ptav(o, tid, "Potted")
+            bar = format_ptav(o, tid, "Bareroot")
+            if pot is not None:
+                set_ptav_extra(o, pot, 0.00, "Format 'Potted'")
+            if bar is not None:
+                set_ptav_extra(o, bar, spec["bareroot_delta"], "Format 'Bareroot'")
+        # Named cultivar premium/drop overrides.
+        for cname, extra in spec["cultivar_extras"].items():
+            have = o.cultivar_values_on(tid)
+            info = have.get(norm(cname))
+            if info is None:
+                print(f"      ! cultivar '{cname}' not on template {tid} (not merged yet?); skipped")
+                continue
+            set_ptav_extra(o, info["ptav_id"], extra, f"Cultivar '{info['display']}'")
+
+
 def main() -> None:
     print(f"Target: {ODOO_URL} db={ODOO_DB}  DRY_RUN={'yes' if DRY_RUN else 'NO — LIVE'}")
     models, uid = authenticate()
@@ -312,6 +397,9 @@ def main() -> None:
     print("\n── Mount Royal correction ──")
     add_cultivar(o, PLUM_ID, MOUNT_ROYAL, 0.0, 0, "PLUM")
     archive(o, ROYAL_ORPHAN_ID, "royal orphan")
+
+    # Prices last: premium cultivars (IKKJ, Grafted) must already be merged on.
+    apply_price_fix(o)
 
     print("\nDone." + (" (dry run — nothing written)" if DRY_RUN else ""))
 
