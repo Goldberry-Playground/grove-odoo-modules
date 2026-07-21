@@ -110,8 +110,14 @@ class Odoo:
         if not attr:
             fail(f"'{CULTIVAR_ATTR}' attribute not found")
         self.cultivar_attr = attr[0]
-        wh = call(models, uid, "stock.warehouse", "search_read",
-                  [[("company_id", "=", company_id)]], {"fields": ["lot_stock_id"], "limit": 1})
+        wh = call(
+            models,
+            uid,
+            "stock.warehouse",
+            "search_read",
+            [[("company_id", "=", company_id)]],
+            {"fields": ["lot_stock_id"], "limit": 1},
+        )
         if not wh:
             fail(f"No warehouse for company {company_id}")
         self.stock_location_id = wh[0]["lot_stock_id"][0]
@@ -120,24 +126,36 @@ class Odoo:
         return call(self.m, self.uid, model, method, args, kwargs)
 
     def template(self, tid: int) -> dict:
-        rows = self.c("product.template", "read", [[tid]],
-                      {"fields": ["id", "name", "active", "default_code", "attribute_line_ids"],
-                       "context": {"active_test": False}})
+        rows = self.c(
+            "product.template",
+            "read",
+            [[tid]],
+            {
+                "fields": ["id", "name", "active", "default_code", "attribute_line_ids"],
+                "context": {"active_test": False},
+            },
+        )
         if not rows:
             fail(f"template id={tid} not found")
         return rows[0]
 
     def cultivar_line(self, tid: int) -> int | None:
-        lines = self.c("product.template.attribute.line", "search",
-                       [[("product_tmpl_id", "=", tid), ("attribute_id", "=", self.cultivar_attr)]], {})
+        lines = self.c(
+            "product.template.attribute.line",
+            "search",
+            [[("product_tmpl_id", "=", tid), ("attribute_id", "=", self.cultivar_attr)]],
+            {},
+        )
         return lines[0] if lines else None
 
     def cultivar_values_on(self, tid: int) -> dict[str, dict]:
         """name -> {value_id, ptav_id, price_extra} for the template's Cultivar values."""
-        ptavs = self.c("product.template.attribute.value", "search_read",
-                       [[("product_tmpl_id", "=", tid), ("attribute_id", "=", self.cultivar_attr)]],
-                       {"fields": ["id", "name", "price_extra", "product_attribute_value_id"],
-                        "context": {"active_test": False}})
+        ptavs = self.c(
+            "product.template.attribute.value",
+            "search_read",
+            [[("product_tmpl_id", "=", tid), ("attribute_id", "=", self.cultivar_attr)]],
+            {"fields": ["id", "name", "price_extra", "product_attribute_value_id"], "context": {"active_test": False}},
+        )
         out = {}
         for p in ptavs:
             out[norm(p["name"])] = {
@@ -150,27 +168,39 @@ class Odoo:
 
     def variant_qty(self, tid: int, cultivar_norm: str) -> tuple[int, str]:
         """Opening on-hand qty and Format for the dup's variant of this cultivar."""
-        variants = self.c("product.product", "search_read",
-                          [[("product_tmpl_id", "=", tid)]],
-                          {"fields": ["id", "default_code", "product_template_variant_value_ids"],
-                           "context": {"active_test": False}})
+        variants = self.c(
+            "product.product",
+            "search_read",
+            [[("product_tmpl_id", "=", tid)]],
+            {"fields": ["id", "default_code", "product_template_variant_value_ids"], "context": {"active_test": False}},
+        )
         for v in variants:
-            names = self.c("product.template.attribute.value", "read",
-                           [v["product_template_variant_value_ids"]], {"fields": ["name", "attribute_id"]})
+            names = self.c(
+                "product.template.attribute.value",
+                "read",
+                [v["product_template_variant_value_ids"]],
+                {"fields": ["name", "attribute_id"]},
+            )
             cult = next((n["name"] for n in names if n["attribute_id"][0] == self.cultivar_attr), None)
-            fmt = next((n["name"] for n in names
-                        if n["attribute_id"][0] != self.cultivar_attr), "Potted")
+            fmt = next((n["name"] for n in names if n["attribute_id"][0] != self.cultivar_attr), "Potted")
             if cult and norm(cult) == cultivar_norm:
-                quant = self.c("stock.quant", "search_read",
-                               [[("product_id", "=", v["id"]), ("location_id", "=", self.stock_location_id)]],
-                               {"fields": ["quantity"]})
+                quant = self.c(
+                    "stock.quant",
+                    "search_read",
+                    [[("product_id", "=", v["id"]), ("location_id", "=", self.stock_location_id)]],
+                    {"fields": ["quantity"]},
+                )
                 qty = int(sum(q["quantity"] for q in quant))
                 return qty, fmt
         return 0, "Potted"
 
     def ensure_value(self, name: str) -> int:
-        ids = self.c("product.attribute.value", "search",
-                     [[("name", "=", name), ("attribute_id", "=", self.cultivar_attr)]], {"limit": 1})
+        ids = self.c(
+            "product.attribute.value",
+            "search",
+            [[("name", "=", name), ("attribute_id", "=", self.cultivar_attr)]],
+            {"limit": 1},
+        )
         if ids:
             return ids[0]
         if DRY_RUN:
@@ -195,17 +225,28 @@ def add_cultivar(o: Odoo, original_id: int, name: str, price_extra: float, qty: 
     value_id = o.ensure_value(name)
     o.c("product.template.attribute.line", "write", [[line], {"value_ids": [(4, value_id)]}])
     # New ptav now exists on the original — set its price delta.
-    ptav = o.c("product.template.attribute.value", "search",
-               [[("product_tmpl_id", "=", original_id), ("product_attribute_value_id", "=", value_id)]], {"limit": 1})
+    ptav = o.c(
+        "product.template.attribute.value",
+        "search",
+        [[("product_tmpl_id", "=", original_id), ("product_attribute_value_id", "=", value_id)]],
+        {"limit": 1},
+    )
     if ptav and price_extra:
         o.c("product.template.attribute.value", "write", [ptav, {"price_extra": price_extra}])
     # New variant(s) for this cultivar: set SKU + opening quant on the Potted one.
-    variants = o.c("product.product", "search_read",
-                   [[("product_tmpl_id", "=", original_id)]],
-                   {"fields": ["id", "product_template_variant_value_ids"]})
+    variants = o.c(
+        "product.product",
+        "search_read",
+        [[("product_tmpl_id", "=", original_id)]],
+        {"fields": ["id", "product_template_variant_value_ids"]},
+    )
     for v in variants:
-        names = o.c("product.template.attribute.value", "read",
-                    [v["product_template_variant_value_ids"]], {"fields": ["name", "attribute_id"]})
+        names = o.c(
+            "product.template.attribute.value",
+            "read",
+            [v["product_template_variant_value_ids"]],
+            {"fields": ["name", "attribute_id"]},
+        )
         cult = next((n["name"] for n in names if n["attribute_id"][0] == o.cultivar_attr), None)
         fmt = next((n["name"] for n in names if n["attribute_id"][0] != o.cultivar_attr), "Potted")
         if not cult or norm(cult) != norm(name):
@@ -214,11 +255,14 @@ def add_cultivar(o: Odoo, original_id: int, name: str, price_extra: float, qty: 
         code = "-".join([sku_prefix, name.split()[0][:3].upper(), abbr])
         o.c("product.product", "write", [[v["id"]], {"default_code": code}])
         if fmt == "Potted" and qty:
-            quant_id = o.c("stock.quant", "create",
-                           [{"product_id": v["id"], "location_id": o.stock_location_id, "inventory_quantity": qty}],
-                           {"context": {"inventory_mode": True, **o.ctx}})
+            quant_id = o.c(
+                "stock.quant",
+                "create",
+                [{"product_id": v["id"], "location_id": o.stock_location_id, "inventory_quantity": qty}],
+                {"context": {"inventory_mode": True, **o.ctx}},
+            )
             o.c("stock.quant", "action_apply_inventory", [[quant_id]], {"context": o.ctx})
-        print(f"      + added '{name}' -> variant {code} ({fmt}) qty={qty if fmt=='Potted' else 0}")
+        print(f"      + added '{name}' -> variant {code} ({fmt}) qty={qty if fmt == 'Potted' else 0}")
 
 
 def archive(o: Odoo, tid: int, label: str) -> None:
