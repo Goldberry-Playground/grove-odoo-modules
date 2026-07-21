@@ -141,15 +141,18 @@ def apply_inventory(uid, quant_id, ctx) -> None:
         "params": {
             "service": "object",
             "method": "execute_kw",
-            "args": [ODOO_DB, uid, ODOO_PASSWORD, "stock.quant", "action_apply_inventory", [[quant_id]], {"context": ctx}],
+            "args": [
+                ODOO_DB, uid, ODOO_PASSWORD,
+                "stock.quant", "action_apply_inventory", [[quant_id]], {"context": ctx},
+            ],
         },
     }
-    r = _json.loads(
-        _ureq.urlopen(
-            _ureq.Request(f"{ODOO_URL}/jsonrpc", data=_json.dumps(payload).encode(), headers={"Content-Type": "application/json"}),
-            timeout=30,
-        ).read()
+    req = _ureq.Request(
+        f"{ODOO_URL}/jsonrpc",
+        data=_json.dumps(payload).encode(),
+        headers={"Content-Type": "application/json"},
     )
+    r = _json.loads(_ureq.urlopen(req, timeout=30).read())
     if r.get("error"):
         fail(f"action_apply_inventory jsonrpc error: {r['error']}")
 
