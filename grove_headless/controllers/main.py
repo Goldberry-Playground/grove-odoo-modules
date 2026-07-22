@@ -771,7 +771,14 @@ class GroveHeadlessAPI(http.Controller):
             env.cr.rollback()
             return _json_response({"error": "handler error"}, status=500)
 
-        ledger.write({"notes": result})
+        ledger_vals = {"notes": result}
+        # Back-reference the reconciled order on the ledger row so the event
+        # trail is queryable order↔event (GOL-711 flag a: order_id was NULL on
+        # every row). Cheap re-resolve — webhook volume is tiny.
+        order = _find_order_for_session(env, session)
+        if order:
+            ledger_vals["order_id"] = order.id
+        ledger.write(ledger_vals)
         return _json_response({"ok": True, "result": result})
 
     # ── Newsletter ───────────────────────────────────────────────────────
@@ -1322,6 +1329,17 @@ def _oversold_lines(order):
     Excludes the shipping line and any variant recorded as a preorder deposit
     at session time — a preorder is legitimately short on stock, only a line we
     took full payment for and now cannot ship is an oversell.
+
+    Availability is read as ``free_qty`` (on-hand minus stock already reserved
+    for other orders) in the *order's own company* — GOL-711. The session-build
+    path evaluates stock via ``with_company(current_company)`` (the branch that
+    owns the nursery warehouse), but this runs from the public webhook with no
+    company in context, so a branch-warehouse quant is invisible in the ambient
+    company and ``qty_available`` read 0 → a full-stock line (24 on-hand, 0
+    reserved) was refunded as oversold. Pinning the company makes the quant
+    visible; ``free_qty`` is the correct "can we still ship this" measure and,
+    because draft/sent carts never reserve, accumulated test orders can't drive
+    it falsely negative.
     """
     preorder_ids = set()
     for raw in (order.grove_preorder_variant_ids or "").split(","):
@@ -1335,7 +1353,8 @@ def _oversold_lines(order):
         product = line.product_id
         if product.default_code == SHIPPING_PRODUCT_CODE or product.id in preorder_ids:
             continue
-        if product.qty_available < line.product_uom_qty:
+        available = product.with_company(order.company_id).free_qty
+        if available < line.product_uom_qty:
             oversold.append(line)
     return oversold
 
