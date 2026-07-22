@@ -85,6 +85,65 @@ class TestStripeCheckout(TransactionCase):
         oversold = grove_main._oversold_lines(order)
         self.assertEqual(len(oversold), 1)
 
+    def test_in_stock_not_oversold_despite_draft_backlog(self):
+        """GOL-711: on-hand stock with a backlog of unconfirmed carts is NOT an
+        oversell — draft/sent orders never reserve, so free_qty stays == on-hand.
+        Guards against a regression to an on_hand−Σ(open demand) implementation."""
+        self._set_stock(self.product, 3)
+        drafts = [self._make_order(qty=1) for _ in range(6)]  # accumulated QA test carts
+        subject = drafts[0]
+        subject.grove_preorder_variant_ids = ""
+        self.assertEqual(grove_main._oversold_lines(subject), [])
+
+        subject.grove_stripe_session_id = "cs_backlog"
+        calls = {}
+        orig = stripe_gateway.create_refund
+
+        def fake_refund(*_a, **_k):
+            calls["refunded"] = True
+            return {"id": "re_x", "status": "succeeded"}
+
+        stripe_gateway.create_refund = fake_refund
+        try:
+            result = grove_main._handle_session_completed(
+                self.env, {"id": "cs_backlog", "payment_intent": "pi_backlog"}
+            )
+        finally:
+            stripe_gateway.create_refund = orig
+        self.assertEqual(result, "paid")
+        self.assertNotIn("refunded", calls)
+
+    def test_oversold_reads_stock_in_order_company(self):
+        """GOL-711 root cause: availability must be read in the ORDER's company,
+        not the ambient one. Stock living in another company's warehouse was
+        invisible in the public webhook's default company → a full-stock line was
+        refunded as oversold. Pinning with_company(order.company_id) fixes it."""
+        other = self.env["res.company"].create({"name": "Grove Nursery Co"})
+        other_wh = self.env["stock.warehouse"].search([("company_id", "=", other.id)], limit=1)
+        self.assertTrue(other_wh, "a fresh company should auto-provision a warehouse")
+        partner = self.env["res.partner"].create({"name": "Branch Customer", "email": "b@example.com"})
+        product = self.env["product.product"].create(
+            {"name": "American Plum (Potted)", "type": "consu", "is_storable": True, "list_price": 40.0}
+        )
+        self.env["stock.quant"].with_company(other)._update_available_quantity(product, other_wh.lot_stock_id, 24)
+        product.invalidate_recordset(["qty_available", "free_qty"])
+        order = (
+            self.env["sale.order"]
+            .with_company(other)
+            .create(
+                {
+                    "partner_id": partner.id,
+                    "company_id": other.id,
+                    "order_line": [(0, 0, {"product_id": product.id, "product_uom_qty": 1})],
+                }
+            )
+        )
+        # Re-read the order the way the webhook does: ambient = the OTHER (main)
+        # company, with only that company allowed. Old code read qty_available
+        # here and saw 0; the fix reads free_qty in order.company_id and sees 24.
+        webhook_view = order.with_company(self.company).with_context(allowed_company_ids=[self.company.id])
+        self.assertEqual(grove_main._oversold_lines(webhook_view), [])
+
     # ── webhook handlers ─────────────────────────────────────────────────
 
     def test_session_completed_marks_paid_and_confirms(self):
