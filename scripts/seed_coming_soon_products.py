@@ -362,14 +362,18 @@ def main() -> None:
         # (a real product of that species already exists) are deliberately absent
         # here: they are not our placeholders, so their invariants are not ours to
         # assert. A converged re-run seeds nothing and verifies nothing.
-        rows = call(
-            models,
-            uid,
-            "product.template",
-            "search_read",
-            [[("id", "in", list(seeded_ids.values()))]],
-            {"fields": ["id", "name", "website_published", "sale_ok", "public_categ_ids"]},
-        ) if seeded_ids else []
+        rows = (
+            call(
+                models,
+                uid,
+                "product.template",
+                "search_read",
+                [[("id", "in", list(seeded_ids.values()))]],
+                {"fields": ["id", "name", "website_published", "sale_ok", "public_categ_ids"]},
+            )
+            if seeded_ids
+            else []
+        )
         by_id = {r["id"]: r for r in rows}
         problems = []
         for p in PRODUCTS:
