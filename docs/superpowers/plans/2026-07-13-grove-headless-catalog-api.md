@@ -36,6 +36,7 @@
 ```python
 # grove_headless/tests/test_growing_facts.py
 """Growing-facts fields (2026-07-13 catalog spec). DB tests — Odoo runner only."""
+
 from odoo.exceptions import ValidationError
 from odoo.tests import TransactionCase, tagged
 
@@ -83,36 +84,37 @@ Expected: FAIL — `Invalid field 'grove_botanical_name'` on create.
 Append to `grove_headless/models/product_template.py` (inside `ProductTemplate`; add `from odoo.exceptions import ValidationError` and `api` to the existing imports if missing — `api` is already imported):
 
 ```python
-    # ── Growing facts (2026-07-13 catalog spec) ─────────────────────────
-    # Filterable facts live here (typed); display-only facts stay Char.
-    # Narrative content deliberately does NOT live in Odoo (Ghost, keyed
-    # by grove_slug — see the nursery product-pages spec).
-    grove_botanical_name = fields.Char(string="Botanical Name")
-    grove_zone_min = fields.Integer(string="USDA Zone Min")
-    grove_zone_max = fields.Integer(string="USDA Zone Max")
-    grove_layer = fields.Selection(
-        [
-            ("canopy", "Canopy"),
-            ("understory", "Understory"),
-            ("shrub", "Shrub"),
-            ("ground", "Ground cover"),
-            ("vine", "Vine"),
-        ],
-        string="Food Forest Layer",
-    )
-    grove_sun = fields.Selection(
-        [("full", "Full sun"), ("partial", "Partial sun"), ("shade", "Shade")],
-        string="Sun Requirement",
-    )
-    grove_mature_size = fields.Char(string="Mature Size")
-    grove_spacing = fields.Char(string="Plant Spacing")
-    grove_soil = fields.Char(string="Soil")
+# ── Growing facts (2026-07-13 catalog spec) ─────────────────────────
+# Filterable facts live here (typed); display-only facts stay Char.
+# Narrative content deliberately does NOT live in Odoo (Ghost, keyed
+# by grove_slug — see the nursery product-pages spec).
+grove_botanical_name = fields.Char(string="Botanical Name")
+grove_zone_min = fields.Integer(string="USDA Zone Min")
+grove_zone_max = fields.Integer(string="USDA Zone Max")
+grove_layer = fields.Selection(
+    [
+        ("canopy", "Canopy"),
+        ("understory", "Understory"),
+        ("shrub", "Shrub"),
+        ("ground", "Ground cover"),
+        ("vine", "Vine"),
+    ],
+    string="Food Forest Layer",
+)
+grove_sun = fields.Selection(
+    [("full", "Full sun"), ("partial", "Partial sun"), ("shade", "Shade")],
+    string="Sun Requirement",
+)
+grove_mature_size = fields.Char(string="Mature Size")
+grove_spacing = fields.Char(string="Plant Spacing")
+grove_soil = fields.Char(string="Soil")
 
-    @api.constrains("grove_zone_min", "grove_zone_max")
-    def _check_zone_range(self):
-        for record in self:
-            if record.grove_zone_min and record.grove_zone_max and record.grove_zone_min > record.grove_zone_max:
-                raise ValidationError("USDA zone min cannot exceed zone max.")
+
+@api.constrains("grove_zone_min", "grove_zone_max")
+def _check_zone_range(self):
+    for record in self:
+        if record.grove_zone_min and record.grove_zone_max and record.grove_zone_min > record.grove_zone_max:
+            raise ValidationError("USDA zone min cannot exceed zone max.")
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -145,6 +147,7 @@ git commit -m "feat(grove_headless): growing-facts fields on product.template (c
 ```python
 # grove_headless/tests/test_effective_shipping_tier.py
 """Variant-level shipping tier (fixes bareroot variants quoting potted rates)."""
+
 from odoo.tests import TransactionCase, tagged
 
 
@@ -152,15 +155,9 @@ from odoo.tests import TransactionCase, tagged
 class TestEffectiveShippingTier(TransactionCase):
     def setUp(self):
         super().setUp()
-        self.fmt = self.env["product.attribute"].create(
-            {"name": "Format", "create_variant": "always"}
-        )
-        self.v_potted = self.env["product.attribute.value"].create(
-            {"name": "Potted", "attribute_id": self.fmt.id}
-        )
-        self.v_bareroot = self.env["product.attribute.value"].create(
-            {"name": "Bareroot", "attribute_id": self.fmt.id}
-        )
+        self.fmt = self.env["product.attribute"].create({"name": "Format", "create_variant": "always"})
+        self.v_potted = self.env["product.attribute.value"].create({"name": "Potted", "attribute_id": self.fmt.id})
+        self.v_bareroot = self.env["product.attribute.value"].create({"name": "Bareroot", "attribute_id": self.fmt.id})
 
     def test_bareroot_variant_overrides_template_tier(self):
         tmpl = self.env["product.template"].create(
@@ -174,8 +171,7 @@ class TestEffectiveShippingTier(TransactionCase):
             }
         )
         tiers = {
-            v.product_template_variant_value_ids.name: v.grove_effective_shipping_tier
-            for v in tmpl.product_variant_ids
+            v.product_template_variant_value_ids.name: v.grove_effective_shipping_tier for v in tmpl.product_variant_ids
         }
         self.assertEqual(tiers["Bareroot"], "bareroot")
         self.assertEqual(tiers["Potted"], "potted")
@@ -227,9 +223,7 @@ class ProductProduct(models.Model):
             if fmt_values and fmt_values[0].name == BAREROOT_VALUE:
                 product.grove_effective_shipping_tier = "bareroot"
             else:
-                product.grove_effective_shipping_tier = (
-                    product.product_tmpl_id.grove_shipping_tier or "potted"
-                )
+                product.grove_effective_shipping_tier = product.product_tmpl_id.grove_shipping_tier or "potted"
 ```
 
 In `grove_headless/models/__init__.py` add `from . import product_product` alongside the existing imports. In `grove_headless/models/sale_order.py` replace line 59:
@@ -273,6 +267,7 @@ git commit -m "fix(grove_headless): resolve shipping tier per-variant — barero
 ```python
 # grove_headless/tests/test_product_domain.py
 """Pure tests for the product_list filter-domain builder (no Odoo runtime)."""
+
 import importlib.util
 import pathlib
 
@@ -308,9 +303,7 @@ def test_bad_values_ignored():
 
 
 def test_existing_filters_still_work():
-    dom = product_domain.build_product_domain(
-        {"featured": "1", "category_id": "12", "slug": " Pear "}, 7
-    )
+    dom = product_domain.build_product_domain({"featured": "1", "category_id": "12", "slug": " Pear "}, 7)
     assert ("grove_featured", "=", True) in dom
     assert ("public_categ_ids", "in", [12]) in dom
     assert ("grove_slug", "=", "pear") in dom
@@ -415,6 +408,7 @@ git commit -m "feat(grove_headless): tag_id + zone list filters (pure domain bui
 ```python
 # grove_headless/tests/test_detail_serialization.py
 """Detail serializer: facts block + structured variants (catalog spec)."""
+
 from odoo.tests import TransactionCase, tagged
 
 from odoo.addons.grove_headless.controllers.main import _serialize_facts, _structure_variant
@@ -486,9 +480,7 @@ def _serialize_facts(product):
 
 def _structure_variant(variant):
     """Structured variant entry: axes parsed into fields, not display-name strings."""
-    axis = {
-        v.attribute_id.name: v.name for v in variant.product_template_variant_value_ids
-    }
+    axis = {v.attribute_id.name: v.name for v in variant.product_template_variant_value_ids}
     return {
         "id": variant.id,
         "display_name": variant.display_name,
@@ -536,14 +528,16 @@ git commit -m "feat(grove_headless): facts block + structured variants (sku/cult
 - [ ] **Step 1: Write the failing test (append to TestDetailSerialization)**
 
 ```python
-    def test_images_hero_first_and_empty_ok(self):
-        from odoo.addons.grove_headless.controllers.main import _serialize_images
+def test_images_hero_first_and_empty_ok(self):
+    from odoo.addons.grove_headless.controllers.main import _serialize_images
 
-        self.assertEqual(_serialize_images(self.tmpl), [])  # no image set
-        self.tmpl.image_1920 = b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
-        images = _serialize_images(self.tmpl)
-        self.assertEqual(images[0]["url"], f"/web/image/product.template/{self.tmpl.id}/image_1024")
-        self.assertEqual(images[0]["thumb_url"], f"/web/image/product.template/{self.tmpl.id}/image_256")
+    self.assertEqual(_serialize_images(self.tmpl), [])  # no image set
+    self.tmpl.image_1920 = (
+        b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+    )
+    images = _serialize_images(self.tmpl)
+    self.assertEqual(images[0]["url"], f"/web/image/product.template/{self.tmpl.id}/image_1024")
+    self.assertEqual(images[0]["thumb_url"], f"/web/image/product.template/{self.tmpl.id}/image_256")
 ```
 
 - [ ] **Step 2: Run to verify it fails**
@@ -609,6 +603,7 @@ git commit -m "feat(grove_headless): images[] gallery (hero + eCommerce media) o
 ```python
 # grove_headless/tests/test_zone_endpoint.py
 """Pure tests for the /zone response builder."""
+
 import importlib.util
 import pathlib
 
