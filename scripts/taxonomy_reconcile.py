@@ -456,6 +456,21 @@ def _new_single_cultivar_template(
         call(models, uid, "product.template.attribute.value", "write", [ptav, {"price_extra": extra}])
         print(f"    price_extra {cultivar_name}: +${extra:.2f}")
 
+    # Apply the Format Potted differential (bareroot-anchor model, GOL-691) so a
+    # split child prices Potted at +$POTTED_EXTRA like every seed-built template.
+    # product.template.attribute.value.price_extra is per-template, so a freshly
+    # created split template starts at 0 and must be set explicitly.
+    if "Potted" in formats:
+        potted_ptav = call(
+            models,
+            uid,
+            "product.template.attribute.value",
+            "search",
+            [[("product_tmpl_id", "=", tmpl_id), ("product_attribute_value_id", "=", fmt_vals["Potted"])]],
+        )
+        call(models, uid, "product.template.attribute.value", "write", [potted_ptav, {"price_extra": POTTED_EXTRA}])
+        print(f"    price_extra Format Potted: +${POTTED_EXTRA:.2f}")
+
     # SKU + opening stock per generated variant, matched by its Format value.
     products = call(
         models,
