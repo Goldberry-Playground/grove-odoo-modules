@@ -569,6 +569,11 @@ def _read_cultivar_variants(models, uid, tmpl_id, cultivar_name, list_price, sto
 
 
 def _move_gallery_image(models, uid, src_tmpl, dst_tmpl, image_name) -> None:
+    # The ingest pipeline (grove-sites scripts/upload-asset.ts) renames gallery
+    # rows to "<slug>-<n>.jpg [grove-ingest <hash12>]" — the source filename
+    # ("red mulberry fruit 2.jpg") never survives upload. Match exact name
+    # first (hand-uploaded images), then any grove-ingest row, then fall back
+    # to the SOLE gallery image on the source template; fail only if ambiguous.
     imgs = call(
         models,
         uid,
@@ -578,8 +583,31 @@ def _move_gallery_image(models, uid, src_tmpl, dst_tmpl, image_name) -> None:
         {"fields": ["id", "name", "image_1920"]},
     )
     if not imgs:
-        fail(f"gallery image '{image_name}' not found on template {src_tmpl}")
+        imgs = call(
+            models,
+            uid,
+            "product.image",
+            "search_read",
+            [[("product_tmpl_id", "=", src_tmpl), ("name", "like", "grove-ingest")]],
+            {"fields": ["id", "name", "image_1920"]},
+        )
+    if not imgs:
+        imgs = call(
+            models,
+            uid,
+            "product.image",
+            "search_read",
+            [[("product_tmpl_id", "=", src_tmpl)]],
+            {"fields": ["id", "name", "image_1920"]},
+        )
+    if len(imgs) != 1:
+        fail(
+            f"gallery image for '{image_name}' not uniquely resolvable on template "
+            f"{src_tmpl} ({len(imgs)} candidates) — refusing to guess"
+        )
     img = imgs[0]
+    if img["name"] != image_name:
+        print(f"    note: matched by fallback — actual image name '{img['name']}'")
     if DRY_RUN:
         print(f"    WOULD MOVE gallery image '{image_name}' from {src_tmpl} -> {dst_tmpl}")
         return
