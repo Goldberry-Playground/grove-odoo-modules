@@ -80,6 +80,15 @@ PRODUCT_DETAIL_FIELDS = PRODUCT_LIST_FIELDS + [
     "currency_id",
     "website_url",
     "image_1920",
+    # Purchasability flag. product_detail renders any website_published product,
+    # including "coming soon" placeholders that are published-but-not-for-sale
+    # (sale_ok=False, GOL-757/760). Those are excluded from the /shop grid and
+    # ?cat= facets (build_product_domain requires sale_ok=True) but their detail
+    # page still renders — so the storefront needs sale_ok here to lock the buy
+    # box (no Add-to-Cart, no Bareroot "Reserve" deposit) on a not-for-sale
+    # product. Without it the frontend derives purchasability from stock alone
+    # and a qty-0 Bareroot placeholder leaks a live reservation (GOL-760).
+    "sale_ok",
 ]
 
 # Fields only present when the `stock` module is installed.

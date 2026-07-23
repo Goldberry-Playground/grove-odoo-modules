@@ -1,9 +1,11 @@
 """Detail serializer: facts block + structured variants (catalog spec)."""
 
 from odoo.addons.grove_headless.controllers.main import (
+    PRODUCT_DETAIL_FIELDS,
     _image_url,
     _serialize_facts,
     _serialize_images,
+    _serialize_product,
     _structure_variant,
 )
 from odoo.tests import TransactionCase, tagged
@@ -60,6 +62,19 @@ class TestDetailSerialization(TransactionCase):
         images = _serialize_images(self.tmpl)
         self.assertEqual(images[0]["url"], f"/web/image/product.template/{self.tmpl.id}/image_1024")
         self.assertEqual(images[0]["thumb_url"], f"/web/image/product.template/{self.tmpl.id}/image_256")
+
+    def test_detail_exposes_sale_ok_for_coming_soon(self):
+        # A published-but-not-for-sale "coming soon" placeholder (GOL-760): the
+        # detail payload must carry sale_ok=False so the storefront can lock the
+        # buy box. Without it the frontend infers purchasability from stock alone
+        # and a qty-0 Bareroot placeholder leaks a live "Reserve" deposit.
+        self.assertIn("sale_ok", PRODUCT_DETAIL_FIELDS)
+        self.tmpl.sale_ok = False
+        data = _serialize_product(self.tmpl, PRODUCT_DETAIL_FIELDS)
+        self.assertIn("sale_ok", data)
+        self.assertFalse(data["sale_ok"])
+        self.tmpl.sale_ok = True
+        self.assertTrue(_serialize_product(self.tmpl, PRODUCT_DETAIL_FIELDS)["sale_ok"])
 
     def test_image_url_null_when_empty(self):
         # Imageless product: list/detail image_url must be null, not the gray
