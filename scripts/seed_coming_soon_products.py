@@ -265,6 +265,12 @@ def main() -> None:
 
     print("\n── Coming-soon placeholders ──")
     created = 0
+    # sku -> template id for the placeholders this run created (or found as our
+    # own prior placeholder). The verify pass reads these back BY ID: a template
+    # with >1 variant has product.template.default_code == False (Odoo only
+    # mirrors a single variant's code up to the template), so the placeholders —
+    # each carrying Bareroot+Potted variants — can never be found by default_code.
+    seeded_ids: dict[str, int] = {}
     for product in PRODUCTS:
         sku = product["sku"]
         species = norm_species(product["name"])
@@ -286,6 +292,7 @@ def main() -> None:
         )
         if existing:
             print(f"  = {product['name']} ({sku}) already seeded (id={existing[0]})")
+            seeded_ids[sku] = existing[0]
             continue
 
         cat_names = " + ".join(product["cats"])
@@ -315,6 +322,7 @@ def main() -> None:
             "grove_layer": product["layer"],
         }
         tmpl_id = call(models, uid, "product.template", "create", [vals], ctx)
+        seeded_ids[sku] = tmpl_id
         print(f"  CREATE {sku} → template id={tmpl_id} ({product['botanical']}; [{cat_names}])")
 
         # Per-variant SKUs so a graduated placeholder already has clean codes. No
@@ -349,21 +357,32 @@ def main() -> None:
     # that makes them "published but not purchasable and out of the facets".
     if not DRY_RUN:
         print("\n── Verify ──")
-        skus = [p["sku"] for p in PRODUCTS]
-        rows = call(
-            models,
-            uid,
-            "product.template",
-            "search_read",
-            [[("default_code", "in", skus), ("company_id", "in", [company_id, False])]],
-            {"fields": ["default_code", "name", "website_published", "sale_ok", "public_categ_ids"]},
+        # Read back by the template ids we seeded this run — NOT by default_code,
+        # which is False on these multi-variant templates. Species-skipped rows
+        # (a real product of that species already exists) are deliberately absent
+        # here: they are not our placeholders, so their invariants are not ours to
+        # assert. A converged re-run seeds nothing and verifies nothing.
+        rows = (
+            call(
+                models,
+                uid,
+                "product.template",
+                "search_read",
+                [[("id", "in", list(seeded_ids.values()))]],
+                {"fields": ["id", "name", "website_published", "sale_ok", "public_categ_ids"]},
+            )
+            if seeded_ids
+            else []
         )
-        by_sku = {r["default_code"]: r for r in rows}
+        by_id = {r["id"]: r for r in rows}
         problems = []
         for p in PRODUCTS:
-            r = by_sku.get(p["sku"])
+            tmpl_id = seeded_ids.get(p["sku"])
+            if tmpl_id is None:
+                continue  # species-skipped this run; not a placeholder we own
+            r = by_id.get(tmpl_id)
             if not r:
-                problems.append(f"{p['sku']}: not found after seed")
+                problems.append(f"{p['sku']}: template id={tmpl_id} not found after seed")
                 continue
             if not r["website_published"]:
                 problems.append(f"{p['sku']}: website_published is False (page would not render)")
