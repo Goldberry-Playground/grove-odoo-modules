@@ -2,6 +2,7 @@
 
 from odoo.addons.grove_headless.controllers.main import (
     PRODUCT_DETAIL_FIELDS,
+    PRODUCT_LIST_FIELDS,
     _image_url,
     _serialize_facts,
     _serialize_images,
@@ -69,10 +70,14 @@ class TestDetailSerialization(TransactionCase):
         # buy box. Without it the frontend infers purchasability from stock alone
         # and a qty-0 Bareroot placeholder leaks a live "Reserve" deposit.
         self.assertIn("sale_ok", PRODUCT_DETAIL_FIELDS)
+        # GOL-760: coming-soon products now appear in the grid too, so the LIST
+        # payload must carry sale_ok as well for the card to read as not-for-sale.
+        self.assertIn("sale_ok", PRODUCT_LIST_FIELDS)
         self.tmpl.sale_ok = False
         data = _serialize_product(self.tmpl, PRODUCT_DETAIL_FIELDS)
         self.assertIn("sale_ok", data)
         self.assertFalse(data["sale_ok"])
+        self.assertFalse(_serialize_product(self.tmpl, PRODUCT_LIST_FIELDS)["sale_ok"])
         self.tmpl.sale_ok = True
         self.assertTrue(_serialize_product(self.tmpl, PRODUCT_DETAIL_FIELDS)["sale_ok"])
 

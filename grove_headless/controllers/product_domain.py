@@ -36,9 +36,14 @@ SUN_VALUES = {"full", "partial", "shade"}
 
 
 def build_product_domain(kwargs: dict, company_id: int, cat_category_ids=None) -> list:
+    # Visibility is gated by `website_published` alone — NOT `sale_ok`. A
+    # published-but-not-for-sale "coming soon" placeholder (sale_ok=False,
+    # GOL-757/760) must appear in the /shop grid and ?cat= facets so shoppers
+    # can browse to it; the storefront reads the serialized `sale_ok` to render
+    # the card + detail buy box as not-purchasable. (Odoo semantics:
+    # website_published = "show it", sale_ok = "can it be sold".)
     domain = [
         ("website_published", "=", True),
-        ("sale_ok", "=", True),
         ("company_id", "in", [company_id, False]),
     ]
     if kwargs.get("featured"):
