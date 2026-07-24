@@ -71,6 +71,15 @@ PRODUCT_LIST_FIELDS = [
     "grove_featured",
     "image_128",
     "grove_slug",
+    # Purchasability flag. The grid + ?cat= facets now include published-but-
+    # not-for-sale "coming soon" placeholders (sale_ok=False, GOL-757/760 —
+    # build_product_domain gates on website_published alone), so every card
+    # needs sale_ok to render as not-purchasable ("Coming soon") instead of
+    # falsely claiming "In stock". The detail page likewise reads it to lock the
+    # buy box (no Add-to-Cart, no Bareroot "Reserve" deposit) — without it the
+    # frontend derives purchasability from stock alone and a qty-0 Bareroot
+    # placeholder leaks a live reservation.
+    "sale_ok",
 ]
 
 PRODUCT_DETAIL_FIELDS = PRODUCT_LIST_FIELDS + [
@@ -80,15 +89,6 @@ PRODUCT_DETAIL_FIELDS = PRODUCT_LIST_FIELDS + [
     "currency_id",
     "website_url",
     "image_1920",
-    # Purchasability flag. product_detail renders any website_published product,
-    # including "coming soon" placeholders that are published-but-not-for-sale
-    # (sale_ok=False, GOL-757/760). Those are excluded from the /shop grid and
-    # ?cat= facets (build_product_domain requires sale_ok=True) but their detail
-    # page still renders — so the storefront needs sale_ok here to lock the buy
-    # box (no Add-to-Cart, no Bareroot "Reserve" deposit) on a not-for-sale
-    # product. Without it the frontend derives purchasability from stock alone
-    # and a qty-0 Bareroot placeholder leaks a live reservation (GOL-760).
-    "sale_ok",
 ]
 
 # Fields only present when the `stock` module is installed.

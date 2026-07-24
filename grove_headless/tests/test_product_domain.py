@@ -10,13 +10,21 @@ _spec.loader.exec_module(product_domain)
 
 BASE = [
     ("website_published", "=", True),
-    ("sale_ok", "=", True),
     ("company_id", "in", [7, False]),
 ]
 
 
 def test_base_domain_no_filters():
     assert product_domain.build_product_domain({}, 7) == BASE
+
+
+def test_base_domain_does_not_gate_on_sale_ok():
+    # GOL-760: coming-soon placeholders (sale_ok=False) are published and must
+    # appear in the grid + ?cat= facets, so the visibility domain must NOT carry
+    # a sale_ok leaf — the storefront gates purchasability off the serialized
+    # sale_ok instead.
+    dom = product_domain.build_product_domain({}, 7)
+    assert not any(leaf[0] == "sale_ok" for leaf in dom)
 
 
 def test_tag_filter():
