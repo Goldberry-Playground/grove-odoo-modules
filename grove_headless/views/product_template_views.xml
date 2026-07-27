@@ -17,6 +17,22 @@
                             <field name="grove_seo_description" />
                         </group>
                     </group>
+                    <group string="Photo Quality (storefront)" name="grove_photo_quality">
+                        <field name="grove_image_width" />
+                        <field name="grove_image_height" />
+                        <field name="grove_image_low_res" />
+                        <div
+                            class="alert alert-warning"
+                            role="alert"
+                            colspan="2"
+                            invisible="not grove_image_low_res"
+                        >
+                            This product photo's long edge is below the 1600px storefront minimum,
+                            so it will render blurry on the product page hero (~1056px) and grid
+                            cards. Upload a higher-resolution source (re-shoot list tracked in
+                            GOL-689).
+                        </div>
+                    </group>
                 </page>
             </xpath>
         </field>

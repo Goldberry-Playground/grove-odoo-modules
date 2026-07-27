@@ -1,7 +1,21 @@
 import re
 
-from odoo import api, fields, models
+from odoo import _, api, fields, models
 from odoo.exceptions import ValidationError
+
+try:
+    from .image_resolution import GROVE_MIN_IMAGE_LONG_EDGE, is_low_res, read_image_dimensions
+except ImportError:  # loaded standalone (tests import by file path)
+    import importlib.util as _ilu
+    import os as _os
+
+    _ir_path = _os.path.join(_os.path.dirname(__file__), "image_resolution.py")
+    _spec = _ilu.spec_from_file_location("grove_image_resolution", _ir_path)
+    _ir = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(_ir)
+    GROVE_MIN_IMAGE_LONG_EDGE = _ir.GROVE_MIN_IMAGE_LONG_EDGE
+    is_low_res = _ir.is_low_res
+    read_image_dimensions = _ir.read_image_dimensions
 
 
 class ProductTemplate(models.Model):
@@ -81,6 +95,72 @@ class ProductTemplate(models.Model):
     grove_mature_size = fields.Char(string="Mature Size")
     grove_spacing = fields.Char(string="Plant Spacing")
     grove_soil = fields.Char(string="Soil")
+
+    # ── Product-photo resolution guardrail (GOL-837) ────────────────────
+    # The storefront can't add resolution a source lacks, so we surface the
+    # stored photo's pixel size here and flag anything below the storefront
+    # minimum at upload time. Stored + computed off image_1920 so the flag is
+    # queryable/searchable in the admin without re-reading the image bytes.
+    grove_image_width = fields.Integer(
+        string="Photo Width (px)",
+        compute="_compute_grove_image_resolution",
+        store=True,
+        readonly=True,
+        help="Pixel width of the stored product photo (image_1920). 0 if none set.",
+    )
+    grove_image_height = fields.Integer(
+        string="Photo Height (px)",
+        compute="_compute_grove_image_resolution",
+        store=True,
+        readonly=True,
+        help="Pixel height of the stored product photo (image_1920). 0 if none set.",
+    )
+    grove_image_low_res = fields.Boolean(
+        string="Low-resolution Photo",
+        compute="_compute_grove_image_resolution",
+        store=True,
+        readonly=True,
+        help=(
+            "True when a photo is set but its long edge is below the "
+            f"{GROVE_MIN_IMAGE_LONG_EDGE}px storefront minimum — it will render "
+            "blurry on the product page. Re-shoot / re-upload a larger source."
+        ),
+    )
+
+    @api.depends("image_1920")
+    def _compute_grove_image_resolution(self):
+        for record in self:
+            width, height = read_image_dimensions(record.image_1920)
+            record.grove_image_width = width
+            record.grove_image_height = height
+            record.grove_image_low_res = is_low_res(width, height, GROVE_MIN_IMAGE_LONG_EDGE)
+
+    @api.onchange("image_1920")
+    def _onchange_grove_image_low_res_warning(self):
+        # Non-blocking upload-time guardrail: warn (don't reject) so content
+        # owners can still stage a placeholder, but can't silently regress
+        # storefront photo quality. Fires on the raw upload before Odoo's 1920
+        # store-cap, so it sees the true source resolution.
+        if not self.image_1920:
+            return
+        width, height = read_image_dimensions(self.image_1920)
+        if is_low_res(width, height, GROVE_MIN_IMAGE_LONG_EDGE):
+            long_edge = max(width, height)
+            return {
+                "warning": {
+                    "title": _("Low-resolution product photo"),
+                    "message": _(
+                        "This photo is %(w)s×%(h)spx (long edge %(edge)spx), below the "
+                        "%(minimum)spx storefront minimum. It will look blurry on the product "
+                        "page hero (~1056px) and grid cards. Upload a higher-resolution source "
+                        "before publishing.",
+                        w=width,
+                        h=height,
+                        edge=long_edge,
+                        minimum=GROVE_MIN_IMAGE_LONG_EDGE,
+                    ),
+                }
+            }
 
     @api.constrains("grove_zone_min", "grove_zone_max")
     def _check_zone_range(self):
