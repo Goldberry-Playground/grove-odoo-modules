@@ -11,6 +11,7 @@ from odoo import http
 from odoo.http import Response, request
 
 from ..models import stripe_gateway
+from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.newsletter import newsletter_tag_names
 from ..models.shipping_calendar import serialize_ship_options, ship_options, usda_zone_for_zip
 from ..models.shipping_zones import compute_order_shipping, compute_shipping_rate
@@ -304,6 +305,15 @@ class GroveHeadlessAPI(http.Controller):
         detail_fields = PRODUCT_DETAIL_FIELDS + _available_fields(product, OPTIONAL_STOCK_FIELDS)
         data = _serialize_product(product, detail_fields)
         data["image_url"] = _image_url("product.template", product, "image_1920")
+        # Stored-photo resolution (GOL-837) so content owners / audit tooling can
+        # see which products serve a below-minimum source and need re-shooting.
+        data["image"] = {
+            "url": data["image_url"],
+            "width": product.grove_image_width or None,
+            "height": product.grove_image_height or None,
+            "low_res": bool(product.grove_image_low_res),
+            "min_long_edge": GROVE_MIN_IMAGE_LONG_EDGE,
+        }
         data["variants"] = [_structure_variant(v) for v in product.product_variant_ids]
         data["facts"] = _serialize_facts(product)
         data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
