@@ -86,6 +86,14 @@ PRODUCT_LIST_FIELDS = [
 PRODUCT_DETAIL_FIELDS = PRODUCT_LIST_FIELDS + [
     "description_sale",
     "grove_seo_description",
+    # website_description holds the species "guide" body (agent-drafted, then
+    # human-reviewed). It is read here but the value is GATED by
+    # _gate_guide_fields on the way out — an un-approved draft is withheld even
+    # though the field is in the read set. grove_guide_ready is Wes's approval
+    # flag. See GATH-130 (this contract) / GATH-127 (frontend GuideBlock) /
+    # GATH-121 (the drafting routine that writes website_description).
+    "website_description",
+    "grove_guide_ready",
     "categ_id",
     "currency_id",
     "website_url",
@@ -155,6 +163,29 @@ def _serialize_facts(product):
         "spacing": product.grove_spacing or "",
         "soil": product.grove_soil or "",
     }
+
+
+def _gate_guide_fields(product, data):
+    """Withhold the species-guide body until Wes has approved it.
+
+    ``website_description`` carries the guide body written by the Paperclip
+    guide-drafting routine (GATH-121). Agent-authored HTML is a weaker trust
+    story than the human prose it replaces, so it must not reach any client
+    until Wes ticks ``grove_guide_ready`` on the product form. The frontend
+    GuideBlock (GATH-127) also gates on ``grove_guide_ready`` and sanitizes the
+    body, but enforcing the gate here means an un-approved draft can never cross
+    the API boundary at all — defense in depth, not just a hidden UI element.
+
+    Mutates ``data`` in place (it is already in the read set) and returns it:
+    - ``grove_guide_ready`` -> a plain bool the frontend keys its render on.
+    - ``website_description`` -> the body when approved, else ``None``. Also
+      ``None`` (never ``False`` / ``""``) when approved-but-empty, so the
+      frontend renders its "coming soon" placeholder rather than an empty block.
+    """
+    ready = bool(product.grove_guide_ready)
+    data["grove_guide_ready"] = ready
+    data["website_description"] = (product.website_description or None) if ready else None
+    return data
 
 
 def _structure_variant(variant):
@@ -304,6 +335,9 @@ class GroveHeadlessAPI(http.Controller):
 
         detail_fields = PRODUCT_DETAIL_FIELDS + _available_fields(product, OPTIONAL_STOCK_FIELDS)
         data = _serialize_product(product, detail_fields)
+        # Gate the agent-drafted guide body: withhold website_description until
+        # grove_guide_ready is set (GATH-130). Must run after the raw read.
+        _gate_guide_fields(product, data)
         data["image_url"] = _image_url("product.template", product, "image_1920")
         # Stored-photo resolution (GOL-837) so content owners / audit tooling can
         # see which products serve a below-minimum source and need re-shooting.

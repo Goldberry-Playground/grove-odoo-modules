@@ -3,6 +3,7 @@
 from odoo.addons.grove_headless.controllers.main import (
     PRODUCT_DETAIL_FIELDS,
     PRODUCT_LIST_FIELDS,
+    _gate_guide_fields,
     _image_url,
     _serialize_facts,
     _serialize_images,
@@ -80,6 +81,40 @@ class TestDetailSerialization(TransactionCase):
         self.assertFalse(_serialize_product(self.tmpl, PRODUCT_LIST_FIELDS)["sale_ok"])
         self.tmpl.sale_ok = True
         self.assertTrue(_serialize_product(self.tmpl, PRODUCT_DETAIL_FIELDS)["sale_ok"])
+
+    def test_guide_fields_in_detail_contract(self):
+        # PR A (GATH-130) contract: both the guide body and Wes's approval flag
+        # are part of the detail read set the frontend GuideBlock consumes.
+        self.assertIn("website_description", PRODUCT_DETAIL_FIELDS)
+        self.assertIn("grove_guide_ready", PRODUCT_DETAIL_FIELDS)
+        # ...but never leak into the leaner list payload (detail-only).
+        self.assertNotIn("website_description", PRODUCT_LIST_FIELDS)
+        self.assertNotIn("grove_guide_ready", PRODUCT_LIST_FIELDS)
+
+    def test_guide_body_withheld_until_approved(self):
+        # A drafted-but-unapproved guide must NOT cross the API boundary, even
+        # though website_description is populated and in the read set.
+        self.tmpl.website_description = "<p>How to grow a pear tree.</p>"
+        self.tmpl.grove_guide_ready = False
+        data = _gate_guide_fields(self.tmpl, _serialize_product(self.tmpl, PRODUCT_DETAIL_FIELDS))
+        self.assertFalse(data["grove_guide_ready"])
+        self.assertIsNone(data["website_description"])
+
+    def test_guide_body_exposed_once_approved(self):
+        self.tmpl.website_description = "<p>How to grow a pear tree.</p>"
+        self.tmpl.grove_guide_ready = True
+        data = _gate_guide_fields(self.tmpl, _serialize_product(self.tmpl, PRODUCT_DETAIL_FIELDS))
+        self.assertTrue(data["grove_guide_ready"])
+        self.assertIn("How to grow a pear tree.", data["website_description"])
+
+    def test_guide_body_none_when_approved_but_empty(self):
+        # Approved with no body -> None (not False/""), so the frontend renders
+        # its "coming soon" placeholder rather than an empty guide block.
+        self.tmpl.website_description = False
+        self.tmpl.grove_guide_ready = True
+        data = _gate_guide_fields(self.tmpl, _serialize_product(self.tmpl, PRODUCT_DETAIL_FIELDS))
+        self.assertTrue(data["grove_guide_ready"])
+        self.assertIsNone(data["website_description"])
 
     def test_image_url_null_when_empty(self):
         # Imageless product: list/detail image_url must be null, not the gray

@@ -60,6 +60,25 @@ class ProductTemplate(models.Model):
             collision = record.search(domain, limit=1)
             record.grove_slug = f"{base}-{record.id}" if collision else base
 
+    # ── Guide publishing gate (GATH-130 / GATH-121) ─────────────────────
+    # The species "guide" body lives in the standard eCommerce field
+    # website_description ("Description for the website"), drafted by the
+    # Paperclip guide-drafting routine. Agent-authored HTML is a weaker trust
+    # story than the human prose Wes wrote in Ghost, so it stays invisible to
+    # the storefront until Wes reviews the draft and ticks this box. The detail
+    # serializer withholds the body while this is False
+    # (controllers/main.py:_gate_guide_fields), so an un-approved draft never
+    # crosses the API boundary — defense in depth behind the frontend GuideBlock
+    # sanitizer. CREATE-ONLY: the routine refuses to overwrite a non-empty
+    # description, so re-drafting means a human clears the field first.
+    grove_guide_ready = fields.Boolean(
+        string="Guide Approved for Storefront",
+        default=False,
+        help="Tick once the website description (species guide) has been "
+        "reviewed and is ready to show on the storefront. Until then the "
+        "storefront shows a 'coming soon' guide placeholder instead of the body.",
+    )
+
     # Shipping tier drives the per-tree zone rate at checkout
     # (models/shipping_zones.py). Default "potted" = the higher tier, so an
     # untagged product can never be undercharged.
