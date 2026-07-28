@@ -66,9 +66,7 @@ class TestDetailSerialization(TransactionCase):
 
     def test_cultivar_count_multi_cultivar(self):
         # Add a second cultivar -> two varieties (× two formats = four variants).
-        c_bart = self.env["product.attribute.value"].create(
-            {"name": "Bartlett", "attribute_id": self.cultivar.id}
-        )
+        c_bart = self.env["product.attribute.value"].create({"name": "Bartlett", "attribute_id": self.cultivar.id})
         line = self.tmpl.attribute_line_ids.filtered(lambda l: l.attribute_id == self.cultivar)
         line.value_ids = [(4, c_bart.id)]
         self.assertEqual(len(self.tmpl.product_variant_ids), 4)
