@@ -188,6 +188,25 @@ def _gate_guide_fields(product, data):
     return data
 
 
+def _cultivar_count(product):
+    """Distinct **cultivar** count for a template — the storefront "varieties".
+
+    A template's ``product_variant_ids`` is the Cartesian product of its axes
+    (Cultivar × Format), so a single-cultivar plant with a Potted/Bareroot Format
+    axis has two variants but is still *one* variety (GOL-919). Count distinct
+    Cultivar attribute values across the active variants instead, and floor at 1
+    so a Format-only product (no Cultivar axis, so the set is empty) reads
+    "1 variety" rather than "0".
+    """
+    cultivars = {
+        value.name
+        for variant in product.product_variant_ids
+        for value in variant.product_template_variant_value_ids
+        if value.attribute_id.name == "Cultivar"
+    }
+    return len(cultivars) or 1
+
+
 def _structure_variant(variant):
     """Structured variant entry: axes parsed into fields, not display-name strings."""
     axis = {v.attribute_id.name: v.name for v in variant.product_template_variant_value_ids}
@@ -290,6 +309,7 @@ class GroveHeadlessAPI(http.Controller):
                     {"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids
                 ]
                 data["variant_count"] = len(product.product_variant_ids)
+                data["cultivar_count"] = _cultivar_count(product)
                 data["price_min"] = min(product.product_variant_ids.mapped("lst_price"), default=product.list_price)
                 items.append(data)
 

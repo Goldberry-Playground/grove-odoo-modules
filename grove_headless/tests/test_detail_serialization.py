@@ -3,6 +3,7 @@
 from odoo.addons.grove_headless.controllers.main import (
     PRODUCT_DETAIL_FIELDS,
     PRODUCT_LIST_FIELDS,
+    _cultivar_count,
     _gate_guide_fields,
     _image_url,
     _serialize_facts,
@@ -55,6 +56,36 @@ class TestDetailSerialization(TransactionCase):
         self.assertEqual(data["shipping_tier"], "bareroot")
         self.assertIn("price", data)
         self.assertIn("qty_available", data)
+
+    def test_cultivar_count_ignores_format_axis(self):
+        # GOL-919: single-cultivar Pear (Magness) with a Potted/Bareroot Format
+        # axis has TWO variants but is still ONE variety. The storefront count
+        # must track distinct cultivars, not the Cultivar × Format variant grid.
+        self.assertEqual(len(self.tmpl.product_variant_ids), 2)
+        self.assertEqual(_cultivar_count(self.tmpl), 1)
+
+    def test_cultivar_count_multi_cultivar(self):
+        # Add a second cultivar -> two varieties (× two formats = four variants).
+        c_bart = self.env["product.attribute.value"].create({"name": "Bartlett", "attribute_id": self.cultivar.id})
+        line = self.tmpl.attribute_line_ids.filtered(lambda l: l.attribute_id == self.cultivar)
+        line.value_ids = [(4, c_bart.id)]
+        self.assertEqual(len(self.tmpl.product_variant_ids), 4)
+        self.assertEqual(_cultivar_count(self.tmpl), 2)
+
+    def test_cultivar_count_format_only_floors_at_one(self):
+        # A Format-only product (Aronia-style: no Cultivar axis) has an empty
+        # cultivar set -> floor at 1 so the card reads "1 variety", not "0".
+        tmpl = self.env["product.template"].create(
+            {
+                "name": "Aronia",
+                "type": "consu",
+                "attribute_line_ids": [
+                    (0, 0, {"attribute_id": self.fmt.id, "value_ids": [(6, 0, [self.f_pt.id, self.f_br.id])]}),
+                ],
+            }
+        )
+        self.assertEqual(len(tmpl.product_variant_ids), 2)
+        self.assertEqual(_cultivar_count(tmpl), 1)
 
     def test_images_hero_first_and_empty_ok(self):
         self.assertEqual(_serialize_images(self.tmpl), [])  # no image set
