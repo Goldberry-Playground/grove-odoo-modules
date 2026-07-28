@@ -17,6 +17,16 @@
                             <field name="grove_seo_description" />
                         </group>
                     </group>
+                    <group string="Storefront Guide" name="grove_guide">
+                        <field name="grove_guide_ready" />
+                        <div class="text-muted" colspan="2">
+                            The species guide shown on the storefront is the
+                            <b>Description for the website</b> field (Sales tab). It is drafted
+                            automatically and stays hidden until you tick <b>Guide Approved
+                            for Storefront</b>. Until then the storefront shows a "coming soon"
+                            placeholder. To re-draft, clear the description first.
+                        </div>
+                    </group>
                     <group string="Photo Quality (storefront)" name="grove_photo_quality">
                         <field name="grove_image_width" />
                         <field name="grove_image_height" />
