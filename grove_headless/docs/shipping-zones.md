@@ -44,6 +44,28 @@ Keys beginning with `_` are ignored (used for comments).
 Green states (alphabetical): CT, DE, IL, IN, KY, MA, MD, ME, MI, MN, NC, NH, NJ,
 NY, OH, PA, RI, VA, VT, WI, WV.
 
+## Live rate feed — `GET /grove/api/v1/shipping/rates` (GOL-952)
+
+`rate_feed()` serves the in-memory rate table and zone map as read-only JSON so
+the storefront product-page estimator prices against exactly what checkout will
+charge, instead of a bundled snapshot that drifts as the checker rewrites
+`shipping_rates.json`. Public, no Shippo call, no DB read.
+
+```json
+{
+  "zones": { "zone_1": { "bareroot": {"base": 21.0}, "potted": {"base": 32.0} }, ... },
+  "zone_by_state": { "WV": "zone_1", ... },
+  "green_states": ["CT", "DE", ...]
+}
+```
+
+`zones` mirrors `data/shipping_rates.json`; the frontend drops it into
+`resolveRateTable()` (grove-sites `apps/nursery/lib/shipping-estimate.ts`).
+`zone_by_state` is the authoritative green-list zone map — the frontend
+eligibility gate must stay in lockstep with it. Because the feed is served from
+the same module globals `compute_shipping_rate` prices with, it can never
+disagree with the checkout engine within a running instance.
+
 ## Product tier — `grove_shipping_tier`
 
 `product.template` carries a `grove_shipping_tier` selection field (`bareroot` or

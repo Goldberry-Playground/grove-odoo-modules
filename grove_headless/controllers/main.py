@@ -14,7 +14,7 @@ from ..models import stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.newsletter import newsletter_tag_names
 from ..models.shipping_calendar import serialize_ship_options, ship_options, usda_zone_for_zip
-from ..models.shipping_zones import compute_order_shipping, compute_shipping_rate
+from ..models.shipping_zones import compute_order_shipping, compute_shipping_rate, rate_feed
 from ..models.shippo_client import is_valid_tracking
 from .product_domain import build_product_domain, slugify, zone_response
 
@@ -544,6 +544,25 @@ class GroveHeadlessAPI(http.Controller):
         result = serialize_ship_options(ship_options(zip_code, tier, _date.today()))
         result["per_tree_rate"] = compute_shipping_rate(state, tier=tier)
         return _json_response(result)
+
+    @http.route(
+        "/grove/api/v1/shipping/rates",
+        type="http",
+        auth="public",
+        methods=["GET"],
+        csrf=False,
+    )
+    def shipping_rates(self, **_kwargs):
+        """Live read-only shipping-rate feed for the storefront estimator (GOL-952).
+
+        Serves the in-memory zone rate table (mirroring ``data/shipping_rates.json``)
+        plus the authoritative zone->state green list, so the product-page estimator
+        prices against exactly what checkout will charge instead of a bundled copy
+        that drifts as the daily rate-checker rewrites the table. Public and cheap:
+        no Shippo call in the request path, no DB read — pure in-memory serialization.
+        The frontend drops the ``zones`` map into ``resolveRateTable()``.
+        """
+        return _json_response(rate_feed())
 
     # ── Orders ───────────────────────────────────────────────────────────
 
