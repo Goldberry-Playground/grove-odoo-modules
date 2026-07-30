@@ -1,4 +1,6 @@
 from . import (
+    grove_publish,  # noqa: F401  pure HMAC signer/sender (GOL-985), no ORM models
+    grove_publish_event,  # noqa: F401
     grove_stripe_event,  # noqa: F401
     newsletter,  # noqa: F401  pure tag-name helper (GOL-221), no ORM models
     potting_batch,  # noqa: F401

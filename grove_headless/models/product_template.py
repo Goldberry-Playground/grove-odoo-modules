@@ -1,7 +1,7 @@
 import re
 
 from odoo import _, api, fields, models
-from odoo.exceptions import ValidationError
+from odoo.exceptions import UserError, ValidationError
 
 try:
     from .image_resolution import GROVE_MIN_IMAGE_LONG_EDGE, is_low_res, read_image_dimensions
@@ -78,6 +78,70 @@ class ProductTemplate(models.Model):
         "reviewed and is ready to show on the storefront. Until then the "
         "storefront shows a 'coming soon' guide placeholder instead of the body.",
     )
+
+    grove_publish_event_ids = fields.One2many(
+        "grove.publish.event", "product_tmpl_id", string="Publish Events"
+    )
+    grove_publish_event_count = fields.Integer(compute="_compute_grove_publish_event_count")
+
+    def _compute_grove_publish_event_count(self):
+        Event = self.env["grove.publish.event"]
+        for record in self:
+            # _origin.id is the real DB id (0/False for an unsaved record in
+            # create mode), so the stat button computes without hitting a NewId.
+            origin_id = record._origin.id
+            record.grove_publish_event_count = (
+                Event.search_count([("product_tmpl_id", "=", origin_id)]) if origin_id else 0
+            )
+
+    def action_view_grove_publish_events(self):
+        """Open the publish-webhook delivery log for this product (stat button)."""
+        self.ensure_one()
+        return {
+            "type": "ir.actions.act_window",
+            "name": _("Publish Events"),
+            "res_model": "grove.publish.event",
+            "view_mode": "list,form",
+            "domain": [("product_tmpl_id", "=", self.id)],
+            "context": {"search_default_product_tmpl_id": self.id},
+        }
+
+    def action_publish_guide(self):
+        """Publish the approved species guide: emit a signed webhook to grove-sites.
+
+        The "Draft-guide" publish action (GOL-985). Fires an HMAC-signed
+        `guide.publish` event so the tenant's Next.js storefront revalidates the
+        product page, and records the delivery in `grove.publish.event` for
+        audit/replay. Gated on the same approval flag the API serializer honours
+        (`grove_guide_ready`) — you cannot push an un-reviewed draft live.
+
+        Delivery failures do NOT raise (the event row is kept for retry); we
+        surface the outcome as a UI notification instead.
+        """
+        self.ensure_one()
+        if not self.grove_guide_ready:
+            raise UserError(
+                _(
+                    "Approve the guide first: tick 'Guide Approved for Storefront' "
+                    "before publishing it to the site."
+                )
+            )
+        # Audit rows are system-owned: publishing writes the ledger + delivers
+        # regardless of the approver's group, same as the Stripe event ledger.
+        event = self.env["grove.publish.event"].sudo().publish_guide(self)
+        if event.state == "delivered":
+            message = _("Guide published — storefront revalidation triggered.")
+            level = "success"
+        else:
+            message = _("Publish webhook failed: %s. Retry from the Publish Events log.") % (
+                event.error or _("unknown error")
+            )
+            level = "warning"
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {"title": _("Publish Guide"), "message": message, "type": level, "sticky": False},
+        }
 
     # Shipping tier drives the per-tree zone rate at checkout
     # (models/shipping_zones.py). Default "potted" = the higher tier, so an
