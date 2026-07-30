@@ -1032,7 +1032,9 @@ class GroveHeadlessAPI(http.Controller):
         if not is_valid_tracking(tracking):
             return _json_response({"ok": True, "matched": 0})
         orders = request.env["sale.order"].sudo().search([("grove_tracking_numbers", "like", tracking)])
-        orders.write({"grove_delivery_status": status.lower()})
+        new_status = status.lower()
+        for order in orders:
+            _apply_delivery_status(request.env, order, new_status, tracking)
         return _json_response({"ok": True, "matched": len(orders)})
 
 
@@ -1501,6 +1503,7 @@ def _handle_session_completed(env, session):
             order.action_confirm()
     except Exception:  # noqa: BLE001 — payment is already recorded; don't fail the webhook
         _logger.exception("action_confirm failed for %s (payment recorded, confirm deferred)", order.name)
+    _send_order_confirmation_email(env, order)
     return vals["grove_checkout_status"]
 
 
@@ -1550,3 +1553,76 @@ def _notify_discord(message):
         requests.post(url, json={"content": message}, timeout=10)
     except Exception:  # noqa: BLE001
         _logger.warning("Discord ops notify failed", exc_info=True)
+
+
+def _send_order_confirmation_email(env, order):
+    """Best-effort order-confirmation receipt once payment is recorded (GOL-988).
+
+    Uses the standard Odoo sale confirmation template so the receipt is branded
+    and lists the order lines + totals, and so Odoo's outgoing mail server
+    (Mailgun SMTP in QA/prod) applies the configured From/from_filter. Never
+    fatal: the payment is already recorded and the chatter/webhook stand on
+    their own if outgoing mail is unconfigured."""
+    if not order.partner_id.email:
+        return
+    template = env.ref("sale.mail_template_sale_confirmation", raise_if_not_found=False)
+    if not template:
+        _logger.warning("sale confirmation template missing; skipping receipt for %s", order.name)
+        return
+    try:
+        template.sudo().send_mail(order.id, force_send=True)
+    except Exception:  # noqa: BLE001 — receipt is best-effort, never fails the webhook
+        _logger.warning("Order confirmation email failed for %s", order.name, exc_info=True)
+
+
+# Shippo tracking statuses that warrant a customer email, mapped to the
+# subject template + lead line of the notification. Backs the shipping-
+# notification promise on the /shipping-warranty page (GOL-988). Repeated
+# webhooks for the same status are de-duplicated by only emailing on a status
+# *transition* (see _apply_delivery_status), so a customer gets one "shipped"
+# and one "delivered" — not one per Shippo poll.
+_SHIPPING_NOTIFY = {
+    "transit": ("Your order {order} has shipped", "Good news — your order is on its way!"),
+    "delivered": ("Your order {order} has been delivered", "Your order has been delivered. We hope you love it!"),
+}
+
+
+def _apply_delivery_status(env, order, new_status, tracking):
+    """Record the new Shippo delivery status and, on a *transition* into a
+    notify-worthy state, email the customer. Idempotent: a repeated webhook for
+    a status the order already has sends no second email. Returns True when the
+    status changed."""
+    if new_status == order.grove_delivery_status:
+        return False
+    order.grove_delivery_status = new_status
+    _notify_shipping_status(env, order, new_status, tracking)
+    return True
+
+
+def _notify_shipping_status(env, order, status, tracking):
+    """Best-effort shipping-notification email (GOL-988). Never fatal — the
+    delivery-status write has already landed, and a mail failure must not make
+    Shippo retry the webhook. Only notify-worthy statuses (see _SHIPPING_NOTIFY)
+    produce an email; everything else is a silent status update."""
+    notice = _SHIPPING_NOTIFY.get(status)
+    if not notice or not order.partner_id.email:
+        return
+    subject_tmpl, lead = notice
+    body = (
+        f"<p>Hi {order.partner_id.name or 'there'},</p>"
+        f"<p>{lead}</p>"
+        f"<p>Order: <strong>{order.name}</strong><br/>"
+        f"Tracking number: <strong>{tracking}</strong></p>"
+        f"<p>— Goldberry Grove Nursery</p>"
+    )
+    try:
+        env["mail.mail"].sudo().create(
+            {
+                "subject": subject_tmpl.format(order=order.name),
+                "email_to": order.partner_id.email,
+                "body_html": body,
+                "auto_delete": True,
+            }
+        ).send()
+    except Exception:  # noqa: BLE001 — shipping notice is best-effort
+        _logger.warning("Shipping notification email failed for %s", order.name, exc_info=True)

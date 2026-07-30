@@ -207,3 +207,85 @@ class TestStripeCheckout(TransactionCase):
         with mute_logger("odoo.sql_db"), self.assertRaises(IntegrityError):
             with self.cr.savepoint():
                 Event.create({"event_id": "evt_dup", "event_type": "checkout.session.completed"})
+
+    # ── transactional email (GOL-988) ────────────────────────────────────
+
+    def test_order_confirmation_email_sent_on_paid(self):
+        """A paid checkout sends the standard sale confirmation receipt for that
+        order, so Odoo's outgoing mail server (Mailgun) delivers a branded email."""
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        order.grove_stripe_session_id = "cs_mail"
+        sent = {}
+        Template = type(self.env["mail.template"])
+        orig = Template.send_mail
+
+        def fake_send_mail(self_t, res_id, **kwargs):
+            sent["res_id"] = res_id
+            sent["xmlid"] = self_t.get_external_id().get(self_t.id)
+            return 0
+
+        Template.send_mail = fake_send_mail
+        try:
+            grove_main._handle_session_completed(self.env, {"id": "cs_mail", "payment_intent": "pi_mail"})
+        finally:
+            Template.send_mail = orig
+        self.assertEqual(sent.get("res_id"), order.id)
+        self.assertEqual(sent.get("xmlid"), "sale.mail_template_sale_confirmation")
+
+    def test_order_confirmation_skipped_without_email(self):
+        """No partner email → no receipt attempt, and the webhook still succeeds."""
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        order.grove_stripe_session_id = "cs_noemail"
+        self.partner.email = False
+        sent = {}
+        Template = type(self.env["mail.template"])
+        orig = Template.send_mail
+
+        def fake_send_mail(self_t, res_id, **kwargs):
+            sent["called"] = True
+
+        Template.send_mail = fake_send_mail
+        try:
+            result = grove_main._handle_session_completed(self.env, {"id": "cs_noemail", "payment_intent": "pi_x"})
+        finally:
+            Template.send_mail = orig
+        self.assertEqual(result, "paid")
+        self.assertNotIn("called", sent)
+
+    def test_shipping_status_transition_notifies_once(self):
+        """A status change emails the customer; a repeat webhook for the same
+        status is a no-op (idempotent). Non-notify statuses update silently."""
+        order = self._make_order(qty=1)
+        order.grove_delivery_status = "label_purchased"
+        calls = []
+        orig = grove_main._notify_shipping_status
+
+        def fake_notify(env, notify_order, notify_status, notify_tracking):
+            calls.append(notify_status)
+
+        grove_main._notify_shipping_status = fake_notify
+        try:
+            first = grove_main._apply_delivery_status(self.env, order, "transit", "TRACK123")
+            repeat = grove_main._apply_delivery_status(self.env, order, "transit", "TRACK123")
+            delivered = grove_main._apply_delivery_status(self.env, order, "delivered", "TRACK123")
+        finally:
+            grove_main._notify_shipping_status = orig
+        self.assertTrue(first)
+        self.assertFalse(repeat)
+        self.assertTrue(delivered)
+        self.assertEqual(calls, ["transit", "delivered"])
+        self.assertEqual(order.grove_delivery_status, "delivered")
+
+    def test_shipping_notification_builds_customer_email(self):
+        """The shipping notice is a real email to the customer carrying the
+        tracking number; a non-notify status produces no email."""
+        order = self._make_order(qty=1)
+        with mute_logger("odoo.addons.mail.models.mail_mail"):
+            grove_main._notify_shipping_status(self.env, order, "transit", "TRACK999")
+            grove_main._notify_shipping_status(self.env, order, "pre_transit", "TRACK999")
+        shipped = self.env["mail.mail"].search([("subject", "ilike", "has shipped")])
+        self.assertEqual(len(shipped), 1)
+        self.assertEqual(shipped.email_to, self.partner.email)
+        self.assertIn("TRACK999", shipped.body_html or "")
