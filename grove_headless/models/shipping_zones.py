@@ -169,6 +169,34 @@ ZONE_BY_STATE: dict[str, str] = {
 assert set(ZONE_BY_STATE) == GREEN_STATES
 
 
+def rate_feed() -> dict:
+    """Read-only snapshot of the live rate table + compliance zone map (GOL-952).
+
+    Returns exactly the in-memory table ``compute_shipping_rate`` prices orders
+    with, so the storefront estimator (grove-sites ``resolveRateTable``) can
+    override its bundled snapshot and never drift from what checkout will
+    actually charge. Shape:
+
+        {
+          "zones": {"zone_1": {"bareroot": {"base": 21.0}, "potted": {...}}, ...},
+          "zone_by_state": {"WV": "zone_1", ...},
+          "green_states": ["CT", "DE", ...],
+        }
+
+    ``zones`` mirrors ``data/shipping_rates.json`` (minus the ``_comment`` key,
+    already stripped at load). ``zone_by_state`` is the authoritative 21-state
+    green list -> zone map — the compliance gate the frontend must stay in
+    lockstep with. No Shippo call and no DB read: rates are pre-computed and
+    served straight from memory. The returned dict is a fresh deep copy so a
+    caller can't mutate the engine's live tables.
+    """
+    return {
+        "zones": {zone: {tier: dict(rule) for tier, rule in tiers.items()} for zone, tiers in ZONE_RATES.items()},
+        "zone_by_state": dict(ZONE_BY_STATE),
+        "green_states": sorted(ZONE_BY_STATE),
+    }
+
+
 def is_configured() -> bool:
     """True when both the zone map and rate table are populated.
 
