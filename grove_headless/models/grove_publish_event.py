@@ -96,9 +96,7 @@ class GrovePublishEvent(models.Model):
     def _webhook_config(self, tenant):
         """(url, secret) for a tenant slug from the environment. Either may be ''."""
         key = tenant.upper()
-        url = os.environ.get(f"GROVE_PUBLISH_WEBHOOK_URL_{key}") or os.environ.get(
-            "GROVE_PUBLISH_WEBHOOK_URL", ""
-        )
+        url = os.environ.get(f"GROVE_PUBLISH_WEBHOOK_URL_{key}") or os.environ.get("GROVE_PUBLISH_WEBHOOK_URL", "")
         secret = os.environ.get(f"GROVE_PUBLISH_WEBHOOK_SECRET_{key}") or os.environ.get(
             "GROVE_PUBLISH_WEBHOOK_SECRET", ""
         )
@@ -135,9 +133,7 @@ class GrovePublishEvent(models.Model):
         company = product_tmpl.company_id or self.env.company
         tenant = self._tenant_slug_for_company(company)
         if not tenant:
-            raise UserError(
-                _("No storefront tenant is mapped to company '%s'. Cannot publish.") % company.display_name
-            )
+            raise UserError(_("No storefront tenant is mapped to company '%s'. Cannot publish.") % company.display_name)
         url, secret = self._webhook_config(tenant)
         if not url or not secret:
             key = tenant.upper()
@@ -203,9 +199,7 @@ class GrovePublishEvent(models.Model):
             }
         )
         if not ok:
-            _logger.warning(
-                "publish.event %s rejected: HTTP %s", self.delivery_id, response.status_code
-            )
+            _logger.warning("publish.event %s rejected: HTTP %s", self.delivery_id, response.status_code)
         return self
 
     def action_retry(self):
@@ -217,9 +211,7 @@ class GrovePublishEvent(models.Model):
                 raise UserError(_("Cannot replay: this event has no tenant."))
             url, secret = self._webhook_config(event.tenant)
             if not url or not secret:
-                raise UserError(
-                    _("Publish webhook is not configured for tenant '%s'.") % event.tenant
-                )
+                raise UserError(_("Publish webhook is not configured for tenant '%s'.") % event.tenant)
             event.write({"state": "pending", "error": False})
             # Reuse the exact stored payload so the delivery_id (and therefore the
             # receiver's dedupe key) stays stable across retries.

@@ -117,9 +117,7 @@ def deliver(
     sender = post or requests.post
     body = serialize(payload)
     signature = sign_body(secret, body)
-    headers = build_headers(
-        event_type=event_type, delivery_id=delivery_id, tenant=tenant, signature=signature
-    )
+    headers = build_headers(event_type=event_type, delivery_id=delivery_id, tenant=tenant, signature=signature)
     try:
         response = sender(url, data=body, headers=headers, timeout=timeout)
     except requests.RequestException as exc:

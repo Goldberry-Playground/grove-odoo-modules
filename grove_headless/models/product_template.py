@@ -79,9 +79,7 @@ class ProductTemplate(models.Model):
         "storefront shows a 'coming soon' guide placeholder instead of the body.",
     )
 
-    grove_publish_event_ids = fields.One2many(
-        "grove.publish.event", "product_tmpl_id", string="Publish Events"
-    )
+    grove_publish_event_ids = fields.One2many("grove.publish.event", "product_tmpl_id", string="Publish Events")
     grove_publish_event_count = fields.Integer(compute="_compute_grove_publish_event_count")
 
     def _compute_grove_publish_event_count(self):
@@ -121,10 +119,7 @@ class ProductTemplate(models.Model):
         self.ensure_one()
         if not self.grove_guide_ready:
             raise UserError(
-                _(
-                    "Approve the guide first: tick 'Guide Approved for Storefront' "
-                    "before publishing it to the site."
-                )
+                _("Approve the guide first: tick 'Guide Approved for Storefront' before publishing it to the site.")
             )
         # Audit rows are system-owned: publishing writes the ledger + delivers
         # regardless of the approver's group, same as the Stripe event ledger.

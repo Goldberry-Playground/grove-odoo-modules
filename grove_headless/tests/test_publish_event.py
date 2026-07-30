@@ -44,9 +44,7 @@ class TestPublishEvent(TransactionCase):
         super().setUp()
         # Default company/website is Goldberry (data/grove_companies.xml), so the
         # product resolves to the 'goldberry' tenant.
-        self.product = self.env["product.template"].create(
-            {"name": "Test Pawpaw Guide", "grove_guide_ready": True}
-        )
+        self.product = self.env["product.template"].create({"name": "Test Pawpaw Guide", "grove_guide_ready": True})
 
     def _patch_env(self, **overrides):
         env = dict(WEBHOOK_ENV)
@@ -61,9 +59,7 @@ class TestPublishEvent(TransactionCase):
         with self._patch_env(), self._patch_post(fake):
             self.product.action_publish_guide()
 
-        event = self.env["grove.publish.event"].search(
-            [("product_tmpl_id", "=", self.product.id)], limit=1
-        )
+        event = self.env["grove.publish.event"].search([("product_tmpl_id", "=", self.product.id)], limit=1)
         self.assertTrue(event, "a grove.publish.event row must be recorded")
         self.assertEqual(event.state, "delivered")
         self.assertEqual(event.tenant, "goldberry")
@@ -81,9 +77,7 @@ class TestPublishEvent(TransactionCase):
         sig = call["headers"][grove_publish.SIGNATURE_HEADER]
         self.assertEqual(sig, event.signature)
         self.assertTrue(
-            grove_publish.verify_signature(
-                WEBHOOK_ENV["GROVE_PUBLISH_WEBHOOK_SECRET_GOLDBERRY"], call["data"], sig
-            )
+            grove_publish.verify_signature(WEBHOOK_ENV["GROVE_PUBLISH_WEBHOOK_SECRET_GOLDBERRY"], call["data"], sig)
         )
         # Delivery headers carry the routing + dedupe metadata.
         self.assertEqual(call["headers"][grove_publish.EVENT_HEADER], "guide.publish")
@@ -95,17 +89,13 @@ class TestPublishEvent(TransactionCase):
         with self._patch_env(), self._patch_post(_FakePost()):
             with self.assertRaises(UserError):
                 self.product.action_publish_guide()
-        self.assertFalse(
-            self.env["grove.publish.event"].search([("product_tmpl_id", "=", self.product.id)])
-        )
+        self.assertFalse(self.env["grove.publish.event"].search([("product_tmpl_id", "=", self.product.id)]))
 
     def test_missing_config_raises_and_records_nothing(self):
         with mock.patch.dict(os.environ, {}, clear=True), self._patch_post(_FakePost()):
             with self.assertRaises(UserError):
                 self.product.action_publish_guide()
-        self.assertFalse(
-            self.env["grove.publish.event"].search([("product_tmpl_id", "=", self.product.id)])
-        )
+        self.assertFalse(self.env["grove.publish.event"].search([("product_tmpl_id", "=", self.product.id)]))
 
     def test_non_2xx_marks_failed_without_raising(self):
         fake = _FakePost(status_code=401, text="unauthorized")
@@ -114,9 +104,7 @@ class TestPublishEvent(TransactionCase):
             # row must persist for retry.
             result = self.product.action_publish_guide()
         self.assertEqual(result["params"]["type"], "warning")
-        event = self.env["grove.publish.event"].search(
-            [("product_tmpl_id", "=", self.product.id)], limit=1
-        )
+        event = self.env["grove.publish.event"].search([("product_tmpl_id", "=", self.product.id)], limit=1)
         self.assertEqual(event.state, "failed")
         self.assertEqual(event.http_status, 401)
 
@@ -124,9 +112,7 @@ class TestPublishEvent(TransactionCase):
         failing = _FakePost(status_code=500, text="boom")
         with self._patch_env(), self._patch_post(failing):
             self.product.action_publish_guide()
-        event = self.env["grove.publish.event"].search(
-            [("product_tmpl_id", "=", self.product.id)], limit=1
-        )
+        event = self.env["grove.publish.event"].search([("product_tmpl_id", "=", self.product.id)], limit=1)
         self.assertEqual(event.state, "failed")
         original_delivery = event.delivery_id
 
