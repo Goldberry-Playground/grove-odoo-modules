@@ -191,10 +191,7 @@ def rate_feed() -> dict:
     caller can't mutate the engine's live tables.
     """
     return {
-        "zones": {
-            zone: {tier: dict(rule) for tier, rule in tiers.items()}
-            for zone, tiers in ZONE_RATES.items()
-        },
+        "zones": {zone: {tier: dict(rule) for tier, rule in tiers.items()} for zone, tiers in ZONE_RATES.items()},
         "zone_by_state": dict(ZONE_BY_STATE),
         "green_states": sorted(ZONE_BY_STATE),
     }
