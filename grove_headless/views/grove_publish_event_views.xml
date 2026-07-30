@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+
+    <!-- Publish-webhook delivery log (GOL-985). Reached from the "Publishes"
+         stat button on the product form (product_template_views.xml). Read-only
+         audit trail; the only mutating action is Retry (idempotent replay). -->
+
+    <record id="grove_publish_event_list" model="ir.ui.view">
+        <field name="name">grove.publish.event.list</field>
+        <field name="model">grove.publish.event</field>
+        <field name="arch" type="xml">
+            <list string="Publish Events" default_order="create_date desc" create="false">
+                <field name="create_date" string="Sent" />
+                <field name="event_type" />
+                <field name="tenant" />
+                <field name="product_tmpl_id" />
+                <field name="http_status" string="HTTP" />
+                <field name="state" widget="badge"
+                       decoration-success="state == 'delivered'"
+                       decoration-danger="state == 'failed'"
+                       decoration-muted="state == 'pending'" />
+            </list>
+        </field>
+    </record>
+
+    <record id="grove_publish_event_form" model="ir.ui.view">
+        <field name="name">grove.publish.event.form</field>
+        <field name="model">grove.publish.event</field>
+        <field name="arch" type="xml">
+            <form string="Publish Event" create="false" edit="false">
+                <header>
+                    <button name="action_retry" type="object" string="Retry Delivery"
+                            class="btn-primary"
+                            groups="sales_team.group_sale_manager"
+                            confirm="Re-send this publish event to the storefront?" />
+                    <field name="state" widget="statusbar" statusbar_visible="pending,delivered,failed" />
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="event_type" />
+                            <field name="tenant" />
+                            <field name="product_tmpl_id" />
+                            <field name="company_id" />
+                        </group>
+                        <group>
+                            <field name="delivery_id" />
+                            <field name="endpoint_url" />
+                            <field name="http_status" />
+                            <field name="create_date" string="Sent at" />
+                        </group>
+                    </group>
+                    <group string="Signature">
+                        <field name="signature" nolabel="1" />
+                    </group>
+                    <group string="Payload (signed bytes)">
+                        <field name="payload" nolabel="1" />
+                    </group>
+                    <group string="Response" invisible="not response_body and not error">
+                        <field name="error" nolabel="1" invisible="not error" />
+                        <field name="response_body" nolabel="1" invisible="not response_body" />
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+</odoo>

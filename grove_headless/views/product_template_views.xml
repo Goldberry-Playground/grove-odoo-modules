@@ -7,6 +7,17 @@
         <field name="model">product.template</field>
         <field name="inherit_id" ref="product.product_template_form_view" />
         <field name="arch" type="xml">
+            <xpath expr="//div[@name='button_box']" position="inside">
+                <button
+                    type="object"
+                    name="action_view_grove_publish_events"
+                    class="oe_stat_button"
+                    icon="fa-cloud-upload"
+                    invisible="grove_publish_event_count == 0"
+                >
+                    <field name="grove_publish_event_count" widget="statinfo" string="Publishes" />
+                </button>
+            </xpath>
             <xpath expr="//page[@name='sales']" position="after">
                 <page string="Grove Headless" name="grove_headless">
                     <group>
@@ -25,6 +36,20 @@
                             automatically and stays hidden until you tick <b>Guide Approved
                             for Storefront</b>. Until then the storefront shows a "coming soon"
                             placeholder. To re-draft, clear the description first.
+                        </div>
+                        <div colspan="2">
+                            <button
+                                name="action_publish_guide"
+                                type="object"
+                                string="Publish Guide to Storefront"
+                                class="btn-primary"
+                                icon="fa-cloud-upload"
+                                invisible="not grove_guide_ready"
+                                confirm="Publish this species guide to the storefront now? The site page will be revalidated."
+                            />
+                            <span class="text-muted" invisible="grove_guide_ready">
+                                Approve the guide above to enable publishing.
+                            </span>
                         </div>
                     </group>
                     <group string="Photo Quality (storefront)" name="grove_photo_quality">

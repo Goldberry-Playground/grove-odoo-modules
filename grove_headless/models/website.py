@@ -15,6 +15,9 @@ _TENANT_SLUGS = {
     "nursery": "At The Grove Nursery",
 }
 
+# Reverse map for resolving a website back to its slug (publish webhook routing).
+_SLUG_BY_NAME = {name: slug for slug, name in _TENANT_SLUGS.items()}
+
 
 class Website(models.Model):
     _inherit = "website"
@@ -61,3 +64,13 @@ class Website(models.Model):
             limit=1,
         )
         return website or None
+
+    def grove_tenant_slug(self):
+        """Return this website's tenant slug (goldberry / ggg / nursery), or None.
+
+        Inverse of `_resolve_tenant_slug`. Used by the publish webhook to route
+        an event to the right tenant's grove-sites deployment. Name-based like
+        the rest of the tenant mapping (see the TODO above about the field).
+        """
+        self.ensure_one()
+        return _SLUG_BY_NAME.get(self.name)
