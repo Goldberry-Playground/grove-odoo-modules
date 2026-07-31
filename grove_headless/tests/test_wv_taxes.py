@@ -122,9 +122,7 @@ class TestDestinationTax(TransactionCase):
                 {
                     "partner_id": partner.id,
                     "company_id": self.company.id,
-                    "order_line": [
-                        (0, 0, {"product_id": product.id, "product_uom_qty": 1.0, "price_unit": 100.0})
-                    ],
+                    "order_line": [(0, 0, {"product_id": product.id, "product_uom_qty": 1.0, "price_unit": 100.0})],
                 }
             )
         )
