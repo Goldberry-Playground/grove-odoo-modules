@@ -210,5 +210,57 @@ class TestOrderShipping(unittest.TestCase):
             self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 0), ("potted", -2), ("bareroot", 1)]), 21.0)
 
 
+class TestCanonicalStateCode(unittest.TestCase):
+    """GOL-1021 defect 1 — a ship-to state given as a full name or in odd case
+    must canonicalize to its USPS code, so the checkout never silently drops the
+    shipping line (under-billing) for a green-list state it does ship to."""
+
+    def test_two_letter_code_passthrough(self):
+        self.assertEqual(sz.canonical_state_code("OH"), "OH")
+
+    def test_lowercase_and_padded_code(self):
+        self.assertEqual(sz.canonical_state_code("  wv "), "WV")
+
+    def test_full_name_any_case(self):
+        self.assertEqual(sz.canonical_state_code("Ohio"), "OH")
+        self.assertEqual(sz.canonical_state_code("west virginia"), "WV")
+
+    def test_full_name_collapses_internal_whitespace(self):
+        self.assertEqual(sz.canonical_state_code("West   Virginia"), "WV")
+
+    def test_empty_and_none_return_none(self):
+        self.assertIsNone(sz.canonical_state_code(""))
+        self.assertIsNone(sz.canonical_state_code(None))
+
+    def test_unknown_returns_none(self):
+        self.assertIsNone(sz.canonical_state_code("Atlantis"))
+        self.assertIsNone(sz.canonical_state_code("ZZ"))
+
+    def test_name_map_covers_every_destination_code(self):
+        # Every code in the destination universe must be reachable by name too,
+        # or a customer typing a full state name would be routed to None.
+        mapped_codes = set(sz._STATE_NAME_TO_CODE.values())
+        self.assertEqual(mapped_codes, set(sz.US_STATES))
+
+
+class TestFullNameShippingRouting(unittest.TestCase):
+    """Green-list states supplied as full names must still price (defect 1)."""
+
+    RATES = {"zone_1": {"bareroot": {"base": 21.0}, "potted": {"base": 32.0}}}
+
+    def test_full_name_green_state_prices_like_its_code(self):
+        with _temp_table({"WV": "zone_1"}, self.RATES):
+            by_code = sz.compute_order_shipping("WV", [("potted", 1)])
+            by_name = sz.compute_order_shipping("West Virginia", [("potted", 1)])
+            self.assertEqual(by_name, by_code)
+            self.assertEqual(by_name, 32.0)
+
+    def test_full_name_non_green_state_still_drops(self):
+        # "Ohio" canonicalizes to OH, but OH is not in this temp green table,
+        # so it correctly returns None (no guessed charge) — the fail-safe holds.
+        with _temp_table({"WV": "zone_1"}, self.RATES):
+            self.assertIsNone(sz.compute_order_shipping("Ohio", [("potted", 1)]))
+
+
 if __name__ == "__main__":
     unittest.main()

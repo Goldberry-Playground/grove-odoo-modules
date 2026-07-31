@@ -207,13 +207,105 @@ def is_configured() -> bool:
     return bool(ZONE_BY_STATE) and bool(ZONE_RATES)
 
 
-def _normalize_state(state: str) -> str:
-    return (state or "").strip().upper()
+# Full state/territory name -> USPS code, for every entry in US_STATES. The
+# checkout receives a client-supplied ship-to state that may arrive as a full
+# name ("Ohio", "West Virginia") instead of a 2-letter code, in any case. Both
+# the shipping-zone lookup and the destination-tax decision must canonicalize
+# it identically, or an order gets silently under-billed for shipping (a green
+# state that fails the code lookup adds NO shipping line) or wrongly taxed
+# (a WV-only sales tax leaking onto an out-of-state destination). Keeping the
+# map here — beside US_STATES — keeps the one destination universe authoritative.
+_STATE_NAME_TO_CODE: dict[str, str] = {
+    "ALABAMA": "AL",
+    "ALASKA": "AK",
+    "ARIZONA": "AZ",
+    "ARKANSAS": "AR",
+    "CALIFORNIA": "CA",
+    "COLORADO": "CO",
+    "CONNECTICUT": "CT",
+    "DELAWARE": "DE",
+    "DISTRICT OF COLUMBIA": "DC",
+    "FLORIDA": "FL",
+    "GEORGIA": "GA",
+    "HAWAII": "HI",
+    "IDAHO": "ID",
+    "ILLINOIS": "IL",
+    "INDIANA": "IN",
+    "IOWA": "IA",
+    "KANSAS": "KS",
+    "KENTUCKY": "KY",
+    "LOUISIANA": "LA",
+    "MAINE": "ME",
+    "MARYLAND": "MD",
+    "MASSACHUSETTS": "MA",
+    "MICHIGAN": "MI",
+    "MINNESOTA": "MN",
+    "MISSISSIPPI": "MS",
+    "MISSOURI": "MO",
+    "MONTANA": "MT",
+    "NEBRASKA": "NE",
+    "NEVADA": "NV",
+    "NEW HAMPSHIRE": "NH",
+    "NEW JERSEY": "NJ",
+    "NEW MEXICO": "NM",
+    "NEW YORK": "NY",
+    "NORTH CAROLINA": "NC",
+    "NORTH DAKOTA": "ND",
+    "OHIO": "OH",
+    "OKLAHOMA": "OK",
+    "OREGON": "OR",
+    "PENNSYLVANIA": "PA",
+    "RHODE ISLAND": "RI",
+    "SOUTH CAROLINA": "SC",
+    "SOUTH DAKOTA": "SD",
+    "TENNESSEE": "TN",
+    "TEXAS": "TX",
+    "UTAH": "UT",
+    "VERMONT": "VT",
+    "VIRGINIA": "VA",
+    "WASHINGTON": "WA",
+    "WEST VIRGINIA": "WV",
+    "WISCONSIN": "WI",
+    "WYOMING": "WY",
+    "PUERTO RICO": "PR",
+    "VIRGIN ISLANDS": "VI",
+    "U.S. VIRGIN ISLANDS": "VI",
+    "US VIRGIN ISLANDS": "VI",
+    "GUAM": "GU",
+    "AMERICAN SAMOA": "AS",
+    "NORTHERN MARIANA ISLANDS": "MP",
+}
+
+_VALID_STATE_CODES: frozenset[str] = frozenset(US_STATES)
+
+
+def canonical_state_code(value: str) -> str | None:
+    """Canonicalize a US state/territory identifier to its 2-letter USPS code.
+
+    Accepts a 2-letter code in any case (``"oh"``, ``"OH"``) or a full state
+    name in any case with arbitrary internal whitespace (``"Ohio"``,
+    ``"west  virginia"``). Returns the uppercase 2-letter code, or ``None`` when
+    the value is empty or unrecognized.
+
+    This is the single normalization the shipping-zone lookup and the
+    destination-tax decision both route through, so a ship-to state supplied in
+    a non-code format can never be silently mis-routed into a dropped shipping
+    line or a wrong tax.
+    """
+    if not value:
+        return None
+    token = " ".join(value.strip().upper().split())
+    if token in _VALID_STATE_CODES:
+        return token
+    return _STATE_NAME_TO_CODE.get(token)
 
 
 def zone_for_state(state: str) -> str | None:
     """Return the zone id a destination state maps to, or None if unmapped."""
-    return ZONE_BY_STATE.get(_normalize_state(state))
+    code = canonical_state_code(state)
+    if code is None:
+        return None
+    return ZONE_BY_STATE.get(code)
 
 
 def compute_shipping_rate(
