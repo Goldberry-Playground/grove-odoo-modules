@@ -10,13 +10,28 @@ import requests
 from odoo import http
 from odoo.http import Response, request
 
+from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME
 from ..models import stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.newsletter import newsletter_tag_names
 from ..models.shipping_calendar import serialize_ship_options, ship_options, usda_zone_for_zip
-from ..models.shipping_zones import compute_order_shipping, compute_shipping_rate, rate_feed
+from ..models.shipping_zones import (
+    canonical_state_code,
+    compute_order_shipping,
+    compute_shipping_rate,
+    rate_feed,
+    zone_for_state,
+)
 from ..models.shippo_client import is_valid_tracking
 from .product_domain import build_product_domain, slugify, zone_response
+
+# Grove has sales-tax nexus only in West Virginia, so the WV 7% tax (the product
+# default set by hooks.setup_wv_sales_tax) legally applies only to a WV-destination
+# shipment. Any order shipping elsewhere must have the WV tax stripped — see
+# _apply_destination_tax. The set is the WV group tax + its two components so a
+# line carrying either the combined group or a bare component is caught.
+WV_TAX_NAMES = frozenset({WV_GROUP_NAME, WV_STATE_NAME, WV_MUNI_NAME})
+WV_NEXUS_STATE = "WV"
 
 _logger = logging.getLogger(__name__)
 
@@ -1155,16 +1170,25 @@ def _partner_vals_from_payload(env, contact, address):
         country = env["res.country"].sudo().search([("code", "=", country_code)], limit=1)
         if country:
             vals["country_id"] = country.id
-            state_code = (address.get("state") or "").upper()
-            if state_code:
-                state = (
-                    env["res.country.state"]
-                    .sudo()
-                    .search(
-                        [("code", "=", state_code), ("country_id", "=", country.id)],
-                        limit=1,
-                    )
-                )
+            raw_state = (address.get("state") or "").strip()
+            if raw_state:
+                # Resolve the ship-to state robustly: a US state given as a full
+                # name ("Ohio") or odd case must still bind to res.country.state,
+                # or partner.state_id stays empty and downstream billing (shipping
+                # zone, WV-nexus tax) + label buying all mis-fire. Canonicalize US
+                # input to its 2-letter code; otherwise fall back to a
+                # case-insensitive exact match on code or name.
+                canonical = canonical_state_code(raw_state) if country_code == "US" else None
+                if canonical:
+                    domain = [("country_id", "=", country.id), ("code", "=", canonical)]
+                else:
+                    domain = [
+                        ("country_id", "=", country.id),
+                        "|",
+                        ("code", "=ilike", raw_state),
+                        ("name", "=ilike", raw_state),
+                    ]
+                state = env["res.country.state"].sudo().search(domain, limit=1)
                 if state:
                     vals["state_id"] = state.id
     return vals
@@ -1207,9 +1231,12 @@ def _apply_shipping_line(env, order, shipping, company):
     """Add a shipping charge line to `order` from the tiered zone table.
 
     Fail-safe: returns without adding a line when no rate is configured for
-    the destination or any line's tier — never a guessed charge.
+    the destination or any line's tier — never a guessed charge. The ship-to
+    state is canonicalized to its 2-letter code first, so a green-list state
+    supplied as a full name ("Ohio") or in odd case is priced instead of
+    silently dropped (which under-bills the customer for shipping).
     """
-    state = (shipping or {}).get("state")
+    state = canonical_state_code((shipping or {}).get("state"))
     if not state:
         return
     items = [
@@ -1224,6 +1251,17 @@ def _apply_shipping_line(env, order, shipping, company):
         return
     charge = compute_order_shipping(state, items)
     if charge is None:
+        # A destination outside the 21-state green list legitimately gets no
+        # shipping line. But a *green* state that still can't be priced means a
+        # rate-table gap is silently under-billing a customer we do ship to —
+        # surface that rather than swallow it.
+        if zone_for_state(state) is not None:
+            _logger.warning(
+                "grove_headless: shipping line dropped for order %s to green-list state %s "
+                "(no rate for one or more line tiers) — customer under-billed for shipping",
+                order.name,
+                state,
+            )
         return
 
     product = _get_shipping_product(env, company)
@@ -1237,6 +1275,34 @@ def _apply_shipping_line(env, order, shipping, company):
         }
     )
     order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
+
+
+def _apply_destination_tax(env, order, shipping):
+    """Strip the WV sales tax from every line when the order ships out of state.
+
+    The product default (hooks.setup_wv_sales_tax) puts the "WV Sales Tax 7%"
+    group on every line, which is only lawful for a WV-destination shipment —
+    Grove's sole sales-tax nexus. For any other ship-to state (e.g. Ohio) the WV
+    tax is removed so the customer is not wrongly charged WV tax. Called after
+    the shipping line is added so that line is de-taxed too when out of state.
+
+    Ship-to state is canonicalized identically to the shipping path. If it can't
+    be determined we conservatively leave the default WV tax in place rather than
+    guess a zero-tax order.
+    """
+    dest = canonical_state_code((shipping or {}).get("state"))
+    if dest is None or dest == WV_NEXUS_STATE:
+        return
+    changed = False
+    for line in order.order_line:
+        if line.display_type or not line.product_id:
+            continue
+        wv_taxes = line.tax_id.filtered(lambda t: t.name in WV_TAX_NAMES)
+        if wv_taxes:
+            line.tax_id = [(3, tax.id) for tax in wv_taxes]
+            changed = True
+    if changed:
+        order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
 
 
 def _format_payment_note(payment_method):
@@ -1403,6 +1469,11 @@ def _create_draft_order(website, env, payload):
     # data/shipping_rates.json (models/shipping_zones.py) and are maintained by
     # the daily rate-checker. Fail-safe: no rate configured → no line added.
     _apply_shipping_line(env, order, shipping, current_company)
+
+    # WV sales tax is destination-based (GOL-1021): keep it only for WV-bound
+    # orders, strip it from every line (incl. shipping) for any other ship-to
+    # state. Runs after the shipping line so it is de-taxed too when out of state.
+    _apply_destination_tax(env, order, shipping)
 
     return order, None
 
