@@ -36,7 +36,9 @@ class TestStripeCheckout(TransactionCase):
 
     def _set_stock(self, product, qty):
         self.env["stock.quant"]._update_available_quantity(product, self.location, qty)
-        product.invalidate_recordset(["qty_available"])
+        # free_qty as well as qty_available: the checkout line-item builder reads
+        # free_qty (GOL-1036 defect 4), so a stale cache would misclassify stock.
+        product.invalidate_recordset(["qty_available", "free_qty"])
 
     def _make_order(self, qty=1.0):
         order = (
@@ -146,6 +148,57 @@ class TestStripeCheckout(TransactionCase):
         self.assertEqual(preorder_ids, [self.product.id])
         # No tax line: nothing chargeable-today is taxed on a pure-deposit cart.
         self.assertFalse([li for li in line_items if li["name"] == "Sales tax (WV)"])
+
+    def test_partial_stock_line_splits_in_stock_and_deposit(self):
+        """GOL-1036 defect 3: a line with SOME free stock splits — the in-stock
+        units bill at full price and each short unit is a per-unit deposit,
+        never one flat qty-1 deposit that under-reserves the shortfall."""
+        self._set_stock(self.product, 2)
+        order = self._make_order(qty=5)
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        full = next(li for li in line_items if li["name"] == self.product.display_name)
+        self.assertEqual(full["quantity"], 2)
+        self.assertEqual(full["amount_cents"], stripe_gateway.to_cents(25.0))
+        deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
+        self.assertEqual(deposit["quantity"], 3)  # per unit of shortfall, not 1
+        self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+        self.assertEqual(preorder_ids, [self.product.id])
+
+    # ── ship-to gate: state / potted / $0-shipping breaker (GOL-1036) ─────
+
+    def _website(self):
+        return self.env["website"].search([("company_id", "=", self.company.id)], limit=1) or self.env[
+            "website"
+        ].search([], limit=1)
+
+    def _cart_payload(self, state, **extra):
+        payload = {
+            "contact": {"name": "Ship Test", "email": "ship@example.com"},
+            "items": [{"variant_id": self.product.id, "quantity": 1}],
+            "shipping": {"street": "1 Rd", "city": "Town", "state": state, "zip": "10001"},
+        }
+        payload.update(extra)
+        return payload
+
+    def test_state_gate_rejects_non_green_destination(self):
+        """Defect 1: an unsupported ship-to state (FL / any non-green-list state)
+        is rejected server-side at session creation, before any payment."""
+        order, error = grove_main._create_draft_order(self._website(), self.env, self._cart_payload("FL"))
+        self.assertIsNone(order)
+        self.assertEqual(error.status_code, 400)
+        self.assertIn("can't ship", error.data.decode().lower())
+        # No orphan draft persisted.
+        self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
+
+    def test_zero_shipping_circuit_breaker(self):
+        """Defect 2: a shippable green-state order that cannot resolve a shipping
+        charge fails loudly (never reaches Stripe with silent $0 shipping)."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        with mock.patch.object(grove_main, "_apply_shipping_line", return_value=None):
+            order, error = grove_main._create_draft_order(self._website(), self.env, self._cart_payload("WV"))
+        self.assertIsNone(order)
+        self.assertEqual(error.status_code, 409)
+        self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
 
     # ── oversell detection ───────────────────────────────────────────────
 
