@@ -25,11 +25,19 @@ class TestShippoClient(unittest.TestCase):
         "country": "US",
     }
 
-    def test_payload_uses_tier_parcel(self):
-        p = sp.build_shipment_payload(self.ADDR, "bareroot")
-        self.assertEqual(p["parcels"][0]["length"], "48")
+    def test_payload_uses_box_parcel(self):
+        p = sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed")
+        self.assertEqual(p["parcels"][0]["length"], "20")
+        self.assertEqual(p["parcels"][0]["width"], "8")
+        self.assertEqual(p["parcels"][0]["height"], "8")
+        # 1.6 tare + 4 x 2.0 leafed = 9.6 lb declared actual weight.
+        self.assertEqual(p["parcels"][0]["weight"], "9.6")
         self.assertTrue(p["address_to"]["is_residential"])
         self.assertEqual(p["address_from"]["zip"], "26651")
+
+    def test_payload_weight_never_below_one_pound(self):
+        p = sp.build_shipment_payload(self.ADDR, "br16", 0, "dormant")
+        self.assertGreaterEqual(float(p["parcels"][0]["weight"]), 1.0)
 
     def test_buy_label_happy_path(self):
         shipment = {
@@ -54,7 +62,7 @@ class TestShippoClient(unittest.TestCase):
                 mock.Mock(status_code=201, json=lambda: transaction, raise_for_status=lambda: None),
             ]
         )
-        out = sp.buy_ups_ground_label("key", sp.build_shipment_payload(self.ADDR, "bareroot"), post=posts)
+        out = sp.buy_ups_ground_label("key", sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed"), post=posts)
         self.assertEqual(out["tracking_number"], "1Z999")
 
     def test_no_ups_ground_rate_raises(self):
@@ -70,7 +78,7 @@ class TestShippoClient(unittest.TestCase):
         }
         posts = mock.Mock(return_value=mock.Mock(status_code=201, json=lambda: shipment, raise_for_status=lambda: None))
         with self.assertRaises(sp.ShippoError):
-            sp.buy_ups_ground_label("key", sp.build_shipment_payload(self.ADDR, "bareroot"), post=posts)
+            sp.buy_ups_ground_label("key", sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed"), post=posts)
 
 
 class TestTrackingValidation(unittest.TestCase):

@@ -23,19 +23,33 @@ class RateFeedTests(unittest.TestCase):
         self.feed = sz.rate_feed()
 
     def test_top_level_shape(self):
-        self.assertEqual(set(self.feed), {"zones", "zone_by_state", "green_states"})
+        self.assertEqual(set(self.feed), {"schema", "zones", "zone_by_state", "green_states", "packing"})
+        self.assertEqual(self.feed["schema"], 2)
 
     def test_zones_mirror_engine_table(self):
         # The feed must serve exactly what compute_shipping_rate prices with.
         self.assertEqual(self.feed["zones"], sz.ZONE_RATES)
 
     def test_zone_shape_matches_rates_json(self):
-        # Same structure as data/shipping_rates.json: zone -> tier -> {"base": <num>}.
-        for zone, tiers in self.feed["zones"].items():
+        # Same structure as data/shipping_rates.json: zone -> box -> {"base": <num>}.
+        for zone, boxes in self.feed["zones"].items():
             self.assertIn(zone, sz.RATE_ZONE_IDS)
-            for tier, rule in tiers.items():
-                self.assertIn(tier, sz.TIERS)
+            for box_id, rule in boxes.items():
+                self.assertIn(box_id, sz.shipping_boxes.BOXES)
                 self.assertIsInstance(rule.get("base"), (int, float))
+
+    def test_packing_metadata_mirrors_box_catalog(self):
+        # The frontend must be able to replay pack_order exactly: dims +
+        # capacities per box, the length classes, modes, and dormancy window.
+        packing = self.feed["packing"]
+        self.assertEqual(set(packing["boxes"]), set(sz.shipping_boxes.BOXES))
+        for box_id, box in packing["boxes"].items():
+            src = sz.shipping_boxes.BOXES[box_id]
+            self.assertEqual(box["length"], src["length"])
+            self.assertEqual(box["capacity"], src["capacity"])
+        self.assertEqual(packing["length_classes"], list(sz.shipping_boxes.LENGTH_CLASSES))
+        self.assertEqual(packing["modes"], list(sz.shipping_boxes.MODES))
+        self.assertEqual(len(packing["dormant_window"]), 2)
 
     def test_zone_by_state_is_authoritative_green_list(self):
         # The zone->state map IS the compliance gate; it must equal the engine's
@@ -50,14 +64,14 @@ class RateFeedTests(unittest.TestCase):
         # backend can't price.
         for state, zone in self.feed["zone_by_state"].items():
             self.assertIn(zone, self.feed["zones"])
-            self.assertIsNotNone(sz.compute_shipping_rate(state, tier="potted"))
+            self.assertIsNotNone(sz.single_tree_rate(state, 20, "leafed"))
 
     def test_returned_dict_is_decoupled_copy(self):
         # Mutating the feed must never corrupt the engine's live tables.
-        self.feed["zones"]["zone_1"]["potted"]["base"] = 9999
+        self.feed["zones"]["zone_1"]["s20"]["base"] = 9999
         self.feed["zone_by_state"]["WV"] = "zone_5"
         fresh = sz.rate_feed()
-        self.assertNotEqual(fresh["zones"]["zone_1"]["potted"]["base"], 9999)
+        self.assertNotEqual(fresh["zones"]["zone_1"]["s20"]["base"], 9999)
         self.assertEqual(fresh["zone_by_state"]["WV"], "zone_1")
 
 

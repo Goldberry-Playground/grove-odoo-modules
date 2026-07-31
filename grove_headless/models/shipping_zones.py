@@ -1,15 +1,23 @@
-"""5-zone tiered shipping rate engine for the Grove headless checkout (GOL-15).
+"""5-zone per-box shipping rate engine for the Grove headless checkout.
 
-Rates are loaded from ``data/shipping_rates.json`` at startup with a two-tier
-structure (bareroot and potted products). The file is maintained by the daily
-rate-checker (``scripts/rate_check/rate_check.py``), which rewrites it wholesale
-from live Shippo quotes — hand-editing ``per_lb`` or ``free_over`` keys there
-while the checker is active is not safe; they will be dropped on the next rates PR.
+v2 (Box Engine, GOL-15 successor): shipping is bareroot-only and priced PER
+PACKED BOX instead of per tree. The box catalog + packing algorithm live in
+``shipping_boxes.py``; this module owns the destination zones, the compliance
+gate, and the money. Potted products have no ship rates by design — potted is
+farm pickup only.
+
+Rates are loaded from ``data/shipping_rates.json`` at startup, keyed
+``zone -> box_id -> {"base": usd}``. The file is maintained by the daily
+rate-checker (``scripts/rate_check/rate_check.py``), which rewrites it
+wholesale from live Shippo quotes — hand-editing extra keys there while the
+checker is active is not safe; they will be dropped on the next rates PR.
 Design is documented in the vault wiki at ``Software/Grove Shipping``.
 
-Fail-safe by design: ``compute_shipping_rate`` returns ``None`` for any address
-whose state is outside the 21-state green list, so the checkout adds NO shipping
-line — we never emit a wrong or guessed charge.
+Fail-safe by design: ``compute_order_shipping`` returns ``None`` for any
+address outside the 21-state green list, any cart containing a potted line,
+and any cart the packer cannot plan — the checkout then adds NO shipping line
+(and the checkout endpoint blocks with an explicit message via
+``unshippable_reason``). We never emit a wrong or guessed charge.
 
 The engine is deliberately a pure-Python module with no Odoo imports so it can
 be unit-tested without a database (see ``tests/test_shipping_zones.py``) and so
@@ -18,6 +26,16 @@ the rate table is one obvious source of truth a non-engineer can edit.
 
 import json
 import os
+
+try:
+    from . import shipping_boxes
+except ImportError:  # loaded standalone (tests import by file path)
+    import importlib.util as _ilu
+
+    _sb_path = os.path.join(os.path.dirname(__file__), "shipping_boxes.py")
+    _spec = _ilu.spec_from_file_location("grove_shipping_boxes", _sb_path)
+    shipping_boxes = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(shipping_boxes)
 
 # ── Destination universe ────────────────────────────────────────────────────
 # Every US destination we expect to quote. Used by the test to assert that the
@@ -85,16 +103,17 @@ US_STATES: tuple[str, ...] = (
 )
 
 RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 6))
-TIERS: tuple[str, ...] = ("bareroot", "potted")
-DEFAULT_TIER = "potted"  # never undercharge an untagged product
 
-# Box rule (UPS additional-handling triggers at > 48.0"): documented constants
-# the packing docs and the rate-checker's reference parcels share.
-MAX_BOX_LONGEST_SIDE_IN = 48.0
-PARCEL_PROFILES = {
-    "bareroot": {"length": 48, "width": 6, "height": 6, "weight_lb": 4},
-    "potted": {"length": 30, "width": 16, "height": 16, "weight_lb": 25},
-}
+# Product tiers survive v2 as the shippability gate: bareroot ships, potted is
+# farm pickup only. DEFAULT_TIER stays potted so a mistagged product can never
+# ship undercharged — it simply cannot ship until it is tagged bareroot.
+TIERS: tuple[str, ...] = ("bareroot", "potted")
+SHIPPABLE_TIERS: frozenset[str] = frozenset({"bareroot"})
+DEFAULT_TIER = "potted"
+
+# Box-geometry authority lives in shipping_boxes; re-exported for callers
+# (rate-checker reference parcels, packing docs) that pinned it here in v1.
+MAX_BOX_LONGEST_SIDE_IN = shipping_boxes.MAX_BOX_LONGEST_SIDE_IN
 
 _RATES_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "shipping_rates.json")
 
@@ -172,28 +191,52 @@ assert set(ZONE_BY_STATE) == GREEN_STATES
 def rate_feed() -> dict:
     """Read-only snapshot of the live rate table + compliance zone map (GOL-952).
 
-    Returns exactly the in-memory table ``compute_shipping_rate`` prices orders
-    with, so the storefront estimator (grove-sites ``resolveRateTable``) can
-    override its bundled snapshot and never drift from what checkout will
-    actually charge. Shape:
+    Returns exactly the in-memory tables ``compute_order_shipping`` prices
+    orders with, so the storefront estimator (grove-sites ``resolveRateTable``)
+    can override its bundled snapshot and never drift from what checkout will
+    actually charge. v2 shape:
 
         {
-          "zones": {"zone_1": {"bareroot": {"base": 21.0}, "potted": {...}}, ...},
+          "schema": 2,
+          "zones": {"zone_1": {"br16": {"base": 18.0}, "s20": {...}, ...}, ...},
           "zone_by_state": {"WV": "zone_1", ...},
           "green_states": ["CT", "DE", ...],
+          "packing": {
+            "boxes": {"s20": {"length": 20, "width": 8, "height": 8,
+                              "capacity": {"dormant": 15, "leafed": 4}}, ...},
+            "length_classes": [16, 20, 32, 46],
+            "modes": ["dormant", "leafed"],
+            "dormant_window": [[11, 1], [4, 15]],
+          },
         }
 
-    ``zones`` mirrors ``data/shipping_rates.json`` (minus the ``_comment`` key,
-    already stripped at load). ``zone_by_state`` is the authoritative 21-state
-    green list -> zone map — the compliance gate the frontend must stay in
-    lockstep with. No Shippo call and no DB read: rates are pre-computed and
-    served straight from memory. The returned dict is a fresh deep copy so a
-    caller can't mutate the engine's live tables.
+    ``zones`` mirrors ``data/shipping_rates.json`` (minus the ``_``-prefixed
+    keys, already stripped at load). ``zone_by_state`` is the authoritative
+    21-state green list -> zone map — the compliance gate the frontend must
+    stay in lockstep with. ``packing`` carries the box catalog + capacities so
+    the frontend can mirror ``pack_order`` exactly. No Shippo call and no DB
+    read: rates are pre-computed and served straight from memory. The returned
+    dict is a fresh deep copy so a caller can't mutate the engine's tables.
     """
     return {
-        "zones": {zone: {tier: dict(rule) for tier, rule in tiers.items()} for zone, tiers in ZONE_RATES.items()},
+        "schema": 2,
+        "zones": {zone: {box: dict(rule) for box, rule in boxes.items()} for zone, boxes in ZONE_RATES.items()},
         "zone_by_state": dict(ZONE_BY_STATE),
         "green_states": sorted(ZONE_BY_STATE),
+        "packing": {
+            "boxes": {
+                box_id: {
+                    "length": b["length"],
+                    "width": b["width"],
+                    "height": b["height"],
+                    "capacity": dict(b["capacity"]),
+                }
+                for box_id, b in shipping_boxes.BOXES.items()
+            },
+            "length_classes": list(shipping_boxes.LENGTH_CLASSES),
+            "modes": list(shipping_boxes.MODES),
+            "dormant_window": [list(shipping_boxes.DORMANT_START), list(shipping_boxes.DORMANT_END)],
+        },
     }
 
 
@@ -308,54 +351,82 @@ def zone_for_state(state: str) -> str | None:
     return ZONE_BY_STATE.get(code)
 
 
-def compute_shipping_rate(
-    state: str,
-    tier: str = DEFAULT_TIER,
-    *,
-    weight: float = 0.0,
-    subtotal: float = 0.0,
-) -> float | None:
-    """Per-tree shipping charge for one unit of `tier` to `state`, or None.
+def box_rate(state: str, box_id: str) -> float | None:
+    """Committed charge for shipping one `box_id` to `state`, or None.
 
-    None (not 0.0) means "no rate configured — add no shipping line".
-    Unknown tier strings price as DEFAULT_TIER (potted) so a mistagged
-    product can never be undercharged.
+    None (not 0.0) means "no rate configured — this box cannot ship there".
     """
     zone = zone_for_state(state)
     if not zone:
         return None
-    tier_key = tier if tier in TIERS else DEFAULT_TIER
-    rule = (ZONE_RATES.get(zone) or {}).get(tier_key)
+    rule = (ZONE_RATES.get(zone) or {}).get(box_id)
     if not rule:
         return None
-
-    free_over = rule.get("free_over")
-    if free_over is not None and subtotal >= float(free_over):
-        return 0.0
-
-    rate = float(rule.get("base", 0.0))
-    per_lb = rule.get("per_lb")
-    if per_lb:
-        rate += float(per_lb) * max(0.0, float(weight))
-    return round(rate, 2)
+    return round(float(rule.get("base", 0.0)), 2)
 
 
-def compute_order_shipping(state: str, items: list[tuple[str, float]]) -> float | None:
-    """Total shipping for an order: sum of per-tree tier rates × qty.
+def single_tree_rate(
+    state: str, length_class: int = shipping_boxes.DEFAULT_LENGTH, mode: str = "leafed"
+) -> float | None:
+    """Cheapest way to ship exactly one bareroot tree — the product-card
+    "shipping from $X" estimate. None when unpriceable."""
+    plan = shipping_boxes.pack_order([(length_class, 1)], mode, lambda b: box_rate(state, b))
+    if not plan:
+        return None
+    return round(sum(r for r in (box_rate(state, pb.box_id) for pb in plan)), 2)
 
-    Fail-safe: if ANY line can't be priced (no zone, no tier rule), return
-    None so the caller adds no shipping line at all — we never ship a
-    partial/guessed charge.
+
+def unshippable_reason(items: list[tuple[str, int, float]]) -> str | None:
+    """Explicit human-readable reason a cart cannot ship, or None if it can
+
+    have a shipping charge computed (destination permitting). Used by the
+    checkout endpoint to BLOCK with a kind message instead of silently
+    creating an un-shipped order (2026-07-20 decision, extended to potted).
+    items: (tier, length_class, qty).
+    """
+    for tier, _length, qty in items:
+        if float(qty) <= 0:
+            continue
+        tier_key = tier if tier in TIERS else DEFAULT_TIER
+        if tier_key not in SHIPPABLE_TIERS:
+            return (
+                "Potted trees are available for farm pickup only — remove them "
+                "from the cart to ship, or choose pickup for the whole order."
+            )
+    return None
+
+
+def pack_for_state(state: str, items: list[tuple[str, int, float]], mode: str):
+    """Pack a cart for a destination: list of PackedBox, or None (fail-safe).
+
+    items: (tier, length_class, qty) per order line. Any non-shippable tier,
+    unknown state, or unpackable line -> None. Shared by the checkout charge
+    and the Shippo label plan so the boxes bought are the boxes priced.
     """
     if zone_for_state(state) is None:
         return None
+    if unshippable_reason(items) is not None:
+        return None
+    pack_items = [(int(length), qty) for _tier, length, qty in items if float(qty) > 0]
+    return shipping_boxes.pack_order(pack_items, mode, lambda b: box_rate(state, b))
+
+
+def compute_order_shipping(state: str, items: list[tuple[str, int, float]], mode: str) -> float | None:
+    """Total committed shipping for an order: sum of packed-box zone rates.
+
+    Fail-safe: if the cart can't be packed and priced end-to-end (no zone,
+    potted line, missing box rate), return None so the caller adds no
+    shipping line at all — we never ship a partial/guessed charge.
+    """
+    plan = pack_for_state(state, items, mode)
+    if plan is None:
+        return None
+    if not plan:
+        return None  # empty cart -> no charge line
     total = 0.0
-    for tier, qty in items:
-        qty = float(qty)
-        if qty <= 0:
-            continue
-        rate = compute_shipping_rate(state, tier=tier)
-        if rate is None:
+    for pb in plan:
+        rate = box_rate(state, pb.box_id)
+        if rate is None:  # pragma: no cover — packer only picks rated boxes
             return None
-        total += rate * qty
+        total += rate
     return round(total, 2)

@@ -1,4 +1,4 @@
-"""Tests for the tiered 5-zone shipping rate engine (GOL-15).
+"""Tests for the per-box 5-zone shipping rate engine (Box Engine v2).
 
 The engine in ``models/shipping_zones.py`` is pure Python, so these are plain
 ``unittest`` cases with no DB — they run both under Odoo's ``--test-enable``
@@ -10,7 +10,7 @@ Two layers:
     times and guard against regression on the core routing logic.
   * Table-coverage tests — assert the finished table is complete and self-
     consistent. They automatically enforce full coverage across all 21 green
-    states and 5 zones once the rate table is populated.
+    states, 5 zones, and every catalog box.
 """
 
 import importlib.util
@@ -21,6 +21,8 @@ _MODULE_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "shipping
 _spec = importlib.util.spec_from_file_location("grove_shipping_zones", _MODULE_PATH)
 sz = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sz)
+
+sb = sz.shipping_boxes
 
 # Independent pin of the 21 green states (deliberately NOT sz.GREEN_STATES:
 # the test must catch an accidental edit to the module's set, so it keeps
@@ -51,115 +53,16 @@ GREEN = frozenset(
     }
 )
 
-
-class TestShippingZoneEngineContract(unittest.TestCase):
-    """Fail-safe behaviour that must hold regardless of the data state."""
-
-    def test_unmapped_state_returns_none(self):
-        # None (not 0.0) => "no shipping configured, add no line".
-        self.assertIsNone(sz.compute_shipping_rate("ZZ"))
-
-    def test_empty_or_missing_state_returns_none(self):
-        self.assertIsNone(sz.compute_shipping_rate(""))
-        self.assertIsNone(sz.compute_shipping_rate(None))
-
-    def test_there_are_exactly_five_rate_zones(self):
-        self.assertEqual(len(sz.RATE_ZONE_IDS), 5)
-
-    def test_rate_is_tier_scoped(self):
-        rates = {"zone_1": {"bareroot": {"base": 21.0}, "potted": {"base": 32.0}}}
-        with _temp_table({"WV": "zone_1"}, rates):
-            self.assertEqual(sz.compute_shipping_rate("WV", tier="bareroot"), 21.0)
-            self.assertEqual(sz.compute_shipping_rate("WV", tier="potted"), 32.0)
-
-    def test_unknown_tier_prices_as_potted(self):
-        rates = {"zone_1": {"bareroot": {"base": 21.0}, "potted": {"base": 32.0}}}
-        with _temp_table({"WV": "zone_1"}, rates):
-            self.assertEqual(sz.compute_shipping_rate("WV", tier="mystery"), 32.0)
-
-    def test_missing_tier_rule_returns_none(self):
-        with _temp_table({"WV": "zone_1"}, {"zone_1": {"bareroot": {"base": 21.0}}}):
-            self.assertIsNone(sz.compute_shipping_rate("WV", tier="potted"))
-
-    def test_rates_load_from_json_file(self):
-        # The shipped data file parses and, if non-empty, only contains known
-        # zone ids and tiers with numeric non-negative "base".
-        for zone, tiers in sz.ZONE_RATES.items():
-            self.assertIn(zone, sz.RATE_ZONE_IDS)
-            for tier, rule in tiers.items():
-                self.assertIn(tier, sz.TIERS)
-                self.assertGreaterEqual(float(rule["base"]), 0.0)
-
-    def test_state_lookup_is_case_and_space_insensitive(self):
-        import copy
-
-        saved_state = copy.deepcopy(dict(sz.ZONE_BY_STATE))
-        try:
-            sz.ZONE_BY_STATE["WV"] = "zone_1"
-            self.assertEqual(sz.zone_for_state(" wv "), "zone_1")
-        finally:
-            sz.ZONE_BY_STATE.clear()
-            sz.ZONE_BY_STATE.update(saved_state)
-
-    def test_flat_base_rate(self):
-        with _temp_table({"WV": "zone_1"}, {"zone_1": {"potted": {"base": 8.0}}}):
-            self.assertEqual(sz.compute_shipping_rate("WV", tier="potted"), 8.0)
-
-    def test_per_pound_surcharge(self):
-        with _temp_table({"CA": "zone_5"}, {"zone_5": {"potted": {"base": 10.0, "per_lb": 0.5}}}):
-            # 10 base + 0.5 * 6 lbs = 13.00
-            self.assertEqual(sz.compute_shipping_rate("CA", tier="potted", weight=6.0), 13.0)
-
-    def test_free_over_threshold(self):
-        rule = {"zone_1": {"potted": {"base": 8.0, "free_over": 75.0}}}
-        with _temp_table({"WV": "zone_1"}, rule):
-            self.assertEqual(sz.compute_shipping_rate("WV", tier="potted", subtotal=80.0), 0.0)
-            self.assertEqual(sz.compute_shipping_rate("WV", tier="potted", subtotal=20.0), 8.0)
-
-
-class TestTwentyOneStateCoverage(unittest.TestCase):
-    """The 21-state green list and its rate coverage."""
-
-    def test_exactly_the_21_green_states_are_mapped(self):
-        self.assertEqual(set(sz.ZONE_BY_STATE), GREEN)
-
-    def test_every_mapped_state_prices_in_both_tiers(self):
-        for state in GREEN:
-            for tier in sz.TIERS:
-                rate = sz.compute_shipping_rate(state, tier=tier)
-                self.assertIsNotNone(rate, f"{state}/{tier} has no rate")
-                self.assertGreater(rate, 0.0)
-
-    def test_every_excluded_destination_returns_none(self):
-        for code in sz.US_STATES:
-            if code in GREEN:
-                continue
-            for tier in sz.TIERS:
-                self.assertIsNone(sz.compute_shipping_rate(code, tier=tier), code)
-
-
-class TestShippingZoneTableCoverage(unittest.TestCase):
-    """Enforced automatically once the blocked table is populated."""
-
-    def test_every_mapped_zone_has_a_rate(self):
-        for state, zone in sz.ZONE_BY_STATE.items():
-            self.assertIn(zone, sz.ZONE_RATES, f"state {state} maps to {zone} with no rate rule")
-            self.assertIn(zone, sz.RATE_ZONE_IDS, f"{zone} is not one of the 5 zone ids")
-
-    def test_full_state_coverage_when_configured(self):
-        if not sz.is_configured():
-            self.skipTest("21-state rate table not yet populated (GOL-15 blocked)")
-        # Verify exactly the 21 green states are mapped, no more, no less.
-        mapped = set(sz.ZONE_BY_STATE)
-        self.assertEqual(
-            mapped,
-            GREEN,
-            f"mapped states {mapped} do not match green states {GREEN}",
-        )
-
-    def test_every_rate_rule_targets_a_real_zone(self):
-        for zone in sz.ZONE_RATES:
-            self.assertIn(zone, sz.RATE_ZONE_IDS, f"rate rule for unknown zone {zone}")
+# A complete single-zone box rate table for contract tests (mirrors the
+# provisional zone_1 card).
+BOX_RATES_Z1 = {
+    "br16": {"base": 18.0},
+    "s20": {"base": 22.0},
+    "s32": {"base": 24.0},
+    "s46": {"base": 26.0},
+    "b20": {"base": 28.0},
+    "b32": {"base": 30.0},
+}
 
 
 class _temp_table:
@@ -187,27 +90,202 @@ class _temp_table:
         return False
 
 
-class TestOrderShipping(unittest.TestCase):
-    RATES = {"zone_1": {"bareroot": {"base": 21.0}, "potted": {"base": 32.0}}}
-
-    def test_sums_tiers_linearly(self):
-        with _temp_table({"WV": "zone_1"}, self.RATES):
-            # 2 bareroot + 1 potted = 2*21 + 32 = 74.00
-            total = sz.compute_order_shipping("WV", [("bareroot", 2), ("potted", 1)])
-            self.assertEqual(total, 74.0)
-
-    def test_any_unpriceable_item_fails_whole_order(self):
-        rates = {"zone_1": {"bareroot": {"base": 21.0}}}  # no potted rule
-        with _temp_table({"WV": "zone_1"}, rates):
-            self.assertIsNone(sz.compute_order_shipping("WV", [("bareroot", 1), ("potted", 1)]))
+class TestShippingZoneEngineContract(unittest.TestCase):
+    """Fail-safe behaviour that must hold regardless of the data state."""
 
     def test_unmapped_state_returns_none(self):
-        with _temp_table({"WV": "zone_1"}, self.RATES):
-            self.assertIsNone(sz.compute_order_shipping("TX", [("bareroot", 1)]))
+        # None (not 0.0) => "no shipping configured, add no line".
+        self.assertIsNone(sz.box_rate("ZZ", "s20"))
+        self.assertIsNone(sz.compute_order_shipping("ZZ", [("bareroot", 20, 1)], "leafed"))
+
+    def test_empty_or_missing_state_returns_none(self):
+        self.assertIsNone(sz.box_rate("", "s20"))
+        self.assertIsNone(sz.box_rate(None, "s20"))
+
+    def test_there_are_exactly_five_rate_zones(self):
+        self.assertEqual(len(sz.RATE_ZONE_IDS), 5)
+
+    def test_rate_is_box_scoped(self):
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
+            self.assertEqual(sz.box_rate("WV", "s20"), 22.0)
+            self.assertEqual(sz.box_rate("WV", "b32"), 30.0)
+
+    def test_missing_box_rule_returns_none(self):
+        with _temp_table({"WV": "zone_1"}, {"zone_1": {"s20": {"base": 22.0}}}):
+            self.assertIsNone(sz.box_rate("WV", "b32"))
+
+    def test_rates_load_from_json_file(self):
+        # The shipped data file parses and, if non-empty, only contains known
+        # zone ids and catalog box ids with numeric non-negative "base".
+        for zone, boxes in sz.ZONE_RATES.items():
+            self.assertIn(zone, sz.RATE_ZONE_IDS)
+            for box_id, rule in boxes.items():
+                self.assertIn(box_id, sb.BOXES)
+                self.assertGreaterEqual(float(rule["base"]), 0.0)
+
+    def test_state_lookup_is_case_and_space_insensitive(self):
+        import copy
+
+        saved_state = copy.deepcopy(dict(sz.ZONE_BY_STATE))
+        try:
+            sz.ZONE_BY_STATE["WV"] = "zone_1"
+            self.assertEqual(sz.zone_for_state(" wv "), "zone_1")
+        finally:
+            sz.ZONE_BY_STATE.clear()
+            sz.ZONE_BY_STATE.update(saved_state)
+
+    def test_potted_is_never_shippable(self):
+        # Potted = farm pickup only: reason for the checkout BLOCK message,
+        # None from the pricing path — even with a fully populated table.
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
+            self.assertIsNotNone(sz.unshippable_reason([("potted", 20, 1)]))
+            self.assertIsNone(sz.compute_order_shipping("WV", [("potted", 20, 1)], "leafed"))
+
+    def test_unknown_tier_treated_as_potted(self):
+        # A mistagged product can never ship undercharged — it cannot ship.
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
+            self.assertIsNotNone(sz.unshippable_reason([("mystery", 20, 1)]))
+            self.assertIsNone(sz.compute_order_shipping("WV", [("mystery", 20, 1)], "leafed"))
+
+    def test_bareroot_has_no_unshippable_reason(self):
+        self.assertIsNone(sz.unshippable_reason([("bareroot", 20, 3)]))
+
+    def test_zero_qty_potted_line_is_ignored(self):
+        self.assertIsNone(sz.unshippable_reason([("potted", 20, 0), ("bareroot", 20, 1)]))
+
+
+class TestTwentyOneStateCoverage(unittest.TestCase):
+    """The 21-state green list and its rate coverage."""
+
+    def test_exactly_the_21_green_states_are_mapped(self):
+        self.assertEqual(set(sz.ZONE_BY_STATE), GREEN)
+
+    def test_every_mapped_state_prices_every_catalog_box(self):
+        for state in GREEN:
+            for box_id in sb.BOXES:
+                rate = sz.box_rate(state, box_id)
+                self.assertIsNotNone(rate, f"{state}/{box_id} has no rate")
+                self.assertGreater(rate, 0.0)
+
+    def test_every_excluded_destination_returns_none(self):
+        for code in sz.US_STATES:
+            if code in GREEN:
+                continue
+            for box_id in sb.BOXES:
+                self.assertIsNone(sz.box_rate(code, box_id), code)
+
+    def test_heavier_box_never_cheaper_within_a_zone(self):
+        # Rates monotone in representative billable weight keep the packer's
+        # "fewer, bigger boxes for bulk" outcomes intuitive; a violation means
+        # the table (or a checker PR) needs a second look.
+        for zone, boxes in sz.ZONE_RATES.items():
+            ordered = sorted(boxes, key=sb.representative_billable_lb)
+            for lighter, heavier in zip(ordered, ordered[1:]):
+                self.assertLessEqual(
+                    boxes[lighter]["base"],
+                    boxes[heavier]["base"],
+                    f"{zone}: {lighter} costs more than heavier {heavier}",
+                )
+
+
+class TestShippingZoneTableCoverage(unittest.TestCase):
+    """Enforced automatically once the table is populated."""
+
+    def test_every_mapped_zone_has_a_rate(self):
+        for state, zone in sz.ZONE_BY_STATE.items():
+            self.assertIn(zone, sz.ZONE_RATES, f"state {state} maps to {zone} with no rate rule")
+            self.assertIn(zone, sz.RATE_ZONE_IDS, f"{zone} is not one of the 5 zone ids")
+
+    def test_full_state_coverage_when_configured(self):
+        if not sz.is_configured():
+            self.skipTest("21-state rate table not yet populated")
+        mapped = set(sz.ZONE_BY_STATE)
+        self.assertEqual(
+            mapped,
+            GREEN,
+            f"mapped states {mapped} do not match green states {GREEN}",
+        )
+
+    def test_every_rate_rule_targets_a_real_zone(self):
+        for zone in sz.ZONE_RATES:
+            self.assertIn(zone, sz.RATE_ZONE_IDS, f"rate rule for unknown zone {zone}")
+
+
+class TestOrderShipping(unittest.TestCase):
+    """compute_order_shipping: per-box totals from the packed plan."""
+
+    TABLE = {"zone_1": BOX_RATES_Z1}
+
+    def test_single_leafed_tree_prices_one_s20(self):
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 1)], "leafed"), 22.0)
+
+    def test_five_leafed_trees_take_two_boxes(self):
+        # cap 4/box leafed -> 4 + 1 = two s20 boxes.
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 5)], "leafed"), 44.0)
+
+    def test_bulk_dormant_order_uses_bulk_box(self):
+        # 50 dormant -> one b20 ($28), NOT 4 x s20 ($88).
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 50)], "dormant"), 28.0)
+
+    def test_sixty_dormant_split_bulk_plus_small(self):
+        # 60 -> b20 (50) + s20 (10) = 28 + 22 = 50.
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 60)], "dormant"), 50.0)
+
+    def test_short_trees_top_up_tall_box(self):
+        # 1 x 46" + 14 x 20" dormant all fit the one s46 (cap 15) = 26.0.
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            items = [("bareroot", 46, 1), ("bareroot", 20, 14)]
+            self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 26.0)
+
+    def test_single_dormant_whip_uses_whip_box(self):
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 16, 1)], "dormant"), 18.0)
+
+    def test_any_potted_item_fails_whole_order(self):
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            items = [("bareroot", 20, 2), ("potted", 20, 1)]
+            self.assertIsNone(sz.compute_order_shipping("WV", items, "leafed"))
+
+    def test_missing_box_rate_fails_whole_order(self):
+        # Only s20 priced: a 46" tree has no usable rated box -> None.
+        with _temp_table({"WV": "zone_1"}, {"zone_1": {"s20": {"base": 22.0}}}):
+            self.assertIsNone(sz.compute_order_shipping("WV", [("bareroot", 46, 1)], "leafed"))
+
+    def test_unmapped_state_returns_none(self):
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            self.assertIsNone(sz.compute_order_shipping("GA", [("bareroot", 20, 1)], "leafed"))
 
     def test_zero_and_negative_qty_ignored(self):
-        with _temp_table({"WV": "zone_1"}, self.RATES):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 0), ("potted", -2), ("bareroot", 1)]), 21.0)
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            items = [("bareroot", 20, 0), ("bareroot", 20, 1)]
+            self.assertEqual(sz.compute_order_shipping("WV", items, "leafed"), 22.0)
+            self.assertIsNone(sz.compute_order_shipping("WV", [("bareroot", 20, 0)], "leafed"))
+
+    def test_empty_cart_returns_none(self):
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            self.assertIsNone(sz.compute_order_shipping("WV", [], "leafed"))
+
+
+class TestSingleTreeRate(unittest.TestCase):
+    """single_tree_rate: the product-card "shipping from $X" estimate."""
+
+    TABLE = {"zone_1": BOX_RATES_Z1}
+
+    def test_leafed_single_is_smallest_leafed_box(self):
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            self.assertEqual(sz.single_tree_rate("WV", 20, "leafed"), 22.0)
+
+    def test_dormant_whip_single_is_whip_box(self):
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            self.assertEqual(sz.single_tree_rate("WV", 16, "dormant"), 18.0)
+
+    def test_unmapped_state_returns_none(self):
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            self.assertIsNone(sz.single_tree_rate("GA", 20, "leafed"))
 
 
 class TestCanonicalStateCode(unittest.TestCase):
@@ -246,20 +324,20 @@ class TestCanonicalStateCode(unittest.TestCase):
 class TestFullNameShippingRouting(unittest.TestCase):
     """Green-list states supplied as full names must still price (defect 1)."""
 
-    RATES = {"zone_1": {"bareroot": {"base": 21.0}, "potted": {"base": 32.0}}}
+    TABLE = {"zone_1": BOX_RATES_Z1}
 
     def test_full_name_green_state_prices_like_its_code(self):
-        with _temp_table({"WV": "zone_1"}, self.RATES):
-            by_code = sz.compute_order_shipping("WV", [("potted", 1)])
-            by_name = sz.compute_order_shipping("West Virginia", [("potted", 1)])
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            by_code = sz.compute_order_shipping("WV", [("bareroot", 20, 1)], "leafed")
+            by_name = sz.compute_order_shipping("West Virginia", [("bareroot", 20, 1)], "leafed")
             self.assertEqual(by_name, by_code)
-            self.assertEqual(by_name, 32.0)
+            self.assertEqual(by_name, 22.0)
 
     def test_full_name_non_green_state_still_drops(self):
         # "Ohio" canonicalizes to OH, but OH is not in this temp green table,
         # so it correctly returns None (no guessed charge) — the fail-safe holds.
-        with _temp_table({"WV": "zone_1"}, self.RATES):
-            self.assertIsNone(sz.compute_order_shipping("Ohio", [("potted", 1)]))
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            self.assertIsNone(sz.compute_order_shipping("Ohio", [("bareroot", 20, 1)], "leafed"))
 
 
 if __name__ == "__main__":

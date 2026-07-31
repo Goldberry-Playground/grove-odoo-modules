@@ -18,8 +18,15 @@ class TestRateMath(unittest.TestCase):
         self.assertEqual(rc.pick_ups_ground(data), 14.23)
 
     def test_target_formula_ceil(self):
-        # 14.23 + 3.50 + 2.00 = 19.73 -> 20
-        self.assertEqual(rc.target_rate(14.23), 20)
+        # 14.23 + 4.50 (s20 packaging) + 2.00 = 20.73 -> 21
+        self.assertEqual(rc.target_rate(14.23, "s20"), 21)
+
+    def test_parcels_come_from_box_catalog(self):
+        # One reference parcel per catalog box, quoted at representative
+        # billable weight (never undercharge).
+        self.assertEqual(set(rc.PARCELS), set(rc.shipping_boxes.BOXES))
+        for box_id, parcel in rc.PARCELS.items():
+            self.assertEqual(float(parcel["weight"]), rc.shipping_boxes.representative_billable_lb(box_id))
 
     def test_diff_detects_material_drift(self):
         current = {"zone_1": {"bareroot": {"base": 21.0}}}
