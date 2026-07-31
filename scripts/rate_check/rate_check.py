@@ -5,7 +5,14 @@ Quotes Shippo (UPS Ground, residential) for each rate zone x catalog box
 (shipping_boxes.BOXES at representative billable weight), computes
 target = ceil(quote + per-box packaging + 2.00), and rewrites
 grove_headless/data/shipping_rates.json when any zone drifts >= $1.
-Exit codes: 0 no material drift | 3 rates file rewritten | 1 API failure.
+
+Before writing, the proposed table is run through the monotonicity guard
+(monotonicity.find_violations): a bigger box or a farther zone must never be
+cheaper. A violation aborts the rewrite (exit 4) so a bad quote can never
+publish an exploitable table — the workflow alerts and rates stay untouched.
+
+Exit codes: 0 no material drift | 3 rates file rewritten | 1 API failure |
+4 proposed table failed the monotonicity guard (not published).
 Requires env SHIPPO_API_KEY (unless --dry-run with --fixture).
 """
 
@@ -42,6 +49,14 @@ _SB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless",
 _spec = _ilu.spec_from_file_location("grove_shipping_boxes", _SB_PATH)
 shipping_boxes = _ilu.module_from_spec(_spec)
 _spec.loader.exec_module(shipping_boxes)
+
+# Monotonicity guard — loaded by file path so this script stays standalone
+# whether run directly (`python3 rate_check.py`) or imported by tests via
+# spec (which does not put this dir on sys.path).
+_MONO_PATH = os.path.join(os.path.dirname(__file__), "monotonicity.py")
+_mspec = _ilu.spec_from_file_location("grove_rate_monotonicity", _MONO_PATH)
+monotonicity = _ilu.module_from_spec(_mspec)
+_mspec.loader.exec_module(monotonicity)
 
 PARCELS = {
     box_id: {
@@ -142,6 +157,17 @@ def main() -> int:
                 print(f"no UPS Ground rate for {zone}/{box_id}", file=sys.stderr)
                 return 1
             proposed[zone][box_id] = target_rate(quote, box_id)
+
+    # Guard before publishing: a bigger box or farther zone must never be
+    # cheaper. A bad Shippo quote that inverts the table is refused, not
+    # written — the workflow's failure alert fires and rates stay untouched.
+    box_order = monotonicity.ordered_boxes(shipping_boxes.BOXES, shipping_boxes.representative_billable_lb)
+    violations = monotonicity.find_violations(proposed, box_order, list(REFERENCE_ZIPS))
+    if violations:
+        print(f"proposed rate table failed monotonicity guard ({len(violations)}):", file=sys.stderr)
+        for v in violations:
+            print(f"  - {v}", file=sys.stderr)
+        return 4
 
     drift = compute_drift(current, proposed)
     if not drift:
