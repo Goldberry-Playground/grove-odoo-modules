@@ -119,6 +119,55 @@ def _json_response(data, status=200):
     )
 
 
+# Each tenant sandbox (nursery/ggg/goldberry) signs its Stripe webhook events
+# with a DIFFERENT endpoint secret, yet all tenants POST to the single
+# /grove/api/v1/stripe/webhook URL. So verification must try EVERY configured
+# tenant secret and accept on any match (mirrors Stripe's own guidance for one
+# endpoint serving multiple signing secrets). Names are lowercase to match the
+# odoo process-env convention already used for stripe_test_* (see the QA
+# compose `environment:` block); Terra wires these per-tenant vars in T2
+# (GOL-1016). `stripe_test_webhook_secret` stays for backward-compat with the
+# legacy single-tenant env.
+STRIPE_WEBHOOK_SECRET_ENV_VARS = (
+    "stripe_webhook_secret_nursery",
+    "stripe_webhook_secret_ggg",
+    "stripe_webhook_secret_goldberry",
+    "stripe_test_webhook_secret",
+)
+
+
+def _configured_webhook_secrets():
+    """Return the non-empty webhook signing secrets from the environment, in a
+    stable order and de-duplicated (a value shared across env vars is tried
+    once)."""
+    secrets = []
+    for name in STRIPE_WEBHOOK_SECRET_ENV_VARS:
+        value = os.environ.get(name, "")
+        if value and value not in secrets:
+            secrets.append(value)
+    return secrets
+
+
+def _verify_stripe_webhook(raw, sig, secrets):
+    """Verify a Stripe-Signature header against ANY of the given tenant secrets.
+
+    Returns (True, None) on the first secret that validates, else
+    (False, last_error). Every secret is tried WITHOUT an early exit on match:
+    the per-secret HMAC is cheap and running them all keeps the response time
+    from leaking (via how many secrets were tried) which tenant signed the
+    event.
+    """
+    verified = False
+    last_error = None
+    for secret in secrets:
+        try:
+            stripe_gateway.verify_webhook_signature(raw, sig, secret)
+            verified = True
+        except stripe_gateway.StripeError as exc:
+            last_error = exc
+    return verified, last_error
+
+
 def _image_url(model, record, size):
     """Return the ``/web/image`` path for ``record``'s image at ``size``, or None.
 
@@ -809,12 +858,14 @@ class GroveHeadlessAPI(http.Controller):
         in-stock line it refunds, apologises, and pings ops on Discord.
         """
         raw = request.httprequest.get_data() or b""
-        secret = os.environ.get("stripe_test_webhook_secret", "")
         sig = request.httprequest.headers.get("Stripe-Signature", "")
-        try:
-            stripe_gateway.verify_webhook_signature(raw, sig, secret)
-        except stripe_gateway.StripeError as exc:
-            _logger.warning("Stripe webhook rejected: %s", exc)
+        secrets = _configured_webhook_secrets()
+        if not secrets:
+            _logger.warning("Stripe webhook rejected: no webhook secret configured")
+            return _json_response({"error": "signature verification failed"}, status=400)
+        verified, last_error = _verify_stripe_webhook(raw, sig, secrets)
+        if not verified:
+            _logger.warning("Stripe webhook rejected: %s", last_error)
             return _json_response({"error": "signature verification failed"}, status=400)
 
         try:

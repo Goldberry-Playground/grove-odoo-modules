@@ -6,6 +6,11 @@ Network is never touched: create_refund is monkeypatched and no live secret
 keys are read (the handlers take the env, not the HTTP request).
 """
 
+import hashlib
+import hmac
+import time
+from unittest import mock
+
 from odoo.addons.grove_headless.controllers import main as grove_main
 from odoo.addons.grove_headless.models import stripe_gateway
 from odoo.tests import TransactionCase, tagged
@@ -46,6 +51,78 @@ class TestStripeCheckout(TransactionCase):
             )
         )
         return order
+
+    @staticmethod
+    def _sign(secret, body, ts=None):
+        """Build a valid Stripe-Signature header for `body` signed with `secret`
+        (mirrors stripe_gateway.verify_webhook_signature's scheme)."""
+        if ts is None:
+            ts = int(time.time())
+        signed = f"{ts}.".encode("utf-8") + body
+        digest = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
+        return f"t={ts},v1={digest}"
+
+    # ── multi-tenant webhook signature verification (GOL-1020) ────────────
+
+    def test_webhook_secrets_collects_all_tenants_deduped(self):
+        """All three tenant env vars plus the legacy single one are collected,
+        in order, with duplicates removed."""
+        env = {
+            "stripe_webhook_secret_nursery": "whsec_nursery",
+            "stripe_webhook_secret_ggg": "whsec_ggg",
+            "stripe_webhook_secret_goldberry": "whsec_goldberry",
+            # Legacy var duplicates nursery's value — must be tried only once.
+            "stripe_test_webhook_secret": "whsec_nursery",
+        }
+        with mock.patch.dict("os.environ", env, clear=True):
+            self.assertEqual(
+                grove_main._configured_webhook_secrets(),
+                ["whsec_nursery", "whsec_ggg", "whsec_goldberry"],
+            )
+
+    def test_webhook_secrets_skips_empty(self):
+        """Empty/absent env vars are ignored so an unprovisioned tenant does not
+        introduce an empty secret."""
+        env = {
+            "stripe_webhook_secret_nursery": "whsec_nursery",
+            "stripe_webhook_secret_ggg": "",
+            "stripe_webhook_secret_goldberry": "whsec_goldberry",
+        }
+        with mock.patch.dict("os.environ", env, clear=True):
+            self.assertEqual(
+                grove_main._configured_webhook_secrets(),
+                ["whsec_nursery", "whsec_goldberry"],
+            )
+
+    def test_webhook_verifies_each_tenant_secret(self):
+        """A validly-signed event from EACH of the three tenants verifies
+        against the shared secret list — the core GOL-1020 acceptance case."""
+        secrets = ["whsec_nursery", "whsec_ggg", "whsec_goldberry"]
+        body = b'{"id":"evt_multitenant","type":"checkout.session.completed"}'
+        for tenant_secret in secrets:
+            sig = self._sign(tenant_secret, body)
+            verified, err = grove_main._verify_stripe_webhook(body, sig, secrets)
+            self.assertTrue(verified, f"secret {tenant_secret} failed: {err}")
+            self.assertIsNone(err)
+
+    def test_webhook_rejects_unknown_secret(self):
+        """An event signed by a secret NOT in the configured set is rejected."""
+        secrets = ["whsec_nursery", "whsec_ggg", "whsec_goldberry"]
+        body = b'{"id":"evt_rogue","type":"checkout.session.completed"}'
+        sig = self._sign("whsec_rogue_unconfigured", body)
+        verified, err = grove_main._verify_stripe_webhook(body, sig, secrets)
+        self.assertFalse(verified)
+        self.assertIsInstance(err, stripe_gateway.StripeError)
+
+    def test_webhook_rejects_tampered_body(self):
+        """A signature valid for the original body does not verify a mutated
+        body under any tenant secret."""
+        secrets = ["whsec_nursery", "whsec_ggg"]
+        body = b'{"id":"evt_ok","type":"checkout.session.completed"}'
+        sig = self._sign("whsec_ggg", body)
+        tampered = b'{"id":"evt_HACKED","type":"checkout.session.completed"}'
+        verified, _ = grove_main._verify_stripe_webhook(tampered, sig, secrets)
+        self.assertFalse(verified)
 
     # ── line-item builder / charging matrix ──────────────────────────────
 
