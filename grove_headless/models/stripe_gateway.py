@@ -50,18 +50,36 @@ def to_cents(amount) -> int:
 # ── Checkout Session ────────────────────────────────────────────────────────
 
 
-def line_charge(unit_price, quantity, qty_available, deposit=PREORDER_DEPOSIT):
-    """Resolve one product line to a Stripe amount under the charging matrix.
+def line_charge(unit_price, quantity, free_available, deposit=PREORDER_DEPOSIT):
+    """Resolve one product line into Stripe sub-charges under the charging matrix.
 
-    Returns (amount_cents, quantity, is_preorder):
-      * in stock  (qty_available covers the requested quantity) -> full price
-        for the full quantity;
-      * preorder  (stock cannot cover it, incl. qty_available None/unknown) ->
-        a single flat deposit line (quantity collapses to 1), balance later.
+    Returns a list of ``(amount_cents, quantity, is_preorder)`` tuples so a
+    partially-stocked line SPLITS instead of collapsing to a single flat
+    deposit (GOL-1036 defect 3): the units we can fill from free stock are
+    billed at full price now, and each unit of the shortfall is a preorder
+    charged the flat deposit PER UNIT (balance captured off-session at ship).
+
+      * fully in stock  -> [(full price, quantity, False)]
+      * fully short/unknown stock -> [(deposit, quantity, True)]  (per unit)
+      * partially in stock (0 < free < quantity) ->
+            [(full price, free, False), (deposit, quantity - free, True)]
+
+    Stock is measured as *free* quantity (on-hand minus already-reserved),
+    passed in by the caller (GOL-1036 defect 4) — a unit another order has
+    reserved is not sellable now and must fall to the preorder side, or the
+    same tree is billed to two customers. ``free_available`` None/negative is
+    treated as zero free stock (unknown -> preorder), never as "in stock".
     """
-    if qty_available is not None and qty_available >= quantity:
-        return (to_cents(unit_price), int(quantity), False)
-    return (to_cents(deposit), 1, True)
+    qty = int(quantity)
+    free = 0 if free_available is None else int(free_available)
+    in_stock = max(0, min(free, qty))
+    charges = []
+    if in_stock > 0:
+        charges.append((to_cents(unit_price), in_stock, False))
+    reserve = qty - in_stock
+    if reserve > 0:
+        charges.append((to_cents(deposit), reserve, True))
+    return charges
 
 
 def _flatten(prefix, value, out):

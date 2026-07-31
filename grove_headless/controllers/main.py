@@ -1241,15 +1241,17 @@ def _get_shipping_product(env, company):
 def _apply_shipping_line(env, order, shipping, company):
     """Add a shipping charge line to `order` from the tiered zone table.
 
-    Fail-safe: returns without adding a line when no rate is configured for
-    the destination or any line's tier — never a guessed charge. The ship-to
-    state is canonicalized to its 2-letter code first, so a green-list state
-    supplied as a full name ("Ohio") or in odd case is priced instead of
-    silently dropped (which under-bills the customer for shipping).
+    Returns the applied shipping charge (float) or ``None`` when no line was
+    added. Fail-safe: returns None without adding a line when no rate is
+    configured for the destination or any line's tier — never a guessed
+    charge. The caller enforces the no-$0-shipping circuit breaker (GOL-1036
+    defect 2) off this return value. The ship-to state is canonicalized to its
+    2-letter code first, so a green-list state supplied as a full name ("Ohio")
+    or in odd case is priced instead of silently dropped.
     """
     state = canonical_state_code((shipping or {}).get("state"))
     if not state:
-        return
+        return None
     items = [
         (
             line.product_id.grove_effective_shipping_tier
@@ -1262,13 +1264,15 @@ def _apply_shipping_line(env, order, shipping, company):
         if not line.display_type and line.product_id
     ]
     if not items:
-        return
+        return None
     charge = compute_order_shipping(state, items, packing_mode(_date.today()))
     if charge is None:
         # A destination outside the 21-state green list legitimately gets no
         # shipping line. But a *green* state that still can't be priced means a
         # rate-table gap is silently under-billing a customer we do ship to —
-        # surface that rather than swallow it.
+        # surface that rather than swallow it. The caller's circuit breaker
+        # (GOL-1036 defect 2) turns this None into a hard error for a shipped
+        # order so it can never reach Stripe with $0 shipping.
         if zone_for_state(state) is not None:
             _logger.warning(
                 "grove_headless: shipping line dropped for order %s to green-list state %s "
@@ -1276,7 +1280,7 @@ def _apply_shipping_line(env, order, shipping, company):
                 order.name,
                 state,
             )
-        return
+        return None
 
     product = _get_shipping_product(env, company)
     env["sale.order.line"].sudo().create(
@@ -1289,6 +1293,7 @@ def _apply_shipping_line(env, order, shipping, company):
         }
     )
     order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
+    return charge
 
 
 def _apply_destination_tax(env, order, shipping):
@@ -1479,10 +1484,33 @@ def _create_draft_order(website, env, payload):
     env["sale.order.line"].sudo().create(line_vals)
     order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
 
-    # Box Engine v2 guard: a ship-to order containing potted lines is BLOCKED
-    # with an explicit message (potted = farm pickup only), mirroring the
-    # 2026-07-20 out-of-green-list decision — never a silently un-shipped order.
-    if shipping and (shipping or {}).get("state"):
+    # ── Ship-to gate (GOL-1036 defects 1 & 2) ────────────────────────────────
+    # A cart with a ship-to state must clear three server-side gates before it
+    # can reach payment, or a compliance/revenue defect leaks to Stripe:
+    #   (1) state gate — the destination must be on the 21-state green list.
+    #       Everything else (FL, and every living-tree-cert / quarantine state)
+    #       is rejected here, not just discouraged by product-page copy.
+    #   (2) potted gate — potted trees are farm pickup only (Box Engine v2).
+    #   (3) $0-shipping circuit breaker — a shippable order MUST end up with a
+    #       positive shipping line; if shipping can't be resolved we fail loudly
+    #       rather than let a shipped order settle with silent $0 shipping.
+    ship_state = (shipping or {}).get("state") if shipping else None
+    is_ship_to = bool(ship_state)
+    if is_ship_to:
+        dest = canonical_state_code(ship_state)
+        if dest is None or zone_for_state(dest) is None:
+            # (1) Unsupported / non-green-list destination — reject at the source.
+            order.unlink()
+            return None, _json_response(
+                {
+                    "error": (
+                        f"We can't ship live trees to {ship_state}. Shipping is limited to "
+                        "our 21-state region for plant-health compliance — choose a supported "
+                        "ship-to state or farm pickup."
+                    )
+                },
+                status=400,
+            )
         ship_items = [
             (
                 line.product_id.grove_effective_shipping_tier
@@ -1494,6 +1522,7 @@ def _create_draft_order(website, env, payload):
             for line in order.order_line
             if not line.display_type and line.product_id and line.product_id.product_tmpl_id.type != "service"
         ]
+        # (2) Potted (or otherwise non-shippable) lines block the ship-to order.
         reason = unshippable_reason(ship_items)
         if reason:
             order.unlink()
@@ -1502,7 +1531,25 @@ def _create_draft_order(website, env, payload):
     # Apply the per-box 21-state shipping charge (Box Engine v2). Rates load
     # from data/shipping_rates.json (models/shipping_zones.py) and are
     # maintained by the daily rate-checker. Fail-safe: no rate → no line added.
-    _apply_shipping_line(env, order, shipping, current_company)
+    shipping_charge = _apply_shipping_line(env, order, shipping, current_company)
+
+    # (3) No-$0-shipping circuit breaker: a ship-to order with shippable goods
+    # that produced no positive shipping line is a rate-table gap — never let it
+    # reach Stripe under-billed. (unshippable_reason above already cleared potted
+    # carts, so reaching here with shippable items and no charge is a real gap.)
+    if is_ship_to:
+        has_shippable = any(qty > 0 for _tier, _length, qty in ship_items)
+        if has_shippable and (shipping_charge is None or shipping_charge <= 0):
+            order.unlink()
+            return None, _json_response(
+                {
+                    "error": (
+                        "We couldn't calculate shipping for this order right now. "
+                        "No payment was taken — please try again shortly or contact us."
+                    )
+                },
+                status=409,
+            )
 
     # WV sales tax is destination-based (GOL-1021): keep it only for WV-bound
     # orders, strip it from every line (incl. shipping) for any other ship-to
@@ -1519,11 +1566,13 @@ def _build_stripe_line_items(order):
     """Turn a draft order's lines into Stripe Checkout line items.
 
     Returns (line_items, preorder_variant_ids, charged_cents). Applies the
-    charging matrix per product line (in-stock = full price; short stock =
-    a flat deposit line at qty 1) and adds the WV sales tax as ONE explicit
-    line (Stripe Tax OFF) covering only what is charged today — preorder lines
+    charging matrix per product line (in-stock units = full price; short-stock
+    units = a per-unit flat deposit) and adds the WV sales tax as ONE explicit
+    line (Stripe Tax OFF) covering only what is charged today — preorder units
     contribute a deposit and no tax now; their goods + tax settle off-session
-    when they ship.
+    when they ship. A partially-stocked line splits into an in-stock charge and
+    a deposit charge (GOL-1036 defect 3); tax today is prorated to only the
+    in-stock units so the deposit units aren't taxed before they ship.
     """
     line_items = []
     preorder_variant_ids = []
@@ -1540,15 +1589,18 @@ def _build_stripe_line_items(order):
             line_items.append({"name": name, "amount_cents": amount, "quantity": 1})
             tax_today += line.price_tax
             continue
-        amount, qty, is_preorder = stripe_gateway.line_charge(
-            line.price_unit, line.product_uom_qty, product.qty_available
-        )
-        if is_preorder:
-            preorder_variant_ids.append(product.id)
-            line_items.append({"name": f"Deposit — {name}", "amount_cents": amount, "quantity": qty})
-        else:
-            line_items.append({"name": name, "amount_cents": amount, "quantity": qty})
-            tax_today += line.price_tax
+        # free_qty (on-hand minus reserved), not qty_available: a unit another
+        # order already reserved is not sellable now and must fall to preorder
+        # (GOL-1036 defect 4), or the same tree is billed to two customers.
+        ordered_qty = line.product_uom_qty
+        for amount, qty, is_preorder in stripe_gateway.line_charge(line.price_unit, ordered_qty, product.free_qty):
+            if is_preorder:
+                preorder_variant_ids.append(product.id)
+                line_items.append({"name": f"Deposit — {name}", "amount_cents": amount, "quantity": qty})
+            else:
+                line_items.append({"name": name, "amount_cents": amount, "quantity": qty})
+                # Prorate the line's tax to the units billed today.
+                tax_today += line.price_tax * (qty / ordered_qty) if ordered_qty else 0.0
     if tax_today > 0:
         line_items.append({"name": "Sales tax (WV)", "amount_cents": stripe_gateway.to_cents(tax_today), "quantity": 1})
     charged_cents = sum(li["amount_cents"] * li["quantity"] for li in line_items)

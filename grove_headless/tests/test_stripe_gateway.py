@@ -30,19 +30,40 @@ class TestAmounts(unittest.TestCase):
         self.assertEqual(sg.to_cents(19.999), 2000)
 
     def test_line_charge_in_stock_full_price(self):
-        # qty_available covers the quantity -> full price, full qty, not preorder
-        amount, qty, is_pre = sg.line_charge(unit_price=25.0, quantity=2, qty_available=5)
-        self.assertEqual((amount, qty, is_pre), (2500, 2, False))
+        # free stock covers the quantity -> one full-price sub-charge, no preorder
+        self.assertEqual(
+            sg.line_charge(unit_price=25.0, quantity=2, free_available=5),
+            [(2500, 2, False)],
+        )
 
-    def test_line_charge_short_stock_is_deposit(self):
-        amount, qty, is_pre = sg.line_charge(unit_price=25.0, quantity=2, qty_available=1)
-        self.assertEqual((amount, qty, is_pre), (sg.to_cents(sg.PREORDER_DEPOSIT), 1, True))
+    def test_line_charge_short_stock_splits_per_unit(self):
+        # GOL-1036 defect 3: want 5, only 2 free -> 2 billed full price PLUS
+        # 3 units of deposit (per-unit, NOT a single flat qty-1 deposit).
+        dep = sg.to_cents(sg.PREORDER_DEPOSIT)
+        self.assertEqual(
+            sg.line_charge(unit_price=25.0, quantity=5, free_available=2),
+            [(2500, 2, False), (dep, 3, True)],
+        )
+
+    def test_line_charge_zero_stock_is_all_deposit_per_unit(self):
+        # No free stock -> every unit is a preorder deposit (qty preserved, not
+        # collapsed to 1).
+        dep = sg.to_cents(sg.PREORDER_DEPOSIT)
+        self.assertEqual(
+            sg.line_charge(unit_price=25.0, quantity=4, free_available=0),
+            [(dep, 4, True)],
+        )
 
     def test_line_charge_unknown_stock_is_preorder(self):
-        # qty_available None (no stock module / unknown) is treated as preorder,
-        # never as an in-stock full charge we can't back.
-        _, _, is_pre = sg.line_charge(unit_price=25.0, quantity=1, qty_available=None)
-        self.assertTrue(is_pre)
+        # free_available None (no stock module / unknown) is treated as zero free
+        # stock -> preorder, never an in-stock full charge we can't back.
+        charges = sg.line_charge(unit_price=25.0, quantity=3, free_available=None)
+        self.assertEqual(charges, [(sg.to_cents(sg.PREORDER_DEPOSIT), 3, True)])
+
+    def test_line_charge_negative_free_is_zero(self):
+        # A reserved-oversold free_qty (< 0) must not flip units back to in-stock.
+        charges = sg.line_charge(unit_price=25.0, quantity=2, free_available=-3)
+        self.assertEqual(charges, [(sg.to_cents(sg.PREORDER_DEPOSIT), 2, True)])
 
 
 class TestSessionParams(unittest.TestCase):
