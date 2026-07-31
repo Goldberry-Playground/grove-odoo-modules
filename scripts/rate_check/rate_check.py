@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Morning shipping rate-checker (design: vault wiki/Software/Grove Shipping).
 
-Quotes Shippo (UPS Ground, residential) for each rate zone x tier reference
-parcel, computes target = ceil(quote + 3.50 + 2.00), and rewrites
+Quotes Shippo (UPS Ground, residential) for each rate zone x catalog box
+(shipping_boxes.BOXES at representative billable weight), computes
+target = ceil(quote + per-box packaging + 2.00), and rewrites
 grove_headless/data/shipping_rates.json when any zone drifts >= $1.
 Exit codes: 0 no material drift | 3 rates file rewritten | 1 API failure.
 Requires env SHIPPO_API_KEY (unless --dry-run with --fixture).
 """
 
 import argparse
+import importlib.util as _ilu
 import json
 import math
 import os
@@ -32,11 +34,30 @@ REFERENCE_ZIPS = {
     "zone_4": ("MN", "55401"),
     "zone_5": ("ME", "04101"),
 }
+# Box Engine v2: reference parcels come straight from the box catalog —
+# one quote per box id per zone, at the box's representative billable weight
+# (worst typical fill across modes; never undercharge). Loaded by file path
+# so this script stays standalone (no grove_headless package import).
+_SB_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless", "models", "shipping_boxes.py")
+_spec = _ilu.spec_from_file_location("grove_shipping_boxes", _SB_PATH)
+shipping_boxes = _ilu.module_from_spec(_spec)
+_spec.loader.exec_module(shipping_boxes)
+
 PARCELS = {
-    "bareroot": {"length": "48", "width": "6", "height": "6", "distance_unit": "in", "weight": "4", "mass_unit": "lb"},
-    "potted": {"length": "30", "width": "16", "height": "16", "distance_unit": "in", "weight": "25", "mass_unit": "lb"},
+    box_id: {
+        "length": str(box["length"]),
+        "width": str(box["width"]),
+        "height": str(box["height"]),
+        "distance_unit": "in",
+        "weight": str(shipping_boxes.representative_billable_lb(box_id)),
+        "mass_unit": "lb",
+    }
+    for box_id, box in shipping_boxes.BOXES.items()
 }
-PACKAGING, BUFFER = 3.50, 2.00
+# Per-box packaging (box + consumables: bag, paper, corrugate, bands, tape,
+# sticker, care card, thank-you note) replaces the old flat $3.50/tree.
+PACKAGING = {box_id: box["packaging_usd"] for box_id, box in shipping_boxes.BOXES.items()}
+BUFFER = 2.00
 RATES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless", "data", "shipping_rates.json")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "out")
 
@@ -50,11 +71,11 @@ def pick_ups_ground(shipment_json: dict) -> float | None:
     return min(rates) if rates else None
 
 
-def target_rate(quote: float) -> int:
-    return math.ceil(quote + PACKAGING + BUFFER)
+def target_rate(quote: float, box_id: str) -> int:
+    return math.ceil(quote + PACKAGING[box_id] + BUFFER)
 
 
-def quote_zone_tier(api_key: str, zone: str, tier: str) -> float | None:
+def quote_zone_box(api_key: str, zone: str, box_id: str) -> float | None:
     state, zip5 = REFERENCE_ZIPS[zone]
     payload = {
         "address_from": ORIGIN,
@@ -67,7 +88,7 @@ def quote_zone_tier(api_key: str, zone: str, tier: str) -> float | None:
             "country": "US",
             "is_residential": True,
         },
-        "parcels": [PARCELS[tier]],
+        "parcels": [PARCELS[box_id]],
         "async": False,
     }
     resp = requests.post(
@@ -83,11 +104,11 @@ def quote_zone_tier(api_key: str, zone: str, tier: str) -> float | None:
 def compute_drift(current: dict, proposed: dict) -> list:
     """[(zone, tier, old, new)] where |old - new| >= 1.0."""
     drift = []
-    for zone, tiers in proposed.items():
-        for tier, new in tiers.items():
-            old = (current.get(zone, {}).get(tier) or {}).get("base")
+    for zone, boxes in proposed.items():
+        for box_id, new in boxes.items():
+            old = (current.get(zone, {}).get(box_id) or {}).get("base")
             if old is None or abs(float(old) - float(new)) >= 1.0:
-                drift.append((zone, tier, old, new))
+                drift.append((zone, box_id, old, new))
     return sorted(drift)
 
 
@@ -103,7 +124,7 @@ def main() -> int:
     proposed = {}
     for zone in REFERENCE_ZIPS:
         proposed[zone] = {}
-        for tier in PARCELS:
+        for box_id in PARCELS:
             if args.fixture:
                 with open(args.fixture, encoding="utf-8") as fh:
                     quote = pick_ups_ground(json.load(fh))
@@ -113,21 +134,21 @@ def main() -> int:
                     print("SHIPPO_API_KEY not set", file=sys.stderr)
                     return 1
                 try:
-                    quote = quote_zone_tier(api_key, zone, tier)
+                    quote = quote_zone_box(api_key, zone, box_id)
                 except requests.RequestException as exc:
-                    print(f"shippo error for {zone}/{tier}: {exc}", file=sys.stderr)
+                    print(f"shippo error for {zone}/{box_id}: {exc}", file=sys.stderr)
                     return 1
             if quote is None:
-                print(f"no UPS Ground rate for {zone}/{tier}", file=sys.stderr)
+                print(f"no UPS Ground rate for {zone}/{box_id}", file=sys.stderr)
                 return 1
-            proposed[zone][tier] = target_rate(quote)
+            proposed[zone][box_id] = target_rate(quote, box_id)
 
     drift = compute_drift(current, proposed)
     if not drift:
         print("no material drift (<$1 everywhere)")
         return 0
 
-    lines = ["| zone | tier | current | proposed |", "|---|---|---|---|"]
+    lines = ["| zone | box | current | proposed |", "|---|---|---|---|"]
     lines += [f"| {z} | {t} | {o} | {n} |" for z, t, o, n in drift]
     summary = "\n".join(lines)
     print(summary)
@@ -136,11 +157,13 @@ def main() -> int:
 
     new_doc = {
         "_comment": "Maintained by scripts/rate_check (morning rate-checker). "
-        "Derivation: ceil(Shippo UPS Ground + 3.50 + 2.00). "
-        "Design: vault wiki/Software/Grove Shipping."
+        "Per-box rates (Box Engine v2): ceil(Shippo UPS Ground at the box's "
+        "representative billable weight + per-box packaging + 2.00 buffer). "
+        "Design: vault wiki/Software/Grove Shipping.",
+        "_schema": 2,
     }
     for zone in sorted(proposed):
-        new_doc[zone] = {t: {"base": float(v)} for t, v in sorted(proposed[zone].items())}
+        new_doc[zone] = {b: {"base": float(v)} for b, v in sorted(proposed[zone].items())}
     with open(RATES_PATH, "w", encoding="utf-8") as fh:
         json.dump(new_doc, fh, indent=2)
         fh.write("\n")

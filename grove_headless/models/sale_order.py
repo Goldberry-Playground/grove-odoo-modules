@@ -5,6 +5,8 @@ from odoo import fields, models
 from odoo.exceptions import UserError
 
 from . import shippo_client
+from .shipping_boxes import packing_mode
+from .shipping_zones import pack_for_state, unshippable_reason
 
 _logger = logging.getLogger(__name__)
 
@@ -47,9 +49,10 @@ class SaleOrder(models.Model):
             self.with_env(self.env(cr=cr)).write(vals)
 
     def action_buy_shipping_labels(self):
-        """Buy one UPS Ground label per tree box via Shippo (each tree = its
-        own box, per the shipping design). Idempotent-ish: refuses to run
-        twice on an order that already has tracking numbers."""
+        """Buy one UPS Ground label per PACKED BOX via Shippo (Box Engine v2:
+        the same packer that priced the order plans the labels, so the boxes
+        bought are the boxes charged). Idempotent-ish: refuses to run twice
+        on an order that already has tracking numbers."""
         api_key = os.environ.get("SHIPPO_API_KEY", "")
         if not api_key:
             raise UserError("SHIPPO_API_KEY is not configured on this server.")
@@ -68,10 +71,10 @@ class SaleOrder(models.Model):
                 "email": partner.email or "",
             }
 
-            # ── Pass 1: validate all lines BEFORE buying anything ──────────
+            # ── Pass 1: validate all lines and pack BEFORE buying anything ─
             # Build the purchase plan up front so a bad quantity on line N
             # never causes a partial purchase on a single order.
-            purchase_plan: list[tuple[dict, str]] = []  # (payload, tier) per unit
+            items: list[tuple[str, int, float]] = []  # (tier, length_class, qty)
             for line in order.order_line:
                 if line.display_type or not line.product_id:
                     continue
@@ -83,10 +86,24 @@ class SaleOrder(models.Model):
                 if qty != int(qty):
                     raise UserError(
                         f"{order.name}: line '{line.product_id.display_name}' has "
-                        f"non-integer quantity {qty}; trees ship one label per whole unit."
+                        f"non-integer quantity {qty}; trees pack per whole unit."
                     )
-                for _ in range(int(qty)):
-                    purchase_plan.append((shippo_client.build_shipment_payload(address, tier), tier))
+                items.append((tier, int(tmpl.grove_tree_length or "20"), qty))
+            reason = unshippable_reason(items)
+            if reason:
+                raise UserError(f"{order.name}: {reason}")
+            mode = packing_mode(fields.Date.context_today(order))
+            plan = pack_for_state(address["state"], items, mode)
+            if plan is None:
+                raise UserError(
+                    f"{order.name}: cannot plan boxes for '{address['state']}' — "
+                    "destination or a line is outside the configured rate table."
+                )
+            purchase_plan: list[tuple[dict, str]] = []  # (payload, box_id) per box
+            for pb in plan:
+                purchase_plan.append(
+                    (shippo_client.build_shipment_payload(address, pb.box_id, pb.count, mode), pb.box_id)
+                )
 
             # ── Pass 2: buy labels, persisting after each success ──────────
             # Each label is committed through an independent cursor immediately
@@ -94,7 +111,7 @@ class SaleOrder(models.Model):
             # subsequent label fails and the request transaction rolls back.
             tracking, labels = [], []
             try:
-                for payload, _tier in purchase_plan:
+                for payload, _box_id in purchase_plan:
                     result = shippo_client.buy_ups_ground_label(api_key, payload)
                     tracking.append(result["tracking_number"])
                     labels.append(result["label_url"])

@@ -145,8 +145,22 @@ class ProductTemplate(models.Model):
         [("bareroot", "Bareroot"), ("potted", "Potted")],
         string="Grove Shipping Tier",
         default="potted",
-        help="Bareroot ships as a 4 lb slim box; potted as a ~25 lb box. "
-        "Determines the per-tree shipping rate by destination zone.",
+        help="Bareroot ships (per-box zone rates, Box Engine v2); potted is "
+        "farm pickup only — it cannot ship. An untagged product defaults to "
+        "potted so it can never ship undercharged.",
+    )
+
+    # Tree length class (Box Engine v2): the minimum box length in inches
+    # this tree's height requires when packed. Drives which boxes the packer
+    # may use. "20" fits the current 1-2 yr inventory; "46" is the 3-5 yr
+    # stock (flowering dogwoods, jujubes). Values mirror
+    # shipping_boxes.LENGTH_CLASSES.
+    grove_tree_length = fields.Selection(
+        [("16", '16" (small whip)'), ("20", '20"'), ("32", '32"'), ("46", '46" (3-5 yr)')],
+        string="Grove Tree Length Class",
+        default="20",
+        help="Minimum shipping-box length this tree's height requires. "
+        "Determines which boxes the shipping packer may place it in.",
     )
 
     # ── Growing facts (2026-07-13 catalog spec) ─────────────────────────

@@ -9,16 +9,15 @@ import re
 import requests
 
 try:
-    from .shipping_zones import PARCEL_PROFILES
+    from . import shipping_boxes
 except ImportError:  # loaded standalone (tests import by file path)
     import importlib.util as _ilu
     import os as _os
 
-    _sz_path = _os.path.join(_os.path.dirname(__file__), "shipping_zones.py")
-    _spec = _ilu.spec_from_file_location("grove_shipping_zones", _sz_path)
-    _sz = _ilu.module_from_spec(_spec)
-    _spec.loader.exec_module(_sz)
-    PARCEL_PROFILES = _sz.PARCEL_PROFILES
+    _sb_path = _os.path.join(_os.path.dirname(__file__), "shipping_boxes.py")
+    _spec = _ilu.spec_from_file_location("grove_shipping_boxes", _sb_path)
+    shipping_boxes = _ilu.module_from_spec(_spec)
+    _spec.loader.exec_module(shipping_boxes)
 
 API = "https://api.goshippo.com"
 
@@ -44,14 +43,19 @@ class ShippoError(RuntimeError):
     pass
 
 
-def build_shipment_payload(address: dict, tier: str) -> dict:
-    profile = PARCEL_PROFILES.get(tier, PARCEL_PROFILES["potted"])
+def build_shipment_payload(address: dict, box_id: str, count: int, mode: str) -> dict:
+    """Shippo shipment payload for ONE packed box (Box Engine v2).
+
+    Declares the estimated actual scale weight; UPS applies DIM billing on
+    its side from the dimensions, so we never under- or over-declare.
+    """
+    box = shipping_boxes.BOXES[box_id]
     parcel = {
-        "length": str(profile["length"]),
-        "width": str(profile["width"]),
-        "height": str(profile["height"]),
+        "length": str(box["length"]),
+        "width": str(box["width"]),
+        "height": str(box["height"]),
         "distance_unit": "in",
-        "weight": str(profile["weight_lb"]),
+        "weight": str(max(1.0, shipping_boxes.actual_weight_lb(box_id, count, mode))),
         "mass_unit": "lb",
     }
     addr_to = dict(address)

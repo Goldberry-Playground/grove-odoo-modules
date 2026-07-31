@@ -14,12 +14,14 @@ from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME
 from ..models import stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.newsletter import newsletter_tag_names
+from ..models.shipping_boxes import packing_mode
 from ..models.shipping_calendar import serialize_ship_options, ship_options, usda_zone_for_zip
 from ..models.shipping_zones import (
     canonical_state_code,
     compute_order_shipping,
-    compute_shipping_rate,
     rate_feed,
+    single_tree_rate,
+    unshippable_reason,
     zone_for_state,
 )
 from ..models.shippo_client import is_valid_tracking
@@ -605,8 +607,17 @@ class GroveHeadlessAPI(http.Controller):
         zip_code = kwargs.get("zip", "")
         state = kwargs.get("state", "")
         tier = kwargs.get("tier", "potted")
-        result = serialize_ship_options(ship_options(zip_code, tier, _date.today()))
-        result["per_tree_rate"] = compute_shipping_rate(state, tier=tier)
+        try:
+            length_class = int(kwargs.get("length", "20"))
+        except ValueError:
+            length_class = 20
+        today = _date.today()
+        result = serialize_ship_options(ship_options(zip_code, tier, today))
+        # Box Engine v2: per_tree_rate = cheapest single-tree shipment in the
+        # season's packing mode. Potted -> None (farm pickup only).
+        mode = packing_mode(today)
+        result["packing_mode"] = mode
+        result["per_tree_rate"] = single_tree_rate(state, length_class, mode) if tier == "bareroot" else None
         return _json_response(result)
 
     @http.route(
@@ -1241,7 +1252,10 @@ def _apply_shipping_line(env, order, shipping, company):
         return
     items = [
         (
-            line.product_id.product_tmpl_id.grove_shipping_tier or "potted",
+            line.product_id.grove_effective_shipping_tier
+            or line.product_id.product_tmpl_id.grove_shipping_tier
+            or "potted",
+            int(line.product_id.product_tmpl_id.grove_tree_length or "20"),
             line.product_uom_qty,
         )
         for line in order.order_line
@@ -1249,7 +1263,7 @@ def _apply_shipping_line(env, order, shipping, company):
     ]
     if not items:
         return
-    charge = compute_order_shipping(state, items)
+    charge = compute_order_shipping(state, items, packing_mode(_date.today()))
     if charge is None:
         # A destination outside the 21-state green list legitimately gets no
         # shipping line. But a *green* state that still can't be priced means a
@@ -1465,9 +1479,29 @@ def _create_draft_order(website, env, payload):
     env["sale.order.line"].sudo().create(line_vals)
     order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
 
-    # Apply the tiered 21-state shipping charge (GOL-15). Rates load from
-    # data/shipping_rates.json (models/shipping_zones.py) and are maintained by
-    # the daily rate-checker. Fail-safe: no rate configured → no line added.
+    # Box Engine v2 guard: a ship-to order containing potted lines is BLOCKED
+    # with an explicit message (potted = farm pickup only), mirroring the
+    # 2026-07-20 out-of-green-list decision — never a silently un-shipped order.
+    if shipping and (shipping or {}).get("state"):
+        ship_items = [
+            (
+                line.product_id.grove_effective_shipping_tier
+                or line.product_id.product_tmpl_id.grove_shipping_tier
+                or "potted",
+                int(line.product_id.product_tmpl_id.grove_tree_length or "20"),
+                line.product_uom_qty,
+            )
+            for line in order.order_line
+            if not line.display_type and line.product_id and line.product_id.product_tmpl_id.type != "service"
+        ]
+        reason = unshippable_reason(ship_items)
+        if reason:
+            order.unlink()
+            return None, _json_response({"error": reason}, status=400)
+
+    # Apply the per-box 21-state shipping charge (Box Engine v2). Rates load
+    # from data/shipping_rates.json (models/shipping_zones.py) and are
+    # maintained by the daily rate-checker. Fail-safe: no rate → no line added.
     _apply_shipping_line(env, order, shipping, current_company)
 
     # WV sales tax is destination-based (GOL-1021): keep it only for WV-bound
