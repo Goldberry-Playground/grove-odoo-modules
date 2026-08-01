@@ -33,7 +33,7 @@ Canonical copy: this file. Mirror in the Obsidian vault wiki page
 | `wave` | int | no | Sequencing wave for the decomposition routine (lower runs first; shared libraries typically wave 1, apps wave 2, docs later). |
 
 A **handle** is a Paperclip agent url-key matching `^[a-z0-9][a-z0-9-]*$`
-(e.g. `engineering-alice`, `frontend-iris`, `devops-terra`). In other
+(e.g. `engineering-ada`, `frontend-iris`, `devops-terra`). In other
 deployments the same slot can hold a GitHub handle or team slug.
 
 ## Coverage rule
