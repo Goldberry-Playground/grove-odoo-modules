@@ -164,6 +164,19 @@ class TestStripeCheckout(TransactionCase):
         self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
         self.assertEqual(preorder_ids, [self.product.id])
 
+    def test_line_items_carry_kind_for_review_badges(self):
+        """GOL-1057: every charged-today line is tagged with a `kind` so the
+        review page badges goods vs deposit (vs shipping / tax) without parsing
+        the display name — the review renders this exact array, so its math is
+        byte-identical to what Stripe charges."""
+        self._set_stock(self.product, 2)
+        order = self._make_order(qty=5)  # 2 in stock + 3 short → goods + deposit
+        line_items, _ids, _charged = grove_main._build_stripe_line_items(order)
+        goods = next(li for li in line_items if li["name"] == self.product.display_name)
+        self.assertEqual(goods["kind"], "goods")
+        deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
+        self.assertEqual(deposit["kind"], "deposit")
+
     # ── ship-to gate: state / potted / $0-shipping breaker (GOL-1036) ─────
 
     def _website(self):
@@ -199,6 +212,44 @@ class TestStripeCheckout(TransactionCase):
         self.assertIsNone(order)
         self.assertEqual(error.status_code, 409)
         self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
+
+    # ── explicit fulfillment: pickup vs ship (GOL-1057) ───────────────────
+
+    def test_pickup_skips_ship_gate_and_adds_no_shipping(self):
+        """Farm pickup is the ONE legitimate $0-shipping path. An explicit
+        fulfillment='pickup' order clears the ship-to gate even for potted trees
+        (pickup-only stock) and never adds a shipping line — without tripping the
+        no-$0-ship circuit breaker."""
+        self.product.product_tmpl_id.grove_shipping_tier = "potted"
+        payload = self._cart_payload("WV", fulfillment="pickup")
+        order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(error)
+        self.assertTrue(order)
+        ship_lines = order.order_line.filtered(
+            lambda ln: ln.product_id.default_code == grove_main.SHIPPING_PRODUCT_CODE
+        )
+        self.assertFalse(ship_lines, "pickup must not add a shipping line")
+
+    def test_ship_intent_without_state_is_rejected(self):
+        """fulfillment='ship' with no ship-to state is a hard error, not a silent
+        fall-through to $0-shipping pickup (the collision the breaker guards)."""
+        payload = self._cart_payload("", fulfillment="ship")
+        order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(order)
+        self.assertEqual(error.status_code, 400)
+        self.assertIn("pickup", error.data.decode().lower())
+        self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
+
+    def test_absent_fulfillment_still_treats_state_as_ship_to(self):
+        """Back-compat: a caller that doesn't send `fulfillment` yet keeps the
+        pre-1057 inference — a green-list ship-to state routes through the ship
+        path (shipping applied), it is NOT treated as a $0-shipping pickup."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        with mock.patch.object(grove_main, "_apply_shipping_line", return_value=12.5) as apply_ship:
+            order, error = grove_main._create_draft_order(self._website(), self.env, self._cart_payload("WV"))
+        self.assertIsNone(error)
+        self.assertTrue(order)
+        apply_ship.assert_called_once()
 
     # ── oversell detection ───────────────────────────────────────────────
 
