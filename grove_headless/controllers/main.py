@@ -273,7 +273,28 @@ def _cultivar_count(product):
     return len(cultivars) or 1
 
 
-def _structure_variant(variant):
+def _template_rootstock(product):
+    """Template-wide Rootstock value for products where propagation is metadata,
+    not a purchasable axis (GOL-1117).
+
+    Most grafted/seedling plants carry a *single* rootstock across every variant
+    (e.g. all apple cultivars grafted on M.111). Modelling that as a variant-
+    creating attribute would regenerate the whole Cultivar x Format grid — blowing
+    away SKUs and stock. Instead it is a ``no_variant`` attribute line: one value,
+    no variant explosion. Surface that value uniformly on each variant so the
+    storefront renders a Rootstock metadata pill (GOL-1112).
+
+    Only a single-value no_variant line is treated as template-wide; a multi-value
+    line is ambiguous per-variant and reads as no axis ("").
+    """
+    for line in product.attribute_line_ids:
+        if line.attribute_id.name == "Rootstock" and line.attribute_id.create_variant == "no_variant":
+            names = line.product_template_value_ids.mapped("name")
+            return names[0] if len(names) == 1 else ""
+    return ""
+
+
+def _structure_variant(variant, template_rootstock=""):
     """Structured variant entry: axes parsed into fields, not display-name strings."""
     axis = {v.attribute_id.name: v.name for v in variant.product_template_variant_value_ids}
     return {
@@ -282,6 +303,11 @@ def _structure_variant(variant):
         "sku": variant.default_code or "",
         "cultivar": axis.get("Cultivar", ""),
         "format": axis.get("Format", ""),
+        # Propagation axis (GOL-1117): "grafted" vs "seedling" rootstock. Optional —
+        # a real per-variant Rootstock axis wins; otherwise fall back to the
+        # template-wide no_variant value (see _template_rootstock). Absent -> "",
+        # which the storefront reads as "no rootstock pill / selector" (GOL-1112).
+        "rootstock": axis.get("Rootstock", "") or template_rootstock,
         "price": variant.lst_price,
         "qty_available": variant.qty_available,
         "shipping_tier": variant.grove_effective_shipping_tier,
@@ -434,7 +460,8 @@ class GroveHeadlessAPI(http.Controller):
             "low_res": bool(product.grove_image_low_res),
             "min_long_edge": GROVE_MIN_IMAGE_LONG_EDGE,
         }
-        data["variants"] = [_structure_variant(v) for v in product.product_variant_ids]
+        template_rootstock = _template_rootstock(product)
+        data["variants"] = [_structure_variant(v, template_rootstock) for v in product.product_variant_ids]
         data["facts"] = _serialize_facts(product)
         data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
         data["categories"] = [{"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids]
