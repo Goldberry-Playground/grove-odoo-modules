@@ -891,6 +891,19 @@ class GroveHeadlessAPI(http.Controller):
                 "amount_due_today": round(charged_cents / 100.0, 2),
                 "amount_total": order.amount_total,
                 "currency": order.currency_id.name,
+                # Itemized charged-today breakdown — the SAME array Stripe renders
+                # (goods / per-unit deposit / shipping / WV tax), so the review page
+                # shows byte-identical math to the card page and the confirmation.
+                # `amount_due_today` == sum(unit_amount * quantity) over this list.
+                "line_items": [
+                    {
+                        "name": li["name"],
+                        "kind": li.get("kind", "goods"),
+                        "unit_amount": round(li["amount_cents"] / 100.0, 2),
+                        "quantity": li["quantity"],
+                    }
+                    for li in line_items
+                ],
             }
         )
 
@@ -1521,8 +1534,23 @@ def _create_draft_order(website, env, payload):
     #   (3) $0-shipping circuit breaker — a shippable order MUST end up with a
     #       positive shipping line; if shipping can't be resolved we fail loudly
     #       rather than let a shipped order settle with silent $0 shipping.
+    # Fulfillment is explicit (GOL-1057): "pickup" is the ONLY legitimate
+    # $0-shipping case — potted-and-pickup carts skip the ship-to gate and add no
+    # shipping line. "ship" asserts a shippable order, so a missing ship-to state
+    # is a hard error here, not a silent fall-through to $0-shipping pickup (the
+    # collision the no-$0-ship breaker exists to catch). Absent `fulfillment`
+    # keeps the pre-1057 inference (a ship-to state ⇒ ship) for back-compat with
+    # callers that don't send the field yet.
+    fulfillment = (payload.get("fulfillment") or "").strip().lower() or None
     ship_state = (shipping or {}).get("state") if shipping else None
-    is_ship_to = bool(ship_state)
+    is_pickup = fulfillment == "pickup"
+    if fulfillment == "ship" and not ship_state:
+        order.unlink()
+        return None, _json_response(
+            {"error": "Choose a ship-to state, or select farm pickup."},
+            status=400,
+        )
+    is_ship_to = not is_pickup and bool(ship_state)
     if is_ship_to:
         dest = canonical_state_code(ship_state)
         if dest is None or zone_for_state(dest) is None:
@@ -1558,7 +1586,9 @@ def _create_draft_order(website, env, payload):
     # Apply the per-box 21-state shipping charge (Box Engine v2). Rates load
     # from data/shipping_rates.json (models/shipping_zones.py) and are
     # maintained by the daily rate-checker. Fail-safe: no rate → no line added.
-    shipping_charge = _apply_shipping_line(env, order, shipping, current_company)
+    # Farm pickup never gets a shipping line even if the buyer left an address on
+    # the form — pickup is the one legitimate $0-shipping fulfillment (GOL-1057).
+    shipping_charge = None if is_pickup else _apply_shipping_line(env, order, shipping, current_company)
 
     # (3) No-$0-shipping circuit breaker: a ship-to order with shippable goods
     # that produced no positive shipping line is a rate-table gap — never let it
@@ -1613,7 +1643,7 @@ def _build_stripe_line_items(order):
             amount = stripe_gateway.to_cents(line.price_unit)
             if amount <= 0:
                 continue
-            line_items.append({"name": name, "amount_cents": amount, "quantity": 1})
+            line_items.append({"name": name, "kind": "shipping", "amount_cents": amount, "quantity": 1})
             tax_today += line.price_tax
             continue
         # free_qty (on-hand minus reserved), not qty_available: a unit another
@@ -1623,13 +1653,17 @@ def _build_stripe_line_items(order):
         for amount, qty, is_preorder in stripe_gateway.line_charge(line.price_unit, ordered_qty, product.free_qty):
             if is_preorder:
                 preorder_variant_ids.append(product.id)
-                line_items.append({"name": f"Deposit — {name}", "amount_cents": amount, "quantity": qty})
+                line_items.append(
+                    {"name": f"Deposit — {name}", "kind": "deposit", "amount_cents": amount, "quantity": qty}
+                )
             else:
-                line_items.append({"name": name, "amount_cents": amount, "quantity": qty})
+                line_items.append({"name": name, "kind": "goods", "amount_cents": amount, "quantity": qty})
                 # Prorate the line's tax to the units billed today.
                 tax_today += line.price_tax * (qty / ordered_qty) if ordered_qty else 0.0
     if tax_today > 0:
-        line_items.append({"name": "Sales tax (WV)", "amount_cents": stripe_gateway.to_cents(tax_today), "quantity": 1})
+        line_items.append(
+            {"name": "Sales tax (WV)", "kind": "tax", "amount_cents": stripe_gateway.to_cents(tax_today), "quantity": 1}
+        )
     charged_cents = sum(li["amount_cents"] * li["quantity"] for li in line_items)
     return line_items, preorder_variant_ids, charged_cents
 
