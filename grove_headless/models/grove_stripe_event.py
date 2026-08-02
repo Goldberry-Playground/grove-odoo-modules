@@ -20,6 +20,12 @@ class GroveStripeEvent(models.Model):
     order_id = fields.Many2one("sale.order", ondelete="set null", help="Order this event was reconciled to, if any")
     notes = fields.Text(help="Outcome of processing (confirmed / refunded oversell / expired / ...)")
 
-    _sql_constraints = [
-        ("event_id_uniq", "unique(event_id)", "This Stripe event has already been recorded."),
-    ]
+    # Odoo 19 dropped support for the `_sql_constraints` list attribute (it warns
+    # and never creates the constraint). This is the idempotency guard for the
+    # Stripe webhook — without the DB-level UNIQUE, a duplicate delivery could be
+    # processed twice (double confirm / double oversell reconcile). Declared with
+    # the modern `models.Constraint` so Odoo creates it on `-u grove_headless`.
+    _event_id_uniq = models.Constraint(
+        "unique(event_id)",
+        "This Stripe event has already been recorded.",
+    )

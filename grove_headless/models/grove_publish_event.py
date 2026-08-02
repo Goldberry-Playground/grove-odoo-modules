@@ -76,9 +76,14 @@ class GrovePublishEvent(models.Model):
     response_body = fields.Text(help="Truncated response body, for debugging a rejection.")
     error = fields.Text(help="Failure reason (transport error or non-2xx).")
 
-    _sql_constraints = [
-        ("delivery_id_uniq", "unique(delivery_id)", "This publish delivery id has already been recorded."),
-    ]
+    # Odoo 19 dropped the `_sql_constraints` list attribute (warns, never creates
+    # the constraint). Declared with `models.Constraint` so the UNIQUE(delivery_id)
+    # is actually created on `-u grove_headless`, keeping the audit/replay ledger
+    # one row per logical publish.
+    _delivery_id_uniq = models.Constraint(
+        "unique(delivery_id)",
+        "This publish delivery id has already been recorded.",
+    )
 
     # ── Config resolution ──────────────────────────────────────────────
     @api.model

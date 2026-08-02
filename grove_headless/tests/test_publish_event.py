@@ -18,6 +18,8 @@ from unittest import mock
 from odoo.addons.grove_headless.models import grove_publish
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
+from odoo.tools import mute_logger
+from psycopg2 import IntegrityError
 
 WEBHOOK_ENV = {
     "GROVE_PUBLISH_WEBHOOK_URL_GOLDBERRY": "https://goldberry.test/api/webhooks/publish",
@@ -107,6 +109,17 @@ class TestPublishEvent(TransactionCase):
         event = self.env["grove.publish.event"].search([("product_tmpl_id", "=", self.product.id)], limit=1)
         self.assertEqual(event.state, "failed")
         self.assertEqual(event.http_status, 401)
+
+    def test_delivery_id_is_unique(self):
+        # GOL-1010: the audit/replay ledger must hold one row per logical publish.
+        # This guards the UNIQUE(delivery_id) DB constraint — declared via
+        # models.Constraint since Odoo 19 silently ignores _sql_constraints. If the
+        # constraint is missing, the second create succeeds and this fails.
+        Event = self.env["grove.publish.event"]
+        Event.create({"delivery_id": "del_dup", "event_type": "guide.publish"})
+        with mute_logger("odoo.sql_db"), self.assertRaises(IntegrityError):
+            with self.cr.savepoint():
+                Event.create({"delivery_id": "del_dup", "event_type": "guide.publish"})
 
     def test_retry_reuses_delivery_id(self):
         failing = _FakePost(status_code=500, text="boom")
