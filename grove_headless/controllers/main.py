@@ -282,6 +282,10 @@ def _structure_variant(variant):
         "sku": variant.default_code or "",
         "cultivar": axis.get("Cultivar", ""),
         "format": axis.get("Format", ""),
+        # Propagation axis (GOL-1117): "grafted" vs "seedling" rootstock. Optional
+        # — a product with no Rootstock attribute line reads as "" (no axis), which
+        # the storefront treats as "no rootstock pill / selector" (GOL-1112).
+        "rootstock": axis.get("Rootstock", ""),
         "price": variant.lst_price,
         "qty_available": variant.qty_available,
         "shipping_tier": variant.grove_effective_shipping_tier,

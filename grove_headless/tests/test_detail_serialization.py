@@ -57,6 +57,28 @@ class TestDetailSerialization(TransactionCase):
         self.assertIn("price", data)
         self.assertIn("qty_available", data)
 
+    def test_structured_variant_rootstock_absent_reads_empty(self):
+        # GOL-1117: a product with no Rootstock attribute line still carries the
+        # key, as "" — the storefront treats that as "no propagation axis" and
+        # renders no pill/selector. The field is always present (additive contract).
+        variant = self.tmpl.product_variant_ids[0]
+        data = _structure_variant(variant)
+        self.assertIn("rootstock", data)
+        self.assertEqual(data["rootstock"], "")
+
+    def test_structured_variant_parses_rootstock_axis(self):
+        # GOL-1117: when a template carries a Rootstock (propagation) axis, each
+        # variant's rootstock value is parsed into the payload, mirroring how the
+        # Cultivar/Format axes are already surfaced.
+        rootstock = self.env["product.attribute"].create({"name": "Rootstock", "create_variant": "always"})
+        r_graft = self.env["product.attribute.value"].create({"name": "M.111", "attribute_id": rootstock.id})
+        self.tmpl.attribute_line_ids = [
+            (0, 0, {"attribute_id": rootstock.id, "value_ids": [(6, 0, [r_graft.id])]}),
+        ]
+        variant = self.tmpl.product_variant_ids[0]
+        data = _structure_variant(variant)
+        self.assertEqual(data["rootstock"], "M.111")
+
     def test_cultivar_count_ignores_format_axis(self):
         # GOL-919: single-cultivar Pear (Magness) with a Potted/Bareroot Format
         # axis has TWO variants but is still ONE variety. The storefront count
