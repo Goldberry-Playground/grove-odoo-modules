@@ -10,6 +10,7 @@ from odoo.addons.grove_headless.controllers.main import (
     _serialize_images,
     _serialize_product,
     _structure_variant,
+    _template_rootstock,
 )
 from odoo.tests import TransactionCase, tagged
 
@@ -66,10 +67,10 @@ class TestDetailSerialization(TransactionCase):
         self.assertIn("rootstock", data)
         self.assertEqual(data["rootstock"], "")
 
-    def test_structured_variant_parses_rootstock_axis(self):
-        # GOL-1117: when a template carries a Rootstock (propagation) axis, each
-        # variant's rootstock value is parsed into the payload, mirroring how the
-        # Cultivar/Format axes are already surfaced.
+    def test_structured_variant_parses_rootstock_variant_axis(self):
+        # GOL-1117: when a template carries a Rootstock axis that DOES create
+        # variants, each variant's own rootstock value is parsed into the payload,
+        # mirroring how the Cultivar/Format axes are already surfaced.
         rootstock = self.env["product.attribute"].create({"name": "Rootstock", "create_variant": "always"})
         r_graft = self.env["product.attribute.value"].create({"name": "M.111", "attribute_id": rootstock.id})
         self.tmpl.attribute_line_ids = [
@@ -78,6 +79,37 @@ class TestDetailSerialization(TransactionCase):
         variant = self.tmpl.product_variant_ids[0]
         data = _structure_variant(variant)
         self.assertEqual(data["rootstock"], "M.111")
+
+    def test_template_rootstock_no_variant_axis_is_uniform(self):
+        # GOL-1117: the QA/production model — a single-value no_variant Rootstock
+        # line. It must NOT explode the Cultivar x Format variant grid, and its
+        # value is surfaced uniformly on every variant (metadata pill).
+        variants_before = len(self.tmpl.product_variant_ids)
+        rootstock = self.env["product.attribute"].create({"name": "Rootstock", "create_variant": "no_variant"})
+        r_m111 = self.env["product.attribute.value"].create({"name": "M.111", "attribute_id": rootstock.id})
+        self.tmpl.attribute_line_ids = [
+            (0, 0, {"attribute_id": rootstock.id, "value_ids": [(6, 0, [r_m111.id])]}),
+        ]
+        # No variant explosion: the two Potted/Bareroot variants are untouched.
+        self.assertEqual(len(self.tmpl.product_variant_ids), variants_before)
+        self.assertEqual(_template_rootstock(self.tmpl), "M.111")
+        for variant in self.tmpl.product_variant_ids:
+            data = _structure_variant(variant, _template_rootstock(self.tmpl))
+            self.assertEqual(data["rootstock"], "M.111")
+
+    def test_template_rootstock_multi_value_is_ambiguous(self):
+        # A multi-value no_variant line can't map to a single per-variant value,
+        # so it reads as no axis ("") rather than guessing.
+        rootstock = self.env["product.attribute"].create({"name": "Rootstock", "create_variant": "no_variant"})
+        r_a = self.env["product.attribute.value"].create({"name": "M.111", "attribute_id": rootstock.id})
+        r_b = self.env["product.attribute.value"].create({"name": "Seedling", "attribute_id": rootstock.id})
+        self.tmpl.attribute_line_ids = [
+            (0, 0, {"attribute_id": rootstock.id, "value_ids": [(6, 0, [r_a.id, r_b.id])]}),
+        ]
+        self.assertEqual(_template_rootstock(self.tmpl), "")
+
+    def test_template_rootstock_absent_reads_empty(self):
+        self.assertEqual(_template_rootstock(self.tmpl), "")
 
     def test_cultivar_count_ignores_format_axis(self):
         # GOL-919: single-cultivar Pear (Magness) with a Potted/Bareroot Format
