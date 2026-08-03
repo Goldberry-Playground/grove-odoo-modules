@@ -357,7 +357,9 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
         {"fields": ["id", "display_name", "default_code"]},
     )
     if len(variants) != 1:
-        fail(f"Expected exactly 1 variant for the {spec['format_value']}-only fixture, found {len(variants)}: {variants}")
+        fail(
+            f"Expected exactly 1 variant for the {spec['format_value']}-only fixture, found {len(variants)}: {variants}"
+        )
     variant = variants[0]
     variant_id = variant["id"]
     # The single variant's default_code MUST equal the fixture SKU: on a one-
