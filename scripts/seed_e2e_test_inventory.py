@@ -322,9 +322,7 @@ def main() -> None:
             # One Format value only (Potted). No Cultivar axis -> exactly one
             # variant, so the detail page's default selection IS the in-stock
             # potted variant and the CTA renders "Add to Cart" on first paint.
-            "attribute_line_ids": [
-                (0, 0, {"attribute_id": format_attr, "value_ids": [(6, 0, [format_value_id])]})
-            ],
+            "attribute_line_ids": [(0, 0, {"attribute_id": format_attr, "value_ids": [(6, 0, [format_value_id])]})],
             "description_sale": (
                 "Automated QA E2E test fixture (GOL-1148). Guarantees one in-stock "
                 "potted product so the Playwright checkout suite can add a "
