@@ -530,6 +530,7 @@ Operational helpers in `scripts/` for bootstrapping a fresh tenant. Each script 
 | `seed_sample_products.py` | *(legacy)* 5 representative Goldberry demo products. Superseded by `import_grove_catalog.py` with a real `goldberry.csv`. |
 | `seed_payment_journals.py` | Cash, Card, Check, Online Payment, Invoice (Net 30) journals |
 | `seed_sales_teams.py` | Farmer's Market, Direct to Nursery, Online sales teams |
+| `seed_e2e_test_inventory.py` | **QA Playwright E2E test-inventory fixture** (GOL-1148). One idempotent **Potted-only, in-stock** product so the nursery checkout suite's `findProductByCta("Add to Cart")` finds a purchasable line on first paint. Real dual-format products default to Bareroot (0 on hand in preorder season) and render "Reserve", so the suite otherwise sees zero Add-to-Cart CTAs. Knobs: `E2E_SKU` / `E2E_NAME` / `E2E_PRICE` / `E2E_QTY`. |
 | `setup_ghost_integration.py` | Bootstraps Ghost admin + creates a Custom Integration, prints `GHOST_CONTENT_KEY=...` |
 
 Run against a live Odoo instance:
