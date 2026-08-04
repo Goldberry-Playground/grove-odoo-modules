@@ -23,7 +23,7 @@ class RateFeedTests(unittest.TestCase):
         self.feed = sz.rate_feed()
 
     def test_top_level_shape(self):
-        self.assertEqual(set(self.feed), {"schema", "zones", "zone_by_state", "green_states", "packing"})
+        self.assertEqual(set(self.feed), {"schema", "zones", "zone_by_state", "green_states", "packing", "calendar"})
         self.assertEqual(self.feed["schema"], 2)
 
     def test_zones_mirror_engine_table(self):
@@ -49,7 +49,30 @@ class RateFeedTests(unittest.TestCase):
             self.assertEqual(box["capacity"], src["capacity"])
         self.assertEqual(packing["length_classes"], list(sz.shipping_boxes.LENGTH_CLASSES))
         self.assertEqual(packing["modes"], list(sz.shipping_boxes.MODES))
-        self.assertEqual(len(packing["dormant_window"]), 2)
+        # dormant_window was replaced by the top-level per-zone calendar (GOL-1172).
+        self.assertNotIn("dormant_window", packing)
+
+    def test_calendar_block_is_per_usda_zone(self):
+        # GOL-1172: the feed carries the annual, per-USDA-zone shipping calendar
+        # the frontend resolves (date, usdaZone) -> shippable mode against.
+        cal = self.feed["calendar"]
+        self.assertEqual(set(cal), {"preorder_open", "leafed_window", "fulfillment_days", "zones"})
+        # Global preorder-open switch dates: fall Aug 15, spring Nov 1.
+        self.assertEqual(cal["preorder_open"], {"fall": [8, 15], "spring": [11, 1]})
+        self.assertEqual(cal["fulfillment_days"], [5, 10])
+        # Keyed to USDA hardiness zones 2-10 (strings), each with fall + spring.
+        self.assertEqual(set(cal["zones"]), {str(z) for z in range(2, 11)})
+        for zw in cal["zones"].values():
+            self.assertEqual(set(zw), {"fall", "spring"})
+            self.assertEqual(len(zw["fall"]), 2)
+
+    def test_calendar_override_flows_through_feed(self):
+        # An admin override (the system parameter) narrows a single zone's fall
+        # window without a code change; the rest keep defaults.
+        override = {"zones": {"6": {"fall": [[9, 20], [10, 5]]}}}
+        feed = sz.rate_feed(override)
+        self.assertEqual(feed["calendar"]["zones"]["6"]["fall"], [[9, 20], [10, 5]])
+        self.assertEqual(feed["calendar"]["zones"]["7"]["fall"], [[9, 15], [10, 30]])
 
     def test_zone_by_state_is_authoritative_green_list(self):
         # The zone->state map IS the compliance gate; it must equal the engine's
