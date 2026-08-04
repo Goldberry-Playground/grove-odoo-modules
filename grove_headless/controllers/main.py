@@ -15,7 +15,13 @@ from ..models import stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.newsletter import newsletter_tag_names
 from ..models.shipping_boxes import packing_mode
-from ..models.shipping_calendar import serialize_ship_options, ship_options, usda_zone_for_zip
+from ..models.shipping_calendar import (
+    merge_calendar_override,
+    resolve_fulfillment,
+    serialize_ship_options,
+    ship_options,
+    usda_zone_for_zip,
+)
 from ..models.shipping_zones import (
     canonical_state_code,
     compute_order_shipping,
@@ -623,6 +629,25 @@ class GroveHeadlessAPI(http.Controller):
 
     # ── Shipping ─────────────────────────────────────────────────────────
 
+    def _shipping_calendar_override(self):
+        """Parsed `grove_headless.shipping_calendar` override, or None.
+
+        The annual shipping calendar (GOL-1172) is admin-editable at runtime
+        via this system parameter — a JSON blob deep-merged over the module
+        defaults, so nursery ops can restate a zone's ship window once a year
+        without a deploy. Malformed JSON is ignored (the feed falls back to
+        defaults) rather than 500-ing the storefront.
+        """
+        raw = request.env["ir.config_parameter"].sudo().get_param("grove_headless.shipping_calendar")
+        if not raw:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            _logger.warning("grove_headless.shipping_calendar is not valid JSON; using calendar defaults")
+            return None
+        return parsed
+
     @http.route(
         "/grove/api/v1/shipping/options",
         type="http",
@@ -645,6 +670,15 @@ class GroveHeadlessAPI(http.Controller):
         mode = packing_mode(today)
         result["packing_mode"] = mode
         result["per_tree_rate"] = single_tree_rate(state, length_class, mode) if tier == "bareroot" else None
+        # GOL-1172: per-USDA-zone fulfillment mode for the three-mode frontend
+        # (bareroot-preorder | bareroot-in-window | peat-and-bagged), computed
+        # server-side from the same annual calendar the feed serves. Bareroot
+        # only — potted is farm pickup, no ship timing.
+        if tier == "bareroot":
+            calendar = merge_calendar_override(self._shipping_calendar_override())
+            result["fulfillment"] = resolve_fulfillment(usda_zone_for_zip(zip_code), today, calendar)
+        else:
+            result["fulfillment"] = None
         return _json_response(result)
 
     @http.route(
@@ -664,7 +698,7 @@ class GroveHeadlessAPI(http.Controller):
         no Shippo call in the request path, no DB read — pure in-memory serialization.
         The frontend drops the ``zones`` map into ``resolveRateTable()``.
         """
-        return _json_response(rate_feed())
+        return _json_response(rate_feed(self._shipping_calendar_override()))
 
     # ── Orders ───────────────────────────────────────────────────────────
 

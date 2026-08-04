@@ -167,3 +167,237 @@ def serialize_ship_options(result: dict) -> dict:
             nw[k] = nw[k].isoformat()
         out["next_wave"] = nw
     return out
+
+
+# ── Annual shipping calendar (Box Engine fulfillment model rev 2, GOL-1172) ──
+# One calendar shared by EVERY species, keyed to the destination USDA plant
+# hardiness zone (int 2-10). Two dormant-bareroot mailing seasons per year
+# (fall + spring), each staggered per zone, plus a leafed "peat & bagged"
+# remainder that ships on the normal 5-10 business-day policy.
+#
+# This is ANNUAL CONFIG, not a code constant. The defaults below are the launch
+# values; they are overridable at runtime WITHOUT A DEPLOY via the
+# `grove_headless.shipping_calendar` system parameter (a JSON blob deep-merged
+# over these defaults by `merge_calendar_override`). Zones drift over time, and
+# the per-zone -> ship-week stagger (box-fulfillment-model §5.3) is agronomy
+# data Josh/agronomy still owe: the per-zone shape is exposed here pre-filled
+# with the global season bounds so each zone can be narrowed as that data lands,
+# no code change required.
+#
+# WARNING: the USDA hardiness zone keyed here is NOT the UPS distance "shipping
+# zone" (zone_1..zone_5) that keys the rate table in shipping_zones.py. Same
+# word, different axis.
+
+# Global preorder-open switch dates (month, day). Fall preorder opens Aug 15;
+# spring preorder opens Nov 1.
+PREORDER_OPEN: dict[str, tuple[int, int]] = {"fall": (8, 15), "spring": (11, 1)}
+
+# Leafed / peat & bagged remainder — trees are leafed out at the nursery and
+# ship potted-in-peat on the normal 5-10 business-day policy. Informational for
+# the frontend label; the resolver treats every date outside a dormant window
+# or preorder as this "ships now" mode (see resolve_fulfillment).
+LEAFED_WINDOW: tuple[tuple[int, int], tuple[int, int]] = ((5, 6), (8, 14))
+
+# Normal processing SLA (business days) for leafed / peat & bagged and for the
+# shipped-past-your-zone fallback.
+FULFILLMENT_DAYS: tuple[int, int] = (5, 10)
+
+# Per-USDA-zone dormant ship windows [(start_m, start_d), (end_m, end_d)].
+# Defaults = the global season bounds (fall Sep 15 -> Oct 30, spring Jan 1 ->
+# May 5). Narrow these per zone as §5.3 agronomy data lands (via the system
+# parameter, not a code edit). Each window is non-wrapping within its season.
+_FALL_DEFAULT: tuple[tuple[int, int], tuple[int, int]] = ((9, 15), (10, 30))
+_SPRING_DEFAULT: tuple[tuple[int, int], tuple[int, int]] = ((1, 1), (5, 5))
+ZONE_SHIP_WINDOWS: dict[int, dict[str, tuple]] = {
+    z: {"fall": _FALL_DEFAULT, "spring": _SPRING_DEFAULT} for z in range(2, 11)
+}
+
+# The three shippable modes the frontend (GOL-1114) resolves to, plus the
+# fallback. Kept here so the contract has one authority.
+MODE_PREORDER = "bareroot-preorder"
+MODE_IN_WINDOW = "bareroot-in-window"
+MODE_PEAT = "peat-and-bagged"
+
+
+def _md(pair) -> tuple[int, int]:
+    """Coerce a [m, d] list (from JSON) or (m, d) tuple to a comparable tuple.
+
+    Comparisons like ``(month, day) <= start`` raise TypeError if one side is a
+    list and the other a tuple, so every month-day pair is normalized to a
+    tuple before it enters the calendar.
+    """
+    return (int(pair[0]), int(pair[1]))
+
+
+def default_calendar() -> dict:
+    """A fresh, normalized copy of the launch calendar (tuples, int zone keys)."""
+    return {
+        "preorder_open": {season: _md(md) for season, md in PREORDER_OPEN.items()},
+        "leafed_window": (_md(LEAFED_WINDOW[0]), _md(LEAFED_WINDOW[1])),
+        "fulfillment_days": (int(FULFILLMENT_DAYS[0]), int(FULFILLMENT_DAYS[1])),
+        "zones": {
+            z: {"fall": (_md(w["fall"][0]), _md(w["fall"][1])), "spring": (_md(w["spring"][0]), _md(w["spring"][1]))}
+            for z, w in ZONE_SHIP_WINDOWS.items()
+        },
+    }
+
+
+def merge_calendar_override(override) -> dict:
+    """Deep-merge an admin override (parsed JSON) over the default calendar.
+
+    The override is partial: any key it omits keeps the default, and ``zones``
+    is merged per zone so an admin can narrow one zone's window without
+    re-stating all nine. Returns a normalized calendar. A non-dict override
+    (or None) yields the plain defaults — the feed must never break because a
+    system parameter holds garbage.
+    """
+    cal = default_calendar()
+    if not isinstance(override, dict):
+        return cal
+    po = override.get("preorder_open")
+    if isinstance(po, dict):
+        cal["preorder_open"] = {**cal["preorder_open"], **{s: _md(md) for s, md in po.items()}}
+    if "leafed_window" in override:
+        lw = override["leafed_window"]
+        cal["leafed_window"] = (_md(lw[0]), _md(lw[1]))
+    if "fulfillment_days" in override:
+        fd = override["fulfillment_days"]
+        cal["fulfillment_days"] = (int(fd[0]), int(fd[1]))
+    zones = override.get("zones")
+    if isinstance(zones, dict):
+        for zk, zv in zones.items():
+            z = int(zk)  # JSON object keys arrive as strings
+            cur = dict(cal["zones"].get(z, {"fall": _FALL_DEFAULT, "spring": _SPRING_DEFAULT}))
+            if isinstance(zv, dict):
+                for season in ("fall", "spring"):
+                    if season in zv:
+                        w = zv[season]
+                        cur[season] = (_md(w[0]), _md(w[1]))
+            cal["zones"][z] = cur
+    return cal
+
+
+def _window_dates(start_md, end_md, today: date, upcoming: bool) -> tuple[date, date]:
+    """Concrete [start, end] dates for a non-wrapping season window.
+
+    ``upcoming`` (a preorder wave): anchor to the next occurrence of the start
+    on/after today. Otherwise (today is inside the window): anchor to today's
+    calendar year.
+    """
+    if upcoming:
+        start = _next_occurrence(start_md, today)
+    else:
+        start = date(today.year, *start_md)
+    return start, date(start.year, *end_md)
+
+
+def resolve_fulfillment(zone, today: date, calendar: dict | None = None) -> dict:
+    """Resolve exactly ONE shippable mode for a (zone, date), per the rev-2 model.
+
+    Returns ``mode`` = one of ``bareroot-preorder`` | ``bareroot-in-window`` |
+    ``peat-and-bagged`` (or None for an unknown/unconfigured zone), plus the
+    ship window and a ship-timing string the frontend (GOL-1114) can surface
+    verbatim or reformat.
+
+    Phase order matters — an order placed AFTER the shopper's zone window has
+    already shipped falls through every dormant branch to ``peat-and-bagged``
+    (ships now on the 5-10 business-day policy), and is NOT held as a preorder
+    for the next season. That shipped-past-your-zone fallback is deliberately
+    the same "ships now" path used for the leafed / peat & bagged season, so it
+    applies to dormant and leafed alike (Josh, box-fulfillment-model rev 2).
+    """
+    cal = calendar or default_calendar()
+    fulfillment = list(cal["fulfillment_days"])
+    result = {
+        "usda_zone": zone,
+        "mode": None,
+        "season": None,
+        "ship_window": None,
+        "fulfillment_days": None,
+        "ship_timing": None,
+    }
+    zwin = cal["zones"].get(zone)
+    if zwin is None:
+        return result
+
+    fall_s, fall_e = zwin["fall"]
+    spring_s, spring_e = zwin["spring"]
+    fall_open = cal["preorder_open"]["fall"]
+    spring_open = cal["preorder_open"]["spring"]
+
+    def _preorder(season, start_md, end_md):
+        s, e = _window_dates(start_md, end_md, today, upcoming=True)
+        result.update(
+            mode=MODE_PREORDER,
+            season=season,
+            ship_window=[s.isoformat(), e.isoformat()],
+            ship_timing=f"Reserve now — ships {_fmt(s)}–{_fmt(e)}",
+        )
+
+    def _in_window(season, start_md, end_md):
+        s, e = _window_dates(start_md, end_md, today, upcoming=False)
+        result.update(
+            mode=MODE_IN_WINDOW,
+            season=season,
+            ship_window=[s.isoformat(), e.isoformat()],
+            ship_timing=f"Ships now in your {season} window (by {_fmt(e)})",
+        )
+
+    def _peat():
+        result.update(
+            mode=MODE_PEAT,
+            fulfillment_days=fulfillment,
+            ship_timing=f"Ships in {fulfillment[0]}–{fulfillment[1]} business days",
+        )
+
+    # 1) Inside a dormant ship window -> ships promptly within that wave.
+    if _in_md_window(today, spring_s, spring_e):
+        _in_window("spring", spring_s, spring_e)
+    elif _in_md_window(today, fall_s, fall_e):
+        _in_window("fall", fall_s, fall_e)
+    # 2) Preorder open for the upcoming wave (open date -> ship start).
+    elif _in_md_window(today, fall_open, _prev_day(fall_s)):
+        _preorder("fall", fall_s, fall_e)
+    elif _in_md_window(today, spring_open, _prev_day(spring_s)):
+        _preorder("spring", spring_s, spring_e)
+    # 3) Everything else (leafed season + shipped-past-your-zone) ships now.
+    else:
+        _peat()
+    return result
+
+
+def _prev_day(md: tuple[int, int]) -> tuple[int, int]:
+    """The (month, day) one day before ``md`` — the inclusive end of a preorder
+    window that runs up to (but not into) a ship_start."""
+    y = 2001  # non-leap anchor; only month/day are read back
+    d = date(y, md[0], md[1]) - timedelta(days=1)
+    return (d.month, d.day)
+
+
+_MONTHS = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _fmt(d: date) -> str:
+    """ "Sep 15" — locale-free, no %-d portability trap."""
+    return f"{_MONTHS[d.month]} {d.day}"
+
+
+def serialize_calendar(calendar: dict | None = None) -> dict:
+    """JSON-safe annual calendar for the rate feed's top-level ``calendar`` key.
+
+    Month-day pairs become ``[m, d]`` lists and USDA zone keys become strings
+    ("2".."10"), the shape the frontend indexes with String(usdaZone).
+    """
+    cal = calendar or default_calendar()
+    return {
+        "preorder_open": {season: list(md) for season, md in cal["preorder_open"].items()},
+        "leafed_window": [list(cal["leafed_window"][0]), list(cal["leafed_window"][1])],
+        "fulfillment_days": list(cal["fulfillment_days"]),
+        "zones": {
+            str(z): {
+                "fall": [list(w["fall"][0]), list(w["fall"][1])],
+                "spring": [list(w["spring"][0]), list(w["spring"][1])],
+            }
+            for z, w in sorted(cal["zones"].items())
+        },
+    }

@@ -28,14 +28,19 @@ import json
 import os
 
 try:
-    from . import shipping_boxes
+    from . import shipping_boxes, shipping_calendar
 except ImportError:  # loaded standalone (tests import by file path)
     import importlib.util as _ilu
 
-    _sb_path = os.path.join(os.path.dirname(__file__), "shipping_boxes.py")
-    _spec = _ilu.spec_from_file_location("grove_shipping_boxes", _sb_path)
-    shipping_boxes = _ilu.module_from_spec(_spec)
-    _spec.loader.exec_module(shipping_boxes)
+    def _load_sibling(name):
+        path = os.path.join(os.path.dirname(__file__), f"{name}.py")
+        spec = _ilu.spec_from_file_location(f"grove_{name}", path)
+        mod = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    shipping_boxes = _load_sibling("shipping_boxes")
+    shipping_calendar = _load_sibling("shipping_calendar")
 
 # ── Destination universe ────────────────────────────────────────────────────
 # Every US destination we expect to quote. Used by the test to assert that the
@@ -188,7 +193,7 @@ ZONE_BY_STATE: dict[str, str] = {
 assert set(ZONE_BY_STATE) == GREEN_STATES
 
 
-def rate_feed() -> dict:
+def rate_feed(calendar_override=None) -> dict:
     """Read-only snapshot of the live rate table + compliance zone map (GOL-952).
 
     Returns exactly the in-memory tables ``compute_order_shipping`` prices
@@ -206,7 +211,12 @@ def rate_feed() -> dict:
                               "capacity": {"dormant": 15, "leafed": 4}}, ...},
             "length_classes": [16, 20, 32, 46],
             "modes": ["dormant", "leafed"],
-            "dormant_window": [[11, 1], [4, 15]],
+          },
+          "calendar": {   # GOL-1172: per-USDA-zone twice-yearly ship calendar
+            "preorder_open": {"fall": [8, 15], "spring": [11, 1]},
+            "leafed_window": [[5, 6], [8, 14]],
+            "fulfillment_days": [5, 10],
+            "zones": {"6": {"fall": [[9, 15], [10, 30]], "spring": [[1, 1], [5, 5]]}, ...},
           },
         }
 
@@ -214,10 +224,18 @@ def rate_feed() -> dict:
     keys, already stripped at load). ``zone_by_state`` is the authoritative
     21-state green list -> zone map — the compliance gate the frontend must
     stay in lockstep with. ``packing`` carries the box catalog + capacities so
-    the frontend can mirror ``pack_order`` exactly. No Shippo call and no DB
-    read: rates are pre-computed and served straight from memory. The returned
-    dict is a fresh deep copy so a caller can't mutate the engine's tables.
+    the frontend can mirror ``pack_order`` exactly. ``calendar`` is the annual,
+    admin-editable shipping calendar keyed to USDA hardiness zone (NOT the
+    zone_1..zone_5 distance zones above) — replaces the old single global
+    ``dormant_window`` so the frontend can resolve (date, usdaZone) -> one of
+    ``bareroot-preorder`` | ``bareroot-in-window`` | ``peat-and-bagged``.
+
+    ``calendar_override`` is the parsed ``grove_headless.shipping_calendar``
+    system parameter (or None); the controller reads the DB and passes it in so
+    this function stays pure (no Shippo call, no DB read). The returned dict is
+    a fresh deep copy so a caller can't mutate the engine's tables.
     """
+    calendar = shipping_calendar.merge_calendar_override(calendar_override)
     return {
         "schema": 2,
         "zones": {zone: {box: dict(rule) for box, rule in boxes.items()} for zone, boxes in ZONE_RATES.items()},
@@ -235,8 +253,8 @@ def rate_feed() -> dict:
             },
             "length_classes": list(shipping_boxes.LENGTH_CLASSES),
             "modes": list(shipping_boxes.MODES),
-            "dormant_window": [list(shipping_boxes.DORMANT_START), list(shipping_boxes.DORMANT_END)],
         },
+        "calendar": shipping_calendar.serialize_calendar(calendar),
     }
 
 
