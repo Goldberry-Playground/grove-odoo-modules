@@ -226,8 +226,7 @@ ZONE_SHIP_WINDOWS: dict[int, dict[str, tuple]] = {
     for z, w in WAVE_SCHEDULE.items()
 }
 ZONE_ORDER_DEADLINES: dict[int, dict[str, tuple]] = {
-    z: {"fall": w["fall"]["order_by"], "spring": w["spring"]["order_by"]}
-    for z, w in WAVE_SCHEDULE.items()
+    z: {"fall": w["fall"]["order_by"], "spring": w["spring"]["order_by"]} for z, w in WAVE_SCHEDULE.items()
 }
 # Fallback windows for a zone an override introduces that the real chart does
 # not cover (defensive only — the chart already spans every USDA zone 2-10).
