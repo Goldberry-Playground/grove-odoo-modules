@@ -175,14 +175,13 @@ def serialize_ship_options(result: dict) -> dict:
 # (fall + spring), each staggered per zone, plus a leafed "peat & bagged"
 # remainder that ships on the normal 5-10 business-day policy.
 #
-# This is ANNUAL CONFIG, not a code constant. The defaults below are the launch
-# values; they are overridable at runtime WITHOUT A DEPLOY via the
-# `grove_headless.shipping_calendar` system parameter (a JSON blob deep-merged
-# over these defaults by `merge_calendar_override`). Zones drift over time, and
-# the per-zone -> ship-week stagger (box-fulfillment-model §5.3) is agronomy
-# data Josh/agronomy still owe: the per-zone shape is exposed here pre-filled
-# with the global season bounds so each zone can be narrowed as that data lands,
-# no code change required.
+# This is ANNUAL CONFIG, not a code constant. The defaults below are the real
+# per-zone Arbor Day windows (GOL-1177) — cold zones ship earliest in fall /
+# latest in spring, warm zones the reverse — overridable at runtime WITHOUT A
+# DEPLOY via the `grove_headless.shipping_calendar` system parameter (a JSON
+# blob deep-merged over these defaults by `merge_calendar_override`). Zones
+# drift over time, so ops can restate a zone's window (and its order deadline)
+# once a year through that parameter, no code change required.
 #
 # WARNING: the USDA hardiness zone keyed here is NOT the UPS distance "shipping
 # zone" (zone_1..zone_5) that keys the rate table in shipping_zones.py. Same
@@ -202,15 +201,37 @@ LEAFED_WINDOW: tuple[tuple[int, int], tuple[int, int]] = ((5, 6), (8, 14))
 # shipped-past-your-zone fallback.
 FULFILLMENT_DAYS: tuple[int, int] = (5, 10)
 
-# Per-USDA-zone dormant ship windows [(start_m, start_d), (end_m, end_d)].
-# Defaults = the global season bounds (fall Sep 15 -> Oct 30, spring Jan 1 ->
-# May 5). Narrow these per zone as §5.3 agronomy data lands (via the system
-# parameter, not a code edit). Each window is non-wrapping within its season.
-_FALL_DEFAULT: tuple[tuple[int, int], tuple[int, int]] = ((9, 15), (10, 30))
-_SPRING_DEFAULT: tuple[tuple[int, int], tuple[int, int]] = ((1, 1), (5, 5))
+# Windows are APPROXIMATE — "weather permitting." Per Josh, a hard-frost snap
+# can push a shipment, so every displayed window carries a weather-permitting
+# qualifier (`approximate`) and, when a known delay is in effect, an
+# admin-editable advisory (`weather_hold_note`) that the frontend renders as a
+# banner. Both are overridable at runtime via the system parameter (GOL-1177).
+APPROXIMATE_DEFAULT: bool = True
+WEATHER_HOLD_NOTE_DEFAULT: str | None = None
+
+# Per-USDA-zone dormant ship windows + order deadlines — the REAL Arbor Day
+# chart (GOL-1177; Josh via arborday.org/nursery-shipping, bareroot columns
+# only — the potted column is deliberately NOT imported: potted is farm pickup
+# only). These are the same windows the legacy ``ship_options`` path already
+# serves from ``WAVE_SCHEDULE`` above, so the resolver calendar is sourced from
+# it — one authority, the two can never drift. Cold zones ship earliest in fall
+# / latest in spring; warm zones the reverse. Each window is non-wrapping
+# within its season. Narrow further per zone via the system parameter (no code
+# edit) as agronomy data refines.
 ZONE_SHIP_WINDOWS: dict[int, dict[str, tuple]] = {
-    z: {"fall": _FALL_DEFAULT, "spring": _SPRING_DEFAULT} for z in range(2, 11)
+    z: {
+        "fall": (w["fall"]["ship_start"], w["fall"]["ship_end"]),
+        "spring": (w["spring"]["ship_start"], w["spring"]["ship_end"]),
+    }
+    for z, w in WAVE_SCHEDULE.items()
 }
+ZONE_ORDER_DEADLINES: dict[int, dict[str, tuple]] = {
+    z: {"fall": w["fall"]["order_by"], "spring": w["spring"]["order_by"]} for z, w in WAVE_SCHEDULE.items()
+}
+# Fallback windows for a zone an override introduces that the real chart does
+# not cover (defensive only — the chart already spans every USDA zone 2-10).
+_FALL_DEFAULT: tuple[tuple[int, int], tuple[int, int]] = ((11, 2), (11, 26))
+_SPRING_DEFAULT: tuple[tuple[int, int], tuple[int, int]] = ((3, 1), (6, 6))
 
 # The three shippable modes the frontend (GOL-1114) resolves to, plus the
 # fallback. Kept here so the contract has one authority.
@@ -235,11 +256,38 @@ def default_calendar() -> dict:
         "preorder_open": {season: _md(md) for season, md in PREORDER_OPEN.items()},
         "leafed_window": (_md(LEAFED_WINDOW[0]), _md(LEAFED_WINDOW[1])),
         "fulfillment_days": (int(FULFILLMENT_DAYS[0]), int(FULFILLMENT_DAYS[1])),
+        "approximate": APPROXIMATE_DEFAULT,
+        "weather_hold_note": WEATHER_HOLD_NOTE_DEFAULT,
         "zones": {
-            z: {"fall": (_md(w["fall"][0]), _md(w["fall"][1])), "spring": (_md(w["spring"][0]), _md(w["spring"][1]))}
+            z: {
+                "fall": (_md(w["fall"][0]), _md(w["fall"][1])),
+                "spring": (_md(w["spring"][0]), _md(w["spring"][1])),
+                "fall_order_deadline": _md(ZONE_ORDER_DEADLINES[z]["fall"]),
+                "spring_order_deadline": _md(ZONE_ORDER_DEADLINES[z]["spring"]),
+            }
             for z, w in ZONE_SHIP_WINDOWS.items()
         },
     }
+
+
+def _season_override(val) -> tuple:
+    """Parse one override season entry -> (window | None, order_deadline | None).
+
+    Accepts either a bare ``[[m, d], [m, d]]`` ship-window pair (the shape the
+    feed emits) OR Josh's proposed ``{"ship": [[m, d], [m, d]], "order_deadline":
+    [m, d]}`` object (GOL-1114 comment e8b071f9). Any piece the override omits
+    comes back None so the caller keeps that default.
+    """
+    if isinstance(val, dict):
+        window = None
+        ship = val.get("ship")
+        if isinstance(ship, (list, tuple)) and len(ship) == 2:
+            window = (_md(ship[0]), _md(ship[1]))
+        deadline = _md(val["order_deadline"]) if val.get("order_deadline") else None
+        return window, deadline
+    if isinstance(val, (list, tuple)) and len(val) == 2:
+        return (_md(val[0]), _md(val[1])), None
+    return None, None
 
 
 def merge_calendar_override(override) -> dict:
@@ -250,6 +298,12 @@ def merge_calendar_override(override) -> dict:
     re-stating all nine. Returns a normalized calendar. A non-dict override
     (or None) yields the plain defaults — the feed must never break because a
     system parameter holds garbage.
+
+    A zone's season entry may be either a bare ``[[m, d], [m, d]]`` window or
+    the ``{"ship": ..., "order_deadline": ...}`` object form (see
+    ``_season_override``); the flat ``"<season>_order_deadline"`` key is also
+    honored. ``approximate`` and ``weather_hold_note`` let ops flag a known
+    frost delay without a deploy (GOL-1177).
     """
     cal = default_calendar()
     if not isinstance(override, dict):
@@ -263,16 +317,37 @@ def merge_calendar_override(override) -> dict:
     if "fulfillment_days" in override:
         fd = override["fulfillment_days"]
         cal["fulfillment_days"] = (int(fd[0]), int(fd[1]))
+    if "approximate" in override:
+        cal["approximate"] = bool(override["approximate"])
+    if "weather_hold_note" in override:
+        whn = override["weather_hold_note"]
+        cal["weather_hold_note"] = str(whn) if whn is not None else None
     zones = override.get("zones")
     if isinstance(zones, dict):
         for zk, zv in zones.items():
             z = int(zk)  # JSON object keys arrive as strings
-            cur = dict(cal["zones"].get(z, {"fall": _FALL_DEFAULT, "spring": _SPRING_DEFAULT}))
+            cur = dict(
+                cal["zones"].get(
+                    z,
+                    {
+                        "fall": _FALL_DEFAULT,
+                        "spring": _SPRING_DEFAULT,
+                        "fall_order_deadline": None,
+                        "spring_order_deadline": None,
+                    },
+                )
+            )
             if isinstance(zv, dict):
                 for season in ("fall", "spring"):
                     if season in zv:
-                        w = zv[season]
-                        cur[season] = (_md(w[0]), _md(w[1]))
+                        window, deadline = _season_override(zv[season])
+                        if window is not None:
+                            cur[season] = window
+                        if deadline is not None:
+                            cur[f"{season}_order_deadline"] = deadline
+                    flat_deadline = f"{season}_order_deadline"
+                    if flat_deadline in zv and zv[flat_deadline] is not None:
+                        cur[flat_deadline] = _md(zv[flat_deadline])
             cal["zones"][z] = cur
     return cal
 
@@ -313,8 +388,12 @@ def resolve_fulfillment(zone, today: date, calendar: dict | None = None) -> dict
         "mode": None,
         "season": None,
         "ship_window": None,
+        "order_deadline": None,
         "fulfillment_days": None,
         "ship_timing": None,
+        # Advisory (GOL-1177): windows are estimates, "weather permitting".
+        "approximate": bool(cal.get("approximate", APPROXIMATE_DEFAULT)),
+        "weather_hold_note": cal.get("weather_hold_note", WEATHER_HOLD_NOTE_DEFAULT),
     }
     zwin = cal["zones"].get(zone)
     if zwin is None:
@@ -325,12 +404,17 @@ def resolve_fulfillment(zone, today: date, calendar: dict | None = None) -> dict
     fall_open = cal["preorder_open"]["fall"]
     spring_open = cal["preorder_open"]["spring"]
 
+    def _deadline_iso(season, year):
+        dl = zwin.get(f"{season}_order_deadline")
+        return date(year, dl[0], dl[1]).isoformat() if dl else None
+
     def _preorder(season, start_md, end_md):
         s, e = _window_dates(start_md, end_md, today, upcoming=True)
         result.update(
             mode=MODE_PREORDER,
             season=season,
             ship_window=[s.isoformat(), e.isoformat()],
+            order_deadline=_deadline_iso(season, s.year),
             ship_timing=f"Reserve now — ships {_fmt(s)}–{_fmt(e)}",
         )
 
@@ -340,6 +424,7 @@ def resolve_fulfillment(zone, today: date, calendar: dict | None = None) -> dict
             mode=MODE_IN_WINDOW,
             season=season,
             ship_window=[s.isoformat(), e.isoformat()],
+            order_deadline=_deadline_iso(season, s.year),
             ship_timing=f"Ships now in your {season} window (by {_fmt(e)})",
         )
 
@@ -386,17 +471,29 @@ def serialize_calendar(calendar: dict | None = None) -> dict:
     """JSON-safe annual calendar for the rate feed's top-level ``calendar`` key.
 
     Month-day pairs become ``[m, d]`` lists and USDA zone keys become strings
-    ("2".."10"), the shape the frontend indexes with String(usdaZone).
+    ("2".."10"), the shape the frontend indexes with String(usdaZone). The
+    per-zone ``fall``/``spring`` window pairs are unchanged; ``*_order_deadline``
+    (nullable), ``approximate`` and ``weather_hold_note`` are additive
+    (GOL-1177) so an existing consumer that only reads windows is unaffected.
     """
     cal = calendar or default_calendar()
+
+    def _deadline(w, season):
+        md = w.get(f"{season}_order_deadline")
+        return list(md) if md else None
+
     return {
         "preorder_open": {season: list(md) for season, md in cal["preorder_open"].items()},
         "leafed_window": [list(cal["leafed_window"][0]), list(cal["leafed_window"][1])],
         "fulfillment_days": list(cal["fulfillment_days"]),
+        "approximate": bool(cal.get("approximate", APPROXIMATE_DEFAULT)),
+        "weather_hold_note": cal.get("weather_hold_note", WEATHER_HOLD_NOTE_DEFAULT),
         "zones": {
             str(z): {
                 "fall": [list(w["fall"][0]), list(w["fall"][1])],
                 "spring": [list(w["spring"][0]), list(w["spring"][1])],
+                "fall_order_deadline": _deadline(w, "fall"),
+                "spring_order_deadline": _deadline(w, "spring"),
             }
             for z, w in sorted(cal["zones"].items())
         },

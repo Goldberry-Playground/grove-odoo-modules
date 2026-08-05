@@ -118,51 +118,61 @@ class TestFreezeBoundary(unittest.TestCase):
 
 
 class TestAnnualCalendar(unittest.TestCase):
-    """Rev-2 annual per-USDA-zone shipping calendar + three-mode resolver (GOL-1172)."""
+    """Rev-2 annual per-USDA-zone shipping calendar + three-mode resolver.
 
-    ZONE = 6  # any configured zone; defaults are identical across 2-10
+    Anchored to the REAL Arbor Day windows (GOL-1177). Zone 6: fall ships
+    Nov 9–26 (order by Nov 21), spring ships Apr 5–Jun 6 (order by May 31).
+    """
+
+    ZONE = 6
 
     def _mode(self, today, calendar=None):
         return sc.resolve_fulfillment(self.ZONE, today, calendar)
 
     def test_spring_in_window(self):
-        r = self._mode(date(2027, 3, 1))
+        r = self._mode(date(2027, 5, 1))  # inside zone-6 spring window Apr 5–Jun 6
         self.assertEqual(r["mode"], sc.MODE_IN_WINDOW)
         self.assertEqual(r["season"], "spring")
-        self.assertEqual(r["ship_window"], ["2027-01-01", "2027-05-05"])
+        self.assertEqual(r["ship_window"], ["2027-04-05", "2027-06-06"])
+        self.assertEqual(r["order_deadline"], "2027-05-31")
 
     def test_fall_in_window(self):
-        r = self._mode(date(2026, 10, 1))
+        r = self._mode(date(2026, 11, 15))  # inside zone-6 fall window Nov 9–26
         self.assertEqual(r["mode"], sc.MODE_IN_WINDOW)
         self.assertEqual(r["season"], "fall")
-        self.assertEqual(r["ship_window"], ["2026-09-15", "2026-10-30"])
+        self.assertEqual(r["ship_window"], ["2026-11-09", "2026-11-26"])
+        self.assertEqual(r["order_deadline"], "2026-11-21")
 
     def test_fall_preorder(self):
-        # Aug 15 -> Sep 14: reserve now, ships the upcoming fall wave.
+        # Aug 15 -> Nov 8: reserve now, ships the upcoming fall wave.
         r = self._mode(date(2026, 8, 20))
         self.assertEqual(r["mode"], sc.MODE_PREORDER)
         self.assertEqual(r["season"], "fall")
-        self.assertEqual(r["ship_window"], ["2026-09-15", "2026-10-30"])
+        self.assertEqual(r["ship_window"], ["2026-11-09", "2026-11-26"])
+        self.assertEqual(r["order_deadline"], "2026-11-21")
         self.assertIn("Reserve now", r["ship_timing"])
 
     def test_spring_preorder_spans_year_end(self):
-        # Nov 1 (year Y) preorder ships the spring wave of year Y+1.
+        # Dec 1 (year Y) preorder ships the spring wave of year Y+1.
         r = self._mode(date(2026, 12, 1))
         self.assertEqual(r["mode"], sc.MODE_PREORDER)
         self.assertEqual(r["season"], "spring")
-        self.assertEqual(r["ship_window"], ["2027-01-01", "2027-05-05"])
+        self.assertEqual(r["ship_window"], ["2027-04-05", "2027-06-06"])
+        self.assertEqual(r["order_deadline"], "2027-05-31")
 
     def test_leafed_summer_is_peat_and_bagged(self):
         r = self._mode(date(2026, 7, 1))
         self.assertEqual(r["mode"], sc.MODE_PEAT)
         self.assertEqual(r["fulfillment_days"], [5, 10])
+        self.assertIsNone(r["order_deadline"])
         self.assertIn("5–10 business days", r["ship_timing"])
 
     def test_shipped_past_zone_falls_back_to_ships_now_not_preorder(self):
-        # Oct 31: the fall wave (ends Oct 30) has shipped and spring preorder
-        # (opens Nov 1) has NOT — the order must ship now on the 5-10 day policy,
-        # NOT be held as a spring preorder. (Josh, rev-2: dormant AND leafed.)
-        r = self._mode(date(2026, 10, 31))
+        # Warm zone 8: spring wave ends Apr 30; on May 1 it has shipped and the
+        # next fall preorder (opens Aug 15) has NOT — the order ships now on the
+        # 5-10 day policy, NOT held as a preorder. (Josh, rev-2: dormant AND
+        # leafed alike.) Reconciled against the real deadlines (GOL-1177).
+        r = sc.resolve_fulfillment(8, date(2027, 5, 1))
         self.assertEqual(r["mode"], sc.MODE_PEAT)
         self.assertEqual(r["season"], None)
 
@@ -198,7 +208,9 @@ class TestCalendarSerialization(unittest.TestCase):
         out = sc.serialize_calendar()
         self.assertEqual(set(out["zones"]), {str(z) for z in range(2, 11)})
         self.assertEqual(out["preorder_open"], {"fall": [8, 15], "spring": [11, 1]})
-        self.assertEqual(out["zones"]["6"]["spring"], [[1, 1], [5, 5]])
+        # Real Arbor Day zone-6 spring window + its order deadline.
+        self.assertEqual(out["zones"]["6"]["spring"], [[4, 5], [6, 6]])
+        self.assertEqual(out["zones"]["6"]["spring_order_deadline"], [5, 31])
 
     def test_merge_ignores_garbage_override(self):
         self.assertEqual(sc.merge_calendar_override("not-a-dict"), sc.default_calendar())
@@ -207,7 +219,101 @@ class TestCalendarSerialization(unittest.TestCase):
     def test_merge_partial_override_keeps_defaults(self):
         merged = sc.merge_calendar_override({"fulfillment_days": [3, 7]})
         self.assertEqual(merged["fulfillment_days"], (3, 7))
-        self.assertEqual(merged["zones"][6]["fall"], ((9, 15), (10, 30)))  # untouched
+        self.assertEqual(merged["zones"][6]["fall"], ((11, 9), (11, 26)))  # untouched (real)
+
+
+class TestRealArborDayWindows(unittest.TestCase):
+    """GOL-1177: real per-zone Arbor Day windows + weather-hold advisory."""
+
+    # (zone, season, expected ship_window, expected order_deadline) sampled at a
+    # COLD (2) and WARM (8) zone in BOTH seasons — the acceptance sample.
+    def test_cold_zone2_fall_in_window(self):
+        r = sc.resolve_fulfillment(2, date(2026, 11, 5))  # zone 2 fall Nov 2–13
+        self.assertEqual(r["mode"], sc.MODE_IN_WINDOW)
+        self.assertEqual(r["season"], "fall")
+        self.assertEqual(r["ship_window"], ["2026-11-02", "2026-11-13"])
+        self.assertEqual(r["order_deadline"], "2026-11-12")
+
+    def test_cold_zone2_spring_in_window(self):
+        r = sc.resolve_fulfillment(2, date(2027, 5, 1))  # zone 2 spring Apr 19–Jun 6
+        self.assertEqual(r["mode"], sc.MODE_IN_WINDOW)
+        self.assertEqual(r["season"], "spring")
+        self.assertEqual(r["ship_window"], ["2027-04-19", "2027-06-06"])
+        self.assertEqual(r["order_deadline"], "2027-05-31")
+
+    def test_warm_zone8_fall_in_window(self):
+        r = sc.resolve_fulfillment(8, date(2026, 12, 1))  # zone 8 fall Nov 9–Dec 12
+        self.assertEqual(r["mode"], sc.MODE_IN_WINDOW)
+        self.assertEqual(r["season"], "fall")
+        self.assertEqual(r["ship_window"], ["2026-11-09", "2026-12-12"])
+        self.assertEqual(r["order_deadline"], "2026-11-21")
+
+    def test_warm_zone8_spring_in_window(self):
+        r = sc.resolve_fulfillment(8, date(2027, 3, 15))  # zone 8 spring Mar 1–Apr 30
+        self.assertEqual(r["mode"], sc.MODE_IN_WINDOW)
+        self.assertEqual(r["season"], "spring")
+        self.assertEqual(r["ship_window"], ["2027-03-01", "2027-04-30"])
+        self.assertEqual(r["order_deadline"], "2027-04-16")
+
+    def test_warm_zone8_spring_preorder_from_fall(self):
+        # Dec 13 (zone 8): fall wave ended Dec 12 -> rolls straight into the
+        # spring preorder (opens Nov 1), ships the real spring window. Confirms
+        # preorder-open still reconciles with the later real spring dates.
+        r = sc.resolve_fulfillment(8, date(2026, 12, 13))
+        self.assertEqual(r["mode"], sc.MODE_PREORDER)
+        self.assertEqual(r["season"], "spring")
+        self.assertEqual(r["ship_window"], ["2027-03-01", "2027-04-30"])
+
+    def test_no_dead_months_every_zone_every_day(self):
+        # Exhaustive: every USDA zone, every calendar day resolves to exactly one
+        # mode against the real windows — no gap, no None for a configured zone.
+        cal = sc.default_calendar()
+        valid = {sc.MODE_PREORDER, sc.MODE_IN_WINDOW, sc.MODE_PEAT}
+        for zone in range(2, 11):
+            d = date(2026, 1, 1)
+            while d <= date(2026, 12, 31):
+                mode = sc.resolve_fulfillment(zone, d, cal)["mode"]
+                self.assertIn(mode, valid, f"zone {zone} {d.isoformat()}")
+                d += timedelta(days=1)
+
+    def test_approximate_flag_defaults_true(self):
+        self.assertTrue(sc.resolve_fulfillment(6, date(2026, 7, 1))["approximate"])
+        self.assertTrue(sc.serialize_calendar()["approximate"])
+
+    def test_weather_hold_note_defaults_null_and_round_trips(self):
+        # Absent by default...
+        self.assertIsNone(sc.resolve_fulfillment(6, date(2026, 7, 1))["weather_hold_note"])
+        self.assertIsNone(sc.serialize_calendar()["weather_hold_note"])
+        # ...and an admin advisory round-trips through resolver + feed serialize.
+        note = "Frost hold: NE zones delayed ~1 week"
+        cal = sc.merge_calendar_override({"weather_hold_note": note, "approximate": False})
+        self.assertEqual(cal["weather_hold_note"], note)
+        self.assertFalse(cal["approximate"])
+        r = sc.resolve_fulfillment(6, date(2026, 11, 15), cal)
+        self.assertEqual(r["weather_hold_note"], note)
+        self.assertFalse(r["approximate"])
+        out = sc.serialize_calendar(cal)
+        self.assertEqual(out["weather_hold_note"], note)
+        self.assertFalse(out["approximate"])
+
+    def test_override_accepts_joshs_nested_ship_deadline_shape(self):
+        # The exact shape Josh proposed (GOL-1114 comment e8b071f9): a zone's
+        # season as {"ship": [[m,d],[m,d]], "order_deadline": [m,d]}.
+        override = {"zones": {"6": {"fall": {"ship": [[10, 20], [11, 5]], "order_deadline": [10, 30]}}}}
+        cal = sc.merge_calendar_override(override)
+        self.assertEqual(cal["zones"][6]["fall"], ((10, 20), (11, 5)))
+        self.assertEqual(cal["zones"][6]["fall_order_deadline"], (10, 30))
+        # Spring untouched -> keeps the real default deadline.
+        self.assertEqual(cal["zones"][6]["spring_order_deadline"], (5, 31))
+        out = sc.serialize_calendar(cal)
+        self.assertEqual(out["zones"]["6"]["fall"], [[10, 20], [11, 5]])
+        self.assertEqual(out["zones"]["6"]["fall_order_deadline"], [10, 30])
+
+    def test_bad_override_never_breaks_defaults(self):
+        # A malformed season value is ignored, not fatal (storefront must never
+        # 500 on a bad system parameter).
+        cal = sc.merge_calendar_override({"zones": {"6": {"fall": "garbage"}}})
+        self.assertEqual(cal["zones"][6]["fall"], ((11, 9), (11, 26)))  # real default kept
 
 
 if __name__ == "__main__":

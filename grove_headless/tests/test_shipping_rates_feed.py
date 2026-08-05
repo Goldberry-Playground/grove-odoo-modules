@@ -53,26 +53,39 @@ class RateFeedTests(unittest.TestCase):
         self.assertNotIn("dormant_window", packing)
 
     def test_calendar_block_is_per_usda_zone(self):
-        # GOL-1172: the feed carries the annual, per-USDA-zone shipping calendar
-        # the frontend resolves (date, usdaZone) -> shippable mode against.
+        # GOL-1172/1177: the feed carries the annual, per-USDA-zone shipping
+        # calendar (real Arbor Day windows) the frontend resolves
+        # (date, usdaZone) -> shippable mode against, plus the weather advisory.
         cal = self.feed["calendar"]
-        self.assertEqual(set(cal), {"preorder_open", "leafed_window", "fulfillment_days", "zones"})
+        self.assertEqual(
+            set(cal),
+            {"preorder_open", "leafed_window", "fulfillment_days", "approximate", "weather_hold_note", "zones"},
+        )
         # Global preorder-open switch dates: fall Aug 15, spring Nov 1.
         self.assertEqual(cal["preorder_open"], {"fall": [8, 15], "spring": [11, 1]})
         self.assertEqual(cal["fulfillment_days"], [5, 10])
-        # Keyed to USDA hardiness zones 2-10 (strings), each with fall + spring.
+        # Advisory (GOL-1177): approximate by default, no active weather hold.
+        self.assertTrue(cal["approximate"])
+        self.assertIsNone(cal["weather_hold_note"])
+        # Keyed to USDA hardiness zones 2-10 (strings), each with fall + spring
+        # windows and their (nullable) order deadlines.
         self.assertEqual(set(cal["zones"]), {str(z) for z in range(2, 11)})
         for zw in cal["zones"].values():
-            self.assertEqual(set(zw), {"fall", "spring"})
+            self.assertEqual(set(zw), {"fall", "spring", "fall_order_deadline", "spring_order_deadline"})
             self.assertEqual(len(zw["fall"]), 2)
+        # Real chart values for a sampled cold + warm zone.
+        self.assertEqual(cal["zones"]["2"]["fall"], [[11, 2], [11, 13]])
+        self.assertEqual(cal["zones"]["8"]["spring"], [[3, 1], [4, 30]])
+        self.assertEqual(cal["zones"]["8"]["spring_order_deadline"], [4, 16])
 
     def test_calendar_override_flows_through_feed(self):
         # An admin override (the system parameter) narrows a single zone's fall
-        # window without a code change; the rest keep defaults.
-        override = {"zones": {"6": {"fall": [[9, 20], [10, 5]]}}}
+        # window + adds a weather hold, without a code change; rest keep defaults.
+        override = {"zones": {"6": {"fall": [[9, 20], [10, 5]]}}, "weather_hold_note": "Frost hold"}
         feed = sz.rate_feed(override)
         self.assertEqual(feed["calendar"]["zones"]["6"]["fall"], [[9, 20], [10, 5]])
-        self.assertEqual(feed["calendar"]["zones"]["7"]["fall"], [[9, 15], [10, 30]])
+        self.assertEqual(feed["calendar"]["zones"]["7"]["fall"], [[11, 9], [11, 26]])  # real default
+        self.assertEqual(feed["calendar"]["weather_hold_note"], "Frost hold")
 
     def test_zone_by_state_is_authoritative_green_list(self):
         # The zone->state map IS the compliance gate; it must equal the engine's
