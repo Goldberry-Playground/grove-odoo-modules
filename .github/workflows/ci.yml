@@ -49,7 +49,16 @@ jobs:
           path: ./
           base: ${{ github.event.pull_request.base.sha || '' }}
           head: ${{ github.event.pull_request.head.sha || github.sha }}
-          extra_args: --only-verified
+          # --exclude-detectors=Lob: Grove has NO Lob (direct-mail API)
+          # integration anywhere, so every "Lob" hit is definitionally a false
+          # positive. The Lob detector's loose `test_*` pattern + permissive
+          # test-mode verification makes it "verify" our pytest function names
+          # (e.g. `test_no_box_triggers_additional_handling`). This flipped
+          # `main` red with no code change when the action's bundled scanner
+          # (pinned action SHA still runs the `latest` engine image) bumped to
+          # 3.96.0 — see GOL-1257. Excluding one unused detector keeps full
+          # coverage for services we DO use (Stripe/Square/Mailgun/Ghost).
+          extra_args: --only-verified --exclude-detectors=Lob
 
   # Audit 2026-06-29 — this repo had no Python CVE coverage. requirements-ci.txt
   # exists; scan it for known vulnerabilities at PR time.
