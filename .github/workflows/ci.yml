@@ -49,7 +49,15 @@ jobs:
           path: ./
           base: ${{ github.event.pull_request.base.sha || '' }}
           head: ${{ github.event.pull_request.head.sha || github.sha }}
-          extra_args: --only-verified
+          # Exclude the Lob detector (GOL-1256): its `test_[a-z0-9_]{35}` pattern
+          # matches this repo's long Python test-function names (e.g.
+          # `test_confirm_with_mortality_creates_both`), and Lob's verification
+          # endpoint flakily returns "verified" for them -> intermittent red
+          # merge_group runs on benign strings. Grove uses no Lob (direct-mail)
+          # service, so this loses no real coverage. On PR events trufflehog
+          # scans only the diff so the test files rarely surface; on merge_group
+          # `base` is empty -> full-tree scan surfaces every test name.
+          extra_args: --only-verified --exclude-detectors=lob
 
   # Audit 2026-06-29 — this repo had no Python CVE coverage. requirements-ci.txt
   # exists; scan it for known vulnerabilities at PR time.
