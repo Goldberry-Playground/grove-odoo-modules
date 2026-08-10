@@ -183,8 +183,7 @@ def main() -> int:
         # — e.g. an oversize box or a bad reference address — and must fail
         # loudly so it gets investigated, never silently drop a rate.
         print(
-            f"no UPS Ground rate for {len(missing)} of {total} probe(s): "
-            f"{', '.join(missing)}",
+            f"no UPS Ground rate for {len(missing)} of {total} probe(s): {', '.join(missing)}",
             file=sys.stderr,
         )
         return 1
