@@ -1,0 +1,12 @@
+{
+  "rates": [
+    {
+      "provider": "USPS",
+      "servicelevel": {
+        "token": "usps_ground_advantage"
+      },
+      "amount": "15.80",
+      "currency": "USD"
+    }
+  ]
+}
