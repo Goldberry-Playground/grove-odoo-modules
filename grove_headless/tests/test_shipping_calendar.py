@@ -316,5 +316,61 @@ class TestRealArborDayWindows(unittest.TestCase):
         self.assertEqual(cal["zones"][6]["fall"], ((11, 9), (11, 26)))  # real default kept
 
 
+class TestOverrideFailOpen(unittest.TestCase):
+    """Valid-JSON-wrong-shape overrides must fail open, not 500 (GOL-1311).
+
+    Every case here raised an uncaught ValueError/TypeError before the fix,
+    which propagated out of the /shipping/options and /shipping/rates GET
+    handlers as a 500. The contract: log the bad value, keep the built-in
+    calendar for that field, and still apply the rest of the override.
+    """
+
+    def _default(self):
+        return sc.default_calendar()
+
+    def test_non_numeric_zone_key_is_ignored(self):
+        # "6a" is not int-coercible -> int("6a") used to raise. Ignore that zone,
+        # keep every real default, still return a full calendar.
+        cal = sc.merge_calendar_override({"zones": {"6a": {"fall": [[9, 20], [10, 5]]}}})
+        self.assertEqual(cal, self._default())
+
+    def test_bad_zone_key_does_not_drop_a_good_one(self):
+        # A poisoned key must not stop a valid sibling zone from applying.
+        cal = sc.merge_calendar_override(
+            {"zones": {"6a": {"fall": [[9, 20], [10, 5]]}, "6": {"fall": [[9, 20], [10, 5]]}}}
+        )
+        self.assertEqual(cal["zones"][6]["fall"], ((9, 20), (10, 5)))  # good zone applied
+
+    def test_malformed_leafed_window_keeps_default(self):
+        cal = sc.merge_calendar_override({"leafed_window": "not-a-pair"})
+        self.assertEqual(cal["leafed_window"], self._default()["leafed_window"])
+
+    def test_malformed_fulfillment_days_keeps_default(self):
+        cal = sc.merge_calendar_override({"fulfillment_days": ["a", "b"]})
+        self.assertEqual(cal["fulfillment_days"], self._default()["fulfillment_days"])
+
+    def test_malformed_preorder_open_keeps_default(self):
+        cal = sc.merge_calendar_override({"preorder_open": {"fall": "xx"}})
+        self.assertEqual(cal["preorder_open"], self._default()["preorder_open"])
+
+    def test_malformed_order_deadline_keeps_zone_default(self):
+        # dict-form ship/deadline shape with a bad deadline -> _md used to raise.
+        # Season-level fail-open: the whole fall season falls back to its built-in
+        # window+deadline (no partial-apply), and crucially never 500s.
+        cal = sc.merge_calendar_override(
+            {"zones": {"6": {"fall": {"ship": [[10, 20], [11, 5]], "order_deadline": "zz"}}}}
+        )
+        default6 = self._default()["zones"][6]
+        self.assertEqual(cal["zones"][6]["fall"], default6["fall"])
+        self.assertEqual(cal["zones"][6]["fall_order_deadline"], default6["fall_order_deadline"])
+
+    def test_one_bad_field_does_not_sink_the_others(self):
+        cal = sc.merge_calendar_override(
+            {"leafed_window": "garbage", "fulfillment_days": [3, 7]}
+        )
+        self.assertEqual(cal["leafed_window"], self._default()["leafed_window"])  # kept
+        self.assertEqual(cal["fulfillment_days"], (3, 7))  # applied
+
+
 if __name__ == "__main__":
     unittest.main()

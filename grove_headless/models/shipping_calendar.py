@@ -8,9 +8,12 @@ state (states span multiple USDA zones; WV alone runs 5a-7a).
 """
 
 import csv
+import logging
 import os
 from datetime import date, timedelta
 from functools import lru_cache
+
+_logger = logging.getLogger(__name__)
 
 _MATRIX_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "zip_usda_zone.csv")
 
@@ -308,48 +311,95 @@ def merge_calendar_override(override) -> dict:
     cal = default_calendar()
     if not isinstance(override, dict):
         return cal
-    po = override.get("preorder_open")
-    if isinstance(po, dict):
-        cal["preorder_open"] = {**cal["preorder_open"], **{s: _md(md) for s, md in po.items()}}
-    if "leafed_window" in override:
-        lw = override["leafed_window"]
-        cal["leafed_window"] = (_md(lw[0]), _md(lw[1]))
-    if "fulfillment_days" in override:
-        fd = override["fulfillment_days"]
-        cal["fulfillment_days"] = (int(fd[0]), int(fd[1]))
-    if "approximate" in override:
-        cal["approximate"] = bool(override["approximate"])
-    if "weather_hold_note" in override:
-        whn = override["weather_hold_note"]
-        cal["weather_hold_note"] = str(whn) if whn is not None else None
-    zones = override.get("zones")
-    if isinstance(zones, dict):
-        for zk, zv in zones.items():
-            z = int(zk)  # JSON object keys arrive as strings
-            cur = dict(
-                cal["zones"].get(
-                    z,
-                    {
-                        "fall": _FALL_DEFAULT,
-                        "spring": _SPRING_DEFAULT,
-                        "fall_order_deadline": None,
-                        "spring_order_deadline": None,
-                    },
-                )
-            )
-            if isinstance(zv, dict):
-                for season in ("fall", "spring"):
-                    if season in zv:
-                        window, deadline = _season_override(zv[season])
-                        if window is not None:
-                            cur[season] = window
-                        if deadline is not None:
-                            cur[f"{season}_order_deadline"] = deadline
-                    flat_deadline = f"{season}_order_deadline"
-                    if flat_deadline in zv and zv[flat_deadline] is not None:
-                        cur[flat_deadline] = _md(zv[flat_deadline])
-            cal["zones"][z] = cur
+    # Fail-open contract: a valid-JSON-but-wrong-shape override (e.g. a zone key
+    # like "6a", or a preorder_open/leafed_window/fulfillment_days that isn't a
+    # [m, d] pair) must never 500 the shipping feed. Each field is applied under
+    # its own guard so one bad value is logged and skipped while the rest of the
+    # override still lands; the outer net catches anything unforeseen and returns
+    # the built-in calendar untouched (GOL-1311).
+    try:
+        po = override.get("preorder_open")
+        if isinstance(po, dict):
+            _apply(cal, "preorder_open",
+                   lambda: {**cal["preorder_open"], **{s: _md(md) for s, md in po.items()}})
+        if "leafed_window" in override:
+            lw = override["leafed_window"]
+            _apply(cal, "leafed_window", lambda: (_md(lw[0]), _md(lw[1])))
+        if "fulfillment_days" in override:
+            fd = override["fulfillment_days"]
+            _apply(cal, "fulfillment_days", lambda: (int(fd[0]), int(fd[1])))
+        if "approximate" in override:
+            _apply(cal, "approximate", lambda: bool(override["approximate"]))
+        if "weather_hold_note" in override:
+            whn = override["weather_hold_note"]
+            _apply(cal, "weather_hold_note", lambda: str(whn) if whn is not None else None)
+        zones = override.get("zones")
+        if isinstance(zones, dict):
+            for zk, zv in zones.items():
+                _merge_zone_override(cal, zk, zv)
+    except Exception:  # noqa: BLE001 - fail-open safety net; never break the feed
+        _logger.exception(
+            "grove_headless.shipping_calendar override is malformed; "
+            "falling back to the built-in calendar"
+        )
+        return default_calendar()
     return cal
+
+
+def _apply(cal: dict, key: str, build) -> None:
+    """Set ``cal[key]`` to ``build()``, or log+keep the default if it raises."""
+    try:
+        cal[key] = build()
+    except (TypeError, ValueError, KeyError, IndexError):
+        _logger.warning(
+            "grove_headless.shipping_calendar override key %r is malformed; "
+            "keeping the built-in value", key
+        )
+
+
+def _merge_zone_override(cal: dict, zk, zv) -> None:
+    """Merge one override zone entry over ``cal["zones"]``.
+
+    Skips (with a warning) any zone whose key is not an int-coercible string or
+    whose value is the wrong shape, so a single bad zone can't break the feed.
+    """
+    try:
+        z = int(zk)  # JSON object keys arrive as strings
+    except (TypeError, ValueError):
+        _logger.warning(
+            "grove_headless.shipping_calendar override has a non-numeric zone "
+            "key %r; skipping it", zk
+        )
+        return
+    cur = dict(
+        cal["zones"].get(
+            z,
+            {
+                "fall": _FALL_DEFAULT,
+                "spring": _SPRING_DEFAULT,
+                "fall_order_deadline": None,
+                "spring_order_deadline": None,
+            },
+        )
+    )
+    if isinstance(zv, dict):
+        for season in ("fall", "spring"):
+            try:
+                if season in zv:
+                    window, deadline = _season_override(zv[season])
+                    if window is not None:
+                        cur[season] = window
+                    if deadline is not None:
+                        cur[f"{season}_order_deadline"] = deadline
+                flat_deadline = f"{season}_order_deadline"
+                if flat_deadline in zv and zv[flat_deadline] is not None:
+                    cur[flat_deadline] = _md(zv[flat_deadline])
+            except (TypeError, ValueError, KeyError, IndexError):
+                _logger.warning(
+                    "grove_headless.shipping_calendar zone %s %s override is "
+                    "malformed; keeping the built-in window", z, season
+                )
+    cal["zones"][z] = cur
 
 
 def _window_dates(start_md, end_md, today: date, upcoming: bool) -> tuple[date, date]:
