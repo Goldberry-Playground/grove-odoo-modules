@@ -259,9 +259,7 @@ class TestStripeCheckout(TransactionCase):
         order, error = grove_main._create_draft_order(self._website(), self.env, payload)
         self.assertIsNone(error)
         self.assertTrue(order)
-        self.assertGreater(
-            order.amount_tax, 0.0, "pickup must keep WV tax even with an OH address in the payload"
-        )
+        self.assertGreater(order.amount_tax, 0.0, "pickup must keep WV tax even with an OH address in the payload")
 
     def test_unrecognized_fulfillment_is_rejected(self):
         """GOL-1303: any explicit fulfillment other than ship/pickup is a hard 400,
