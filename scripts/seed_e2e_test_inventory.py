@@ -66,17 +66,37 @@ fixture design, GOL-1074) via the env knobs below — the defaults are sensible
 but the SKU/name/price/qty are the single source of truth the specs assert
 against.
 
+Safety: QA-only, dry-run by DEFAULT
+-----------------------------------
+This script publishes ``is_published`` + ``sale_ok`` "AAA ..." products that
+sort FIRST in ``/shop`` and are genuinely buyable/shippable — running it against
+a live storefront drops fake purchasable trees at the top of the real grid
+(GOL-1310). Two guards prevent that:
+
+* **Dry run is the DEFAULT** (opt-out, unlike the sibling seed scripts): live
+  mode requires an explicit ``DRY_RUN=0`` (``DRY_RUN=1``/unset both stay
+  read-only).
+* **Live mode refuses a non-QA target**: the ``ODOO_URL`` host must be a known
+  QA/local host AND ``ODOO_DB`` must be a known QA DB, else the script exits
+  non-zero before authenticating. Override only with the explicit
+  ``--force-i-know-this-is-not-qa`` flag (you accept publishing test products to
+  that target).
+
 Usage
 -----
-    # Dry run (read-only): resolves company/warehouse/axis, reports the plan
-    # for BOTH fixtures.
+    # Dry run (read-only, DEFAULT): resolves company/warehouse/axis, reports the
+    # plan for BOTH fixtures. No DRY_RUN needed — read-only unless DRY_RUN=0.
     ODOO_URL=https://odoo.qa.gatheringatthegrove.com \\
     ODOO_DB=odoo \\
     ODOO_USER=josh@goldberrygrove.farm \\
     ODOO_PASSWORD=<admin-or-api-key> \\
-    DRY_RUN=1 python3 scripts/seed_e2e_test_inventory.py
+    python3 scripts/seed_e2e_test_inventory.py
 
-    # Live: DRY_RUN unset -> creates/reconciles both fixtures and applies stock.
+    # Live: DRY_RUN=0 -> creates/reconciles both fixtures and applies stock.
+    # Refused unless the target is a known QA host + DB (see Safety above).
+    ODOO_URL=https://odoo.qa.gatheringatthegrove.com ODOO_DB=odoo \\
+    ODOO_USER=... ODOO_PASSWORD=... \\
+    DRY_RUN=0 python3 scripts/seed_e2e_test_inventory.py
 
     # Seed only one fixture: FIXTURE=potted (or FIXTURE=bareroot).
 
@@ -89,7 +109,7 @@ Knobs (env, all optional):
     E2E_TREE_LENGTH   default "20"           grove_tree_length for the bareroot
                                              (shippable) fixture: 16|20|32|46
 
-Exit codes: 0 ok, 1 auth/data failure (fails loudly).
+Exit codes: 0 ok, 1 auth/data failure or a refused non-QA live target (fails loudly).
 """
 
 from __future__ import annotations
@@ -100,12 +120,33 @@ import sys
 import urllib.request as _ureq
 import xmlrpc.client
 from typing import Any
+from urllib.parse import urlparse
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    """Truthy env parse (``1/true/yes/on``); returns ``default`` if unset."""
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
 
 ODOO_URL = os.getenv("ODOO_URL", "http://localhost:8069")
-ODOO_DB = os.getenv("ODOO_DB", "Goldberry")
+# QA DB is ``odoo``. NOT the prod-style "Goldberry" — a prod-shaped default is
+# how a stray localhost tunnel published buyable fixtures to a live store (GOL-1310).
+ODOO_DB = os.getenv("ODOO_DB", "odoo")
 ODOO_USER = os.getenv("ODOO_USER", "josh@goldberrygrove.farm")
 ODOO_PASSWORD = os.getenv("ODOO_PASSWORD")
-DRY_RUN = os.getenv("DRY_RUN") == "1"
+# Dry run is the DEFAULT (opt-out): live mode requires an explicit DRY_RUN=0.
+# DRY_RUN unset OR DRY_RUN=1 both stay read-only. This diverges from the sibling
+# seed scripts on purpose — this one publishes buyable storefront products.
+DRY_RUN = _env_flag("DRY_RUN", True)
+
+# Live mode is refused unless the target is provably QA: URL host in the QA/local
+# allowlist AND DB in the QA-DB allowlist. Override with FORCE_NON_QA_FLAG only.
+FORCE_NON_QA_FLAG = "--force-i-know-this-is-not-qa"
+QA_URL_HOSTS = {"localhost", "127.0.0.1", "odoo.qa.gatheringatthegrove.com"}
+QA_DBS = {"odoo"}
 
 COMPANY_NAME = "At The Grove Nursery"
 SALE_TAXES = ["WV State Sales Tax 6%", "WV Municipal Tax 1%"]
@@ -142,6 +183,38 @@ FIXTURES: list[dict[str, Any]] = [
 def fail(msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+def assert_qa_target_or_die(force: bool) -> None:
+    """Refuse a LIVE seed unless the target is provably QA (GOL-1310).
+
+    Requires ODOO_URL host in ``QA_URL_HOSTS`` **and** ODOO_DB in ``QA_DBS``.
+    Anything else exits non-zero (this script publishes buyable "AAA ..."
+    products to ``/shop``) unless the operator passes ``FORCE_NON_QA_FLAG`` to
+    explicitly accept the target. No-op in DRY_RUN — nothing is written there.
+    """
+    host = (urlparse(ODOO_URL).hostname or "").lower()
+    problems = []
+    if host not in QA_URL_HOSTS:
+        problems.append(f"host {host!r} not in QA allowlist {sorted(QA_URL_HOSTS)}")
+    if ODOO_DB not in QA_DBS:
+        problems.append(f"db {ODOO_DB!r} not in QA allowlist {sorted(QA_DBS)}")
+    if not problems:
+        return
+    detail = "; ".join(problems)
+    if force:
+        print(
+            f"WARNING: live seed target is NOT provably QA ({detail}); proceeding "
+            f"because {FORCE_NON_QA_FLAG} was passed.",
+            file=sys.stderr,
+        )
+        return
+    fail(
+        f"Refusing LIVE seed against a non-QA target: {detail}. This script "
+        "publishes buyable 'AAA ...' test products that sort first in /shop — run "
+        f"it only against QA. Set DRY_RUN=1 to preview, or pass {FORCE_NON_QA_FLAG} "
+        "to override (you accept publishing test products to this target)."
+    )
 
 
 def authenticate() -> tuple[xmlrpc.client.ServerProxy, int]:
@@ -395,6 +468,8 @@ def main() -> None:
         f"fixtures={[f['sku'] for f in specs]} qty={E2E_QTY} price=${E2E_PRICE:.2f}  "
         f"DRY_RUN={'yes' if DRY_RUN else 'NO — LIVE'}"
     )
+    if not DRY_RUN:
+        assert_qa_target_or_die(force=FORCE_NON_QA_FLAG in sys.argv[1:])
     models, uid = authenticate()
 
     company_ids = call(models, uid, "res.company", "search", [[("name", "=", COMPANY_NAME)]], {"limit": 1})
