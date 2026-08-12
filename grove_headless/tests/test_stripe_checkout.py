@@ -240,6 +240,40 @@ class TestStripeCheckout(TransactionCase):
         self.assertIn("pickup", error.data.decode().lower())
         self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
 
+    def test_pickup_keeps_wv_tax_despite_out_of_state_address(self):
+        """GOL-1303: a pickup order carrying a leftover out-of-state address (buyer
+        filled the address, then toggled to pickup) must KEEP the WV default tax —
+        the transfer happens at the WV farm regardless of the payload address. The
+        destination de-tax path must be skipped entirely for pickup."""
+        self.product.product_tmpl_id.grove_shipping_tier = "potted"
+        # Seed the WV default tax explicitly so the test doesn't hinge on
+        # ir.default timing in the transaction — the real product default
+        # (hooks.setup_wv_sales_tax) puts this same group on every line.
+        wv_group = self.env["account.tax"].search(
+            [("name", "=", "WV Sales Tax 7%"), ("company_id", "=", self.company.id), ("amount_type", "=", "group")],
+            limit=1,
+        )
+        self.assertTrue(wv_group, "WV group tax must exist (post_init_hook)")
+        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_group.ids)]
+        payload = self._cart_payload("OH", fulfillment="pickup")
+        order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(error)
+        self.assertTrue(order)
+        self.assertGreater(
+            order.amount_tax, 0.0, "pickup must keep WV tax even with an OH address in the payload"
+        )
+
+    def test_unrecognized_fulfillment_is_rejected(self):
+        """GOL-1303: any explicit fulfillment other than ship/pickup is a hard 400,
+        not a silent fall-through to legacy inference (which would bypass the
+        green-list / potted / $0-shipping gates for a direct bearer-API caller)."""
+        payload = self._cart_payload("WV", fulfillment="delivery")
+        order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(order)
+        self.assertEqual(error.status_code, 400)
+        self.assertIn("fulfillment", error.data.decode().lower())
+        self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
+
     def test_absent_fulfillment_still_treats_state_as_ship_to(self):
         """Back-compat: a caller that doesn't send `fulfillment` yet keeps the
         pre-1057 inference — a green-list ship-to state routes through the ship
