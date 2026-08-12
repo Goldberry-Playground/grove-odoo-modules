@@ -12,9 +12,11 @@ cheaper. A violation aborts the rewrite (exit 4) so a bad quote can never
 publish an exploitable table — the workflow alerts and rates stay untouched.
 
 Exit codes: 0 no material drift (or Shippo has no UPS Ground rates at all yet
-— account not finished, skipped cleanly) | 3 rates file rewritten | 1 API
-failure or a partial rate gap (some boxes quoted, some did not) | 4 proposed
-table failed the monotonicity guard (not published).
+AND the current table is the provisional placeholder — account not finished,
+skipped cleanly) | 3 rates file rewritten | 1 API failure, a partial rate gap
+(some boxes quoted, some did not), or zero UPS Ground rates for every probe
+while real published rates exist (UPS connection lapsed) | 4 proposed table
+failed the monotonicity guard (not published).
 Requires env SHIPPO_API_KEY (unless --dry-run with --fixture).
 """
 
@@ -136,7 +138,14 @@ def main() -> int:
     args = ap.parse_args()
 
     with open(RATES_PATH, encoding="utf-8") as fh:
-        current = {k: v for k, v in json.load(fh).items() if not k.startswith("_")}
+        raw = json.load(fh)
+    # `_provisional` marks the launch-hypothesis placeholder table: real
+    # published rates do not exist yet, so an all-missing Shippo result is the
+    # "UPS not connected" not-ready state, not a lapse. The writer below emits a
+    # doc WITHOUT this key, so once real rates publish the placeholder guard is
+    # gone and a later all-missing result fails loudly (GOL-1312).
+    provisional = bool(raw.get("_provisional"))
+    current = {k: v for k, v in raw.items() if not k.startswith("_")}
 
     proposed = {}
     missing = []
@@ -167,18 +176,34 @@ def main() -> int:
     if missing:
         total = len(REFERENCE_ZIPS) * len(PARCELS)
         if len(missing) == total:
-            # Zero UPS Ground rates across every probe: the SHIPPO_API_KEY
-            # secret exists but the Shippo account has no UPS carrier
-            # connected yet — the same not-ready state the workflow's
-            # pre-key guard covers. Skip cleanly (exit 0) instead of paging
-            # ops every morning; the job self-heals the day UPS goes live.
+            if provisional or not current:
+                # Zero UPS Ground rates across every probe AND the current
+                # table is the placeholder/empty one (no real published
+                # rates to protect): the SHIPPO_API_KEY secret exists but no
+                # UPS carrier is connected in the Shippo account yet — the
+                # same not-ready state the workflow's pre-key guard covers.
+                # Skip cleanly (exit 0) instead of paging ops every morning;
+                # the job self-heals the day UPS goes live (GOL-1296).
+                print(
+                    "::notice::Shippo returned no UPS Ground rate for any probe — "
+                    "UPS carrier not connected in the Shippo account yet; "
+                    "rate-check skipped (see GOL-1296)"
+                )
+                print("no UPS Ground rates available yet — skipped")
+                return 0
+            # Real published rates exist (non-placeholder table) yet Shippo
+            # now returns zero UPS Ground rates for EVERY probe: the carrier
+            # connection that produced those rates has lapsed (auth expiry,
+            # billing, Shippo-side disconnect). Fail loudly — a clean skip
+            # here would let shipping_rates.json fossilize while a later UPS
+            # rate hike silently under-bills every order (GOL-1312).
             print(
-                "::notice::Shippo returned no UPS Ground rate for any probe — "
-                "UPS carrier not connected in the Shippo account yet; "
-                "rate-check skipped (see GOL-1296)"
+                f"no UPS Ground rate for any of {total} probe(s) but "
+                "shipping_rates.json holds real published rates — "
+                "UPS connection lost? (see GOL-1312)",
+                file=sys.stderr,
             )
-            print("no UPS Ground rates available yet — skipped")
-            return 0
+            return 1
         # A PARTIAL gap (some boxes rated, some not) is a real quote problem
         # — e.g. an oversize box or a bad reference address — and must fail
         # loudly so it gets investigated, never silently drop a rate.

@@ -2,8 +2,9 @@ import importlib.util
 import io
 import json
 import os
+import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from unittest import mock
 
 _PATH = os.path.join(os.path.dirname(__file__), "..", "rate_check.py")
@@ -47,7 +48,9 @@ class TestRateMath(unittest.TestCase):
 class TestNoUpsRatesSkips(unittest.TestCase):
     def test_no_ups_rates_anywhere_skips_cleanly(self):
         # Shippo answers HTTP 200 but has no UPS carrier connected: every
-        # probe returns no UPS Ground rate. The checker must skip cleanly
+        # probe returns no UPS Ground rate. Because the shipped rates file is
+        # still the provisional placeholder (`_provisional: true`), there are
+        # no real published rates to protect, so the checker must skip cleanly
         # (exit 0) rather than fail — the daily job stays green until UPS is
         # connected (GOL-1296), and must not rewrite the rates file.
         with open(rc.RATES_PATH, encoding="utf-8") as fh:
@@ -60,3 +63,53 @@ class TestNoUpsRatesSkips(unittest.TestCase):
         self.assertIn("no UPS Ground rate for any probe", out.getvalue())
         with open(rc.RATES_PATH, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), rates_before)
+
+    def test_shipped_rates_file_is_marked_provisional(self):
+        # The clean-skip above is only correct while the shipped table is the
+        # launch-hypothesis placeholder. Once the checker publishes real rates
+        # it drops the marker, and all-missing becomes a lapse failure.
+        with open(rc.RATES_PATH, encoding="utf-8") as fh:
+            self.assertTrue(json.load(fh).get("_provisional"))
+
+    def _run_no_ups_against(self, doc):
+        """Run the all-missing path against a rates file containing `doc`.
+
+        Returns (exit_code, stderr, rates_after). Uses a temp RATES_PATH so
+        the real shipped table is never touched.
+        """
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(doc, fh)
+            path = fh.name
+        try:
+            argv = ["rate_check.py", "--fixture", NO_UPS_FIXTURE]
+            with mock.patch.object(rc, "RATES_PATH", path), mock.patch("sys.argv", argv):
+                err = io.StringIO()
+                with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                    code = rc.main()
+            with open(path, encoding="utf-8") as fh:
+                after = fh.read()
+            return code, err.getvalue(), after
+        finally:
+            os.unlink(path)
+
+    def test_all_missing_with_real_published_rates_fails(self):
+        # Real published rates exist (no `_provisional` marker) but Shippo now
+        # returns zero UPS Ground rates for every probe: the carrier link has
+        # lapsed. The checker must FAIL (exit 1) so the fossilized table gets
+        # investigated, and must not rewrite the file (GOL-1312).
+        real = {
+            "_comment": "Maintained by scripts/rate_check",
+            "_schema": 2,
+            "zone_1": {"br16": {"base": 18.0}},
+        }
+        before = json.dumps(real)
+        code, err, after = self._run_no_ups_against(real)
+        self.assertEqual(code, 1)
+        self.assertIn("UPS connection lost", err)
+        self.assertEqual(after, before)
+
+    def test_all_missing_with_empty_table_skips_cleanly(self):
+        # An empty (or fully placeholder-stripped) table has no real rates to
+        # protect, so all-missing is still the not-ready state — skip cleanly.
+        code, _err, _after = self._run_no_ups_against({"_comment": "x", "_schema": 2})
+        self.assertEqual(code, 0)
