@@ -365,9 +365,7 @@ class TestOverrideFailOpen(unittest.TestCase):
         self.assertEqual(cal["zones"][6]["fall_order_deadline"], default6["fall_order_deadline"])
 
     def test_one_bad_field_does_not_sink_the_others(self):
-        cal = sc.merge_calendar_override(
-            {"leafed_window": "garbage", "fulfillment_days": [3, 7]}
-        )
+        cal = sc.merge_calendar_override({"leafed_window": "garbage", "fulfillment_days": [3, 7]})
         self.assertEqual(cal["leafed_window"], self._default()["leafed_window"])  # kept
         self.assertEqual(cal["fulfillment_days"], (3, 7))  # applied
 

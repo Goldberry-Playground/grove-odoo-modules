@@ -320,8 +320,7 @@ def merge_calendar_override(override) -> dict:
     try:
         po = override.get("preorder_open")
         if isinstance(po, dict):
-            _apply(cal, "preorder_open",
-                   lambda: {**cal["preorder_open"], **{s: _md(md) for s, md in po.items()}})
+            _apply(cal, "preorder_open", lambda: {**cal["preorder_open"], **{s: _md(md) for s, md in po.items()}})
         if "leafed_window" in override:
             lw = override["leafed_window"]
             _apply(cal, "leafed_window", lambda: (_md(lw[0]), _md(lw[1])))
@@ -339,8 +338,7 @@ def merge_calendar_override(override) -> dict:
                 _merge_zone_override(cal, zk, zv)
     except Exception:  # noqa: BLE001 - fail-open safety net; never break the feed
         _logger.exception(
-            "grove_headless.shipping_calendar override is malformed; "
-            "falling back to the built-in calendar"
+            "grove_headless.shipping_calendar override is malformed; falling back to the built-in calendar"
         )
         return default_calendar()
     return cal
@@ -352,8 +350,7 @@ def _apply(cal: dict, key: str, build) -> None:
         cal[key] = build()
     except (TypeError, ValueError, KeyError, IndexError):
         _logger.warning(
-            "grove_headless.shipping_calendar override key %r is malformed; "
-            "keeping the built-in value", key
+            "grove_headless.shipping_calendar override key %r is malformed; keeping the built-in value", key
         )
 
 
@@ -366,10 +363,7 @@ def _merge_zone_override(cal: dict, zk, zv) -> None:
     try:
         z = int(zk)  # JSON object keys arrive as strings
     except (TypeError, ValueError):
-        _logger.warning(
-            "grove_headless.shipping_calendar override has a non-numeric zone "
-            "key %r; skipping it", zk
-        )
+        _logger.warning("grove_headless.shipping_calendar override has a non-numeric zone key %r; skipping it", zk)
         return
     cur = dict(
         cal["zones"].get(
@@ -396,8 +390,9 @@ def _merge_zone_override(cal: dict, zk, zv) -> None:
                     cur[flat_deadline] = _md(zv[flat_deadline])
             except (TypeError, ValueError, KeyError, IndexError):
                 _logger.warning(
-                    "grove_headless.shipping_calendar zone %s %s override is "
-                    "malformed; keeping the built-in window", z, season
+                    "grove_headless.shipping_calendar zone %s %s override is malformed; keeping the built-in window",
+                    z,
+                    season,
                 )
     cal["zones"][z] = cur
 
