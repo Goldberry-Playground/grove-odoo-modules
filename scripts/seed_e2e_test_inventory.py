@@ -66,22 +66,35 @@ fixture design, GOL-1074) via the env knobs below — the defaults are sensible
 but the SKU/name/price/qty are the single source of truth the specs assert
 against.
 
+Environment guard
+-----------------
+This script publishes **buyable** "AAA ..." products that sort first in
+``/shop`` and applies on-hand stock, so a live run is only allowed against a
+known QA target. **Dry run is the default** (opt-out, matching the repo's
+convention); you must pass ``DRY_RUN=0`` to write. Even then, a live run aborts
+non-zero unless the URL host is in ``QA_URL_HOSTS`` **and** the DB is in
+``QA_DBS`` — this stops a prod SSH tunnel on ``localhost:8069`` pointed at the
+``Goldberry`` DB (host passes, DB fails). Override only with the explicit
+``--force-i-know-this-is-not-qa`` flag.
+
 Usage
 -----
-    # Dry run (read-only): resolves company/warehouse/axis, reports the plan
-    # for BOTH fixtures.
+    # Dry run (read-only, DEFAULT): resolves company/warehouse/axis, reports the
+    # plan for BOTH fixtures. No writes.
     ODOO_URL=https://odoo.qa.gatheringatthegrove.com \\
     ODOO_DB=odoo \\
     ODOO_USER=josh@goldberrygrove.farm \\
     ODOO_PASSWORD=<admin-or-api-key> \\
-    DRY_RUN=1 python3 scripts/seed_e2e_test_inventory.py
+    python3 scripts/seed_e2e_test_inventory.py
 
-    # Live: DRY_RUN unset -> creates/reconciles both fixtures and applies stock.
+    # Live (opt-out): add DRY_RUN=0 to the above -> creates/reconciles both
+    # fixtures and applies stock. Requires an allowlisted QA host + DB.
 
     # Seed only one fixture: FIXTURE=potted (or FIXTURE=bareroot).
 
 Knobs (env, all optional):
     FIXTURE           default "" (both)      "potted" | "bareroot" to seed one
+    DRY_RUN           default "1" (dry run)  set "0" to run LIVE (guarded)
     E2E_POTTED_SKU    default "E2E-POTTED-INSTOCK"
     E2E_BAREROOT_SKU  default "E2E-BAREROOT-INSTOCK"
     E2E_PRICE         default "42.00"        list_price (USD), both fixtures
@@ -89,7 +102,7 @@ Knobs (env, all optional):
     E2E_TREE_LENGTH   default "20"           grove_tree_length for the bareroot
                                              (shippable) fixture: 16|20|32|46
 
-Exit codes: 0 ok, 1 auth/data failure (fails loudly).
+Exit codes: 0 ok, 1 auth/data failure or a refused non-QA live run (fails loudly).
 """
 
 from __future__ import annotations
@@ -100,12 +113,26 @@ import sys
 import urllib.request as _ureq
 import xmlrpc.client
 from typing import Any
+from urllib.parse import urlsplit
 
 ODOO_URL = os.getenv("ODOO_URL", "http://localhost:8069")
-ODOO_DB = os.getenv("ODOO_DB", "Goldberry")
+# QA-safe fallback DB: this script publishes buyable fixtures, so it must NOT
+# default to the prod-style "Goldberry" DB name. QA runs on the "odoo" DB.
+ODOO_DB = os.getenv("ODOO_DB", "odoo")
 ODOO_USER = os.getenv("ODOO_USER", "josh@goldberrygrove.farm")
 ODOO_PASSWORD = os.getenv("ODOO_PASSWORD")
-DRY_RUN = os.getenv("DRY_RUN") == "1"
+# Dry-run is the DEFAULT (matches the repo's dry-run-default convention). Live
+# mode is opt-out: set DRY_RUN=0 to actually write. Any other value stays dry.
+DRY_RUN = os.getenv("DRY_RUN", "1") != "0"
+
+# Live mode publishes purchasable "AAA ..." products + on-hand stock, so a live
+# run must prove it is pointed at a known QA target: an allowlisted URL host AND
+# a known QA DB. Anything else is refused unless the explicit override flag is
+# passed. See guard_environment().
+QA_URL_HOSTS = {"localhost", "127.0.0.1", "odoo.qa.gatheringatthegrove.com"}
+QA_DBS = {"odoo"}
+FORCE_FLAG = "--force-i-know-this-is-not-qa"
+FORCE = FORCE_FLAG in sys.argv
 
 COMPANY_NAME = "At The Grove Nursery"
 SALE_TAXES = ["WV State Sales Tax 6%", "WV Municipal Tax 1%"]
@@ -142,6 +169,37 @@ FIXTURES: list[dict[str, Any]] = [
 def fail(msg: str) -> None:
     print(f"ERROR: {msg}", file=sys.stderr)
     sys.exit(1)
+
+
+def guard_environment() -> None:
+    """Refuse a LIVE run against anything that isn't a known QA target.
+
+    Live mode publishes buyable "AAA ..." fixtures that deliberately sort first
+    in ``/shop`` and applies on-hand stock. Run against production (e.g. via a
+    prod SSH tunnel on ``localhost:8069`` or a stale ``ODOO_URL`` export) it
+    would drop fake purchasable trees at the top of the live storefront grid.
+
+    A live run must therefore prove BOTH: an allowlisted URL host AND a known QA
+    DB. Either check failing aborts non-zero — including the classic footgun of
+    a localhost tunnel pointed at the prod ``Goldberry`` DB, which passes the
+    host check but fails the DB check. The only escape hatch is the explicit
+    ``--force-i-know-this-is-not-qa`` flag.
+    """
+    if DRY_RUN or FORCE:
+        return
+    host = urlsplit(ODOO_URL).hostname or ""
+    host_ok = host in QA_URL_HOSTS
+    db_ok = ODOO_DB in QA_DBS
+    if host_ok and db_ok:
+        return
+    fail(
+        "Refusing to run LIVE against a non-QA target — this script publishes "
+        "buyable test products.\n"
+        f"    host={host!r}  (allowed: {sorted(QA_URL_HOSTS)}, ok={host_ok})\n"
+        f"    db={ODOO_DB!r}  (allowed: {sorted(QA_DBS)}, ok={db_ok})\n"
+        "  Fix: point ODOO_URL/ODOO_DB at QA, or set DRY_RUN=1 to preview. "
+        f"If you are certain this is not production, pass {FORCE_FLAG}."
+    )
 
 
 def authenticate() -> tuple[xmlrpc.client.ServerProxy, int]:
@@ -394,7 +452,9 @@ def main() -> None:
         f"Target: {ODOO_URL} db={ODOO_DB} company={COMPANY_NAME}  "
         f"fixtures={[f['sku'] for f in specs]} qty={E2E_QTY} price=${E2E_PRICE:.2f}  "
         f"DRY_RUN={'yes' if DRY_RUN else 'NO — LIVE'}"
+        f"{' [FORCED non-QA]' if FORCE and not DRY_RUN else ''}"
     )
+    guard_environment()
     models, uid = authenticate()
 
     company_ids = call(models, uid, "res.company", "search", [[("name", "=", COMPANY_NAME)]], {"limit": 1})
