@@ -188,14 +188,35 @@ class TestAnnualCalendar(unittest.TestCase):
         self.assertIsNone(sc.resolve_fulfillment(None, date(2026, 7, 1))["mode"])
         self.assertIsNone(sc.resolve_fulfillment(99, date(2026, 7, 1))["mode"])
 
+    def test_leap_day_stays_preorder_for_warm_zones(self):
+        # GOL-1309 boundary: zones 8-10 open their spring wave Mar 1 and their
+        # spring preorder runs Nov 1 -> the day before. With a non-leap anchor
+        # that end resolved to Feb 28, so Feb 29 fell through EVERY branch to the
+        # peat "ships now" fallback — mispricing a dormant preorder as a full
+        # ship-now charge. It must stay a spring preorder on the leap day.
+        for zone in (8, 9, 10):
+            r = sc.resolve_fulfillment(zone, date(2028, 2, 29))  # 2028 is a leap year
+            self.assertEqual(r["mode"], sc.MODE_PREORDER, f"zone {zone} leap day")
+            self.assertEqual(r["season"], "spring")
+        # The day before is still preorder in a non-leap year (no gap either way).
+        self.assertEqual(sc.resolve_fulfillment(8, date(2027, 2, 28))["mode"], sc.MODE_PREORDER)
+
+    def test_prev_day_is_leap_aware(self):
+        # The day before Mar 1 depends on the year's leap context.
+        self.assertEqual(sc._prev_day((3, 1), 2028), (2, 29))  # leap
+        self.assertEqual(sc._prev_day((3, 1), 2027), (2, 28))  # non-leap
+        self.assertEqual(sc._prev_day((3, 1)), (2, 28))  # 2001 non-leap default
+
     def test_every_calendar_date_resolves_to_exactly_one_mode(self):
-        # Coverage/exhaustiveness: every day of a full year maps to a mode.
+        # Coverage/exhaustiveness: every day of a full year maps to a mode —
+        # including a leap year so Feb 29 is exercised (GOL-1309).
         cal = sc.default_calendar()
         valid = {sc.MODE_PREORDER, sc.MODE_IN_WINDOW, sc.MODE_PEAT}
-        d = date(2026, 1, 1)
-        while d <= date(2026, 12, 31):
-            self.assertIn(self._mode(d, cal)["mode"], valid, d.isoformat())
-            d += timedelta(days=1)
+        for year in (2026, 2028):  # non-leap + leap
+            d = date(year, 1, 1)
+            while d <= date(year, 12, 31):
+                self.assertIn(self._mode(d, cal)["mode"], valid, d.isoformat())
+                d += timedelta(days=1)
 
 
 class TestCalendarSerialization(unittest.TestCase):
