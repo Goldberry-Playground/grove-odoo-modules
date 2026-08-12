@@ -315,6 +315,30 @@ class TestRealArborDayWindows(unittest.TestCase):
         cal = sc.merge_calendar_override({"zones": {"6": {"fall": "garbage"}}})
         self.assertEqual(cal["zones"][6]["fall"], ((11, 9), (11, 26)))  # real default kept
 
+    def test_non_numeric_zone_key_falls_back_not_raises(self):
+        # GOL-1311: a zone key like "6a" used to raise ValueError at int(zk),
+        # 500-ing /shipping/rates + /shipping/options. Now the whole override is
+        # discarded and the built-in calendar is returned unchanged.
+        cal = sc.merge_calendar_override({"zones": {"6a": {"fall": [[10, 1], [10, 15]]}}})
+        self.assertEqual(cal, sc.default_calendar())
+
+    def test_wrong_shape_scalars_fall_back_not_raise(self):
+        # GOL-1311: each of these is valid JSON but the wrong shape and used to
+        # raise via _md/int; the feed must fail open to defaults instead.
+        for bad in (
+            {"fulfillment_days": "soon"},
+            {"leafed_window": [[6, 1]]},  # single pair, lw[1] IndexError
+            {"preorder_open": {"spring": ["x", "y"]}},
+            {"zones": {"6": {"fall": {"ship": [["a", "b"], [11, 5]]}}}},
+        ):
+            with self.subTest(bad=bad):
+                self.assertEqual(sc.merge_calendar_override(bad), sc.default_calendar())
+
+    def test_good_zone_key_still_narrows_window(self):
+        # Guard against over-broad failing: a well-formed override still applies.
+        cal = sc.merge_calendar_override({"zones": {"6": {"fall": [[9, 20], [10, 5]]}}})
+        self.assertEqual(cal["zones"][6]["fall"], ((9, 20), (10, 5)))
+
 
 if __name__ == "__main__":
     unittest.main()

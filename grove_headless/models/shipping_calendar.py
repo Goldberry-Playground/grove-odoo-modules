@@ -8,9 +8,12 @@ state (states span multiple USDA zones; WV alone runs 5a-7a).
 """
 
 import csv
+import logging
 import os
 from datetime import date, timedelta
 from functools import lru_cache
+
+_logger = logging.getLogger(__name__)
 
 _MATRIX_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "zip_usda_zone.csv")
 
@@ -304,10 +307,33 @@ def merge_calendar_override(override) -> dict:
     ``_season_override``); the flat ``"<season>_order_deadline"`` key is also
     honored. ``approximate`` and ``weather_hold_note`` let ops flag a known
     frost delay without a deploy (GOL-1177).
+
+    Fail-open is total (GOL-1311): a non-dict override yields defaults, and an
+    override that is valid JSON but the wrong *shape* (a non-numeric zone key
+    like ``"6a"``, a ``fulfillment_days`` that isn't a [n, n] pair, a garbage
+    ``ship`` window) is logged and discarded rather than propagated — the
+    ``/shipping/rates`` and ``/shipping/options`` feeds must never 500 because
+    a nursery op typo'd the ``grove_headless.shipping_calendar`` system param.
     """
-    cal = default_calendar()
     if not isinstance(override, dict):
-        return cal
+        return default_calendar()
+    try:
+        return _apply_calendar_override(default_calendar(), override)
+    except Exception:  # noqa: BLE001 — fail-open: a malformed override must never break the feed
+        _logger.warning(
+            "grove_headless.shipping_calendar override is valid JSON but the wrong shape; "
+            "ignoring it and using calendar defaults",
+            exc_info=True,
+        )
+        return default_calendar()
+
+
+def _apply_calendar_override(cal: dict, override: dict) -> dict:
+    """Merge a shape-validated (dict) override over ``cal`` in place; may raise.
+
+    Kept separate from ``merge_calendar_override`` so the fail-open guard there
+    catches every shape error in one place instead of littering each branch.
+    """
     po = override.get("preorder_open")
     if isinstance(po, dict):
         cal["preorder_open"] = {**cal["preorder_open"], **{s: _md(md) for s, md in po.items()}}
