@@ -695,10 +695,14 @@ class GroveHeadlessAPI(http.Controller):
         plus the authoritative zone->state green list, so the product-page estimator
         prices against exactly what checkout will charge instead of a bundled copy
         that drifts as the daily rate-checker rewrites the table. Public and cheap:
-        no Shippo call in the request path, no DB read — pure in-memory serialization.
-        The frontend drops the ``zones`` map into ``resolveRateTable()``.
+        no Shippo call in the request path, one cheap DB read (the calendar
+        override system parameter). The frontend drops the ``zones`` map into
+        ``resolveRateTable()`` and reads ``calendar.resolved[String(usdaZone)]``
+        for the shopper's mode/ship_timing verbatim (GOL-1386), resolved
+        server-side against ``date.today()`` so it never re-derives the backend
+        state machine or disagrees on a timezone boundary day.
         """
-        return _json_response(rate_feed(self._shipping_calendar_override()))
+        return _json_response(rate_feed(self._shipping_calendar_override(), _date.today()))
 
     # ── Orders ───────────────────────────────────────────────────────────
 

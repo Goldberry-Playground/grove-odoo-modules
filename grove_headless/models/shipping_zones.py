@@ -26,6 +26,7 @@ the rate table is one obvious source of truth a non-engineer can edit.
 
 import json
 import os
+from datetime import date as _date
 
 try:
     from . import shipping_boxes, shipping_calendar
@@ -193,7 +194,7 @@ ZONE_BY_STATE: dict[str, str] = {
 assert set(ZONE_BY_STATE) == GREEN_STATES
 
 
-def rate_feed(calendar_override=None) -> dict:
+def rate_feed(calendar_override=None, today=None) -> dict:
     """Read-only snapshot of the live rate table + compliance zone map (GOL-952).
 
     Returns exactly the in-memory tables ``compute_order_shipping`` prices
@@ -217,6 +218,11 @@ def rate_feed(calendar_override=None) -> dict:
             "leafed_window": [[5, 6], [8, 14]],
             "fulfillment_days": [5, 10],
             "zones": {"6": {"fall": [[9, 15], [10, 30]], "spring": [[1, 1], [5, 5]]}, ...},
+            "resolved": {   # GOL-1386: per-zone RESOLVED mode at request time
+              "6": {"mode": "peat-and-bagged", "season": None,
+                    "ship_timing": "Ships in 5-10 business days",
+                    "ship_window": None, "order_deadline": None,
+                    "fulfillment_days": [5, 10]}, ...},
           },
         }
 
@@ -230,12 +236,27 @@ def rate_feed(calendar_override=None) -> dict:
     ``dormant_window`` so the frontend can resolve (date, usdaZone) -> one of
     ``bareroot-preorder`` | ``bareroot-in-window`` | ``peat-and-bagged``.
 
+    ``calendar.resolved`` (GOL-1386) is that resolution done SERVER-SIDE: for
+    every USDA zone 2-10 it carries the mode/ship_timing/ship_window/
+    order_deadline ``resolve_fulfillment`` computes for ``today``, so the
+    frontend reads the shopper's exact zone verbatim instead of re-deriving the
+    backend state machine (the raw ``calendar`` block stays as the client's
+    degraded-feed fallback). See ``shipping_calendar.serialize_resolved``.
+
     ``calendar_override`` is the parsed ``grove_headless.shipping_calendar``
     system parameter (or None); the controller reads the DB and passes it in so
-    this function stays pure (no Shippo call, no DB read). The returned dict is
-    a fresh deep copy so a caller can't mutate the engine's tables.
+    this function stays DB-free (no Shippo call, no DB read). ``today`` is the
+    server-local date the resolved block is computed for — the controller passes
+    ``date.today()``; tests inject a fixed date. It defaults to ``date.today()``
+    when omitted so callers that only want the rate table need not supply it. The
+    returned dict is a fresh deep copy so a caller can't mutate the engine's
+    tables.
     """
     calendar = shipping_calendar.merge_calendar_override(calendar_override)
+    if today is None:
+        today = _date.today()
+    calendar_block = shipping_calendar.serialize_calendar(calendar)
+    calendar_block["resolved"] = shipping_calendar.serialize_resolved(calendar, today)
     return {
         "schema": 2,
         "zones": {zone: {box: dict(rule) for box, rule in boxes.items()} for zone, boxes in ZONE_RATES.items()},
@@ -254,7 +275,7 @@ def rate_feed(calendar_override=None) -> dict:
             "length_classes": list(shipping_boxes.LENGTH_CLASSES),
             "modes": list(shipping_boxes.MODES),
         },
-        "calendar": shipping_calendar.serialize_calendar(calendar),
+        "calendar": calendar_block,
     }
 
 
