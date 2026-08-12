@@ -524,3 +524,42 @@ def serialize_calendar(calendar: dict | None = None) -> dict:
             for z, w in sorted(cal["zones"].items())
         },
     }
+
+
+def serialize_resolved(calendar: dict | None, today: date) -> dict:
+    """Per-zone RESOLVED fulfillment for the rate feed's ``calendar.resolved`` block.
+
+    For every configured USDA zone, run ``resolve_fulfillment(zone, today)`` at
+    request time (server-local ``today``) and emit the frontend-facing subset,
+    keyed by the same string zone id ``serialize_calendar`` uses ("2".."10").
+    This is the GOL-1386 altitude fix for GOL-1313: the frontend reads ``mode`` /
+    ``ship_timing`` for the shopper's exact zone VERBATIM instead of re-deriving
+    the backend state machine (``resolve_fulfillment``) in TypeScript. It
+    collapses three GOL-1313 findings structurally:
+
+      * union over-promise — with mode-per-zone the client shows the shopper's
+        exact zone when known and an honest "resolved at checkout" when not, so
+        there is no client-side aggregate to guess;
+      * date-basis drift — the backend resolves in its own timezone and the
+        frontend surfaces ``ship_timing`` verbatim, so there is no
+        UTC-vs-server-local disagreement window on boundary days.
+
+    ``approximate`` / ``weather_hold_note`` are NOT duplicated per zone — they
+    are calendar-wide and already sit at the ``calendar`` top level. Every value
+    here is already JSON-safe (``ship_window`` is a list of ISO strings or None,
+    ``order_deadline`` an ISO string or None, ``fulfillment_days`` a list or
+    None), so the block round-trips without further coercion.
+    """
+    cal = calendar or default_calendar()
+    resolved = {}
+    for z in sorted(cal["zones"]):
+        r = resolve_fulfillment(z, today, cal)
+        resolved[str(z)] = {
+            "mode": r["mode"],
+            "season": r["season"],
+            "ship_timing": r["ship_timing"],
+            "ship_window": r["ship_window"],
+            "order_deadline": r["order_deadline"],
+            "fulfillment_days": r["fulfillment_days"],
+        }
+    return resolved

@@ -8,7 +8,9 @@ table checkout prices with, plus the authoritative green-list zone map, in the
 shape the frontend ``resolveRateTable`` drops in unchanged.
 """
 
+import datetime
 import importlib.util
+import json
 import os
 import unittest
 
@@ -59,7 +61,15 @@ class RateFeedTests(unittest.TestCase):
         cal = self.feed["calendar"]
         self.assertEqual(
             set(cal),
-            {"preorder_open", "leafed_window", "fulfillment_days", "approximate", "weather_hold_note", "zones"},
+            {
+                "preorder_open",
+                "leafed_window",
+                "fulfillment_days",
+                "approximate",
+                "weather_hold_note",
+                "zones",
+                "resolved",  # GOL-1386: per-zone server-resolved mode
+            },
         )
         # Global preorder-open switch dates: fall Aug 15, spring Nov 1.
         self.assertEqual(cal["preorder_open"], {"fall": [8, 15], "spring": [11, 1]})
@@ -86,6 +96,56 @@ class RateFeedTests(unittest.TestCase):
         self.assertEqual(feed["calendar"]["zones"]["6"]["fall"], [[9, 20], [10, 5]])
         self.assertEqual(feed["calendar"]["zones"]["7"]["fall"], [[11, 9], [11, 26]])  # real default
         self.assertEqual(feed["calendar"]["weather_hold_note"], "Frost hold")
+
+    def test_resolved_block_matches_resolver_verbatim(self):
+        # GOL-1386: calendar.resolved carries, per USDA zone, the exact mode /
+        # ship_timing / ship_window / order_deadline resolve_fulfillment computes
+        # for the request-time `today`, so the frontend never re-derives the
+        # backend state machine. Assert the block IS the resolver, key by key.
+        sc = sz.shipping_calendar
+        today = datetime.date(2026, 4, 1)  # inside several zones' spring window
+        feed = sz.rate_feed(None, today)
+        resolved = feed["calendar"]["resolved"]
+        self.assertEqual(set(resolved), {str(z) for z in range(2, 11)})
+        cal = sc.default_calendar()
+        for z in range(2, 11):
+            expected = sc.resolve_fulfillment(z, today, cal)
+            entry = resolved[str(z)]
+            self.assertEqual(
+                set(entry),
+                {"mode", "season", "ship_timing", "ship_window", "order_deadline", "fulfillment_days"},
+            )
+            for key in entry:
+                self.assertEqual(entry[key], expected[key], f"zone {z} key {key}")
+            # Advisory fields are calendar-wide, never duplicated per zone.
+            self.assertNotIn("approximate", entry)
+            self.assertNotIn("weather_hold_note", entry)
+
+    def test_resolved_is_json_serializable(self):
+        # The whole feed (resolved block included) must round-trip through JSON —
+        # ship_window is a list of ISO strings, order_deadline an ISO string,
+        # never a date object.
+        feed = sz.rate_feed(None, datetime.date(2026, 12, 20))
+        json.dumps(feed)  # raises TypeError on any un-serializable value
+
+    def test_resolved_reflects_calendar_override(self):
+        # An admin override that shifts a zone's window must flow into resolved:
+        # on a date inside the overridden fall window the zone resolves in-window
+        # to the overridden dates, not the built-in ones.
+        override = {"zones": {"6": {"fall": [[9, 20], [10, 5]]}}}
+        today = datetime.date(2026, 9, 25)  # inside the overridden fall window
+        entry = sz.rate_feed(override, today)["calendar"]["resolved"]["6"]
+        self.assertEqual(entry["mode"], "bareroot-in-window")
+        self.assertEqual(entry["season"], "fall")
+        self.assertEqual(entry["ship_window"], ["2026-09-20", "2026-10-05"])
+
+    def test_resolved_defaults_today_when_omitted(self):
+        # Callers that only want the rate table need not pass `today`; the block
+        # is still present and fully populated (resolved against date.today()).
+        resolved = sz.rate_feed()["calendar"]["resolved"]
+        self.assertEqual(set(resolved), {str(z) for z in range(2, 11)})
+        for entry in resolved.values():
+            self.assertIsNotNone(entry["mode"])
 
     def test_zone_by_state_is_authoritative_green_list(self):
         # The zone->state map IS the compliance gate; it must equal the engine's
