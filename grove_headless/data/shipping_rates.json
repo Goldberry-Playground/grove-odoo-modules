@@ -1,6 +1,7 @@
 {
   "_comment": "PROVISIONAL per-box launch-hypothesis rates (2026-07-31, Box Engine v2). Keyed by box id from models/shipping_boxes.py BOXES. Derivation: ceil(interpolated Shippo UPS Ground quote at the box's representative billable weight + per-box packaging + 2.00 buffer). The morning rate-checker (scripts/rate_check) replaces these with real Shippo-derived values via PR on its first live run. Potted has no rates by design: potted = farm pickup only. Design: vault wiki/Software/Grove Shipping.",
   "_schema": 2,
+  "_provisional": true,
   "zone_1": {"br16": {"base": 18.0}, "s20": {"base": 22.0}, "s32": {"base": 24.0}, "s46": {"base": 26.0}, "b20": {"base": 28.0}, "b32": {"base": 30.0}},
   "zone_2": {"br16": {"base": 19.0}, "s20": {"base": 23.0}, "s32": {"base": 25.0}, "s46": {"base": 27.0}, "b20": {"base": 29.0}, "b32": {"base": 31.0}},
   "zone_3": {"br16": {"base": 20.0}, "s20": {"base": 24.0}, "s32": {"base": 26.0}, "s46": {"base": 28.0}, "b20": {"base": 31.0}, "b32": {"base": 33.0}},
