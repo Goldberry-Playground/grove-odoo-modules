@@ -1575,7 +1575,19 @@ def _create_draft_order(website, env, payload):
     # collision the no-$0-ship breaker exists to catch). Absent `fulfillment`
     # keeps the pre-1057 inference (a ship-to state ⇒ ship) for back-compat with
     # callers that don't send the field yet.
+    # Reject any explicit `fulfillment` that isn't exactly ship/pickup (GOL-1303).
+    # An unrecognized value (typo, stale client, hand-rolled bearer-API caller)
+    # would otherwise fall through to the pre-1057 inference below, which — with a
+    # missing state — silently skips the green-list gate, the potted gate and the
+    # $0-shipping breaker. Mirror the BFF validator: fail loudly at 400. Absent
+    # `fulfillment` (None) still keeps back-compat inference.
     fulfillment = (payload.get("fulfillment") or "").strip().lower() or None
+    if fulfillment is not None and fulfillment not in ("ship", "pickup"):
+        order.unlink()
+        return None, _json_response(
+            {"error": "Invalid fulfillment — choose shipping or farm pickup."},
+            status=400,
+        )
     ship_state = (shipping or {}).get("state") if shipping else None
     is_pickup = fulfillment == "pickup"
     if fulfillment == "ship" and not ship_state:
@@ -1642,10 +1654,16 @@ def _create_draft_order(website, env, payload):
                 status=409,
             )
 
-    # WV sales tax is destination-based (GOL-1021): keep it only for WV-bound
-    # orders, strip it from every line (incl. shipping) for any other ship-to
-    # state. Runs after the shipping line so it is de-taxed too when out of state.
-    _apply_destination_tax(env, order, shipping)
+    # WV sales tax is destination-based for SHIPPED orders (GOL-1021): keep it
+    # only for WV-bound orders, strip it from every line (incl. shipping) for any
+    # other ship-to state. Runs after the shipping line so it is de-taxed too when
+    # out of state. Farm pickup always transfers at the WV farm, so WV tax applies
+    # regardless of any (possibly stale out-of-state) address the buyer left in the
+    # payload before toggling to pickup — skip destination de-taxing entirely so
+    # the collected tax matches the pickup UI's "West Virginia sales tax applies"
+    # promise (GOL-1303).
+    if not is_pickup:
+        _apply_destination_tax(env, order, shipping)
 
     return order, None
 
