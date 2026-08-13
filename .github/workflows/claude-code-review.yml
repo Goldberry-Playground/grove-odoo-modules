@@ -15,9 +15,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Preflight: is the review credential actually available to THIS run?
+  #
+  # Without it the action authenticates with an empty token and exits 1, so an
+  # unconfigured (or Dependabot-scoped) repo paints a red X on every single PR —
+  # which trains everyone to ignore red, the opposite of what a review lane is
+  # for. Two real cases produce an empty token here:
+  #   1. the repo (or org->repo grant) simply doesn't have the secret yet, and
+  #   2. Dependabot runs, which read GitHub's ISOLATED Dependabot secret store —
+  #      the caveat already documented on allowed_bots below.
+  # A secret can't be tested in a job-level `if:`, so it's read into a step here
+  # and surfaced as an output — the same preflight shape this org already uses
+  # for dependency-review.
+  preflight:
+    if: github.event.pull_request.draft == false
+    runs-on: ubuntu-latest
+    outputs:
+      has_token: ${{ steps.check.outputs.has_token }}
+    steps:
+      - id: check
+        env:
+          # Never echoed — only its emptiness is tested.
+          CLAUDE_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+        run: |
+          if [ -n "${CLAUDE_TOKEN}" ]; then
+            echo "has_token=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_token=false" >> "$GITHUB_OUTPUT"
+            echo "::notice title=Claude review skipped::CLAUDE_CODE_OAUTH_TOKEN is not available to this run, so the agentic review was skipped (the PR is NOT unreviewed-by-policy, it simply could not run). Set it with 'gh secret set CLAUDE_CODE_OAUTH_TOKEN -R ${{ github.repository }}' — and additionally '--app dependabot' for Dependabot PRs."
+          fi
+
   claude-review:
     # Drafts get reviewed when marked ready (ready_for_review trigger above).
-    if: github.event.pull_request.draft == false
+    # Skipped (neutral, not failed) when the credential is absent — see preflight.
+    needs: preflight
+    if: github.event.pull_request.draft == false && needs.preflight.outputs.has_token == 'true'
 
     runs-on: ubuntu-latest
     permissions:
