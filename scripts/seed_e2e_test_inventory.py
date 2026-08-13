@@ -375,6 +375,10 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
             drift["taxes_id"] = [(6, 0, tax_ids)]
         if DRY_RUN:
             print(f"  = fixture exists (id={tmpl_id}); would reconcile {drift or 'nothing'}")
+            # Read-only dry run: skip the variant default_code write + apply_stock
+            # below (they mutate). Mirrors the create branch's early return so
+            # DRY_RUN never touches Odoo, per the docstring's "Dry run (read-only)".
+            return
         elif drift:
             call(models, uid, "product.template", "write", [[tmpl_id], drift], ctx)
             print(f"  ~ reconciled fixture (id={tmpl_id}) fields: {list(drift)}")
