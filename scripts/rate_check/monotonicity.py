@@ -4,11 +4,11 @@
 The daily rate-checker (``rate_check.py``) rewrites
 ``grove_headless/data/shipping_rates.json`` wholesale from live Shippo quotes.
 A single bad quote (or a hand-edit) can produce a table where a *bigger box*
-or a *farther zone* is somehow cheaper — which makes the packer's
-"fewer, bigger boxes for bulk" outcomes non-intuitive and can let a customer
-game the cart into an undercharge. This module is the guard against that.
+is somehow cheaper — which makes the packer's "fewer, bigger boxes for bulk"
+outcomes non-intuitive and lets a customer game the cart into an undercharge by
+splitting into more/heavier boxes. This module is the guard against that.
 
-It enforces three properties on the table, reading the table exactly as the
+It enforces two properties on the table, reading the table exactly as the
 checkout prices it (source of truth = the zone engine's ``rate_feed()``):
 
 1. **Coverage** — every one of the 6 catalog boxes has a rate in every one of
@@ -16,15 +16,27 @@ checkout prices it (source of truth = the zone engine's ``rate_feed()``):
 2. **Box monotonicity** — within a zone, a heavier box (by representative
    billable weight, the same ordering the engine's own test asserts) is never
    cheaper than a lighter one.
-3. **Zone monotonicity** — for a fixed box, a farther zone (zone_1 -> zone_5)
-   is never cheaper than a nearer one.
+
+**Why no cross-zone monotonicity.** A prior version also asserted "for a fixed
+box, a farther zone (zone_1 -> zone_5) is never cheaper than a nearer one." That
+invariant is FALSE against real UPS Ground from Summersville WV 26651: the 5
+state-distance bands don't track UPS's own cost ordering (e.g. an OH/NY
+destination genuinely quotes cheaper than a NC one, and Boston MA in zone_4
+quotes higher than Portland ME in zone_5). It was only ever a proxy for the
+thing we actually care about — *never undercharging* — and it blocked correct
+tables while protecting nothing real. That guarantee is now held upstream by
+``rate_check`` quoting each zone's **worst-case (priciest) destination in the
+band** so every published per-zone rate is an upper bound for the whole band
+(GOL-1495, board-approved 2026-08-14). Only box monotonicity — the invariant
+that stops cart-gaming within a single lane — is enforced here.
 
 Two entry points:
 
-* ``find_violations(table, boxes_light_to_heavy, zones_near_to_far)`` — pure,
-  no imports, returns a list of human-readable violation strings (empty ==
-  sound). ``rate_check`` calls this on the *proposed* table before writing, so
-  a non-monotone table is never published; tests call it on fixtures.
+* ``find_violations(table, boxes_light_to_heavy, zones)`` — pure, no imports,
+  returns a list of human-readable violation strings (empty == sound).
+  ``rate_check`` calls this on the *proposed* table before writing, so a
+  non-monotone table is never published; tests call it on fixtures. ``zones``
+  is just the set of zones to check (order no longer carries meaning).
 * ``main()`` — CLI. Checks the *live committed* table (via the zone engine
   ``rate_feed()``) so it is runnable in CI and day-of ops with no Shippo key.
   Exit 0 = sound, 2 = violations found, 1 = could not load the table.
@@ -67,14 +79,16 @@ def ordered_boxes(box_ids, weight_of) -> list:
     return sorted(box_ids, key=lambda b: (weight_of(b), b))
 
 
-def find_violations(table: dict, boxes_light_to_heavy, zones_near_to_far) -> list:
-    """Return a list of monotonicity/coverage violations for ``table``.
+def find_violations(table: dict, boxes_light_to_heavy, zones) -> list:
+    """Return a list of coverage/box-monotonicity violations for ``table``.
 
     ``table``: ``{zone: {box_id: {"base": usd}}}`` (``_``-prefixed keys must
     already be stripped) — or the same with bare-number cells. An empty list
     means the table is sound. Missing cells are reported as coverage gaps and
-    then skipped by the monotonicity passes (a gap is not also a "cheaper"
-    finding), so the output stays one problem per line.
+    then skipped by the box-monotonicity pass (a gap is not also a "cheaper"
+    finding), so the output stays one problem per line. ``zones`` is the set of
+    zones to check; its order is not significant (cross-zone monotonicity is
+    intentionally not enforced — see the module docstring, GOL-1495).
     """
     violations: list[str] = []
 
@@ -82,13 +96,14 @@ def find_violations(table: dict, boxes_light_to_heavy, zones_near_to_far) -> lis
         return _base((table.get(zone) or {}).get(box))
 
     # 1. Coverage — every box priced in every zone.
-    for zone in zones_near_to_far:
+    for zone in zones:
         for box in boxes_light_to_heavy:
             if base(zone, box) is None:
                 violations.append(f"coverage: {zone} has no rate for box {box}")
 
-    # 2. Box monotonicity — within a zone, heavier is never cheaper.
-    for zone in zones_near_to_far:
+    # 2. Box monotonicity — within a zone, heavier is never cheaper. This is the
+    # only cart-gaming vector left once each zone quotes its band's worst case.
+    for zone in zones:
         for lighter, heavier in zip(boxes_light_to_heavy, boxes_light_to_heavy[1:]):
             lo, hi = base(zone, lighter), base(zone, heavier)
             if lo is None or hi is None:
@@ -96,17 +111,6 @@ def find_violations(table: dict, boxes_light_to_heavy, zones_near_to_far) -> lis
             if hi < lo:
                 violations.append(
                     f"box order: {zone} heavier box {heavier} (${hi:g}) cheaper than lighter {lighter} (${lo:g})"
-                )
-
-    # 3. Zone monotonicity — for a box, a farther zone is never cheaper.
-    for box in boxes_light_to_heavy:
-        for near, far in zip(zones_near_to_far, zones_near_to_far[1:]):
-            near_base, far_base = base(near, box), base(far, box)
-            if near_base is None or far_base is None:
-                continue
-            if far_base < near_base:
-                violations.append(
-                    f"zone order: box {box} farther {far} (${far_base:g}) cheaper than nearer {near} (${near_base:g})"
                 )
 
     return violations

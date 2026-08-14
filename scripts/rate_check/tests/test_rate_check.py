@@ -47,7 +47,9 @@ class TestReferenceAddresses(unittest.TestCase):
 
         with mock.patch.object(rc.requests, "post", fake_post):
             rc.quote_zone_box("k", "zone_2", next(iter(rc.PARCELS)))
-        self.assertEqual(captured["city"], "Columbus")
+        # zone_2 reference is the band's worst-case (priciest) corner, NYC,
+        # not a mid-band representative like Columbus (GOL-1495).
+        self.assertEqual(captured["city"], "New York")
 
 
 class TestRateMath(unittest.TestCase):
