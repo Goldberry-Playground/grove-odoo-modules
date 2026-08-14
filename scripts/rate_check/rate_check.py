@@ -37,13 +37,16 @@ ORIGIN = {
     "zip": "26651",
     "country": "US",
 }
-# One representative residential destination per rate zone.
+# One representative residential destination per rate zone. Each entry is a
+# real (city, state, zip) — a placeholder city like "n/a" makes UPS refuse to
+# rate some dense multi-city ZIPs (Columbus 43215, Chicago 60601), so every
+# probe city must be the ZIP's actual city (GOL-1447).
 REFERENCE_ZIPS = {
-    "zone_1": ("NC", "27601"),
-    "zone_2": ("OH", "43215"),
-    "zone_3": ("IL", "60601"),
-    "zone_4": ("MN", "55401"),
-    "zone_5": ("ME", "04101"),
+    "zone_1": ("Raleigh", "NC", "27601"),
+    "zone_2": ("Columbus", "OH", "43215"),
+    "zone_3": ("Chicago", "IL", "60601"),
+    "zone_4": ("Minneapolis", "MN", "55401"),
+    "zone_5": ("Portland", "ME", "04101"),
 }
 # Box Engine v2: reference parcels come straight from the box catalog —
 # one quote per box id per zone, at the box's representative billable weight
@@ -95,13 +98,13 @@ def target_rate(quote: float, box_id: str) -> int:
 
 
 def quote_zone_box(api_key: str, zone: str, box_id: str) -> float | None:
-    state, zip5 = REFERENCE_ZIPS[zone]
+    city, state, zip5 = REFERENCE_ZIPS[zone]
     payload = {
         "address_from": ORIGIN,
         "address_to": {
             "name": "Rate Probe",
             "street1": "100 Main St",
-            "city": "n/a",
+            "city": city,
             "state": state,
             "zip": zip5,
             "country": "US",
