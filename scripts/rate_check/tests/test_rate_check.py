@@ -16,6 +16,40 @@ FIXTURE = os.path.join(os.path.dirname(__file__), "..", "fixtures", "shippo_rate
 NO_UPS_FIXTURE = os.path.join(os.path.dirname(__file__), "..", "fixtures", "shippo_rates_no_ups.json")
 
 
+class TestReferenceAddresses(unittest.TestCase):
+    def test_reference_zips_carry_a_real_city(self):
+        # Each reference destination must be (city, state, zip). A placeholder
+        # city ("n/a") makes UPS hard-reject the probe once a real carrier is
+        # connected ("111539 Invalid Destination Postal Code and City"),
+        # dropping the UPS Ground rate and failing rate-check (GOL-1446).
+        for zone, entry in rc.REFERENCE_ZIPS.items():
+            self.assertEqual(len(entry), 3, f"{zone}: expected (city, state, zip)")
+            city, state, zip5 = entry
+            self.assertTrue(city and city.strip().lower() != "n/a", f"{zone}: bad city {city!r}")
+            self.assertEqual(len(zip5), 5, f"{zone}: bad zip {zip5!r}")
+
+    def test_probe_sends_the_zone_city_not_a_placeholder(self):
+        captured = {}
+
+        def fake_post(url, json=None, timeout=None, headers=None):
+            captured["city"] = json["address_to"]["city"]
+
+            class _R:
+                @staticmethod
+                def raise_for_status():
+                    pass
+
+                @staticmethod
+                def json():
+                    return {"rates": []}
+
+            return _R()
+
+        with mock.patch.object(rc.requests, "post", fake_post):
+            rc.quote_zone_box("k", "zone_2", next(iter(rc.PARCELS)))
+        self.assertEqual(captured["city"], "Columbus")
+
+
 class TestRateMath(unittest.TestCase):
     def test_ups_ground_rate_selected(self):
         with open(FIXTURE) as fh:
