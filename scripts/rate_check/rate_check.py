@@ -7,9 +7,11 @@ target = ceil(quote + per-box packaging + 2.00), and rewrites
 grove_headless/data/shipping_rates.json when any zone drifts >= $1.
 
 Before writing, the proposed table is run through the monotonicity guard
-(monotonicity.find_violations): a bigger box or a farther zone must never be
-cheaper. A violation aborts the rewrite (exit 4) so a bad quote can never
-publish an exploitable table — the workflow alerts and rates stay untouched.
+(monotonicity.find_violations): within a zone a bigger box must never be
+cheaper (cart-gaming). A violation aborts the rewrite (exit 4) so a bad quote
+can never publish an exploitable table — the workflow alerts and rates stay
+untouched. Each zone quotes its band's worst-case (priciest) destination so the
+published rate is a band-wide upper bound — no undercharge (GOL-1495).
 
 Exit codes: 0 no material drift (or Shippo has no UPS Ground rates at all yet
 AND the current table is the provisional placeholder — account not finished,
@@ -37,18 +39,28 @@ ORIGIN = {
     "zip": "26651",
     "country": "US",
 }
-# One representative residential destination per rate zone. The city MUST
-# match the ZIP: once a real UPS carrier is connected, UPS validates city
-# against ZIP and HARD-rejects a mismatch ("111539 Invalid Destination Postal
-# Code and City"), dropping the UPS Ground rate for that probe. A placeholder
-# city ("n/a") silently passed on Shippo's shared UPS account but breaks on the
-# live account for strictly-validated ZIPs (e.g. 43215/60601) — GOL-1446.
+# One reference residential destination per rate zone = the WORST-CASE
+# (priciest live UPS Ground) destination in that zone's state band, so the
+# published per-zone rate is an upper bound for every customer in the band and
+# no one is ever undercharged (GOL-1495, board-approved 2026-08-14). Because
+# the 5 state-distance bands don't track UPS's own cost ordering, quoting a
+# merely-representative city (e.g. Columbus for all of zone_2) would undercharge
+# the band's far corner (NYC); quoting the far corner over-bills the cheapest
+# in-band destination modestly — the accepted cost of static zone pricing.
+# The worst-case picks were determined by live Shippo probe of each band's
+# corner states (br16 + b32; the ranking is box-invariant, UPS-zone driven).
+#
+# The city MUST match the ZIP: once a real UPS carrier is connected, UPS
+# validates city against ZIP and HARD-rejects a mismatch ("111539 Invalid
+# Destination Postal Code and City"), dropping the UPS Ground rate for that
+# probe. A placeholder city ("n/a") silently passed on Shippo's shared UPS
+# account but breaks on the live account for strictly-validated ZIPs — GOL-1446.
 REFERENCE_ZIPS = {
-    "zone_1": ("Raleigh", "NC", "27601"),
-    "zone_2": ("Columbus", "OH", "43215"),
-    "zone_3": ("Chicago", "IL", "60601"),
-    "zone_4": ("Minneapolis", "MN", "55401"),
-    "zone_5": ("Portland", "ME", "04101"),
+    "zone_1": ("Wilmington", "NC", "28401"),  # band {WV,VA,KY,NC,DE}; NC coast
+    "zone_2": ("New York", "NY", "10001"),  # band {MD,PA,OH,IN,NJ,NY}
+    "zone_3": ("Chicago", "IL", "60601"),  # band {IL,MI,CT,RI}
+    "zone_4": ("Boston", "MA", "02108"),  # band {WI,MN,MA,VT,NH}
+    "zone_5": ("Portland", "ME", "04101"),  # band {ME}
 }
 # Box Engine v2: reference parcels come straight from the box catalog —
 # one quote per box id per zone, at the box's representative billable weight
@@ -218,9 +230,12 @@ def main() -> int:
         )
         return 1
 
-    # Guard before publishing: a bigger box or farther zone must never be
-    # cheaper. A bad Shippo quote that inverts the table is refused, not
-    # written — the workflow's failure alert fires and rates stay untouched.
+    # Guard before publishing: within a zone a bigger box must never be
+    # cheaper (cart-gaming). A bad Shippo quote that inverts the table is
+    # refused, not written — the workflow's failure alert fires and rates stay
+    # untouched. Cross-zone monotonicity is intentionally NOT enforced: real UPS
+    # doesn't order our state bands by cost, and worst-case reference ZIPs above
+    # already guarantee no undercharge (GOL-1495).
     box_order = monotonicity.ordered_boxes(shipping_boxes.BOXES, shipping_boxes.representative_billable_lb)
     violations = monotonicity.find_violations(proposed, box_order, list(REFERENCE_ZIPS))
     if violations:

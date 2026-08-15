@@ -35,10 +35,13 @@ class TestFindViolations(unittest.TestCase):
         v = mono.find_violations(_table(22, 18, 23, 24), BOXES, ZONES)
         self.assertTrue(any("box order" in x and "zone_1" in x for x in v), v)
 
-    def test_farther_zone_cheaper_flagged(self):
-        # br16 costs less in zone_2 (farther) than zone_1.
-        v = mono.find_violations(_table(20, 22, 18, 23), BOXES, ZONES)
-        self.assertTrue(any("zone order" in x and "br16" in x for x in v), v)
+    def test_cross_zone_cheaper_is_allowed(self):
+        # Cross-zone monotonicity is intentionally NOT enforced (GOL-1495):
+        # real UPS Ground doesn't order our state bands by cost, and worst-case
+        # reference ZIPs guarantee no undercharge. A "farther" zone quoting
+        # cheaper (here br16 costs less in zone_2 than zone_1) is not a
+        # violation, as long as box monotonicity holds within each zone.
+        self.assertEqual(mono.find_violations(_table(20, 22, 18, 23), BOXES, ZONES), [])
 
     def test_missing_cell_is_a_coverage_violation(self):
         table = _table(18, 22, 19, 23)
