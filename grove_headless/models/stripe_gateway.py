@@ -50,7 +50,7 @@ def to_cents(amount) -> int:
 # ── Checkout Session ────────────────────────────────────────────────────────
 
 
-def line_charge(unit_price, quantity, free_available, deposit=PREORDER_DEPOSIT):
+def line_charge(unit_price, quantity, free_available, deposit=PREORDER_DEPOSIT, ships_now=True):
     """Resolve one product line into Stripe sub-charges under the charging matrix.
 
     Returns a list of ``(amount_cents, quantity, is_preorder)`` tuples so a
@@ -59,20 +59,31 @@ def line_charge(unit_price, quantity, free_available, deposit=PREORDER_DEPOSIT):
     billed at full price now, and each unit of the shortfall is a preorder
     charged the flat deposit PER UNIT (balance captured off-session at ship).
 
-      * fully in stock  -> [(full price, quantity, False)]
+      * fully in stock, in window  -> [(full price, quantity, False)]
       * fully short/unknown stock -> [(deposit, quantity, True)]  (per unit)
       * partially in stock (0 < free < quantity) ->
             [(full price, free, False), (deposit, quantity - free, True)]
+      * cannot ship now (``ships_now`` False) -> [(deposit, quantity, True)]
 
     Stock is measured as *free* quantity (on-hand minus already-reserved),
     passed in by the caller (GOL-1036 defect 4) — a unit another order has
     reserved is not sellable now and must fall to the preorder side, or the
     same tree is billed to two customers. ``free_available`` None/negative is
     treated as zero free stock (unknown -> preorder), never as "in stock".
+
+    ``ships_now`` closes the calendar-window gap (GOL-1666 §1): a line that
+    cannot ship now — a bareroot tree inside a dormant preorder window — is a
+    preorder for its WHOLE quantity even when stock is on hand, because the
+    tree is in the ground and can't be lifted until its wave. On-hand units
+    still reserve with the flat deposit and settle off-session at ship, which
+    matches the product page's deposit-now promise (previously such a line
+    charged 100% at checkout and contradicted the page). The caller decides
+    which lines honor the window — only bareroot passes ``ships_now`` through;
+    potted is pickup-only and keeps its stock-driven behaviour.
     """
     qty = int(quantity)
     free = 0 if free_available is None else int(free_available)
-    in_stock = max(0, min(free, qty))
+    in_stock = max(0, min(free, qty)) if ships_now else 0
     charges = []
     if in_stock > 0:
         charges.append((to_cents(unit_price), in_stock, False))
