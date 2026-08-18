@@ -65,6 +65,25 @@ class TestAmounts(unittest.TestCase):
         charges = sg.line_charge(unit_price=25.0, quantity=2, free_available=-3)
         self.assertEqual(charges, [(sg.to_cents(sg.PREORDER_DEPOSIT), 2, True)])
 
+    def test_line_charge_out_of_window_is_all_deposit_despite_stock(self):
+        # GOL-1666 §1: a bareroot line inside a dormant preorder window can't
+        # ship now, so every unit reserves with the flat deposit EVEN with free
+        # stock on hand — matches the product page's deposit-now promise instead
+        # of charging 100% at checkout.
+        dep = sg.to_cents(sg.PREORDER_DEPOSIT)
+        self.assertEqual(
+            sg.line_charge(unit_price=25.0, quantity=3, free_available=10, ships_now=False),
+            [(dep, 3, True)],
+        )
+
+    def test_line_charge_in_window_default_is_full_price(self):
+        # ships_now defaults True: the existing in-stock/in-window path is
+        # unchanged (in-stock and in-window still charges in full).
+        self.assertEqual(
+            sg.line_charge(unit_price=25.0, quantity=2, free_available=5, ships_now=True),
+            [(2500, 2, False)],
+        )
+
 
 class TestSessionParams(unittest.TestCase):
     LINES = [

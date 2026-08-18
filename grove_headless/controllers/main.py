@@ -1683,6 +1683,18 @@ def _build_stripe_line_items(order):
     line_items = []
     preorder_variant_ids = []
     tax_today = 0.0
+    # Calendar-window preorders (GOL-1666 §1) only apply to shipped orders: a
+    # bareroot line that can't ship now to the destination zone charges the flat
+    # deposit even when in stock, matching the product page. A shipped order is
+    # the one that carries a GROVE-SHIP line and a known destination ZIP; pickup
+    # windows come from the FARM's zone, not the customer's, and land in GOL-1666
+    # §3 (blocked on the farm-ZIP confirmation) — until then pickup is untouched.
+    today = _date.today()
+    is_ship_order = any(
+        ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE for ol in order.order_line
+    )
+    dest_partner = order.partner_shipping_id or order.partner_id
+    dest_zip = dest_partner.zip if dest_partner else None
     for line in order.order_line:
         if line.display_type or not line.product_id:
             continue
@@ -1699,7 +1711,15 @@ def _build_stripe_line_items(order):
         # order already reserved is not sellable now and must fall to preorder
         # (GOL-1036 defect 4), or the same tree is billed to two customers.
         ordered_qty = line.product_uom_qty
-        for amount, qty, is_preorder in stripe_gateway.line_charge(line.price_unit, ordered_qty, product.free_qty):
+        # Only bareroot honors the mailing-window calendar; potted is pickup-only
+        # and its sold-out handling is the GOL-1666 §2 bareroot steer, not here.
+        tier = product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier or "potted"
+        line_ships_now = True
+        if is_ship_order and tier == "bareroot":
+            line_ships_now = ship_options(dest_zip, tier, today).get("ships_now", True)
+        for amount, qty, is_preorder in stripe_gateway.line_charge(
+            line.price_unit, ordered_qty, product.free_qty, ships_now=line_ships_now
+        ):
             if is_preorder:
                 preorder_variant_ids.append(product.id)
                 line_items.append(
