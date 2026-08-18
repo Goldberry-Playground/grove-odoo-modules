@@ -9,6 +9,7 @@ keys are read (the handlers take the env, not the HTTP request).
 import hashlib
 import hmac
 import time
+from datetime import date
 from unittest import mock
 
 from odoo.addons.grove_headless.controllers import main as grove_main
@@ -176,6 +177,91 @@ class TestStripeCheckout(TransactionCase):
         self.assertEqual(goods["kind"], "goods")
         deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
         self.assertEqual(deposit["kind"], "deposit")
+
+    # ── shipping-calendar preorder gate (GOL-1309) ───────────────────────
+
+    def _ship_payload(self, zip_code, **extra):
+        """A ship-to cart payload for the calendar gate. Zip 10001 -> USDA zone
+        7, 01001 -> zone 6, 99999 -> unknown (absent from the PHZM matrix)."""
+        payload = {
+            "contact": {"name": "Cal Endar", "email": "cal@example.com"},
+            "items": [{"variant_id": self.product.id, "quantity": 1}],
+            "shipping": {"street": "1 Rd", "city": "Town", "state": "NY", "zip": zip_code},
+        }
+        payload.update(extra)
+        return payload
+
+    def test_calendar_preorder_forces_deposit_for_in_stock_bareroot(self):
+        """GOL-1309 P0: an IN-STOCK bareroot tree ordered in its dormant preorder
+        season (zone 7, mid-January) is charged as a per-unit deposit, not in
+        full — it physically cannot ship until the spring wave, so a full 'ships
+        now' charge would be wrong. Before this gate the shelf stock (5 on hand)
+        billed both units at full price in any month."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=2)
+        forced = grove_main._calendar_preorder_variant_ids(
+            self.env, order, self._ship_payload("10001"), today=date(2027, 1, 15)
+        )
+        self.assertEqual(forced, frozenset({self.product.id}))
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, forced)
+        self.assertEqual(preorder_ids, [self.product.id])
+        deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
+        self.assertEqual(deposit["quantity"], 2)  # both in-stock units become deposits
+        self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+        # No full-price goods line and no tax today — nothing settles until ship.
+        self.assertFalse([li for li in line_items if li["name"] == self.product.display_name])
+        self.assertFalse([li for li in line_items if li["name"] == "Sales tax (WV)"])
+
+    def test_calendar_in_window_keeps_full_charge(self):
+        """Inside the shopper's active spring ship window the in-stock tree ships
+        now → full price, no calendar deposit forcing."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        forced = grove_main._calendar_preorder_variant_ids(
+            self.env, order, self._ship_payload("10001"), today=date(2027, 4, 15)
+        )
+        self.assertEqual(forced, frozenset())
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, forced)
+        self.assertEqual(preorder_ids, [])
+        goods = next(li for li in line_items if li["name"] == self.product.display_name)
+        self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(25.0))
+
+    def test_calendar_gate_skips_pickup(self):
+        """Farm pickup transfers at the WV farm, off the ship calendar — a
+        pickup order is never calendar-repriced, even in preorder season."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        forced = grove_main._calendar_preorder_variant_ids(
+            self.env, order, self._ship_payload("10001", fulfillment="pickup"), today=date(2027, 1, 15)
+        )
+        self.assertEqual(forced, frozenset())
+
+    def test_calendar_gate_ignores_unknown_zip(self):
+        """An unresolvable destination zone (zip absent from the PHZM matrix)
+        leaves stock-based charging untouched — we neither block nor reseason an
+        order we cannot place on the calendar; the frontend already resolved the
+        mode pre-checkout."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        forced = grove_main._calendar_preorder_variant_ids(
+            self.env, order, self._ship_payload("99999"), today=date(2027, 1, 15)
+        )
+        self.assertEqual(forced, frozenset())
+
+    def test_calendar_gate_skips_non_bareroot_lines(self):
+        """Only bareroot lines are governed by the ship calendar — a potted line
+        is never forced (it is pickup-only and never reaches a ship order)."""
+        self.product.product_tmpl_id.grove_shipping_tier = "potted"
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        forced = grove_main._calendar_preorder_variant_ids(
+            self.env, order, self._ship_payload("10001"), today=date(2027, 1, 15)
+        )
+        self.assertEqual(forced, frozenset())
 
     # ── ship-to gate: state / potted / $0-shipping breaker (GOL-1036) ─────
 
