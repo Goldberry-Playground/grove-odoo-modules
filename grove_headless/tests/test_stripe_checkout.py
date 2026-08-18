@@ -502,3 +502,60 @@ class TestStripeCheckout(TransactionCase):
         self.assertEqual(len(shipped), 1)
         self.assertEqual(shipped.email_to, self.partner.email)
         self.assertIn("TRACK999", shipped.body_html or "")
+
+    # ── preorder deposit email (GOL-1666) ────────────────────────────────
+
+    def test_preorder_deposit_email_sent_alongside_receipt(self):
+        """A deposit_paid checkout emails the ratified deposit explainer in
+        addition to the standard receipt; a full-charge order does not."""
+        self._set_stock(self.product, 0)
+        order = self._make_order(qty=1)
+        order.grove_stripe_session_id = "cs_dep_mail"
+        order.grove_preorder_variant_ids = str(self.product.id)
+        Template = type(self.env["mail.template"])
+        orig = Template.send_mail
+        Template.send_mail = lambda self_t, res_id, **kw: 0  # stub the branded receipt
+        try:
+            with mute_logger("odoo.addons.mail.models.mail_mail"):
+                result = grove_main._handle_session_completed(
+                    self.env, {"id": "cs_dep_mail", "payment_intent": "pi_dep_mail"}
+                )
+        finally:
+            Template.send_mail = orig
+        self.assertEqual(result, "deposit_paid")
+        deposit_mail = self.env["mail.mail"].search([("subject", "ilike", f"preorder deposit for {order.name}")])
+        self.assertEqual(len(deposit_mail), 1)
+        body = deposit_mail.body_html or ""
+        self.assertIn("$10 deposit per tree today", body)
+        self.assertIn("balance", body)
+        self.assertNotIn("—", body)
+
+    def test_no_preorder_deposit_email_for_full_charge(self):
+        """An in-stock (full-charge) order sends no deposit explainer."""
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        order.grove_stripe_session_id = "cs_full_mail"
+        Template = type(self.env["mail.template"])
+        orig = Template.send_mail
+        Template.send_mail = lambda self_t, res_id, **kw: 0
+        try:
+            with mute_logger("odoo.addons.mail.models.mail_mail"):
+                grove_main._handle_session_completed(self.env, {"id": "cs_full_mail", "payment_intent": "pi_full"})
+        finally:
+            Template.send_mail = orig
+        self.assertFalse(self.env["mail.mail"].search([("subject", "ilike", "preorder deposit")]))
+
+    def test_preship_email_carries_balance_line_for_preorder(self):
+        """The shipped/transit email spells out the deposit/balance arrangement
+        for a preorder, and omits it for a full-charge order."""
+        preorder = self._make_order(qty=1)
+        preorder.grove_preorder_variant_ids = str(self.product.id)
+        full = self._make_order(qty=1)
+        full.grove_preorder_variant_ids = ""
+        with mute_logger("odoo.addons.mail.models.mail_mail"):
+            grove_main._notify_shipping_status(self.env, preorder, "transit", "TRK_DEP")
+            grove_main._notify_shipping_status(self.env, full, "transit", "TRK_FULL")
+        pre_mail = self.env["mail.mail"].search([("body_html", "ilike", "TRK_DEP")])
+        full_mail = self.env["mail.mail"].search([("body_html", "ilike", "TRK_FULL")])
+        self.assertIn("deposit per tree", pre_mail.body_html or "")
+        self.assertNotIn("deposit per tree", full_mail.body_html or "")

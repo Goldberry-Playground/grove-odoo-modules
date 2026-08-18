@@ -14,6 +14,7 @@ from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME
 from ..models import stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.newsletter import newsletter_tag_names
+from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
 from ..models.shipping_boxes import packing_mode
 from ..models.shipping_calendar import (
     merge_calendar_override,
@@ -638,15 +639,7 @@ class GroveHeadlessAPI(http.Controller):
         without a deploy. Malformed JSON is ignored (the feed falls back to
         defaults) rather than 500-ing the storefront.
         """
-        raw = request.env["ir.config_parameter"].sudo().get_param("grove_headless.shipping_calendar")
-        if not raw:
-            return None
-        try:
-            parsed = json.loads(raw)
-        except (ValueError, TypeError):
-            _logger.warning("grove_headless.shipping_calendar is not valid JSON; using calendar defaults")
-            return None
-        return parsed
+        return _parse_calendar_override(request.env)
 
     @http.route(
         "/grove/api/v1/shipping/options",
@@ -1829,6 +1822,11 @@ def _handle_session_completed(env, session):
     except Exception:  # noqa: BLE001 — payment is already recorded; don't fail the webhook
         _logger.exception("action_confirm failed for %s (payment recorded, confirm deferred)", order.name)
     _send_order_confirmation_email(env, order)
+    if has_preorder:
+        # Deposit explainer alongside the branded receipt (GOL-1666): the
+        # standard sale template lists the charged-today totals; this line
+        # spells out the deposit/balance arrangement in the ratified voice.
+        _notify_preorder_deposit(env, order)
     return vals["grove_checkout_status"]
 
 
@@ -1839,6 +1837,68 @@ def _handle_session_expired(env, session):
         return "order_not_found"
     order.write({"grove_checkout_status": "expired"})
     return "expired"
+
+
+def _parse_calendar_override(env):
+    """Parsed `grove_headless.shipping_calendar` override dict, or None.
+
+    Module-level twin of the controller's `_shipping_calendar_override` so the
+    webhook/notify path (which has `env` but no `request`) can resolve the same
+    admin-editable calendar. Malformed JSON is ignored (fall back to defaults).
+    """
+    raw = env["ir.config_parameter"].sudo().get_param("grove_headless.shipping_calendar")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        _logger.warning("grove_headless.shipping_calendar is not valid JSON; using calendar defaults")
+        return None
+
+
+def _preorder_ship_season(env, order):
+    """Best-effort ship season ('spring' | 'fall') for the order's destination,
+    or None when the shipping ZIP/zone is unknown. Used only to word the
+    preorder-deposit emails ("...ships this spring"); a None just drops the
+    season word, never blocks the email."""
+    partner = order.partner_shipping_id or order.partner_id
+    zip_code = partner.zip if partner else None
+    zone = usda_zone_for_zip(zip_code)
+    if zone is None:
+        return None
+    calendar = merge_calendar_override(_parse_calendar_override(env))
+    return resolve_fulfillment(zone, _date.today(), calendar).get("season")
+
+
+def _notify_preorder_deposit(env, order):
+    """Best-effort preorder-deposit explainer emailed alongside the standard
+    order-confirmation receipt (GOL-1666). Only sent for orders that took a
+    deposit (grove_preorder_variant_ids set). Never fatal: the payment and the
+    branded receipt already stand on their own if outgoing mail is unconfigured.
+    """
+    email = order.partner_id.email
+    if not email:
+        return
+    season = _preorder_ship_season(env, order)
+    body = (
+        f"<p>Hi {order.partner_id.name or 'there'},</p>"
+        f"<p>Thanks for reserving with us! Your order <strong>{order.name}</strong> "
+        f"includes preorder trees.</p>"
+        f"<p>{confirmation_deposit_line(season)}</p>"
+        f"<p>We'll email you again when your trees ship.</p>"
+        f"<p>Goldberry Grove Nursery</p>"
+    )
+    try:
+        env["mail.mail"].sudo().create(
+            {
+                "subject": f"Your preorder deposit for {order.name}",
+                "email_to": email,
+                "body_html": body,
+                "auto_delete": True,
+            }
+        ).send()
+    except Exception:  # noqa: BLE001 — deposit explainer is best-effort
+        _logger.warning("Preorder deposit email failed for %s", order.name, exc_info=True)
 
 
 def _notify_customer_apology(env, order, product_names, refunded):
@@ -1933,11 +1993,18 @@ def _notify_shipping_status(env, order, status, tracking):
     if not notice or not order.partner_id.email:
         return
     subject_tmpl, lead = notice
+    # Pre-ship balance reminder (GOL-1666): only on the "shipped"/transit notice
+    # and only for orders that took a preorder deposit, so a full-charge order
+    # never sees a balance line it does not owe.
+    balance_html = ""
+    if status == "transit" and (order.grove_preorder_variant_ids or "").strip():
+        balance_html = f"<p>{preship_balance_line(_preorder_ship_season(env, order))}</p>"
     body = (
         f"<p>Hi {order.partner_id.name or 'there'},</p>"
         f"<p>{lead}</p>"
         f"<p>Order: <strong>{order.name}</strong><br/>"
         f"Tracking number: <strong>{tracking}</strong></p>"
+        f"{balance_html}"
         f"<p>— Goldberry Grove Nursery</p>"
     )
     try:
