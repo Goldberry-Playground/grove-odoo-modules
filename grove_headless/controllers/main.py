@@ -1697,7 +1697,10 @@ def _build_stripe_line_items(order):
     # windows come from the FARM's zone, not the customer's, and land in GOL-1666
     # §3 (blocked on the farm-ZIP confirmation) — until then pickup is untouched.
     today = _date.today()
-    is_ship_order = any(l.product_id and l.product_id.default_code == SHIPPING_PRODUCT_CODE for l in order.order_line)
+    is_ship_order = any(
+        ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE
+        for ol in order.order_line
+    )
     dest_partner = order.partner_shipping_id or order.partner_id
     dest_zip = dest_partner.zip if dest_partner else None
     for line in order.order_line:
