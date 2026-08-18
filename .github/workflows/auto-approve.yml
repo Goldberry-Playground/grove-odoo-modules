@@ -24,10 +24,14 @@
 #     GitHub Actions to create and approve pull requests" enabled in GOL-304.)
 #   - RESOLVE stale github-code-quality review threads (advisory nitpicks; the
 #     required status checks are the real gate).
-#   - MERGE as github-actions[bot] via a DIRECT squash (not `--auto`), so it
-#     does not depend on the "Allow auto-merge" setting and so the poll loop can
-#     re-resolve a late-arriving code-quality thread before each merge attempt.
-#     Requires `contents: write`.
+#   - ENABLE auto-merge (squash) as github-actions[bot] and let the branch's
+#     `merge-queue` ruleset own the actual squash-merge. We NEVER pass
+#     `--delete-branch`: the repo's `delete_branch_on_merge=true` deletes the
+#     head ref AFTER the queue merges. Passing `--delete-branch` deletes the head
+#     ref BEFORE the queue completes -> the queued merge is cancelled and the PR
+#     is CLOSED unmerged (this is exactly what silently dropped #93; GOL-1658).
+#     The poll loop keeps re-resolving any late-arriving code-quality thread so
+#     the queue is never blocked. Requires `contents: write` + "Allow auto-merge".
 #
 # Guardrails (see GOL-122 / GOL-644):
 #   - Never auto-approves human/external PRs (author must be the agent App bot)
@@ -123,20 +127,29 @@ jobs:
               "Auto-approved by github-actions[bot]: CI (all required status checks) passed. This identity is distinct from the PR-author App, so it satisfies the review requirement. Functional required status checks still gate the merge. (GOL-308 / GOL-644)"
           fi
 
-          # Merge via a DIRECT squash (no `--auto`). Poll for required checks and
-          # re-resolve any late-arriving code-quality thread before each attempt.
+          # Enable auto-merge (squash) and let the `merge-queue` ruleset own the
+          # actual merge. Poll to re-resolve any late-arriving code-quality thread
+          # so the queue is never blocked, and to exit promptly once merged.
+          #
+          # NEVER pass --delete-branch here: on a merge-queue branch `gh pr merge`
+          # enqueues the PR, and deleting the head ref cancels that queued merge
+          # and CLOSES the PR unmerged (GOL-1658). Cleanup is automatic --
+          # delete_branch_on_merge=true removes the head ref AFTER the queue merges.
           for i in $(seq 1 30); do
             resolve_bot_threads
             MS=$(gh pr view "$PR" --repo "$REPO" --json state,mergeStateStatus -q '.state + ":" + .mergeStateStatus')
             echo "merge attempt $i -- $MS"
             case "$MS" in
               MERGED:*)
-                echo "PR #$PR already merged."; exit 0 ;;
-              OPEN:CLEAN|OPEN:UNSTABLE)
-                if gh pr merge "$PR" --repo "$REPO" --squash --delete-branch; then
-                  echo "Merged PR #$PR."; exit 0
+                echo "PR #$PR merged."; exit 0 ;;
+              OPEN:*)
+                # Idempotent: re-enabling auto-merge once it is set is a no-op.
+                if gh pr merge "$PR" --repo "$REPO" --squash --auto; then
+                  echo "Auto-merge enabled for PR #$PR; the merge queue will squash-merge once required checks are green and threads resolved (head ref auto-deleted post-merge)."
+                else
+                  echo "Could not enable auto-merge this pass (state $MS); will retry."
                 fi ;;
             esac
             sleep 20
           done
-          echo "Required checks not green (or a human review thread is unresolved) within timeout; the approval stands and the PR will merge on a later trigger or a maintainer one-click."
+          echo "PR #$PR not merged within timeout; auto-merge is enabled and the approval stands, so the merge queue will complete it once required checks are green and all human review threads are resolved (or a maintainer can one-click)."
