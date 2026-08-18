@@ -19,7 +19,7 @@ _SEASON_PHRASE = {"spring": "this spring", "fall": "this fall"}
 
 
 def deposit_amount_label(amount=PREORDER_DEPOSIT):
-    """"$10" for a whole-dollar deposit, "$10.50" otherwise (no trailing .00)."""
+    """ "$10" for a whole-dollar deposit, "$10.50" otherwise (no trailing .00)."""
     amount = float(amount)
     if amount == int(amount):
         return f"${int(amount)}"
