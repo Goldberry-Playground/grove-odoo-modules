@@ -2,6 +2,7 @@ import hmac
 import json
 import logging
 import os
+import re
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import timezone as _timezone
@@ -45,6 +46,48 @@ WV_TAX_NAMES = frozenset({WV_GROUP_NAME, WV_STATE_NAME, WV_MUNI_NAME})
 WV_NEXUS_STATE = "WV"
 
 _logger = logging.getLogger(__name__)
+
+
+# Defense-in-depth caps on contact/address fields. Must mirror the BFF's limits
+# (see @grove/odoo-client) — anyone with a valid API key can call this endpoint
+# directly, so we never trust the BFF to have already enforced these.
+MAX_NAME = 200
+MAX_EMAIL = 254
+MAX_PHONE = 30
+MAX_STREET = 200
+MAX_CITY = 100
+MAX_STATE = 50
+MAX_ZIP = 20
+MAX_COUNTRY = 100
+
+# Newsletter opt-in caps. Brand/source/interest values become res.partner.category
+# tag names, so bound them to keep the tag table from being flooded by a caller
+# with a valid API key posting junk. Interests are also capped in count.
+MAX_BRAND = 50
+MAX_SOURCE = 100
+MAX_INTEREST = 50
+MAX_INTERESTS = 20
+
+EMAIL_RE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
+
+
+def _check_lengths(values: dict, limits: dict) -> str | None:
+    """Return an error message if any value in `values` is not a valid bounded string.
+
+    Non-string non-None values fail the same as too-long strings — anyone with
+    a valid API key (auth="bearer") can hit the controller directly with junk
+    types like `{"name": 5, "zip": 28801}`, so `len(v)` on a non-string would
+    raise TypeError and surface as a 500 with a Werkzeug traceback.
+    """
+    for key, limit in limits.items():
+        v = values.get(key)
+        if v is None:
+            continue
+        if not isinstance(v, str):
+            return f"{key} must be a string"
+        if len(v) > limit:
+            return f"{key} exceeds {limit} characters"
+    return None
 
 
 def _today_utc() -> _date:
