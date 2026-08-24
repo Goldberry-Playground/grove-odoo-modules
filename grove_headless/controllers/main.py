@@ -2,7 +2,6 @@ import hmac
 import json
 import logging
 import os
-import re
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import timezone as _timezone
@@ -58,7 +57,6 @@ def _today_utc() -> _date:
     helpers (packing_mode, ship_options, single_tree_rate) stay on server-local
     ``_date.today()`` — a distinct axis, out of scope here."""
     return _datetime.now(_timezone.utc).date()
-
 
 
 # Fields exposed in the public product list (keep minimal for performance)
