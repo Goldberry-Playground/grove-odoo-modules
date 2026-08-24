@@ -1,9 +1,104 @@
 {
-  "_comment": "PROVISIONAL per-box launch-hypothesis rates (2026-07-31, Box Engine v2). Keyed by box id from models/shipping_boxes.py BOXES. Derivation: ceil(interpolated Shippo UPS Ground quote at the box's representative billable weight + per-box packaging + 2.00 buffer). The morning rate-checker (scripts/rate_check) replaces these with real Shippo-derived values via PR on its first live run. Potted has no rates by design: potted = farm pickup only. Design: vault wiki/Software/Grove Shipping.",
+  "_comment": "Maintained by scripts/rate_check (morning rate-checker). Per-box rates (Box Engine v2): ceil(Shippo UPS Ground at the box's representative billable weight + per-box packaging + 2.00 buffer). Design: vault wiki/Software/Grove Shipping.",
   "_schema": 2,
-  "zone_1": {"br16": {"base": 18.0}, "s20": {"base": 22.0}, "s32": {"base": 24.0}, "s46": {"base": 26.0}, "b20": {"base": 28.0}, "b32": {"base": 30.0}},
-  "zone_2": {"br16": {"base": 19.0}, "s20": {"base": 23.0}, "s32": {"base": 25.0}, "s46": {"base": 27.0}, "b20": {"base": 29.0}, "b32": {"base": 31.0}},
-  "zone_3": {"br16": {"base": 20.0}, "s20": {"base": 24.0}, "s32": {"base": 26.0}, "s46": {"base": 28.0}, "b20": {"base": 31.0}, "b32": {"base": 33.0}},
-  "zone_4": {"br16": {"base": 21.0}, "s20": {"base": 25.0}, "s32": {"base": 27.0}, "s46": {"base": 30.0}, "b20": {"base": 32.0}, "b32": {"base": 34.0}},
-  "zone_5": {"br16": {"base": 22.0}, "s20": {"base": 26.0}, "s32": {"base": 28.0}, "s46": {"base": 31.0}, "b20": {"base": 33.0}, "b32": {"base": 36.0}}
+  "zone_1": {
+    "b20": {
+      "base": 53.0
+    },
+    "b32": {
+      "base": 59.0
+    },
+    "br16": {
+      "base": 34.0
+    },
+    "s20": {
+      "base": 39.0
+    },
+    "s32": {
+      "base": 41.0
+    },
+    "s46": {
+      "base": 47.0
+    }
+  },
+  "zone_2": {
+    "b20": {
+      "base": 61.0
+    },
+    "b32": {
+      "base": 68.0
+    },
+    "br16": {
+      "base": 43.0
+    },
+    "s20": {
+      "base": 47.0
+    },
+    "s32": {
+      "base": 50.0
+    },
+    "s46": {
+      "base": 55.0
+    }
+  },
+  "zone_3": {
+    "b20": {
+      "base": 61.0
+    },
+    "b32": {
+      "base": 68.0
+    },
+    "br16": {
+      "base": 43.0
+    },
+    "s20": {
+      "base": 47.0
+    },
+    "s32": {
+      "base": 50.0
+    },
+    "s46": {
+      "base": 55.0
+    }
+  },
+  "zone_4": {
+    "b20": {
+      "base": 61.0
+    },
+    "b32": {
+      "base": 68.0
+    },
+    "br16": {
+      "base": 43.0
+    },
+    "s20": {
+      "base": 47.0
+    },
+    "s32": {
+      "base": 50.0
+    },
+    "s46": {
+      "base": 55.0
+    }
+  },
+  "zone_5": {
+    "b20": {
+      "base": 61.0
+    },
+    "b32": {
+      "base": 68.0
+    },
+    "br16": {
+      "base": 35.0
+    },
+    "s20": {
+      "base": 41.0
+    },
+    "s32": {
+      "base": 45.0
+    },
+    "s46": {
+      "base": 52.0
+    }
+  }
 }

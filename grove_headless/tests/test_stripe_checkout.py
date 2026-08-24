@@ -204,7 +204,11 @@ class TestStripeCheckout(TransactionCase):
             self.env, order, self._ship_payload("10001"), today=date(2027, 1, 15)
         )
         self.assertEqual(forced, frozenset({self.product.id}))
-        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, forced)
+        # Pin the ships_now axis (GOL-1666 §2) open so this test isolates the
+        # calendar-mode forcing axis — otherwise the real ship_options call
+        # makes the assertion seasonal.
+        with mock.patch.object(grove_main, "ship_options", return_value={"ships_now": True}):
+            line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, forced)
         self.assertEqual(preorder_ids, [self.product.id])
         deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
         self.assertEqual(deposit["quantity"], 2)  # both in-stock units become deposits
@@ -223,7 +227,10 @@ class TestStripeCheckout(TransactionCase):
             self.env, order, self._ship_payload("10001"), today=date(2027, 4, 15)
         )
         self.assertEqual(forced, frozenset())
-        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, forced)
+        # Same ships_now pin as above — full charge asserted on the calendar
+        # axis alone, independent of the test-run date's wave window.
+        with mock.patch.object(grove_main, "ship_options", return_value={"ships_now": True}):
+            line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, forced)
         self.assertEqual(preorder_ids, [])
         goods = next(li for li in line_items if li["name"] == self.product.display_name)
         self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(25.0))
@@ -262,6 +269,71 @@ class TestStripeCheckout(TransactionCase):
             self.env, order, self._ship_payload("10001"), today=date(2027, 1, 15)
         )
         self.assertEqual(forced, frozenset())
+
+    # ── farm-pickup bareroot window: farm zone, not customer's (GOL-1669) ──
+
+    def _add_shipping_line(self, order):
+        """Attach a GROVE-SHIP line so `_build_stripe_line_items` treats the
+        order as shipped (is_ship_order), mirroring a real checkout."""
+        ship_product = grove_main._get_shipping_product(self.env, self.company)
+        order.write({"order_line": [(0, 0, {"product_id": ship_product.id, "product_uom_qty": 1, "price_unit": 12.5})]})
+
+    def test_farm_pickup_zip_falls_back_to_seeded_param(self):
+        """GOL-1669: with no warehouse/company partner ZIP set, the farm pickup
+        origin falls back to the admin-editable `grove_headless.farm_pickup_zip`
+        parameter, seeded to 26651 (Summersville WV) in module data."""
+        self.warehouse.partner_id.zip = False
+        self.company.partner_id.zip = False
+        self.assertEqual(grove_main._farm_pickup_zip(self.env, self.company), "26651")
+
+    def test_farm_pickup_zip_prefers_warehouse_address(self):
+        """The pickup warehouse address wins over the fallback param, so a second
+        farm binds its own origin without a code change."""
+        self.warehouse.partner_id.zip = "24551"
+        self.assertEqual(grove_main._farm_pickup_zip(self.env, self.company), "24551")
+
+    def test_pickup_bareroot_out_of_window_deposits_from_farm_zone(self):
+        """GOL-1669: a farm-pickup bareroot line resolves its mailing window from
+        the FARM's ZIP, not the customer's — a warm-zone buyer collecting here is
+        bound by when we can lift on the farm. Out of the farm window it charges
+        the flat deposit despite full stock, exactly like the shipped path."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        self._set_stock(self.product, 10)  # in stock — any deposit is window-driven
+        self.warehouse.partner_id.zip = "26651"
+        self.partner.zip = "33101"  # a warm-zone customer whose home window is later
+        order = self._make_order(qty=2)  # no shipping line → farm pickup
+        seen = {}
+
+        def spy(zip_code, tier, today):
+            seen["zip"] = zip_code
+            return {"ships_now": False}
+
+        with mock.patch.object(grove_main, "ship_options", side_effect=spy):
+            line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        self.assertEqual(seen["zip"], "26651", "pickup window must key off the FARM ZIP, not the customer's")
+        deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
+        self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+        self.assertEqual(deposit["quantity"], 2)
+        self.assertEqual(preorder_ids, [self.product.id])
+
+    def test_ship_bareroot_window_still_keys_off_customer_zip(self):
+        """Regression: a SHIPPED bareroot line keeps resolving its window from the
+        destination ZIP (GOL-1666 §1), unaffected by the farm-pickup path."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        self._set_stock(self.product, 10)
+        self.warehouse.partner_id.zip = "26651"
+        self.partner.zip = "04101"  # Portland ME destination
+        order = self._make_order(qty=1)
+        self._add_shipping_line(order)  # → is_ship_order
+        seen = {}
+
+        def spy(zip_code, tier, today):
+            seen["zip"] = zip_code
+            return {"ships_now": True}
+
+        with mock.patch.object(grove_main, "ship_options", side_effect=spy):
+            grove_main._build_stripe_line_items(order)
+        self.assertEqual(seen["zip"], "04101", "shipped window must key off the destination ZIP")
 
     # ── ship-to gate: state / potted / $0-shipping breaker (GOL-1036) ─────
 
@@ -588,3 +660,60 @@ class TestStripeCheckout(TransactionCase):
         self.assertEqual(len(shipped), 1)
         self.assertEqual(shipped.email_to, self.partner.email)
         self.assertIn("TRACK999", shipped.body_html or "")
+
+    # ── preorder deposit email (GOL-1666) ────────────────────────────────
+
+    def test_preorder_deposit_email_sent_alongside_receipt(self):
+        """A deposit_paid checkout emails the ratified deposit explainer in
+        addition to the standard receipt; a full-charge order does not."""
+        self._set_stock(self.product, 0)
+        order = self._make_order(qty=1)
+        order.grove_stripe_session_id = "cs_dep_mail"
+        order.grove_preorder_variant_ids = str(self.product.id)
+        Template = type(self.env["mail.template"])
+        orig = Template.send_mail
+        Template.send_mail = lambda self_t, res_id, **kw: 0  # stub the branded receipt
+        try:
+            with mute_logger("odoo.addons.mail.models.mail_mail"):
+                result = grove_main._handle_session_completed(
+                    self.env, {"id": "cs_dep_mail", "payment_intent": "pi_dep_mail"}
+                )
+        finally:
+            Template.send_mail = orig
+        self.assertEqual(result, "deposit_paid")
+        deposit_mail = self.env["mail.mail"].search([("subject", "ilike", f"preorder deposit for {order.name}")])
+        self.assertEqual(len(deposit_mail), 1)
+        body = deposit_mail.body_html or ""
+        self.assertIn("$10 deposit per tree today", body)
+        self.assertIn("balance", body)
+        self.assertNotIn("—", body)
+
+    def test_no_preorder_deposit_email_for_full_charge(self):
+        """An in-stock (full-charge) order sends no deposit explainer."""
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        order.grove_stripe_session_id = "cs_full_mail"
+        Template = type(self.env["mail.template"])
+        orig = Template.send_mail
+        Template.send_mail = lambda self_t, res_id, **kw: 0
+        try:
+            with mute_logger("odoo.addons.mail.models.mail_mail"):
+                grove_main._handle_session_completed(self.env, {"id": "cs_full_mail", "payment_intent": "pi_full"})
+        finally:
+            Template.send_mail = orig
+        self.assertFalse(self.env["mail.mail"].search([("subject", "ilike", "preorder deposit")]))
+
+    def test_preship_email_carries_balance_line_for_preorder(self):
+        """The shipped/transit email spells out the deposit/balance arrangement
+        for a preorder, and omits it for a full-charge order."""
+        preorder = self._make_order(qty=1)
+        preorder.grove_preorder_variant_ids = str(self.product.id)
+        full = self._make_order(qty=1)
+        full.grove_preorder_variant_ids = ""
+        with mute_logger("odoo.addons.mail.models.mail_mail"):
+            grove_main._notify_shipping_status(self.env, preorder, "transit", "TRK_DEP")
+            grove_main._notify_shipping_status(self.env, full, "transit", "TRK_FULL")
+        pre_mail = self.env["mail.mail"].search([("body_html", "ilike", "TRK_DEP")])
+        full_mail = self.env["mail.mail"].search([("body_html", "ilike", "TRK_FULL")])
+        self.assertIn("deposit per tree", pre_mail.body_html or "")
+        self.assertNotIn("deposit per tree", full_mail.body_html or "")

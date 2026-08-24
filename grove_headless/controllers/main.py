@@ -16,6 +16,7 @@ from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME
 from ..models import stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.newsletter import newsletter_tag_names
+from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
 from ..models.shipping_boxes import packing_mode
 from ..models.shipping_calendar import (
     MODE_PREORDER,
@@ -58,64 +59,6 @@ def _today_utc() -> _date:
     ``_date.today()`` — a distinct axis, out of scope here."""
     return _datetime.now(_timezone.utc).date()
 
-
-def _shipping_calendar_override(env):
-    """Parsed ``grove_headless.shipping_calendar`` override (JSON), or None.
-
-    Module-level twin of ``GroveHeadlessController._shipping_calendar_override``
-    so non-controller helpers (the checkout calendar gate) can read the same
-    admin override. Malformed JSON is ignored — the calendar falls back to the
-    module defaults rather than 500-ing checkout."""
-    raw = env["ir.config_parameter"].sudo().get_param("grove_headless.shipping_calendar")
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except (ValueError, TypeError):
-        _logger.warning("grove_headless.shipping_calendar is not valid JSON; using calendar defaults")
-        return None
-
-
-# Defense-in-depth caps on contact/address fields. Must mirror the BFF's limits
-# (see @grove/odoo-client) — anyone with a valid API key can call this endpoint
-# directly, so we never trust the BFF to have already enforced these.
-MAX_NAME = 200
-MAX_EMAIL = 254
-MAX_PHONE = 30
-MAX_STREET = 200
-MAX_CITY = 100
-MAX_STATE = 50
-MAX_ZIP = 20
-MAX_COUNTRY = 100
-
-# Newsletter opt-in caps. Brand/source/interest values become res.partner.category
-# tag names, so bound them to keep the tag table from being flooded by a caller
-# with a valid API key posting junk. Interests are also capped in count.
-MAX_BRAND = 50
-MAX_SOURCE = 100
-MAX_INTEREST = 50
-MAX_INTERESTS = 20
-
-EMAIL_RE = re.compile(r"[^\s@]+@[^\s@]+\.[^\s@]+")
-
-
-def _check_lengths(values: dict, limits: dict) -> str | None:
-    """Return an error message if any value in `values` is not a valid bounded string.
-
-    Non-string non-None values fail the same as too-long strings — anyone with
-    a valid API key (auth="bearer") can hit the controller directly with junk
-    types like `{"name": 5, "zip": 28801}`, so `len(v)` on a non-string would
-    raise TypeError and surface as a 500 with a Werkzeug traceback.
-    """
-    for key, limit in limits.items():
-        v = values.get(key)
-        if v is None:
-            continue
-        if not isinstance(v, str):
-            return f"{key} must be a string"
-        if len(v) > limit:
-            return f"{key} exceeds {limit} characters"
-    return None
 
 
 # Fields exposed in the public product list (keep minimal for performance)
@@ -671,7 +614,7 @@ class GroveHeadlessAPI(http.Controller):
         without a deploy. Malformed JSON is ignored (the feed falls back to
         defaults) rather than 500-ing the storefront.
         """
-        return _shipping_calendar_override(request.env)
+        return _parse_calendar_override(request.env)
 
     @http.route(
         "/grove/api/v1/shipping/options",
@@ -684,17 +627,25 @@ class GroveHeadlessAPI(http.Controller):
         zip_code = kwargs.get("zip", "")
         state = kwargs.get("state", "")
         tier = kwargs.get("tier", "potted")
+        is_pickup = (kwargs.get("fulfillment") or "").strip().lower() == "pickup"
         try:
             length_class = int(kwargs.get("length", "20"))
         except ValueError:
             length_class = 20
         today = _date.today()
-        result = serialize_ship_options(ship_options(zip_code, tier, today))
+        # Farm pickup resolves the bareroot window from the FARM's zone, not the
+        # shopper's (GOL-1669): a warm-zone buyer collecting at the farm is bound
+        # by when we can lift here. A missing/unrecognized customer ZIP no longer
+        # blanks the pickup window. Ship (or unspecified) keeps the customer ZIP.
+        window_zip = _farm_pickup_zip(request.env, request.website.company_id) if is_pickup else zip_code
+        result = serialize_ship_options(ship_options(window_zip, tier, today))
         # Box Engine v2: per_tree_rate = cheapest single-tree shipment in the
-        # season's packing mode. Potted -> None (farm pickup only).
+        # season's packing mode. Potted (pickup-only) and farm pickup pay no
+        # shipping, so no per-tree ship rate is quoted for either.
         mode = packing_mode(today)
         result["packing_mode"] = mode
-        result["per_tree_rate"] = single_tree_rate(state, length_class, mode) if tier == "bareroot" else None
+        quotes_ship = tier == "bareroot" and not is_pickup
+        result["per_tree_rate"] = single_tree_rate(state, length_class, mode) if quotes_ship else None
         # GOL-1172: per-USDA-zone fulfillment mode for the three-mode frontend
         # (bareroot-preorder | bareroot-in-window | peat-and-bagged), computed
         # server-side from the same annual calendar the feed serves. Bareroot
@@ -703,8 +654,9 @@ class GroveHeadlessAPI(http.Controller):
             calendar = merge_calendar_override(self._shipping_calendar_override())
             # UTC basis (GOL-1309): the fulfillment MODE the shopper is shown
             # here must match the one the checkout gate re-resolves, and the
-            # frontend resolves in UTC — see _today_utc.
-            result["fulfillment"] = resolve_fulfillment(usda_zone_for_zip(zip_code), _today_utc(), calendar)
+            # frontend resolves in UTC — see _today_utc. Zone keys off
+            # window_zip (farm's ZIP on pickup — GOL-1669), same as the window.
+            result["fulfillment"] = resolve_fulfillment(usda_zone_for_zip(window_zip), _today_utc(), calendar)
         else:
             result["fulfillment"] = None
         return _json_response(result)
@@ -723,10 +675,14 @@ class GroveHeadlessAPI(http.Controller):
         plus the authoritative zone->state green list, so the product-page estimator
         prices against exactly what checkout will charge instead of a bundled copy
         that drifts as the daily rate-checker rewrites the table. Public and cheap:
-        no Shippo call in the request path, no DB read — pure in-memory serialization.
-        The frontend drops the ``zones`` map into ``resolveRateTable()``.
+        no Shippo call in the request path, one cheap DB read (the calendar
+        override system parameter). The frontend drops the ``zones`` map into
+        ``resolveRateTable()`` and reads ``calendar.resolved[String(usdaZone)]``
+        for the shopper's mode/ship_timing verbatim (GOL-1386), resolved
+        server-side against ``date.today()`` so it never re-derives the backend
+        state machine or disagrees on a timezone boundary day.
         """
-        return _json_response(rate_feed(self._shipping_calendar_override()))
+        return _json_response(rate_feed(self._shipping_calendar_override(), _date.today()))
 
     # ── Orders ───────────────────────────────────────────────────────────
 
@@ -1315,6 +1271,35 @@ def _partner_vals_from_payload(env, contact, address):
 SHIPPING_PRODUCT_CODE = "GROVE-SHIP"
 
 
+def _farm_pickup_zip(env, company):
+    """Origin ZIP that keys the bareroot mailing window for FARM-PICKUP orders
+    (GOL-1669).
+
+    Farm pickup lifts trees on the farm, so the USDA hardiness zone that decides
+    when a bareroot line can be filled must come from the FARM's ZIP, never the
+    customer's — a warm-zone (say zone 8) buyer collecting at our zone-6 farm is
+    bound by when WE can lift, not by their home zone's later window.
+
+    Sourced from the pickup warehouse address (``stock.warehouse.partner_id.zip``)
+    so a second farm binds its own origin without a code change; falls back to the
+    company partner ZIP and finally the admin-editable ``grove_headless.farm_pickup_zip``
+    system parameter (seeded to 26651 / Summersville WV in module data). Returns a
+    stripped ZIP string, or None if nothing is configured — callers stay
+    conservative on None (``ship_options`` treats an unknown ZIP as not-shippable).
+    """
+    warehouse = env["stock.warehouse"].sudo()
+    wh = warehouse.search([("company_id", "=", company.id)], limit=1) if company else warehouse.browse()
+    for candidate in (
+        wh.partner_id.zip if wh and wh.partner_id else None,
+        company.partner_id.zip if company and company.partner_id else None,
+        env["ir.config_parameter"].sudo().get_param("grove_headless.farm_pickup_zip"),
+    ):
+        candidate = (candidate or "").strip()
+        if candidate:
+            return candidate
+    return None
+
+
 def _get_shipping_product(env, company):
     """Find (or lazily create) the service product the shipping charge rides on.
 
@@ -1756,7 +1741,7 @@ def _calendar_preorder_variant_ids(env, order, payload, today=None):
     zone = usda_zone_for_zip(shipping.get("zip"))
     if zone is None:
         return frozenset()
-    calendar = merge_calendar_override(_shipping_calendar_override(env))
+    calendar = merge_calendar_override(_parse_calendar_override(env))
     mode = resolve_fulfillment(zone, today or _today_utc(), calendar).get("mode")
     if mode != MODE_PREORDER:
         return frozenset()
@@ -1790,6 +1775,21 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
     line_items = []
     preorder_variant_ids = []
     tax_today = 0.0
+    # Calendar-window preorders (GOL-1666) apply to bareroot regardless of
+    # fulfillment: a bareroot line that can't be filled now charges the flat
+    # deposit even when in stock, matching the product page. The zone that keys
+    # that window depends on WHERE the trees are handed over — a shipped order
+    # (carries a GROVE-SHIP line) resolves from the DESTINATION ZIP; a farm-pickup
+    # order (no shipping line) resolves from the FARM's own ZIP (GOL-1669), since
+    # a warm-zone buyer collecting here is bound by when we can lift on the farm,
+    # not by their home zone's later window.
+    today = _date.today()
+    is_ship_order = any(
+        ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE for ol in order.order_line
+    )
+    dest_partner = order.partner_shipping_id or order.partner_id
+    dest_zip = dest_partner.zip if dest_partner else None
+    farm_zip = _farm_pickup_zip(order.env, order.company_id)
     for line in order.order_line:
         if line.display_type or not line.product_id:
             continue
@@ -1808,8 +1808,27 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
         # GOL-1309: a variant whose ship wave is not yet open is a preorder even
         # if in stock — treat its free stock as zero so every unit deposits.
         ordered_qty = line.product_uom_qty
+        # Two independent deposit-forcing signals; either one moves the line to
+        # the deposit path (deposit is the safe direction — never a full charge
+        # for a tree that cannot ship):
+        #   * calendar_preorder_ids (GOL-1309): destination-zone calendar MODE is
+        #     bareroot-preorder (rev-2 resolver, UTC basis) — free stock counts 0.
+        #   * ships_now (GOL-1666 §2 / GOL-1669): the wave window from
+        #     ship_options, keyed off the destination ZIP for shipped orders and
+        #     the FARM's ZIP for pickup.
         free_qty = 0 if product.id in calendar_preorder_ids else product.free_qty
-        for amount, qty, is_preorder in stripe_gateway.line_charge(line.price_unit, ordered_qty, free_qty):
+        # Only bareroot honors the mailing-window calendar; potted is pickup-only
+        # and its sold-out handling is the GOL-1666 §2 bareroot steer, not here.
+        tier = product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier or "potted"
+        line_ships_now = True
+        if tier == "bareroot":
+            # Ship orders resolve the window from the customer's zone; farm-pickup
+            # orders from the farm's own zone (GOL-1669).
+            window_zip = dest_zip if is_ship_order else farm_zip
+            line_ships_now = ship_options(window_zip, tier, today).get("ships_now", True)
+        for amount, qty, is_preorder in stripe_gateway.line_charge(
+            line.price_unit, ordered_qty, free_qty, ships_now=line_ships_now
+        ):
             if is_preorder:
                 preorder_variant_ids.append(product.id)
                 line_items.append(
@@ -1932,6 +1951,11 @@ def _handle_session_completed(env, session):
     except Exception:  # noqa: BLE001 — payment is already recorded; don't fail the webhook
         _logger.exception("action_confirm failed for %s (payment recorded, confirm deferred)", order.name)
     _send_order_confirmation_email(env, order)
+    if has_preorder:
+        # Deposit explainer alongside the branded receipt (GOL-1666): the
+        # standard sale template lists the charged-today totals; this line
+        # spells out the deposit/balance arrangement in the ratified voice.
+        _notify_preorder_deposit(env, order)
     return vals["grove_checkout_status"]
 
 
@@ -1942,6 +1966,68 @@ def _handle_session_expired(env, session):
         return "order_not_found"
     order.write({"grove_checkout_status": "expired"})
     return "expired"
+
+
+def _parse_calendar_override(env):
+    """Parsed `grove_headless.shipping_calendar` override dict, or None.
+
+    Module-level twin of the controller's `_shipping_calendar_override` so the
+    webhook/notify path (which has `env` but no `request`) can resolve the same
+    admin-editable calendar. Malformed JSON is ignored (fall back to defaults).
+    """
+    raw = env["ir.config_parameter"].sudo().get_param("grove_headless.shipping_calendar")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except (ValueError, TypeError):
+        _logger.warning("grove_headless.shipping_calendar is not valid JSON; using calendar defaults")
+        return None
+
+
+def _preorder_ship_season(env, order):
+    """Best-effort ship season ('spring' | 'fall') for the order's destination,
+    or None when the shipping ZIP/zone is unknown. Used only to word the
+    preorder-deposit emails ("...ships this spring"); a None just drops the
+    season word, never blocks the email."""
+    partner = order.partner_shipping_id or order.partner_id
+    zip_code = partner.zip if partner else None
+    zone = usda_zone_for_zip(zip_code)
+    if zone is None:
+        return None
+    calendar = merge_calendar_override(_parse_calendar_override(env))
+    return resolve_fulfillment(zone, _date.today(), calendar).get("season")
+
+
+def _notify_preorder_deposit(env, order):
+    """Best-effort preorder-deposit explainer emailed alongside the standard
+    order-confirmation receipt (GOL-1666). Only sent for orders that took a
+    deposit (grove_preorder_variant_ids set). Never fatal: the payment and the
+    branded receipt already stand on their own if outgoing mail is unconfigured.
+    """
+    email = order.partner_id.email
+    if not email:
+        return
+    season = _preorder_ship_season(env, order)
+    body = (
+        f"<p>Hi {order.partner_id.name or 'there'},</p>"
+        f"<p>Thanks for reserving with us! Your order <strong>{order.name}</strong> "
+        f"includes preorder trees.</p>"
+        f"<p>{confirmation_deposit_line(season)}</p>"
+        f"<p>We'll email you again when your trees ship.</p>"
+        f"<p>Goldberry Grove Nursery</p>"
+    )
+    try:
+        env["mail.mail"].sudo().create(
+            {
+                "subject": f"Your preorder deposit for {order.name}",
+                "email_to": email,
+                "body_html": body,
+                "auto_delete": True,
+            }
+        ).send()
+    except Exception:  # noqa: BLE001 — deposit explainer is best-effort
+        _logger.warning("Preorder deposit email failed for %s", order.name, exc_info=True)
 
 
 def _notify_customer_apology(env, order, product_names, refunded):
@@ -2036,11 +2122,18 @@ def _notify_shipping_status(env, order, status, tracking):
     if not notice or not order.partner_id.email:
         return
     subject_tmpl, lead = notice
+    # Pre-ship balance reminder (GOL-1666): only on the "shipped"/transit notice
+    # and only for orders that took a preorder deposit, so a full-charge order
+    # never sees a balance line it does not owe.
+    balance_html = ""
+    if status == "transit" and (order.grove_preorder_variant_ids or "").strip():
+        balance_html = f"<p>{preship_balance_line(_preorder_ship_season(env, order))}</p>"
     body = (
         f"<p>Hi {order.partner_id.name or 'there'},</p>"
         f"<p>{lead}</p>"
         f"<p>Order: <strong>{order.name}</strong><br/>"
         f"Tracking number: <strong>{tracking}</strong></p>"
+        f"{balance_html}"
         f"<p>— Goldberry Grove Nursery</p>"
     )
     try:

@@ -8,9 +8,12 @@ state (states span multiple USDA zones; WV alone runs 5a-7a).
 """
 
 import csv
+import logging
 import os
 from datetime import date, timedelta
 from functools import lru_cache
+
+_logger = logging.getLogger(__name__)
 
 _MATRIX_PATH = os.path.join(os.path.dirname(__file__), "..", "data", "zip_usda_zone.csv")
 
@@ -304,10 +307,33 @@ def merge_calendar_override(override) -> dict:
     ``_season_override``); the flat ``"<season>_order_deadline"`` key is also
     honored. ``approximate`` and ``weather_hold_note`` let ops flag a known
     frost delay without a deploy (GOL-1177).
+
+    Fail-open is total (GOL-1311): a non-dict override yields defaults, and an
+    override that is valid JSON but the wrong *shape* (a non-numeric zone key
+    like ``"6a"``, a ``fulfillment_days`` that isn't a [n, n] pair, a garbage
+    ``ship`` window) is logged and discarded rather than propagated — the
+    ``/shipping/rates`` and ``/shipping/options`` feeds must never 500 because
+    a nursery op typo'd the ``grove_headless.shipping_calendar`` system param.
     """
-    cal = default_calendar()
     if not isinstance(override, dict):
-        return cal
+        return default_calendar()
+    try:
+        return _apply_calendar_override(default_calendar(), override)
+    except Exception:  # noqa: BLE001 — fail-open: a malformed override must never break the feed
+        _logger.warning(
+            "grove_headless.shipping_calendar override is valid JSON but the wrong shape; "
+            "ignoring it and using calendar defaults",
+            exc_info=True,
+        )
+        return default_calendar()
+
+
+def _apply_calendar_override(cal: dict, override: dict) -> dict:
+    """Merge a shape-validated (dict) override over ``cal`` in place; may raise.
+
+    Kept separate from ``merge_calendar_override`` so the fail-open guard there
+    catches every shape error in one place instead of littering each branch.
+    """
     po = override.get("preorder_open")
     if isinstance(po, dict):
         cal["preorder_open"] = {**cal["preorder_open"], **{s: _md(md) for s, md in po.items()}}
@@ -507,3 +533,42 @@ def serialize_calendar(calendar: dict | None = None) -> dict:
             for z, w in sorted(cal["zones"].items())
         },
     }
+
+
+def serialize_resolved(calendar: dict | None, today: date) -> dict:
+    """Per-zone RESOLVED fulfillment for the rate feed's ``calendar.resolved`` block.
+
+    For every configured USDA zone, run ``resolve_fulfillment(zone, today)`` at
+    request time (server-local ``today``) and emit the frontend-facing subset,
+    keyed by the same string zone id ``serialize_calendar`` uses ("2".."10").
+    This is the GOL-1386 altitude fix for GOL-1313: the frontend reads ``mode`` /
+    ``ship_timing`` for the shopper's exact zone VERBATIM instead of re-deriving
+    the backend state machine (``resolve_fulfillment``) in TypeScript. It
+    collapses three GOL-1313 findings structurally:
+
+      * union over-promise — with mode-per-zone the client shows the shopper's
+        exact zone when known and an honest "resolved at checkout" when not, so
+        there is no client-side aggregate to guess;
+      * date-basis drift — the backend resolves in its own timezone and the
+        frontend surfaces ``ship_timing`` verbatim, so there is no
+        UTC-vs-server-local disagreement window on boundary days.
+
+    ``approximate`` / ``weather_hold_note`` are NOT duplicated per zone — they
+    are calendar-wide and already sit at the ``calendar`` top level. Every value
+    here is already JSON-safe (``ship_window`` is a list of ISO strings or None,
+    ``order_deadline`` an ISO string or None, ``fulfillment_days`` a list or
+    None), so the block round-trips without further coercion.
+    """
+    cal = calendar or default_calendar()
+    resolved = {}
+    for z in sorted(cal["zones"]):
+        r = resolve_fulfillment(z, today, cal)
+        resolved[str(z)] = {
+            "mode": r["mode"],
+            "season": r["season"],
+            "ship_timing": r["ship_timing"],
+            "ship_window": r["ship_window"],
+            "order_deadline": r["order_deadline"],
+            "fulfillment_days": r["fulfillment_days"],
+        }
+    return resolved
