@@ -4,6 +4,8 @@ import logging
 import os
 import re
 from datetime import date as _date
+from datetime import datetime as _datetime
+from datetime import timezone as _timezone
 
 import psycopg2
 import requests
@@ -17,6 +19,7 @@ from ..models.newsletter import newsletter_tag_names
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
 from ..models.shipping_boxes import packing_mode
 from ..models.shipping_calendar import (
+    MODE_PREORDER,
     merge_calendar_override,
     resolve_fulfillment,
     serialize_ship_options,
@@ -43,6 +46,7 @@ WV_TAX_NAMES = frozenset({WV_GROUP_NAME, WV_STATE_NAME, WV_MUNI_NAME})
 WV_NEXUS_STATE = "WV"
 
 _logger = logging.getLogger(__name__)
+
 
 # Defense-in-depth caps on contact/address fields. Must mirror the BFF's limits
 # (see @grove/odoo-client) — anyone with a valid API key can call this endpoint
@@ -84,6 +88,18 @@ def _check_lengths(values: dict, limits: dict) -> str | None:
         if len(v) > limit:
             return f"{key} exceeds {limit} characters"
     return None
+
+
+def _today_utc() -> _date:
+    """Calendar date in UTC — the basis the frontend fulfillment resolver uses
+    (grove-sites product-view.tsx / fulfillment-mode.ts). The shipping-calendar
+    MODE that gates checkout charging (GOL-1309) and the /shipping/options
+    preview both resolve on this UTC basis so they agree on the wave boundary; a
+    server-local ``_date.today()`` could differ by a day near midnight and land
+    a shopper on a different mode than the page they were shown. Legacy rate/box
+    helpers (packing_mode, ship_options, single_tree_rate) stay on server-local
+    ``_date.today()`` — a distinct axis, out of scope here."""
+    return _datetime.now(_timezone.utc).date()
 
 
 # Fields exposed in the public product list (keep minimal for performance)
@@ -677,7 +693,11 @@ class GroveHeadlessAPI(http.Controller):
         # only — potted is farm pickup, no ship timing.
         if tier == "bareroot":
             calendar = merge_calendar_override(self._shipping_calendar_override())
-            result["fulfillment"] = resolve_fulfillment(usda_zone_for_zip(window_zip), today, calendar)
+            # UTC basis (GOL-1309): the fulfillment MODE the shopper is shown
+            # here must match the one the checkout gate re-resolves, and the
+            # frontend resolves in UTC — see _today_utc. Zone keys off
+            # window_zip (farm's ZIP on pickup — GOL-1669), same as the window.
+            result["fulfillment"] = resolve_fulfillment(usda_zone_for_zip(window_zip), _today_utc(), calendar)
         else:
             result["fulfillment"] = None
         return _json_response(result)
@@ -884,7 +904,12 @@ class GroveHeadlessAPI(http.Controller):
             return error
 
         access_token = order._portal_ensure_token()
-        line_items, preorder_ids, charged_cents = _build_stripe_line_items(order)
+        # GOL-1309: re-resolve the destination's shipping-calendar mode and force
+        # bareroot lines whose ship wave has not opened onto the deposit path, so
+        # a dormant winter order is never charged in full for a tree that cannot
+        # ship until spring/fall (mirrors the frontend's pre-checkout resolution).
+        calendar_preorder_ids = _calendar_preorder_variant_ids(request.env, order, payload)
+        line_items, preorder_ids, charged_cents = _build_stripe_line_items(order, calendar_preorder_ids)
         if not line_items:
             order.unlink()
             return _json_response({"error": "Cart produced no chargeable line items"}, status=400)
@@ -1705,7 +1730,70 @@ def _create_draft_order(website, env, payload):
 # ── Stripe checkout helpers ──────────────────────────────────────────────────
 
 
-def _build_stripe_line_items(order):
+def _bareroot_tier(product) -> bool:
+    """Is this product a shippable bareroot tier (the tier the ship calendar
+    governs)? Mirrors the tier resolution used by the ship-to gate and the
+    shipping-charge builder: per-variant effective tier first, then the template
+    tier, defaulting to potted (non-shippable)."""
+    tier = product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier or "potted"
+    return tier == "bareroot"
+
+
+def _calendar_preorder_variant_ids(env, order, payload, today=None):
+    """Variant ids whose bareroot ship wave has not opened yet — force them to
+    the preorder deposit path regardless of stock (GOL-1309).
+
+    The checkout path had zero shipping-calendar awareness: an in-stock bareroot
+    tree ordered in the shopper's dormant winter (its ship wave months away) was
+    charged in FULL for immediate fulfillment, even though it physically cannot
+    leave the nursery until spring/fall. This re-resolves the destination USDA
+    zone + today to exactly one mode via the rev-2 calendar
+    (shipping_calendar.resolve_fulfillment) and returns the bareroot variants to
+    reprice when that mode is ``bareroot-preorder``: those units become a flat
+    per-unit deposit now, with the balance captured off-session at ship time
+    (the same deposit machinery short-stock preorders already use).
+
+    Only ``bareroot-preorder`` changes charging. ``bareroot-in-window`` and
+    ``peat-and-bagged`` both ship now, so they keep stock-based charging.
+
+    Scope / conservative fallbacks:
+      * SHIP orders only — farm pickup transfers at the WV farm, off the ship
+        calendar, so it is never calendar-repriced.
+      * An unresolvable destination zone (zip absent from the ~15k-row PHZM
+        matrix, or a zone the calendar does not configure → mode None) is left
+        on stock-based charging: we neither block the order nor reseason it off
+        a zone we cannot place. The frontend already surfaced the mode
+        pre-checkout; this backend gate is defense-in-depth against a stale or
+        hand-rolled client, not the primary UX.
+      * The rev-2 model has no hard "frozen / cannot ship" mode for bareroot —
+        every dormant date is a chargeable preorder, so there is no reject path
+        here (unlike the older ship_options freeze model). See the PR notes.
+
+    Date basis is UTC (``_today_utc``) to match the frontend and the
+    /shipping/options preview; ``today`` is injectable for tests.
+    """
+    fulfillment = (payload.get("fulfillment") or "").strip().lower() or None
+    shipping = payload.get("shipping") or {}
+    ship_state = shipping.get("state")
+    is_pickup = fulfillment == "pickup"
+    is_ship_to = not is_pickup and bool(ship_state)
+    if not is_ship_to:
+        return frozenset()
+    zone = usda_zone_for_zip(shipping.get("zip"))
+    if zone is None:
+        return frozenset()
+    calendar = merge_calendar_override(_parse_calendar_override(env))
+    mode = resolve_fulfillment(zone, today or _today_utc(), calendar).get("mode")
+    if mode != MODE_PREORDER:
+        return frozenset()
+    return frozenset(
+        line.product_id.id
+        for line in order.order_line
+        if not line.display_type and line.product_id and _bareroot_tier(line.product_id)
+    )
+
+
+def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
     """Turn a draft order's lines into Stripe Checkout line items.
 
     Returns (line_items, preorder_variant_ids, charged_cents). Applies the
@@ -1716,6 +1804,14 @@ def _build_stripe_line_items(order):
     when they ship. A partially-stocked line splits into an in-stock charge and
     a deposit charge (GOL-1036 defect 3); tax today is prorated to only the
     in-stock units so the deposit units aren't taxed before they ship.
+
+    ``calendar_preorder_ids`` (GOL-1309): variant ids whose bareroot ship wave
+    is not yet open per the shipping calendar (see
+    _calendar_preorder_variant_ids). Those lines charge entirely as deposits
+    regardless of on-hand stock — an in-stock dormant tree cannot ship until its
+    wave, so it is a preorder even though the shelf shows it available. Modeled
+    by treating free stock as zero for the line so line_charge routes every unit
+    to the deposit side.
     """
     line_items = []
     preorder_variant_ids = []
@@ -1750,7 +1846,18 @@ def _build_stripe_line_items(order):
         # free_qty (on-hand minus reserved), not qty_available: a unit another
         # order already reserved is not sellable now and must fall to preorder
         # (GOL-1036 defect 4), or the same tree is billed to two customers.
+        # GOL-1309: a variant whose ship wave is not yet open is a preorder even
+        # if in stock — treat its free stock as zero so every unit deposits.
         ordered_qty = line.product_uom_qty
+        # Two independent deposit-forcing signals; either one moves the line to
+        # the deposit path (deposit is the safe direction — never a full charge
+        # for a tree that cannot ship):
+        #   * calendar_preorder_ids (GOL-1309): destination-zone calendar MODE is
+        #     bareroot-preorder (rev-2 resolver, UTC basis) — free stock counts 0.
+        #   * ships_now (GOL-1666 §2 / GOL-1669): the wave window from
+        #     ship_options, keyed off the destination ZIP for shipped orders and
+        #     the FARM's ZIP for pickup.
+        free_qty = 0 if product.id in calendar_preorder_ids else product.free_qty
         # Only bareroot honors the mailing-window calendar; potted is pickup-only
         # and its sold-out handling is the GOL-1666 §2 bareroot steer, not here.
         tier = product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier or "potted"
@@ -1761,7 +1868,7 @@ def _build_stripe_line_items(order):
             window_zip = dest_zip if is_ship_order else farm_zip
             line_ships_now = ship_options(window_zip, tier, today).get("ships_now", True)
         for amount, qty, is_preorder in stripe_gateway.line_charge(
-            line.price_unit, ordered_qty, product.free_qty, ships_now=line_ships_now
+            line.price_unit, ordered_qty, free_qty, ships_now=line_ships_now
         ):
             if is_preorder:
                 preorder_variant_ids.append(product.id)

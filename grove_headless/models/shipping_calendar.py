@@ -467,9 +467,13 @@ def resolve_fulfillment(zone, today: date, calendar: dict | None = None) -> dict
     elif _in_md_window(today, fall_s, fall_e):
         _in_window("fall", fall_s, fall_e)
     # 2) Preorder open for the upcoming wave (open date -> ship start).
-    elif _in_md_window(today, fall_open, _prev_day(fall_s)):
+    #    The window's inclusive end is the day before ship_start, resolved in
+    #    today's year so a Mar-1 ship start (zones 8-10) yields a Feb-29 end in a
+    #    leap year — otherwise Feb 29 falls through every branch to _peat() and a
+    #    dormant preorder is mispriced as "ships now" (GOL-1309).
+    elif _in_md_window(today, fall_open, _prev_day(fall_s, today.year)):
         _preorder("fall", fall_s, fall_e)
-    elif _in_md_window(today, spring_open, _prev_day(spring_s)):
+    elif _in_md_window(today, spring_open, _prev_day(spring_s, today.year)):
         _preorder("spring", spring_s, spring_e)
     # 3) Everything else (leafed season + shipped-past-your-zone) ships now.
     else:
@@ -477,11 +481,16 @@ def resolve_fulfillment(zone, today: date, calendar: dict | None = None) -> dict
     return result
 
 
-def _prev_day(md: tuple[int, int]) -> tuple[int, int]:
+def _prev_day(md: tuple[int, int], year: int = 2001) -> tuple[int, int]:
     """The (month, day) one day before ``md`` — the inclusive end of a preorder
-    window that runs up to (but not into) a ship_start."""
-    y = 2001  # non-leap anchor; only month/day are read back
-    d = date(y, md[0], md[1]) - timedelta(days=1)
+    window that runs up to (but not into) a ship_start.
+
+    ``year`` sets the leap context: the day before Mar 1 is Feb 29 in a leap
+    year and Feb 28 otherwise. Callers pass ``today.year`` so a preorder window
+    ending the day before a Mar-1 ship start still covers Feb 29 (GOL-1309); the
+    2001 default keeps the non-leap month/day behaviour for any bare caller.
+    Only month/day are read back."""
+    d = date(year, md[0], md[1]) - timedelta(days=1)
     return (d.month, d.day)
 
 
