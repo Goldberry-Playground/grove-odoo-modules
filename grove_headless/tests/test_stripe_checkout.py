@@ -177,6 +177,71 @@ class TestStripeCheckout(TransactionCase):
         deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
         self.assertEqual(deposit["kind"], "deposit")
 
+    # ── farm-pickup bareroot window: farm zone, not customer's (GOL-1669) ──
+
+    def _add_shipping_line(self, order):
+        """Attach a GROVE-SHIP line so `_build_stripe_line_items` treats the
+        order as shipped (is_ship_order), mirroring a real checkout."""
+        ship_product = grove_main._get_shipping_product(self.env, self.company)
+        order.write({"order_line": [(0, 0, {"product_id": ship_product.id, "product_uom_qty": 1, "price_unit": 12.5})]})
+
+    def test_farm_pickup_zip_falls_back_to_seeded_param(self):
+        """GOL-1669: with no warehouse/company partner ZIP set, the farm pickup
+        origin falls back to the admin-editable `grove_headless.farm_pickup_zip`
+        parameter, seeded to 26651 (Summersville WV) in module data."""
+        self.warehouse.partner_id.zip = False
+        self.company.partner_id.zip = False
+        self.assertEqual(grove_main._farm_pickup_zip(self.env, self.company), "26651")
+
+    def test_farm_pickup_zip_prefers_warehouse_address(self):
+        """The pickup warehouse address wins over the fallback param, so a second
+        farm binds its own origin without a code change."""
+        self.warehouse.partner_id.zip = "24551"
+        self.assertEqual(grove_main._farm_pickup_zip(self.env, self.company), "24551")
+
+    def test_pickup_bareroot_out_of_window_deposits_from_farm_zone(self):
+        """GOL-1669: a farm-pickup bareroot line resolves its mailing window from
+        the FARM's ZIP, not the customer's — a warm-zone buyer collecting here is
+        bound by when we can lift on the farm. Out of the farm window it charges
+        the flat deposit despite full stock, exactly like the shipped path."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        self._set_stock(self.product, 10)  # in stock — any deposit is window-driven
+        self.warehouse.partner_id.zip = "26651"
+        self.partner.zip = "33101"  # a warm-zone customer whose home window is later
+        order = self._make_order(qty=2)  # no shipping line → farm pickup
+        seen = {}
+
+        def spy(zip_code, tier, today):
+            seen["zip"] = zip_code
+            return {"ships_now": False}
+
+        with mock.patch.object(grove_main, "ship_options", side_effect=spy):
+            line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        self.assertEqual(seen["zip"], "26651", "pickup window must key off the FARM ZIP, not the customer's")
+        deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
+        self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+        self.assertEqual(deposit["quantity"], 2)
+        self.assertEqual(preorder_ids, [self.product.id])
+
+    def test_ship_bareroot_window_still_keys_off_customer_zip(self):
+        """Regression: a SHIPPED bareroot line keeps resolving its window from the
+        destination ZIP (GOL-1666 §1), unaffected by the farm-pickup path."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        self._set_stock(self.product, 10)
+        self.warehouse.partner_id.zip = "26651"
+        self.partner.zip = "04101"  # Portland ME destination
+        order = self._make_order(qty=1)
+        self._add_shipping_line(order)  # → is_ship_order
+        seen = {}
+
+        def spy(zip_code, tier, today):
+            seen["zip"] = zip_code
+            return {"ships_now": True}
+
+        with mock.patch.object(grove_main, "ship_options", side_effect=spy):
+            grove_main._build_stripe_line_items(order)
+        self.assertEqual(seen["zip"], "04101", "shipped window must key off the destination ZIP")
+
     # ── ship-to gate: state / potted / $0-shipping breaker (GOL-1036) ─────
 
     def _website(self):

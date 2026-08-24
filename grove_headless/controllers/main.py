@@ -652,24 +652,32 @@ class GroveHeadlessAPI(http.Controller):
         zip_code = kwargs.get("zip", "")
         state = kwargs.get("state", "")
         tier = kwargs.get("tier", "potted")
+        is_pickup = (kwargs.get("fulfillment") or "").strip().lower() == "pickup"
         try:
             length_class = int(kwargs.get("length", "20"))
         except ValueError:
             length_class = 20
         today = _date.today()
-        result = serialize_ship_options(ship_options(zip_code, tier, today))
+        # Farm pickup resolves the bareroot window from the FARM's zone, not the
+        # shopper's (GOL-1669): a warm-zone buyer collecting at the farm is bound
+        # by when we can lift here. A missing/unrecognized customer ZIP no longer
+        # blanks the pickup window. Ship (or unspecified) keeps the customer ZIP.
+        window_zip = _farm_pickup_zip(request.env, request.website.company_id) if is_pickup else zip_code
+        result = serialize_ship_options(ship_options(window_zip, tier, today))
         # Box Engine v2: per_tree_rate = cheapest single-tree shipment in the
-        # season's packing mode. Potted -> None (farm pickup only).
+        # season's packing mode. Potted (pickup-only) and farm pickup pay no
+        # shipping, so no per-tree ship rate is quoted for either.
         mode = packing_mode(today)
         result["packing_mode"] = mode
-        result["per_tree_rate"] = single_tree_rate(state, length_class, mode) if tier == "bareroot" else None
+        quotes_ship = tier == "bareroot" and not is_pickup
+        result["per_tree_rate"] = single_tree_rate(state, length_class, mode) if quotes_ship else None
         # GOL-1172: per-USDA-zone fulfillment mode for the three-mode frontend
         # (bareroot-preorder | bareroot-in-window | peat-and-bagged), computed
         # server-side from the same annual calendar the feed serves. Bareroot
         # only — potted is farm pickup, no ship timing.
         if tier == "bareroot":
             calendar = merge_calendar_override(self._shipping_calendar_override())
-            result["fulfillment"] = resolve_fulfillment(usda_zone_for_zip(zip_code), today, calendar)
+            result["fulfillment"] = resolve_fulfillment(usda_zone_for_zip(window_zip), today, calendar)
         else:
             result["fulfillment"] = None
         return _json_response(result)
@@ -1279,6 +1287,35 @@ def _partner_vals_from_payload(env, contact, address):
 SHIPPING_PRODUCT_CODE = "GROVE-SHIP"
 
 
+def _farm_pickup_zip(env, company):
+    """Origin ZIP that keys the bareroot mailing window for FARM-PICKUP orders
+    (GOL-1669).
+
+    Farm pickup lifts trees on the farm, so the USDA hardiness zone that decides
+    when a bareroot line can be filled must come from the FARM's ZIP, never the
+    customer's — a warm-zone (say zone 8) buyer collecting at our zone-6 farm is
+    bound by when WE can lift, not by their home zone's later window.
+
+    Sourced from the pickup warehouse address (``stock.warehouse.partner_id.zip``)
+    so a second farm binds its own origin without a code change; falls back to the
+    company partner ZIP and finally the admin-editable ``grove_headless.farm_pickup_zip``
+    system parameter (seeded to 26651 / Summersville WV in module data). Returns a
+    stripped ZIP string, or None if nothing is configured — callers stay
+    conservative on None (``ship_options`` treats an unknown ZIP as not-shippable).
+    """
+    warehouse = env["stock.warehouse"].sudo()
+    wh = warehouse.search([("company_id", "=", company.id)], limit=1) if company else warehouse.browse()
+    for candidate in (
+        wh.partner_id.zip if wh and wh.partner_id else None,
+        company.partner_id.zip if company and company.partner_id else None,
+        env["ir.config_parameter"].sudo().get_param("grove_headless.farm_pickup_zip"),
+    ):
+        candidate = (candidate or "").strip()
+        if candidate:
+            return candidate
+    return None
+
+
 def _get_shipping_product(env, company):
     """Find (or lazily create) the service product the shipping charge rides on.
 
@@ -1683,18 +1720,21 @@ def _build_stripe_line_items(order):
     line_items = []
     preorder_variant_ids = []
     tax_today = 0.0
-    # Calendar-window preorders (GOL-1666 §1) only apply to shipped orders: a
-    # bareroot line that can't ship now to the destination zone charges the flat
-    # deposit even when in stock, matching the product page. A shipped order is
-    # the one that carries a GROVE-SHIP line and a known destination ZIP; pickup
-    # windows come from the FARM's zone, not the customer's, and land in GOL-1666
-    # §3 (blocked on the farm-ZIP confirmation) — until then pickup is untouched.
+    # Calendar-window preorders (GOL-1666) apply to bareroot regardless of
+    # fulfillment: a bareroot line that can't be filled now charges the flat
+    # deposit even when in stock, matching the product page. The zone that keys
+    # that window depends on WHERE the trees are handed over — a shipped order
+    # (carries a GROVE-SHIP line) resolves from the DESTINATION ZIP; a farm-pickup
+    # order (no shipping line) resolves from the FARM's own ZIP (GOL-1669), since
+    # a warm-zone buyer collecting here is bound by when we can lift on the farm,
+    # not by their home zone's later window.
     today = _date.today()
     is_ship_order = any(
         ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE for ol in order.order_line
     )
     dest_partner = order.partner_shipping_id or order.partner_id
     dest_zip = dest_partner.zip if dest_partner else None
+    farm_zip = _farm_pickup_zip(order.env, order.company_id)
     for line in order.order_line:
         if line.display_type or not line.product_id:
             continue
@@ -1715,8 +1755,11 @@ def _build_stripe_line_items(order):
         # and its sold-out handling is the GOL-1666 §2 bareroot steer, not here.
         tier = product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier or "potted"
         line_ships_now = True
-        if is_ship_order and tier == "bareroot":
-            line_ships_now = ship_options(dest_zip, tier, today).get("ships_now", True)
+        if tier == "bareroot":
+            # Ship orders resolve the window from the customer's zone; farm-pickup
+            # orders from the farm's own zone (GOL-1669).
+            window_zip = dest_zip if is_ship_order else farm_zip
+            line_ships_now = ship_options(window_zip, tier, today).get("ships_now", True)
         for amount, qty, is_preorder in stripe_gateway.line_charge(
             line.price_unit, ordered_qty, product.free_qty, ships_now=line_ships_now
         ):
