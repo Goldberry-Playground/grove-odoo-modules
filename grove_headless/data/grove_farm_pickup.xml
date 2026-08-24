@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo noupdate="1">
+
+    <!-- Farm-pickup origin ZIP (GOL-1669). Bareroot farm-pickup orders derive
+         their USDA mailing-window zone from the FARM's ZIP, never the customer's:
+         a warm-zone buyer collecting at our zone-6 farm is bound by when we can
+         lift here. Confirmed by Josh 2026-08-24: 26651 (Summersville, WV) — the
+         same origin the shipping/tax code already uses; USDA zone 6b.
+
+         This is the admin-editable fallback: `_farm_pickup_zip` prefers the
+         pickup warehouse address (stock.warehouse.partner_id.zip) so a second
+         farm binds its own origin without a code change, and only falls back to
+         this parameter when the warehouse/company partner ZIP is unset.
+         noupdate="1" so an admin edit survives module upgrades. -->
+    <record id="farm_pickup_zip_param" model="ir.config_parameter">
+        <field name="key">grove_headless.farm_pickup_zip</field>
+        <field name="value">26651</field>
+    </record>
+
+</odoo>
