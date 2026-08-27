@@ -80,6 +80,21 @@ jobs:
               exit 0 ;;
           esac
 
+          # ── Tier-0 carve-out (GOL-1732): protected-paths MUST need human review ──
+          # The protected-paths guard's PROTECTED_GLOBS for this repo include
+          # `.github/workflows/**` and `ownership.yml`.
+          # Without this block, an agent PR touching those paths would be
+          # auto-approved before an allowlisted human's SHA-bound review
+          # — defeating the guard. SENSITIVE ⊇ PROTECTED_GLOBS invariant.
+          PROTECTED_PATTERN='(^\.github/workflows/|^ownership\.yml$)'
+          PR_FILES_LIST=$(gh pr view "$PR" --repo "$REPO" --json files -q '.files[].path')
+          PROTECTED_HIT=$(echo "$PR_FILES_LIST" | grep -E "$PROTECTED_PATTERN" | head -1 || true)
+          if [ -n "$PROTECTED_HIT" ]; then
+            echo "PR #$PR touches protected path '${PROTECTED_HIT}' — withholding auto-approve (Tier-0 carve-out, GOL-1732). Protected paths require a human SHA-bound approving review via the protected-paths guard."
+            exit 0
+          fi
+
+
           OWNER="${REPO%/*}"
           NAME="${REPO#*/}"
 
