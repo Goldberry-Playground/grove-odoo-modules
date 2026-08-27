@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Morning shipping rate-checker (design: vault wiki/Software/Grove Shipping).
 
-Quotes Shippo (UPS Ground, residential) for each rate zone x catalog box
+Quotes Shippo (USPS Ground Advantage, residential) for each rate zone x catalog box
 (shipping_boxes.BOXES at representative billable weight), computes
 target = ceil(quote + per-box packaging + 2.00), and rewrites
 grove_headless/data/shipping_rates.json when any zone drifts >= $1.
@@ -13,11 +13,11 @@ can never publish an exploitable table — the workflow alerts and rates stay
 untouched. Each zone quotes its band's worst-case (priciest) destination so the
 published rate is a band-wide upper bound — no undercharge (GOL-1495).
 
-Exit codes: 0 no material drift (or Shippo has no UPS Ground rates at all yet
+Exit codes: 0 no material drift (or Shippo has no USPS Ground Advantage rates at all yet
 AND the current table is the provisional placeholder — account not finished,
 skipped cleanly) | 3 rates file rewritten | 1 API failure, a partial rate gap
-(some boxes quoted, some did not), or zero UPS Ground rates for every probe
-while real published rates exist (UPS connection lapsed) | 4 proposed table
+(some boxes quoted, some did not), or zero USPS Ground Advantage rates for every probe
+while real published rates exist (USPS connection lapsed) | 4 proposed table
 failed the monotonicity guard (not published).
 Requires env SHIPPO_API_KEY (unless --dry-run with --fixture).
 """
@@ -40,21 +40,29 @@ ORIGIN = {
     "country": "US",
 }
 # One reference residential destination per rate zone = the WORST-CASE
-# (priciest live UPS Ground) destination in that zone's state band, so the
-# published per-zone rate is an upper bound for every customer in the band and
-# no one is ever undercharged (GOL-1495, board-approved 2026-08-14). Because
-# the 5 state-distance bands don't track UPS's own cost ordering, quoting a
+# (priciest) destination in that zone's state band, so the published per-zone
+# rate is an upper bound for every customer in the band and no one is ever
+# undercharged (GOL-1495, board-approved 2026-08-14). Because the 5
+# state-distance bands don't track a carrier's own cost ordering, quoting a
 # merely-representative city (e.g. Columbus for all of zone_2) would undercharge
 # the band's far corner (NYC); quoting the far corner over-bills the cheapest
-# in-band destination modestly — the accepted cost of static zone pricing.
-# The worst-case picks were determined by live Shippo probe of each band's
-# corner states (br16 + b32; the ranking is box-invariant, UPS-zone driven).
+# in-band destination modestly -- the accepted cost of static zone pricing.
 #
-# The city MUST match the ZIP: once a real UPS carrier is connected, UPS
-# validates city against ZIP and HARD-rejects a mismatch ("111539 Invalid
-# Destination Postal Code and City"), dropping the UPS Ground rate for that
-# probe. A placeholder city ("n/a") silently passed on Shippo's shared UPS
-# account but breaks on the live account for strictly-validated ZIPs — GOL-1446.
+# !! CARRIER-SWITCH CAVEAT (UPS Ground -> USPS Ground Advantage) !!
+# These worst-case picks were derived from live Shippo probes of each band's
+# corner states against UPS GROUND (br16 + b32; box-invariant, UPS-zone driven).
+# USPS prices on its OWN zone map (zones 1-9 by distance from origin 26651),
+# which does not necessarily rank the same corners as worst-case. The GOL-1495
+# "never undercharge" guarantee is therefore NOT yet proven under USPS -- the
+# corner probes must be re-run per band before these picks can be trusted as
+# upper bounds. Until that re-derivation lands, treat the published table as
+# PROVISIONAL for USPS.
+#
+# The city MUST match the ZIP: carriers validate city against ZIP and can HARD-
+# reject a mismatch, dropping the rate for that probe. A placeholder city
+# ("n/a") passed silently on Shippo's shared test account but breaks on a live
+# account for strictly-validated ZIPs -- GOL-1446 (observed on UPS; assume the
+# same discipline applies to USPS).
 REFERENCE_ZIPS = {
     "zone_1": ("Wilmington", "NC", "28401"),  # band {WV,VA,KY,NC,DE}; NC coast
     "zone_2": ("New York", "NY", "10001"),  # band {MD,PA,OH,IN,NJ,NY}
@@ -98,11 +106,11 @@ RATES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless
 OUT_DIR = os.path.join(os.path.dirname(__file__), "out")
 
 
-def pick_ups_ground(shipment_json: dict) -> float | None:
+def pick_usps_ground_advantage(shipment_json: dict) -> float | None:
     rates = [
         float(r["amount"])
         for r in shipment_json.get("rates", [])
-        if r.get("provider") == "UPS" and r.get("servicelevel", {}).get("token") == "ups_ground"
+        if r.get("provider") == "USPS" and r.get("servicelevel", {}).get("token") == "usps_ground_advantage"
     ]
     return min(rates) if rates else None
 
@@ -134,7 +142,7 @@ def quote_zone_box(api_key: str, zone: str, box_id: str) -> float | None:
         headers={"Authorization": f"ShippoToken {api_key}"},
     )
     resp.raise_for_status()
-    return pick_ups_ground(resp.json())
+    return pick_usps_ground_advantage(resp.json())
 
 
 def compute_drift(current: dict, proposed: dict) -> list:
@@ -158,7 +166,7 @@ def main() -> int:
         raw = json.load(fh)
     # `_provisional` marks the launch-hypothesis placeholder table: real
     # published rates do not exist yet, so an all-missing Shippo result is the
-    # "UPS not connected" not-ready state, not a lapse. The writer below emits a
+    # "USPS not connected" not-ready state, not a lapse. The writer below emits a
     # doc WITHOUT this key, so once real rates publish the placeholder guard is
     # gone and a later all-missing result fails loudly (GOL-1312).
     provisional = bool(raw.get("_provisional"))
@@ -171,7 +179,7 @@ def main() -> int:
         for box_id in PARCELS:
             if args.fixture:
                 with open(args.fixture, encoding="utf-8") as fh:
-                    quote = pick_ups_ground(json.load(fh))
+                    quote = pick_usps_ground_advantage(json.load(fh))
             else:
                 api_key = os.environ.get("SHIPPO_API_KEY", "")
                 if not api_key:
@@ -183,7 +191,7 @@ def main() -> int:
                     print(f"shippo error for {zone}/{box_id}: {exc}", file=sys.stderr)
                     return 1
             if quote is None:
-                # Shippo answered (HTTP 200) but returned no UPS Ground rate
+                # Shippo answered (HTTP 200) but returned no USPS Ground Advantage rate
                 # for this probe. Record it and keep going so we can tell a
                 # total absence (account not finished) from a partial gap.
                 missing.append(f"{zone}/{box_id}")
@@ -194,30 +202,30 @@ def main() -> int:
         total = len(REFERENCE_ZIPS) * len(PARCELS)
         if len(missing) == total:
             if provisional or not current:
-                # Zero UPS Ground rates across every probe AND the current
+                # Zero USPS Ground Advantage rates across every probe AND the current
                 # table is the placeholder/empty one (no real published
                 # rates to protect): the SHIPPO_API_KEY secret exists but no
-                # UPS carrier is connected in the Shippo account yet — the
+                # USPS carrier is connected in the Shippo account yet — the
                 # same not-ready state the workflow's pre-key guard covers.
                 # Skip cleanly (exit 0) instead of paging ops every morning;
-                # the job self-heals the day UPS goes live (GOL-1296).
+                # the job self-heals the day USPS goes live (GOL-1296).
                 print(
-                    "::notice::Shippo returned no UPS Ground rate for any probe — "
-                    "UPS carrier not connected in the Shippo account yet; "
+                    "::notice::Shippo returned no USPS Ground Advantage rate for any probe — "
+                    "USPS carrier not connected in the Shippo account yet; "
                     "rate-check skipped (see GOL-1296)"
                 )
-                print("no UPS Ground rates available yet — skipped")
+                print("no USPS Ground Advantage rates available yet — skipped")
                 return 0
             # Real published rates exist (non-placeholder table) yet Shippo
-            # now returns zero UPS Ground rates for EVERY probe: the carrier
+            # now returns zero USPS Ground Advantage rates for EVERY probe: the carrier
             # connection that produced those rates has lapsed (auth expiry,
             # billing, Shippo-side disconnect). Fail loudly — a clean skip
-            # here would let shipping_rates.json fossilize while a later UPS
+            # here would let shipping_rates.json fossilize while a later USPS
             # rate hike silently under-bills every order (GOL-1312).
             print(
-                f"no UPS Ground rate for any of {total} probe(s) but "
+                f"no USPS Ground Advantage rate for any of {total} probe(s) but "
                 "shipping_rates.json holds real published rates — "
-                "UPS connection lost? (see GOL-1312)",
+                "USPS connection lost? (see GOL-1312)",
                 file=sys.stderr,
             )
             return 1
@@ -225,7 +233,7 @@ def main() -> int:
         # — e.g. an oversize box or a bad reference address — and must fail
         # loudly so it gets investigated, never silently drop a rate.
         print(
-            f"no UPS Ground rate for {len(missing)} of {total} probe(s): {', '.join(missing)}",
+            f"no USPS Ground Advantage rate for {len(missing)} of {total} probe(s): {', '.join(missing)}",
             file=sys.stderr,
         )
         return 1
@@ -233,7 +241,7 @@ def main() -> int:
     # Guard before publishing: within a zone a bigger box must never be
     # cheaper (cart-gaming). A bad Shippo quote that inverts the table is
     # refused, not written — the workflow's failure alert fires and rates stay
-    # untouched. Cross-zone monotonicity is intentionally NOT enforced: real UPS
+    # untouched. Cross-zone monotonicity is intentionally NOT enforced: real USPS
     # doesn't order our state bands by cost, and worst-case reference ZIPs above
     # already guarantee no undercharge (GOL-1495).
     box_order = monotonicity.ordered_boxes(shipping_boxes.BOXES, shipping_boxes.representative_billable_lb)
@@ -258,7 +266,7 @@ def main() -> int:
 
     new_doc = {
         "_comment": "Maintained by scripts/rate_check (morning rate-checker). "
-        "Per-box rates (Box Engine v2): ceil(Shippo UPS Ground at the box's "
+        "Per-box rates (Box Engine v2): ceil(Shippo USPS Ground Advantage at the box's "
         "representative billable weight + per-box packaging + 2.00 buffer). "
         "Design: vault wiki/Software/Grove Shipping.",
         "_schema": 2,
