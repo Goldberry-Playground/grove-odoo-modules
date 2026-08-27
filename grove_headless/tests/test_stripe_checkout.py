@@ -127,6 +127,60 @@ class TestStripeCheckout(TransactionCase):
         verified, _ = grove_main._verify_stripe_webhook(tampered, sig, secrets)
         self.assertFalse(verified)
 
+    # ── per-tenant secret-key selection (GOL-1766) ───────────────────────
+
+    def test_tenant_secret_key_selects_per_tenant(self):
+        """Each tenant's charge/refund uses THAT tenant's own account key so
+        the three LLCs' revenue never commingles."""
+        env = {
+            "stripe_secret_key_nursery": "sk_nursery",
+            "stripe_secret_key_ggg": "sk_ggg",
+            "stripe_secret_key_goldberry": "sk_goldberry",
+            # Present but must never win when a per-tenant key exists.
+            "stripe_test_secret_key": "sk_legacy",
+        }
+        with mock.patch.dict("os.environ", env, clear=True):
+            self.assertEqual(grove_main._tenant_secret_key("nursery"), "sk_nursery")
+            self.assertEqual(grove_main._tenant_secret_key("ggg"), "sk_ggg")
+            self.assertEqual(grove_main._tenant_secret_key("goldberry"), "sk_goldberry")
+
+    def test_tenant_secret_key_falls_back_to_legacy(self):
+        """An env with only the legacy single key routes every tenant to it —
+        the single-merchant-of-record (B1) config, zero code change."""
+        env = {"stripe_test_secret_key": "sk_legacy"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            for tenant in ("nursery", "ggg", "goldberry", None):
+                self.assertEqual(grove_main._tenant_secret_key(tenant), "sk_legacy")
+
+    def test_tenant_secret_key_prefers_own_over_legacy_when_partial(self):
+        """A tenant WITH its own key uses it; a tenant WITHOUT one falls back to
+        the legacy key rather than silently failing — so a half-wired env still
+        charges."""
+        env = {
+            "stripe_secret_key_goldberry": "sk_goldberry",
+            "stripe_test_secret_key": "sk_legacy",
+        }
+        with mock.patch.dict("os.environ", env, clear=True):
+            self.assertEqual(grove_main._tenant_secret_key("goldberry"), "sk_goldberry")
+            self.assertEqual(grove_main._tenant_secret_key("ggg"), "sk_legacy")
+
+    def test_tenant_secret_key_empty_when_unconfigured(self):
+        """No key at all → "" so the caller keeps returning the 503 'not
+        configured yet' rather than calling Stripe with an empty key."""
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(grove_main._tenant_secret_key("nursery"), "")
+            self.assertEqual(grove_main._tenant_secret_key(None), "")
+
+    def test_tenant_secret_key_ignores_empty_per_tenant_var(self):
+        """A per-tenant var present but blank is treated as absent (falls back),
+        matching the webhook-secret 'skips empty' behaviour."""
+        env = {
+            "stripe_secret_key_ggg": "",
+            "stripe_test_secret_key": "sk_legacy",
+        }
+        with mock.patch.dict("os.environ", env, clear=True):
+            self.assertEqual(grove_main._tenant_secret_key("ggg"), "sk_legacy")
+
     # ── line-item builder / charging matrix ──────────────────────────────
 
     def test_in_stock_line_charges_full_price(self):
