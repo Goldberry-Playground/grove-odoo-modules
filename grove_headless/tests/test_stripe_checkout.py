@@ -97,6 +97,48 @@ class TestStripeCheckout(TransactionCase):
                 ["whsec_nursery", "whsec_goldberry"],
             )
 
+    def test_secret_key_prefers_per_tenant_over_legacy(self):
+        """Each tenant's Checkout/refund key comes from its OWN account var so a
+        charge lands in the right LLC (GOL-1448); the legacy var is a fallback
+        only."""
+        env = {
+            "stripe_secret_key_nursery": "rk_nursery",
+            "stripe_secret_key_ggg": "rk_ggg",
+            "stripe_secret_key_goldberry": "rk_goldberry",
+            "stripe_test_secret_key": "rk_legacy",
+        }
+        with mock.patch.dict("os.environ", env, clear=True):
+            self.assertEqual(grove_main._stripe_secret_key("nursery"), "rk_nursery")
+            self.assertEqual(grove_main._stripe_secret_key("ggg"), "rk_ggg")
+            self.assertEqual(grove_main._stripe_secret_key("goldberry"), "rk_goldberry")
+
+    def test_secret_key_falls_back_to_legacy(self):
+        """An unknown/None slug or an unset per-brand var degrades to the shared
+        legacy key rather than to no key at all."""
+        env = {"stripe_test_secret_key": "rk_legacy"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            self.assertEqual(grove_main._stripe_secret_key("nursery"), "rk_legacy")
+            self.assertEqual(grove_main._stripe_secret_key(None), "rk_legacy")
+            self.assertEqual(grove_main._stripe_secret_key("unknown"), "rk_legacy")
+
+    def test_secret_key_empty_when_nothing_configured(self):
+        """No per-brand var and no legacy var → empty, so callers 503 instead of
+        charging against a stale key."""
+        with mock.patch.dict("os.environ", {}, clear=True):
+            self.assertEqual(grove_main._stripe_secret_key("nursery"), "")
+
+    def test_tenant_slug_resolves_from_order_company(self):
+        """The refund path keys off order.company_id → website slug, so a refund
+        uses the same account that took the payment. Round-trips a known tenant
+        website's company back to that tenant's slug."""
+        website = self.env["website"]._resolve_tenant_slug("nursery")
+        if not website:
+            self.skipTest("nursery tenant website not seeded in this DB")
+        self.assertEqual(
+            grove_main._tenant_slug_for_company(self.env, website.company_id),
+            "nursery",
+        )
+
     def test_webhook_verifies_each_tenant_secret(self):
         """A validly-signed event from EACH of the three tenants verifies
         against the shared secret list — the core GOL-1020 acceptance case."""

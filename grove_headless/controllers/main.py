@@ -208,6 +208,46 @@ def _verify_stripe_webhook(raw, sig, secrets):
     return verified, last_error
 
 
+# Per the 2026-08-12 ruling (GOL-1448) each LLC has its OWN Stripe account
+# (nursery / ggg / goldberry), yet ONE Odoo process serves all three tenant
+# companies. So the secret key that CREATES a Checkout Session or issues a
+# refund must match the company the order belongs to — otherwise the charge
+# lands in the wrong entity and a cross-account refund 403s (the payment_intent
+# lives in a different account than the key). This is the send-side mirror of
+# the per-tenant webhook-secret handling above. `stripe_test_secret_key` stays
+# as the legacy single-tenant fallback so QA and the pre-cutover window keep
+# working until Terra wires the per-brand vars. Any future off-session capture
+# (GOL-1666 §7) MUST resolve its key the same way.
+STRIPE_SECRET_KEY_ENV_BY_SLUG = {
+    "nursery": "stripe_secret_key_nursery",
+    "ggg": "stripe_secret_key_ggg",
+    "goldberry": "stripe_secret_key_goldberry",
+}
+
+
+def _stripe_secret_key(slug):
+    """Return the Stripe secret key for a tenant slug, else the legacy key.
+
+    Falls back to `stripe_test_secret_key` when the tenant is unknown or its
+    per-brand var is unset, so a missing var degrades to the shared key rather
+    than to no key at all — callers still 503 when BOTH are empty.
+    """
+    env_name = STRIPE_SECRET_KEY_ENV_BY_SLUG.get(slug or "")
+    if env_name:
+        key = os.environ.get(env_name, "")
+        if key:
+            return key
+    return os.environ.get("stripe_test_secret_key", "")
+
+
+def _tenant_slug_for_company(env, company):
+    """Resolve a res.company to its tenant slug via its website record, or None."""
+    if not company:
+        return None
+    website = env["website"].sudo().search([("company_id", "=", company.id)], limit=1)
+    return website.grove_tenant_slug() if website else None
+
+
 def _image_url(model, record, size):
     """Return the ``/web/image`` path for ``record``'s image at ``size``, or None.
 
@@ -888,10 +928,11 @@ class GroveHeadlessAPI(http.Controller):
         except json.JSONDecodeError:
             return _json_response({"error": "Invalid JSON body"}, status=400)
 
-        secret_key = os.environ.get("stripe_test_secret_key", "")
+        secret_key = _stripe_secret_key(request.website.grove_tenant_slug())
         if not secret_key:
             # Code ships before keys land (GOL-642): the endpoint is live but
-            # inert until Terra applies stripe_test_* to the QA droplet env.
+            # inert until Terra applies the tenant's key to the droplet env
+            # (per-brand stripe_secret_key_<slug>, else legacy stripe_test_secret_key).
             return _json_response({"error": "Checkout is not configured yet"}, status=503)
 
         success_url = payload.get("success_url")
@@ -1958,7 +1999,7 @@ def _handle_session_completed(env, session):
         names = ", ".join(line.product_id.display_name for line in oversold)
         refunded = False
         if payment_intent:
-            secret_key = os.environ.get("stripe_test_secret_key", "")
+            secret_key = _stripe_secret_key(_tenant_slug_for_company(order.env, order.company_id))
             try:
                 stripe_gateway.create_refund(
                     secret_key,
