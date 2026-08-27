@@ -1,0 +1,16 @@
+{
+  "//": "Config-freeze lock (GOL-1735 / GOL-1406-D). A repo-level hard stop on config drift.",
+  "//frozen": "When true, the `Config freeze` required check FAILS any PR that touches a path in `paths`, overriding normal Tier-0 human approval.",
+  "//lift": "This file is NOT in `paths` so a freeze can always be lifted.",
+  "frozen": false,
+  "reason": "",
+  "paths": [
+    ".github/workflows/**",
+    ".github/actions/**",
+    ".github/CODEOWNERS",
+    ".github/dependabot.yml",
+    "**/*payment*.py",
+    "**/*stripe*",
+    "**/*webhook*"
+  ]
+}
