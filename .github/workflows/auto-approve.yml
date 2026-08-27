@@ -80,6 +80,39 @@ jobs:
               exit 0 ;;
           esac
 
+          # ── Unified agent-review gate (GOL-1734 / GOL-1738, Ada sign-off) ──
+          # The github-sync plugin emits exactly one `agent-review/<reviewer>`
+          # check-run per non-draft agent PR: seeded `in_progress` on open,
+          # flipped to `success` ON THAT HEAD SHA only when the reviewer signs
+          # the review issue `done`. COMMENT-only — the signal is a check-run,
+          # never a GitHub APPROVE event. Require it PRESENT and `success` on the
+          # CURRENT head SHA before approving/merging: absent / in_progress /
+          # neutral / failure / success-on-old-SHA => BLOCK. Native `--auto`
+          # merge only waits for REQUIRED checks, and agent-review/* is not a
+          # required check, so this explicit gate is what enforces review here.
+          # Poll so a sign-off landing shortly after CI is caught; a later
+          # sign-off re-fires on the next CI run.
+          HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q '.headRefOid')
+          REVIEW_STATE=absent
+          for i in $(seq 1 30); do   # up to ~15 min (30 × 30s)
+            REVIEW_STATE=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+              -q '[.check_runs[] | select(.name | startswith("agent-review/"))]
+                   | if length==0 then "absent"
+                     elif any(.[]; .status=="completed" and .conclusion=="success") then "success"
+                     elif all(.[]; .status=="completed") then "completed-not-success"
+                     else "pending" end')
+            case "$REVIEW_STATE" in
+              success|completed-not-success) break ;;
+            esac
+            echo "agent-review/* on $HEAD_SHA: $REVIEW_STATE (poll $i/30)…"
+            sleep 30
+          done
+          if [ "$REVIEW_STATE" != "success" ]; then
+            echo "PR #$PR agent-review/* gate not satisfied on $HEAD_SHA (state: $REVIEW_STATE); not approving. The reviewer must sign off (COMMENT-only gate — GOL-1734)."
+            exit 0
+          fi
+          echo "agent-review/* is success on $HEAD_SHA; proceeding."
+
           OWNER="${REPO%/*}"
           NAME="${REPO#*/}"
 
