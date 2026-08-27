@@ -215,7 +215,7 @@ def rate_feed(calendar_override=None, today=None) -> dict:
           },
           "calendar": {   # GOL-1172: per-USDA-zone twice-yearly ship calendar
             "preorder_open": {"fall": [8, 15], "spring": [11, 1]},
-            "leafed_window": [[5, 6], [8, 14]],
+            "leafed_window": [[5, 1], [10, 15]],
             "fulfillment_days": [5, 10],
             "zones": {"6": {"fall": [[9, 15], [10, 30]], "spring": [[1, 1], [5, 5]]}, ...},
             "resolved": {   # GOL-1386: per-zone RESOLVED mode at request time
