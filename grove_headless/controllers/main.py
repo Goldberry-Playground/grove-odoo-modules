@@ -1229,8 +1229,10 @@ class GroveHeadlessAPI(http.Controller):
         (JSON-RPC dispatcher), all responses — including exceptions — are wrapped
         in HTTP 200, preventing Shippo from detecting failures and retrying.
 
-        Auth: token sent via `X-Grove-Webhook-Token` request header (configure
-        this custom header in the Shippo webhook settings URL for this endpoint).
+        Auth: token presented either as the `token` URL query parameter (the
+        only mechanism Shippo supports — register the webhook as
+        `.../shipping/webhook?token=<GROVE_SHIPPO_WEBHOOK_TOKEN>`) or as an
+        `X-Grove-Webhook-Token` request header (non-Shippo callers).
         The token is compared with `hmac.compare_digest` to prevent timing-oracle
         attacks. GROVE_SHIPPO_WEBHOOK_TOKEN must be set in the server environment.
         """
@@ -1239,8 +1241,17 @@ class GroveHeadlessAPI(http.Controller):
         except (json.JSONDecodeError, ValueError):
             return _json_response({"error": "bad json"}, status=400)
 
+        # Shippo CANNOT send custom request headers. Its only webhook security
+        # options are a self-generated token in the URL query string, an inbound
+        # IP allowlist, or HMAC (provisioned by their solutions team on request,
+        # up to 10 business days). The header-only check below was therefore
+        # unsatisfiable in production and 403'd every real delivery — verified
+        # live against prod 2026-08-27. Read ?token= first (the Shippo path) and
+        # keep the header for any non-Shippo caller already using it.
         expected = os.environ.get("GROVE_SHIPPO_WEBHOOK_TOKEN", "")
-        token = request.httprequest.headers.get("X-Grove-Webhook-Token", "")
+        token = request.httprequest.args.get("token", "") or request.httprequest.headers.get(
+            "X-Grove-Webhook-Token", ""
+        )
         if not expected or not hmac.compare_digest(token, expected):
             return _json_response({"error": "forbidden"}, status=403)
 
