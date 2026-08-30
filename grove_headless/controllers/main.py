@@ -208,6 +208,39 @@ def _verify_stripe_webhook(raw, sig, secrets):
     return verified, last_error
 
 
+# Each tenant (nursery/ggg/goldberry) is a separate LLC with its OWN Stripe
+# account + secret key, so a checkout session and a refund must be created with
+# the key belonging to the tenant that owns the order. The webhook-VERIFY path
+# above cannot know which tenant signed an event, so it tries every secret;
+# here the tenant IS known (from the website/company), so we select exactly one
+# key — creating a session with the wrong key would route that LLC's revenue
+# into another LLC's account, and a refund whose payment_intent lives in a
+# different account fails outright. Names are lowercase to match the odoo
+# process-env convention already used for stripe_*_secret (Terra wires the
+# per-tenant vars, GOL-973). `stripe_test_secret_key` is the legacy single-key
+# fallback: an env that sets only it (and no per-tenant keys) routes every
+# tenant to one account — i.e. a single merchant-of-record — with zero code
+# change, so the per-tenant-vs-single-account choice stays a config decision.
+STRIPE_SECRET_KEY_ENV_PREFIX = "stripe_secret_key_"
+STRIPE_SECRET_KEY_LEGACY_ENV = "stripe_test_secret_key"
+
+
+def _tenant_secret_key(tenant):
+    """Return the Stripe secret key to charge/refund `tenant`'s orders with.
+
+    Prefers the per-tenant ``stripe_secret_key_{tenant}`` env var so each LLC's
+    money lands in its own account; falls back to the legacy single-tenant
+    ``stripe_test_secret_key`` when no per-tenant key is configured (or the
+    tenant slug is unknown). Returns ``""`` when neither is set so callers can
+    keep emitting the existing "not configured yet" 503.
+    """
+    if tenant:
+        key = os.environ.get(f"{STRIPE_SECRET_KEY_ENV_PREFIX}{tenant}", "")
+        if key:
+            return key
+    return os.environ.get(STRIPE_SECRET_KEY_LEGACY_ENV, "")
+
+
 def _image_url(model, record, size):
     """Return the ``/web/image`` path for ``record``'s image at ``size``, or None.
 
@@ -888,10 +921,16 @@ class GroveHeadlessAPI(http.Controller):
         except json.JSONDecodeError:
             return _json_response({"error": "Invalid JSON body"}, status=400)
 
-        secret_key = os.environ.get("stripe_test_secret_key", "")
+        # Charge in the account belonging to THIS storefront's tenant so each
+        # LLC's revenue lands in its own Stripe account (GOL-1766). The tenant
+        # is the website serving the request; a single-account env falls back to
+        # the legacy key inside _tenant_secret_key.
+        tenant = request.website.grove_tenant_slug()
+        secret_key = _tenant_secret_key(tenant)
         if not secret_key:
             # Code ships before keys land (GOL-642): the endpoint is live but
-            # inert until Terra applies stripe_test_* to the QA droplet env.
+            # inert until Terra applies the Stripe secret key(s) to the droplet
+            # env.
             return _json_response({"error": "Checkout is not configured yet"}, status=503)
 
         success_url = payload.get("success_url")
@@ -1190,8 +1229,10 @@ class GroveHeadlessAPI(http.Controller):
         (JSON-RPC dispatcher), all responses — including exceptions — are wrapped
         in HTTP 200, preventing Shippo from detecting failures and retrying.
 
-        Auth: token sent via `X-Grove-Webhook-Token` request header (configure
-        this custom header in the Shippo webhook settings URL for this endpoint).
+        Auth: token presented either as the `token` URL query parameter (the
+        only mechanism Shippo supports — register the webhook as
+        `.../shipping/webhook?token=<GROVE_SHIPPO_WEBHOOK_TOKEN>`) or as an
+        `X-Grove-Webhook-Token` request header (non-Shippo callers).
         The token is compared with `hmac.compare_digest` to prevent timing-oracle
         attacks. GROVE_SHIPPO_WEBHOOK_TOKEN must be set in the server environment.
         """
@@ -1200,8 +1241,17 @@ class GroveHeadlessAPI(http.Controller):
         except (json.JSONDecodeError, ValueError):
             return _json_response({"error": "bad json"}, status=400)
 
+        # Shippo CANNOT send custom request headers. Its only webhook security
+        # options are a self-generated token in the URL query string, an inbound
+        # IP allowlist, or HMAC (provisioned by their solutions team on request,
+        # up to 10 business days). The header-only check below was therefore
+        # unsatisfiable in production and 403'd every real delivery — verified
+        # live against prod 2026-08-27. Read ?token= first (the Shippo path) and
+        # keep the header for any non-Shippo caller already using it.
         expected = os.environ.get("GROVE_SHIPPO_WEBHOOK_TOKEN", "")
-        token = request.httprequest.headers.get("X-Grove-Webhook-Token", "")
+        token = request.httprequest.args.get("token", "") or request.httprequest.headers.get(
+            "X-Grove-Webhook-Token", ""
+        )
         if not expected or not hmac.compare_digest(token, expected):
             return _json_response({"error": "forbidden"}, status=403)
 
@@ -1958,7 +2008,13 @@ def _handle_session_completed(env, session):
         names = ", ".join(line.product_id.display_name for line in oversold)
         refunded = False
         if payment_intent:
-            secret_key = os.environ.get("stripe_test_secret_key", "")
+            # The payment_intent lives in the account that CHARGED it, so the
+            # refund must use that same tenant's key (GOL-1766). The order
+            # carries its originating website, so resolve the tenant from it
+            # rather than the ambient env (this runs from the public webhook
+            # with no website in context).
+            tenant = order.website_id.grove_tenant_slug() if order.website_id else None
+            secret_key = _tenant_secret_key(tenant)
             try:
                 stripe_gateway.create_refund(
                     secret_key,
