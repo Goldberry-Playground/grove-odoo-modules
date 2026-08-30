@@ -4,6 +4,7 @@ Injection point: pass `post=` (default requests.post) so Odoo methods and
 tests share one code path. Design: vault wiki/Software/Grove Shipping.
 """
 
+import os
 import re
 
 import requests
@@ -29,9 +30,16 @@ def is_valid_tracking(value) -> bool:
     return bool(value) and isinstance(value, str) and bool(TRACKING_RE.match(value))
 
 
+# Ship-from origin. `street1` previously held the literal placeholder
+# "SET_AT_DEPLOY" with a comment claiming GROVE_SHIP_FROM_STREET overrode it —
+# but nothing ever read that variable and ORIGIN was never mutated, so every
+# Shippo call shipped from the literal string (GOL-988). Rate quotes hid this
+# because UPS rates off city/state/ZIP, but a purchased label carried a garbage
+# return address. The real farm street is now the default and the documented
+# env override is actually wired.
 ORIGIN = {
     "name": "Goldberry Grove",
-    "street1": "SET_AT_DEPLOY",  # env GROVE_SHIP_FROM_STREET overrides
+    "street1": os.environ.get("GROVE_SHIP_FROM_STREET", "2291 Armstrong Road"),
     "city": "Summersville",
     "state": "WV",
     "zip": "26651",
