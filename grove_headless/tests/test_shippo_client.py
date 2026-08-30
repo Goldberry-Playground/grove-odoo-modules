@@ -115,3 +115,35 @@ class TestTrackingValidation(unittest.TestCase):
 
     def test_underscore_wildcard_rejected(self):
         self.assertFalse(sp.is_valid_tracking("1Z999_AA"))
+
+
+class TestShipFromOrigin(unittest.TestCase):
+    """GOL-988 regression: ORIGIN.street1 used to be the literal placeholder
+    "SET_AT_DEPLOY" while a comment claimed GROVE_SHIP_FROM_STREET overrode it —
+    nothing read that var, so real labels carried a garbage return address."""
+
+    def test_origin_street_is_a_real_address_not_a_placeholder(self):
+        street = sp.ORIGIN["street1"]
+        self.assertNotIn("SET_AT_DEPLOY", street)
+        self.assertNotEqual(street.strip(), "")
+        # A usable street line starts with a house number.
+        self.assertRegex(street, r"^\d+\s+\S")
+
+    def test_origin_city_state_zip_are_the_farm(self):
+        self.assertEqual(sp.ORIGIN["city"], "Summersville")
+        self.assertEqual(sp.ORIGIN["state"], "WV")
+        self.assertEqual(sp.ORIGIN["zip"], "26651")
+        self.assertEqual(sp.ORIGIN["country"], "US")
+
+    def test_ship_from_street_env_override_is_actually_wired(self):
+        """The documented override must work, not just be described in a comment."""
+        with mock.patch.dict(os.environ, {"GROVE_SHIP_FROM_STREET": "1 Override Way"}):
+            spec = importlib.util.spec_from_file_location("grove_shippo_reload", _MODULE_PATH)
+            reloaded = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(reloaded)
+            self.assertEqual(reloaded.ORIGIN["street1"], "1 Override Way")
+
+    def test_payload_ships_from_the_origin(self):
+        payload = sp.build_shipment_payload(TestShippoClient.ADDR, "s20", 4, "leafed")
+        self.assertEqual(payload["address_from"]["zip"], "26651")
+        self.assertNotIn("SET_AT_DEPLOY", payload["address_from"]["street1"])
