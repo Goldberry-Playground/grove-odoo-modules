@@ -1,0 +1,112 @@
+# `fix:` touches a test  —  GOL-1735 / GOL-1406-D (P0 CI hardening).
+#
+# Regression-guard convention: a change that claims to FIX a bug must also
+# touch at least one test so the bug it fixes cannot silently regress.
+#
+# CONVENTION OWNER: Ada owns the exact `fix:` detection, test globs, and the
+# escape-hatch label. grove-odoo-modules test conventions: Python pytest
+# under **/tests/** (grove_headless/tests/, web_dark_mode/tests/,
+# scripts/rate_check/tests/).
+#
+# Merge-queue safety: reports success on `merge_group` so it can become a
+# required check without wedging the queue.
+name: fix touches a test
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled]
+  merge_group:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: fix-touches-test-${{ github.event.pull_request.number || github.event.merge_group.head_sha || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  fix-test:
+    name: fix touches a test
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require a test change on fix PRs
+        uses: actions/github-script@v9
+        with:
+          script: |
+            if (context.eventName === 'merge_group') {
+              core.info('merge_group event — fix/test rule enforced at the PR gate; passing for the merge group.');
+              return;
+            }
+
+            const BYPASS_LABEL = 'fix-no-test';
+            const FIX_RE = /^\s*fix(\([^)]*\))?!?:/i;
+            // grove-odoo-modules: Python pytest conventions
+            const TEST_GLOBS = [
+              '**/tests/**',
+              '**/test_*.py',
+              '**/*_test.py',
+            ];
+
+            const { owner, repo } = context.repo;
+            const number = context.payload.pull_request.number;
+
+            const { data: pr } = await github.rest.pulls.get({ owner, repo, pull_number: number });
+            const labels = (pr.labels || []).map(l => (l && l.name) || '');
+            if (labels.includes(BYPASS_LABEL)) {
+              core.warning('`' + BYPASS_LABEL + '` present — skipping the fix/test rule. ' +
+                'The author must justify why this fix needs no test.');
+              return;
+            }
+
+            const commits = await github.paginate(github.rest.pulls.listCommits, {
+              owner, repo, pull_number: number, per_page: 100,
+            });
+            const subjects = [pr.title || '', ...commits.map(c => (c.commit && c.commit.message || '').split('\n')[0])];
+            const isFix = subjects.some(s => FIX_RE.test(s));
+
+            if (!isFix) {
+              core.info('Not a `fix:` change — rule does not apply; passing.');
+              return;
+            }
+
+            function globToRe(g) {
+              let re = '^';
+              for (let i = 0; i < g.length; i++) {
+                const c = g[i];
+                if (c === '*') {
+                  if (g[i + 1] === '*') {
+                    i++;
+                    if (g[i + 1] === '/') { i++; re += '(?:.*/)?'; }
+                    else { re += '.*'; }
+                  } else {
+                    re += '[^/]*';
+                  }
+                } else if ('\\^$.|?+()[]{}/'.includes(c)) {
+                  re += '\\' + c;
+                } else {
+                  re += c;
+                }
+              }
+              return new RegExp(re + '$');
+            }
+            const matchers = TEST_GLOBS.map(globToRe);
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner, repo, pull_number: number, per_page: 100,
+            });
+            const testHits = files
+              .filter(f => f.status !== 'removed')
+              .map(f => f.filename)
+              .filter(fn => matchers.some(re => re.test(fn)));
+
+            if (testHits.length > 0) {
+              core.info('fix PR touches a test:\n  ' + testHits.join('\n  '));
+              return;
+            }
+
+            core.setFailed(
+              'This is a `fix:` change but it touches no test. Add a regression test or apply ' +
+              'the `' + BYPASS_LABEL + '` label with a justification comment if the fix has no ' +
+              'testable surface.\nTest globs: ' + TEST_GLOBS.join(', ')
+            );
