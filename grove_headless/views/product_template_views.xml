@@ -28,6 +28,55 @@
                             <field name="grove_seo_description" />
                         </group>
                     </group>
+                    <group string="Growing Facts" name="grove_growing_facts">
+                        <div class="text-muted" colspan="2">
+                            These feed the storefront spec block, and <b>USDA Zone</b>,
+                            <b>Food Forest Layer</b> and <b>Sun Requirement</b> also drive
+                            the /shop filter facets. Leave a field blank to omit it from
+                            the storefront.
+                        </div>
+                        <group>
+                            <field name="grove_botanical_name" />
+                            <label for="grove_zone_min" string="USDA Zone (min / max)" />
+                            <div class="o_row">
+                                <field name="grove_zone_min" class="oe_inline" />
+                                <span class="mx-1">–</span>
+                                <field name="grove_zone_max" class="oe_inline" />
+                            </div>
+                            <field name="grove_layer" />
+                            <field name="grove_sun" />
+                        </group>
+                        <group>
+                            <field name="grove_mature_size" />
+                            <field name="grove_spacing" />
+                            <field name="grove_soil" />
+                        </group>
+                        <div class="text-muted" colspan="2">
+                            USDA Zone min cannot exceed max — saving an inverted range is
+                            rejected with a validation error.
+                        </div>
+                    </group>
+                    <group string="Shipping (shippability gate — read the warning)" name="grove_shipping">
+                        <div class="alert alert-warning" role="alert" colspan="2">
+                            <b>Shipping Tier is the shippability gate, not a cosmetic tag.</b>
+                            Only <b>Bareroot</b> products can ship (priced by Box Engine v2 per-box
+                            zone rates). <b>Potted</b> is farm-pickup-only and <b>cannot be ordered
+                            for shipping</b> — the checkout hard-fails any potted line. An untagged
+                            product defaults to Potted so it can never ship undercharged. A variant
+                            whose <b>Format</b> attribute is exactly "Bareroot" overrides this
+                            template tier, so the <b>Effective Shipping Tier</b> shown per variant
+                            below is the real outcome.
+                        </div>
+                        <field name="grove_shipping_tier" />
+                        <field name="grove_tree_length" />
+                        <separator string="Effective Shipping Tier per variant" colspan="2" />
+                        <field name="product_variant_ids" nolabel="1" colspan="2" readonly="1">
+                            <list string="Variants" create="false" delete="false" editable="false">
+                                <field name="display_name" string="Variant" />
+                                <field name="grove_effective_shipping_tier" string="Ships as" />
+                            </list>
+                        </field>
+                    </group>
                     <group string="Storefront Guide" name="grove_guide">
                         <field name="grove_guide_ready" />
                         <div class="text-muted" colspan="2">
