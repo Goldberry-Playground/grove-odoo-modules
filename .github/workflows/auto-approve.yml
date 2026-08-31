@@ -33,12 +33,29 @@
 #     The poll loop keeps re-resolving any late-arriving code-quality thread so
 #     the queue is never blocked. Requires `contents: write` + "Allow auto-merge".
 #
-# Guardrails (see GOL-122 / GOL-644):
-#   - Never auto-approves human/external PRs (author must be the agent App bot)
-#     -> human review is preserved for human PRs.
+# Human-maintainer path (GOL-1854, port of odoocker GOL-1195):
+#   A maintainer's OWN PRs hit the same wall from the other side: the ruleset
+#   requires an approving review, GitHub blocks approving your own PR, and (until
+#   now) this workflow skipped ALL human authors -> the maintainer's PR dead-ended
+#   with no way to satisfy the gate. The old workaround was to RE-ORIGINATE the PR
+#   under the agent App so it became bot-authored (GOL-1815 toil). We now clear the
+#   review gate for a small allowlist of trusted human maintainers (MAINTAINERS)
+#   by approving as github-actions[bot] (a DISTINCT identity, so no self-approval),
+#   but we deliberately DO NOT enable auto-merge for them -> the human keeps full
+#   control over WHEN their PR merges. The protected-paths carve-out applies to
+#   maintainer PRs too; only the agent-review sign-off gate is skipped for them
+#   (a human reviews their PR by hand). CI + protected-paths-guard +
+#   required_review_thread_resolution still gate the actual merge.
+#
+# Guardrails (see GOL-122 / GOL-644 / GOL-1854):
+#   - Auto-approves only (a) the agent App bot's PRs and (b) an explicit
+#     human-maintainer allowlist (MAINTAINERS). All other human/external PRs
+#     still keep the normal human-review requirement.
 #   - Only fires AFTER CI (all required status checks) SUCCEEDED
 #     -> not a blanket rubber-stamp; functional gates still hold.
 #   - Only resolves github-code-quality threads, never human threads.
+#   - Agent PRs get approve + auto-merge; maintainer PRs get approve ONLY
+#     (no auto-merge) so the human decides when to merge.
 #   - Runs from the base-branch definition (workflow_run), so a PR cannot
 #     modify this file to approve itself.
 name: Auto-approve verified agent PRs
@@ -79,15 +96,33 @@ jobs:
         run: |
           set -euo pipefail
 
+          # Trusted human maintainers whose OWN PRs may auto-clear the review
+          # gate (space-separated logins). GitHub blocks approving your own PR,
+          # so without this a maintainer's PR dead-ends — previously worked around
+          # by re-originating the PR under the agent App (GOL-1815 toil). Keep this
+          # list minimal and in sync with the protected-paths owner. (GOL-1854)
+          MAINTAINERS="EngineeringMoonBear"
+
           AUTHOR=$(gh pr view "$PR" --repo "$REPO" --json author -q '.author.login')
           # App bot logins appear as "app/agenticos-developer" via gh and
-          # "agenticos-developer" via some APIs; accept both, reject all else.
+          # "agenticos-developer" via some APIs; accept both.
+          KIND=""
           case "$AUTHOR" in
-            app/agenticos-developer|agenticos-developer) ;;
-            *)
-              echo "PR #$PR author '$AUTHOR' is not the agent App bot; skipping (human/external PRs keep human review)."
-              exit 0 ;;
+            app/agenticos-developer|agenticos-developer) KIND="agent" ;;
           esac
+          if [ -z "$KIND" ]; then
+            for m in $MAINTAINERS; do
+              # Match a bare login ONLY. Reject the "app/$m" form: real human
+              # maintainers always appear as bare logins, never "app/<login>".
+              # (GOL-1372 / GOL-1322)
+              if [ "$AUTHOR" = "$m" ]; then KIND="maintainer"; break; fi
+            done
+          fi
+          if [ -z "$KIND" ]; then
+            echo "PR #$PR author '$AUTHOR' is not the agent App bot or a listed maintainer; skipping (human/external PRs keep human review)."
+            exit 0
+          fi
+          echo "PR #$PR author '$AUTHOR' classified as: $KIND"
 
           # Both gates apply — they answer different questions and neither
           # subsumes the other: the carve-out asks "does this touch a dangerous
@@ -114,6 +149,10 @@ jobs:
           fi
 
           # ── Unified agent-review gate (GOL-1734 / GOL-1738, Ada sign-off) ──
+          # AGENT PRs only. Maintainer PRs are exempt — a human reviews them by
+          # hand; the review-count gate is cleared by the github-actions[bot]
+          # approval below. The carve-out above still applied to both. (GOL-1854)
+          if [ "$KIND" = "agent" ]; then
           # The github-sync plugin emits exactly one `agent-review/<reviewer>`
           # check-run per non-draft agent PR: seeded `in_progress` on open,
           # flipped to `success` ON THAT HEAD SHA only when the reviewer signs
@@ -145,6 +184,7 @@ jobs:
             exit 0
           fi
           echo "agent-review/* is success on $HEAD_SHA; proceeding."
+          fi
 
           OWNER="${REPO%/*}"
           NAME="${REPO#*/}"
@@ -190,7 +230,18 @@ jobs:
             echo "PR #$PR already approved by github-actions[bot]."
           else
             gh pr review "$PR" --repo "$REPO" --approve --body \
-              "Auto-approved by github-actions[bot]: CI (all required status checks) passed. This identity is distinct from the PR-author App, so it satisfies the review requirement. Functional required status checks still gate the merge. (GOL-308 / GOL-644)"
+              "Auto-approved by github-actions[bot]: CI (all required status checks) passed. This identity is distinct from the PR author, so it satisfies the review requirement without self-approval. Functional required status checks (incl. protected-paths-guard) still gate the merge. (GOL-308 / GOL-644 / GOL-1854)"
+          fi
+
+          # Maintainer PRs: approve ONLY. The human decides WHEN to merge, so we
+          # do not enable auto-merge on their behalf. We resolve advisory
+          # github-code-quality threads once so the human's merge isn't wedged on
+          # a bot nitpick; CI, protected-paths-guard, and required human review
+          # threads still gate. (GOL-1854)
+          if [ "$KIND" = "maintainer" ]; then
+            resolve_bot_threads
+            echo "PR #$PR is a maintainer PR: review gate cleared; leaving the merge decision to the author."
+            exit 0
           fi
 
           # Enable auto-merge (squash) and let the `merge-queue` ruleset own the
