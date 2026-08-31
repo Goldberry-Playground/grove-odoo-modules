@@ -47,4 +47,5 @@ collect_ignore_glob = [
     "grove_headless/tests/test_newsletter_subscribe.py",
     "grove_headless/tests/test_stripe_checkout.py",
     "grove_headless/tests/test_publish_event.py",
+    "grove_headless/tests/test_availability_events.py",
 ]

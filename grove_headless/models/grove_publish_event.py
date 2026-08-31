@@ -40,9 +40,26 @@ except ImportError:  # loaded standalone (tests import by file path)
 _logger = logging.getLogger(__name__)
 
 EVENT_GUIDE_PUBLISH = "guide.publish"
+# Emitted when a product crosses an availability boundary (GOL-1896) so the
+# grove-sites `/shop` ISR grid stops advertising a stale "In stock". Rides the
+# same signed/deduped/replayable channel as guide.publish; the receiver
+# revalidates the same two paths.
+EVENT_PRODUCT_AVAILABILITY = "product.availability"
 
 # Truncate stored response bodies — this is a debugging aid, not a mirror.
 _RESPONSE_LIMIT = 2000
+
+# Storm guard (GOL-1896): a bulk import or mass inventory adjustment can flip
+# hundreds of products' availability in one transaction. We coalesce to one
+# event per template (earliest→final state), then cap how many we actually send
+# per transaction; anything past the cap degrades to the (shortened) `/shop` ISR
+# window rather than firing a webhook storm at the receiver.
+_AVAILABILITY_EMIT_CAP = 50
+
+# Transaction-scoped scratch keys on `cr.precommit.data` (cleared when the flush
+# runs, i.e. at commit — or manually in tests).
+_AVAIL_BEFORE_KEY = "grove_availability_before"
+_AVAIL_REGISTERED_KEY = "grove_availability_flush_registered"
 
 
 class GrovePublishEvent(models.Model):
@@ -131,6 +148,109 @@ class GrovePublishEvent(models.Model):
     def publish_guide(self, product_tmpl):
         """Emit a `guide.publish` event for a product and deliver it. Returns the row."""
         return self._emit(product_tmpl, EVENT_GUIDE_PUBLISH)
+
+    # ── Availability transitions (GOL-1896) ────────────────────────────
+    # Storefront availability is three storefront-visible booleans:
+    #   * in stock          (qty_available > 0, read in the product's company)
+    #   * sale_ok           (purchasable vs "Coming soon")
+    #   * website_published  (present vs absent on /shop)
+    # The stock.quant and product.template write hooks call
+    # `note_availability_candidates` with the pre-mutation state; a single
+    # transaction-commit flush emits `product.availability` for the templates
+    # that actually crossed a boundary. Emitting on the *transition* (not every
+    # write) is the whole point: a confirmed order moves stock on every line, so
+    # a naive per-write emit would storm the receiver — we fire once per template
+    # that changed, computed earliest→final state.
+    @api.model
+    def _availability_signature(self, templates):
+        """{template_id: (in_stock, sale_ok, website_published)} for `templates`.
+
+        Read in each template's own company so the boolean matches what that
+        tenant's storefront sees. sudo: this runs from low-level stock hooks that
+        may not carry catalog read rights, and the availability booleans are not
+        sensitive.
+        """
+        signature = {}
+        for template in templates.sudo():
+            company = template.company_id or self.env.company
+            scoped = template.with_company(company)
+            signature[template.id] = (
+                (scoped.qty_available or 0.0) > 0.0,
+                bool(template.sale_ok),
+                bool(template.website_published),
+            )
+        return signature
+
+    @api.model
+    def note_availability_candidates(self, templates):
+        """Record `templates`' pre-mutation availability and schedule a flush.
+
+        Call this BEFORE the mutation (stock write / template write). Only the
+        first signature seen for a template this transaction is kept, so a
+        multi-write transaction still emits at most one event per template,
+        computed earliest→final state. Safe to call with an empty recordset.
+        """
+        templates = templates.exists()
+        if not templates:
+            return
+        data = self.env.cr.precommit.data
+        before = data.setdefault(_AVAIL_BEFORE_KEY, {})
+        missing = templates.filtered(lambda t: t.id not in before)
+        if missing:
+            before.update(self._availability_signature(missing))
+        if not data.get(_AVAIL_REGISTERED_KEY):
+            data[_AVAIL_REGISTERED_KEY] = True
+            # Flush at commit so a rolled-back stock change emits nothing, and so
+            # the webhook round-trip never blocks the business logic (it runs
+            # after all SQL is staged). sudo() binds the flush to a system env —
+            # audit rows are system-owned, like the guide-publish path.
+            self.env.cr.precommit.add(self.sudo()._flush_availability_events)
+
+    def _flush_availability_events(self):
+        """Emit `product.availability` for every noted template that changed.
+
+        Runs once per transaction (at commit, or directly in tests). Idempotent:
+        pops the scratch state, so a second call is a no-op.
+        """
+        data = self.env.cr.precommit.data
+        before = data.pop(_AVAIL_BEFORE_KEY, None)
+        data.pop(_AVAIL_REGISTERED_KEY, None)
+        if not before:
+            return
+        templates = self.env["product.template"].browse(sorted(before)).exists()
+        # The stock write already happened; drop the cached compute so the
+        # after-signature reflects the new on-hand quantity.
+        templates.invalidate_recordset(["qty_available"])
+        after = self._availability_signature(templates)
+        changed = [t for t in templates if after.get(t.id, before[t.id]) != before[t.id]]
+        for index, template in enumerate(changed):
+            if index >= _AVAILABILITY_EMIT_CAP:
+                _logger.warning(
+                    "product.availability: %s templates changed availability in one "
+                    "transaction; emitted the first %s and left the remaining %s to the "
+                    "/shop ISR window (GOL-1896).",
+                    len(changed),
+                    _AVAILABILITY_EMIT_CAP,
+                    len(changed) - _AVAILABILITY_EMIT_CAP,
+                )
+                break
+            self.sudo()._emit_safe(template, EVENT_PRODUCT_AVAILABILITY)
+
+    def _emit_safe(self, product_tmpl, event_type):
+        """`_emit` that never raises — for automatic emits behind a user's write.
+
+        A misconfigured tenant (no webhook URL/secret) or any unexpected error
+        must not abort or 500 the stock/template write that triggered it; the
+        storefront simply degrades to its ISR window. Delivery failures are
+        already non-raising (see `_deliver`) and keep the row for replay.
+        """
+        try:
+            return self._emit(product_tmpl, event_type)
+        except UserError as exc:
+            _logger.info("%s emit skipped for template %s: %s", event_type, product_tmpl.id, exc)
+        except Exception:  # pragma: no cover - defensive: never break the write
+            _logger.exception("%s emit failed for template %s", event_type, product_tmpl.id)
+        return self.browse()
 
     @api.model
     def _emit(self, product_tmpl, event_type):

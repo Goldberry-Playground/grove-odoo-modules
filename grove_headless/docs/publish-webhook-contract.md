@@ -6,6 +6,41 @@ receiver **must implement identically**. It supersedes the shared-secret
 `x-grove-revalidate-secret` scheme on `apps/hub/app/api/revalidate/route.ts`
 with a per-tenant HMAC signature.
 
+## Event types
+
+Two event types ride this same signed/deduped/replayable channel. The wire
+format, headers, signature scheme and receiver responsibilities below are
+identical for both — only the trigger and `X-Grove-Event` value differ. The
+receiver revalidates the **same two paths** (`/shop/${product.id}` + `/shop`)
+for either.
+
+| `X-Grove-Event`        | Trigger                                                                 |
+| ---------------------- | ---------------------------------------------------------------------- |
+| `guide.publish`        | Operator clicks **Publish Guide to Storefront** (GOL-985, below).      |
+| `product.availability` | A product crosses an availability boundary (GOL-1896, see next section).|
+
+## `product.availability` (GOL-1896)
+
+Emitted automatically when a product template crosses a storefront-visible
+availability boundary, so the ISR `/shop` grid stops advertising a stale "In
+stock" for up to a minute after a sellout. The boundaries:
+
+- `qty_available` crosses 0 in either direction (sellout / restock) — detected
+  on `stock.quant`, since on-hand never flows through a `product.template`
+  write;
+- `sale_ok` flips (purchasable vs "Coming soon");
+- `website_published` flips (present vs absent on `/shop`).
+
+Emitted on the **transition**, coalesced to **one event per template per
+transaction** (earliest→final state) and flushed at commit, so a multi-line
+order that sells out three species produces three events, not thirty, and a
+rolled-back write emits nothing. A bulk import / mass inventory adjustment is
+capped per transaction (`_AVAILABILITY_EMIT_CAP`); anything past the cap degrades
+to the `/shop` ISR window (lowered to 30s as the backstop). The emit never raises
+into the Odoo write — a missing config or failed delivery is logged and the
+storefront falls back to ISR. The body is the same product envelope as
+`guide.publish` (the receiver only needs `product.id`).
+
 ## Trigger
 
 An operator approves a species guide on the Odoo product form

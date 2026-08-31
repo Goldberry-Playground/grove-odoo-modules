@@ -21,6 +21,20 @@ except ImportError:  # loaded standalone (tests import by file path)
 class ProductTemplate(models.Model):
     _inherit = "product.template"
 
+    # Availability fields that live on the template itself (GOL-1896). A flip of
+    # any of these changes what the /shop grid shows — sale_ok toggles
+    # purchasable vs "Coming soon", website_published / active add or remove the
+    # card — so snapshot before the write and let grove.publish.event emit a
+    # `product.availability` webhook if the state actually crossed. qty_available
+    # is deliberately NOT here: on-hand never changes via a template write, it
+    # crosses through stock.quant (see stock_quant.py).
+    _GROVE_AVAILABILITY_FIELDS = frozenset({"sale_ok", "website_published", "is_published", "active"})
+
+    def write(self, vals):
+        if self._GROVE_AVAILABILITY_FIELDS.intersection(vals):
+            self.env["grove.publish.event"].sudo().note_availability_candidates(self)
+        return super().write(vals)
+
     grove_featured = fields.Boolean(
         string="Grove Featured",
         default=False,
