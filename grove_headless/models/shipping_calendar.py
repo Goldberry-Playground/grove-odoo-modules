@@ -198,7 +198,7 @@ PREORDER_OPEN: dict[str, tuple[int, int]] = {"fall": (8, 15), "spring": (11, 1)}
 # ship potted-in-peat on the normal 5-10 business-day policy. Informational for
 # the frontend label; the resolver treats every date outside a dormant window
 # or preorder as this "ships now" mode (see resolve_fulfillment).
-LEAFED_WINDOW: tuple[tuple[int, int], tuple[int, int]] = ((5, 6), (8, 14))
+LEAFED_WINDOW: tuple[tuple[int, int], tuple[int, int]] = ((5, 1), (10, 15))
 
 # Normal processing SLA (business days) for leafed / peat & bagged and for the
 # shipped-past-your-zone fallback.

@@ -62,6 +62,15 @@ jobs:
       github.event.workflow_run.pull_requests[0] != null
     runs-on: ubuntu-latest
     steps:
+      # GOL-1406-A: base-branch checkout so the Tier-0 carve-out below runs the
+      # base definition of scripts/ci/protected-paths-carveout.mjs, not a
+      # PR-supplied one (a PR cannot edit the carve-out to approve itself).
+      - name: Check out base-branch scripts (protected-paths carve-out)
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: false
+
       - name: Approve + resolve bot threads + merge (github-actions[bot])
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -79,6 +88,63 @@ jobs:
               echo "PR #$PR author '$AUTHOR' is not the agent App bot; skipping (human/external PRs keep human review)."
               exit 0 ;;
           esac
+
+          # Both gates apply — they answer different questions and neither
+          # subsumes the other: the carve-out asks "does this touch a dangerous
+          # file?", the agent-review gate asks "did a reviewer sign off on THIS
+          # head SHA?". A PR can fail either independently, so both stay.
+          #
+          # ORDER IS DELIBERATE: the carve-out is one API call + a local script,
+          # while the agent-review gate polls for up to 15 minutes. Running the
+          # cheap fail-closed check FIRST means a protected-path PR exits at once
+          # instead of burning a quarter hour of runner time to reach the same
+          # verdict.
+          # ── Tier-0 protected-paths carve-out (GOL-1406-A) ──
+          # Defense-in-depth before the protected-paths-guard becomes a REQUIRED
+          # check: never auto-approve/merge an agent PR that touches a protected
+          # path. Same PROTECTED_GLOBS as protected-paths-guard.yml (both
+          # generated from AgenticOS scripts/ci/gen-protected-paths-guard.py, so
+          # they cannot drift). Fail-closed: if the check cannot run, withhold.
+          PR_FILES=$(gh pr view "$PR" --repo "$REPO" --json files -q '.files[].path')
+          if REASON=$(PR_FILES="$PR_FILES" node scripts/ci/protected-paths-carveout.mjs); then
+            :  # no protected path touched — proceed to approve
+          else
+            echo "PR #$PR not auto-approved: $REASON"
+            exit 0
+          fi
+
+          # ── Unified agent-review gate (GOL-1734 / GOL-1738, Ada sign-off) ──
+          # The github-sync plugin emits exactly one `agent-review/<reviewer>`
+          # check-run per non-draft agent PR: seeded `in_progress` on open,
+          # flipped to `success` ON THAT HEAD SHA only when the reviewer signs
+          # the review issue `done`. COMMENT-only — the signal is a check-run,
+          # never a GitHub APPROVE event. Require it PRESENT and `success` on the
+          # CURRENT head SHA before approving/merging: absent / in_progress /
+          # neutral / failure / success-on-old-SHA => BLOCK. Native `--auto`
+          # merge only waits for REQUIRED checks, and agent-review/* is not a
+          # required check, so this explicit gate is what enforces review here.
+          # Poll so a sign-off landing shortly after CI is caught; a later
+          # sign-off re-fires on the next CI run.
+          HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q '.headRefOid')
+          REVIEW_STATE=absent
+          for i in $(seq 1 30); do   # up to ~15 min (30 × 30s)
+            REVIEW_STATE=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+              -q '[.check_runs[] | select(.name | startswith("agent-review/"))]
+                   | if length==0 then "absent"
+                     elif any(.[]; .status=="completed" and .conclusion=="success") then "success"
+                     elif all(.[]; .status=="completed") then "completed-not-success"
+                     else "pending" end')
+            case "$REVIEW_STATE" in
+              success|completed-not-success) break ;;
+            esac
+            echo "agent-review/* on $HEAD_SHA: $REVIEW_STATE (poll $i/30)…"
+            sleep 30
+          done
+          if [ "$REVIEW_STATE" != "success" ]; then
+            echo "PR #$PR agent-review/* gate not satisfied on $HEAD_SHA (state: $REVIEW_STATE); not approving. The reviewer must sign off (COMMENT-only gate — GOL-1734)."
+            exit 0
+          fi
+          echo "agent-review/* is success on $HEAD_SHA; proceeding."
 
           OWNER="${REPO%/*}"
           NAME="${REPO#*/}"
