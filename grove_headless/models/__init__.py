@@ -8,6 +8,7 @@ from . import (
     product_template,  # noqa: F401
     sale_order,  # noqa: F401
     shipping_zones,  # noqa: F401  pure rate engine (GOL-15), no ORM models
+    stock_quant,  # noqa: F401  on-hand → product.availability webhook (GOL-1896)
     stripe_gateway,  # noqa: F401  pure Stripe REST client (GOL-642), no ORM models
     website,  # noqa: F401
 )
