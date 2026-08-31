@@ -32,6 +32,7 @@ Two modes:
 
 Exit non-zero on any failure.
 """
+
 import glob
 import json
 import os
@@ -79,8 +80,7 @@ def job_context_names(job_id, job):
 def load_workflows():
     """[(path, has_merge_group, {context_name: templated_bool})]"""
     out = []
-    paths = sorted(glob.glob(os.path.join(WF_DIR, "*.yml")) +
-                   glob.glob(os.path.join(WF_DIR, "*.yaml")))
+    paths = sorted(glob.glob(os.path.join(WF_DIR, "*.yml")) + glob.glob(os.path.join(WF_DIR, "*.yaml")))
     for path in paths:
         with open(path) as f:
             raw = f.read()
@@ -98,7 +98,7 @@ def load_workflows():
         contexts = {}
         for job_id, job in (doc.get("jobs") or {}).items():
             ctx = job_context_names(job_id, job)
-            contexts[ctx] = ("${{" in ctx)
+            contexts[ctx] = "${{" in ctx
         # Commit-status contexts posted via the statuses API (not job names).
         for _q, ctx in STATUS_CTX_RE.findall(raw):
             contexts.setdefault(ctx, ("${{" in ctx))
@@ -113,26 +113,30 @@ def static_audit():
     workflows = load_workflows()
 
     failures = []
-    print(f"Auditing {len(required)} required context(s) against "
-          f"{len(workflows)} workflow(s):\n")
+    print(f"Auditing {len(required)} required context(s) against {len(workflows)} workflow(s):\n")
     for ctx in required:
         producers = [(path, mg) for (path, mg, ctxs) in workflows if ctx in ctxs]
         if not producers:
             # Also flag templated names that *might* match, to avoid a false miss.
-            templated = [path for (path, _mg, ctxs) in workflows
-                         for name, t in ctxs.items() if t]
-            hint = (f" (workflows with templated job/status names that may produce "
-                    f"it: {sorted(set(templated))})") if templated else ""
-            failures.append(f"required check '{ctx}' is produced by NO workflow "
-                            f"job or status — renamed or removed?{hint}")
+            templated = [path for (path, _mg, ctxs) in workflows for name, t in ctxs.items() if t]
+            hint = (
+                (f" (workflows with templated job/status names that may produce it: {sorted(set(templated))})")
+                if templated
+                else ""
+            )
+            failures.append(
+                f"required check '{ctx}' is produced by NO workflow job or status — renamed or removed?{hint}"
+            )
             print(f"  ✗ {ctx!r}: no producing workflow found")
             continue
         on_mg = [p for (p, mg) in producers if mg]
         if not on_mg:
             paths = ", ".join(os.path.basename(p) for (p, _mg) in producers)
-            failures.append(f"required check '{ctx}' is PR-only — its workflow(s) "
-                            f"[{paths}] do not trigger on `merge_group`; the merge "
-                            f"queue will wedge. Add `merge_group:` to `on:`.")
+            failures.append(
+                f"required check '{ctx}' is PR-only — its workflow(s) "
+                f"[{paths}] do not trigger on `merge_group`; the merge "
+                f"queue will wedge. Add `merge_group:` to `on:`."
+            )
             print(f"  ✗ {ctx!r}: produced by [{paths}] but none trigger on merge_group")
             continue
         print(f"  ✓ {ctx!r}: {os.path.basename(on_mg[0])} triggers on merge_group")
@@ -141,8 +145,7 @@ def static_audit():
     if failures:
         for msg in failures:
             print(f"::error::{msg}")
-        print(f"\nFAIL: {len(failures)} required check(s) would not report on the "
-              f"merge queue.")
+        print(f"\nFAIL: {len(failures)} required check(s) would not report on the merge queue.")
         return 1
     print("PASS: every required check reports on `merge_group`.")
     return 0
@@ -152,11 +155,15 @@ def _api_get(url, token):
     """GET a GitHub API URL. Returns (data, None) or (None, http_status)."""
     import urllib.error
     import urllib.request
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    })
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.load(resp), None
@@ -181,8 +188,8 @@ def reconcile():
 
     # 1) Classic branch protection required status checks.
     prot, err = _api_get(
-        f"https://api.github.com/repos/{repo}/branches/{branch}"
-        f"/protection/required_status_checks", token)
+        f"https://api.github.com/repos/{repo}/branches/{branch}/protection/required_status_checks", token
+    )
     if prot is not None:
         sources += 1
         for c in prot.get("checks", []):
@@ -193,8 +200,7 @@ def reconcile():
     # that is a legitimate empty source, not an auth failure.
 
     # 2) Ruleset-based required status checks effective on the branch.
-    rules, err = _api_get(
-        f"https://api.github.com/repos/{repo}/rules/branches/{branch}", token)
+    rules, err = _api_get(f"https://api.github.com/repos/{repo}/rules/branches/{branch}", token)
     if rules is not None:
         sources += 1
         if isinstance(rules, list):
@@ -211,11 +217,13 @@ def reconcile():
     # genuinely lacks branch-protection/ruleset admin. Otherwise we have a real
     # live picture (possibly empty) to compare against.
     if sources == 0 and auth_failures:
-        print(f"::warning::--reconcile skipped: token lacks branch-protection / "
-              f"ruleset read admin on {repo}@{branch}. Provision an admin-scoped "
-              f"REQUIRED_CHECKS_ADMIN_TOKEN secret (fine-grained: Administration "
-              f"read) to enable the live drift check; the static audit above still "
-              f"gates.")
+        print(
+            f"::warning::--reconcile skipped: token lacks branch-protection / "
+            f"ruleset read admin on {repo}@{branch}. Provision an admin-scoped "
+            f"REQUIRED_CHECKS_ADMIN_TOKEN secret (fine-grained: Administration "
+            f"read) to enable the live drift check; the static audit above still "
+            f"gates."
+        )
         return 0
 
     live = sorted(live)
@@ -223,8 +231,10 @@ def reconcile():
         print(f"PASS: required-checks.json matches live required checks: {live}")
         return 0
     print(f"::error::required-checks.json drift — declared={declared} live={live}")
-    print("Update .github/required-checks.json to match, then re-run the static "
-          "audit so the new checks are verified against merge_group.")
+    print(
+        "Update .github/required-checks.json to match, then re-run the static "
+        "audit so the new checks are verified against merge_group."
+    )
     return 1
 
 
