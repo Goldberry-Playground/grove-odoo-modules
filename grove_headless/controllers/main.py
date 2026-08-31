@@ -242,18 +242,13 @@ def _fallback_secret_key():
     ``stripe_test_secret_key`` alias so the rename can land before Terra's env
     change without a flag day (GOL-1892 item d).
     """
-    return os.environ.get(STRIPE_SECRET_KEY_FALLBACK_ENV, "") or os.environ.get(
-        STRIPE_SECRET_KEY_LEGACY_ENV, ""
-    )
+    return os.environ.get(STRIPE_SECRET_KEY_FALLBACK_ENV, "") or os.environ.get(STRIPE_SECRET_KEY_LEGACY_ENV, "")
 
 
 def _any_per_tenant_key_configured():
     """True when ANY non-empty ``stripe_secret_key_{slug}`` var is set — i.e.
     per-tenant (one-account-per-LLC) mode is active for this deployment."""
-    return any(
-        name.startswith(STRIPE_SECRET_KEY_ENV_PREFIX) and value
-        for name, value in os.environ.items()
-    )
+    return any(name.startswith(STRIPE_SECRET_KEY_ENV_PREFIX) and value for name, value in os.environ.items())
 
 
 def _tenant_secret_key(tenant):
