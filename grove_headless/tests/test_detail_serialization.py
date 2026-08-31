@@ -6,6 +6,7 @@ from odoo.addons.grove_headless.controllers.main import (
     _cultivar_count,
     _gate_guide_fields,
     _image_url,
+    _ordered_variants,
     _serialize_facts,
     _serialize_images,
     _serialize_product,
@@ -57,6 +58,31 @@ class TestDetailSerialization(TransactionCase):
         self.assertEqual(data["shipping_tier"], "bareroot")
         self.assertIn("price", data)
         self.assertIn("qty_available", data)
+
+    def test_variants_ordered_bareroot_first(self):
+        # GOL-1868: product_variant_ids has no `sequence`, so Odoo's recordset
+        # order is a function of per-environment SKU/creation data (prod surfaced
+        # Potted first, QA Bareroot first — GOL-1862). The controller must emit
+        # shippable/preorderable tiers (bareroot) before pickup-only (potted),
+        # independent of that order.
+        ordered = _ordered_variants(self.tmpl)
+        self.assertEqual(ordered.mapped("grove_effective_shipping_tier"), ["bareroot", "potted"])
+
+    def test_variants_order_is_stable_on_id(self):
+        # A second cultivar yields two bareroot + two potted variants; within a
+        # tier the tiebreak is ascending id, so the order is fully deterministic.
+        c_bart = self.env["product.attribute.value"].create({"name": "Bartlett", "attribute_id": self.cultivar.id})
+        line = self.tmpl.attribute_line_ids.filtered(lambda al: al.attribute_id == self.cultivar)
+        line.value_ids = [(4, c_bart.id)]
+        ordered = _ordered_variants(self.tmpl)
+        self.assertEqual(
+            ordered.mapped("grove_effective_shipping_tier"),
+            ["bareroot", "bareroot", "potted", "potted"],
+        )
+        bareroots = ordered.filtered(lambda v: v.grove_effective_shipping_tier == "bareroot")
+        self.assertEqual(bareroots.ids, sorted(bareroots.ids))
+        potteds = ordered.filtered(lambda v: v.grove_effective_shipping_tier == "potted")
+        self.assertEqual(potteds.ids, sorted(potteds.ids))
 
     def test_structured_variant_rootstock_absent_reads_empty(self):
         # GOL-1117: a product with no Rootstock attribute line still carries the

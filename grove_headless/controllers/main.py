@@ -371,6 +371,27 @@ def _structure_variant(variant, template_rootstock=""):
     }
 
 
+# Deterministic order for the variant list the PDP consumes (GOL-1868).
+# product_variant_ids carries no `sequence`, so Odoo's default recordset order is
+# a function of per-environment SKU/creation data — this is why prod surfaced
+# Potted first while QA surfaced Bareroot first (GOL-1862). Rank shippable /
+# preorderable tiers (bareroot) ahead of pickup-only ones (potted); unknown tiers
+# sort last but stay deterministic via the id tiebreak, so every consumer
+# receives an intentional order. Belt-and-braces only: the frontend must still
+# not depend on array order for correctness (GOL-1862 already ensures it doesn't).
+_SHIPPING_TIER_RANK = {"bareroot": 0, "potted": 1}
+
+
+def _variant_sort_key(variant):
+    tier = variant.grove_effective_shipping_tier or ""
+    return (_SHIPPING_TIER_RANK.get(tier, len(_SHIPPING_TIER_RANK)), variant.id)
+
+
+def _ordered_variants(product):
+    """product_variant_ids in a deterministic, intentional order (GOL-1868)."""
+    return product.product_variant_ids.sorted(key=_variant_sort_key)
+
+
 def _serialize_images(product):
     """Gallery list: template hero first, then eCommerce media images."""
     images = []
@@ -517,7 +538,7 @@ class GroveHeadlessAPI(http.Controller):
             "min_long_edge": GROVE_MIN_IMAGE_LONG_EDGE,
         }
         template_rootstock = _template_rootstock(product)
-        data["variants"] = [_structure_variant(v, template_rootstock) for v in product.product_variant_ids]
+        data["variants"] = [_structure_variant(v, template_rootstock) for v in _ordered_variants(product)]
         data["facts"] = _serialize_facts(product)
         data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
         data["categories"] = [{"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids]
