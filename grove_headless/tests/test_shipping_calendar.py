@@ -224,11 +224,19 @@ class TestCalendarSerialization(unittest.TestCase):
         cal = sc.default_calendar()
         self.assertEqual(set(cal["zones"]), set(range(2, 11)))
         self.assertEqual(cal["preorder_open"]["fall"], (8, 15))
+        # GOL-1725: leafed / peat-and-bagged ships May 1 - Oct 15. Pinned by
+        # value, not shape: LEAFED_WINDOW feeds only the customer-facing label,
+        # so a wrong value leaves every functional test green while the site
+        # advertises the wrong season (it read Aug 14 for two months of live
+        # shipping before anyone noticed).
+        self.assertEqual(cal["leafed_window"], ((5, 1), (10, 15)))
 
     def test_serialize_is_json_safe(self):
         out = sc.serialize_calendar()
         self.assertEqual(set(out["zones"]), {str(z) for z in range(2, 11)})
         self.assertEqual(out["preorder_open"], {"fall": [8, 15], "spring": [11, 1]})
+        # GOL-1725: same window, JSON shape — this is what the storefront reads.
+        self.assertEqual(out["leafed_window"], [[5, 1], [10, 15]])
         # Real Arbor Day zone-6 spring window + its order deadline.
         self.assertEqual(out["zones"]["6"]["spring"], [[4, 5], [6, 6]])
         self.assertEqual(out["zones"]["6"]["spring_order_deadline"], [5, 31])
