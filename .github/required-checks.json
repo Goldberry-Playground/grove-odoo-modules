@@ -1,0 +1,10 @@
+{
+  "//": "Declared required status checks for this repo (GOL-1735 / GOL-1406-D; ported by GOL-1824).",
+  "//audit": "audit-required-merge-group.py asserts every context below is produced by a workflow that triggers on `merge_group` (job name OR a commit status posted via the statuses API), so no required check is PR-only and the merge queue cannot wedge ('Expected \u2014 waiting for status'). The weekly reconcile job compares this list against the live required contexts (classic branch protection AND rulesets) and fails on drift, so keep this file in sync when a required check is added or removed.",
+  "branch": "main",
+  "required_contexts": [
+    "Lint Python",
+    "Validate Module Manifests",
+    "Validate Tenant Slug Map"
+  ]
+}
