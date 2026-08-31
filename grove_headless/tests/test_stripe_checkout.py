@@ -145,24 +145,57 @@ class TestStripeCheckout(TransactionCase):
             self.assertEqual(grove_main._tenant_secret_key("goldberry"), "sk_goldberry")
 
     def test_tenant_secret_key_falls_back_to_legacy(self):
-        """An env with only the legacy single key routes every tenant to it —
-        the single-merchant-of-record (B1) config, zero code change."""
+        """An env with only the single fallback key routes every tenant to it —
+        the single-merchant-of-record (B1) config, zero code change. The
+        deprecated ``stripe_test_secret_key`` name is still read (dual-read)."""
         env = {"stripe_test_secret_key": "sk_legacy"}
         with mock.patch.dict("os.environ", env, clear=True):
             for tenant in ("nursery", "ggg", "goldberry", None):
                 self.assertEqual(grove_main._tenant_secret_key(tenant), "sk_legacy")
 
-    def test_tenant_secret_key_prefers_own_over_legacy_when_partial(self):
-        """A tenant WITH its own key uses it; a tenant WITHOUT one falls back to
-        the legacy key rather than silently failing — so a half-wired env still
-        charges."""
+    def test_tenant_secret_key_fails_closed_in_mixed_mode(self):
+        """GOL-1892 money-flow guard: once ANY per-tenant key is set, a known
+        tenant WITHOUT its own key fails closed (returns "") instead of
+        borrowing the fallback key — that fallback holds one LLC's live key, so
+        charging another tenant with it misroutes revenue into the wrong
+        entity's books. The caller turns "" into the existing 503."""
         env = {
             "stripe_secret_key_goldberry": "sk_goldberry",
             "stripe_test_secret_key": "sk_legacy",
         }
         with mock.patch.dict("os.environ", env, clear=True):
             self.assertEqual(grove_main._tenant_secret_key("goldberry"), "sk_goldberry")
-            self.assertEqual(grove_main._tenant_secret_key("ggg"), "sk_legacy")
+            # Unwired known tenants must NOT reach sk_legacy.
+            self.assertEqual(grove_main._tenant_secret_key("ggg"), "")
+            self.assertEqual(grove_main._tenant_secret_key("nursery"), "")
+            self.assertEqual(grove_main._tenant_secret_key(None), "")
+
+    def test_tenant_secret_key_prefers_new_fallback_name(self):
+        """The non-"test" ``stripe_secret_key`` name is preferred over the
+        deprecated ``stripe_test_secret_key`` alias when both are set, so the
+        rename can land before the old var is removed (GOL-1892 item d)."""
+        env = {
+            "stripe_secret_key": "sk_new",
+            "stripe_test_secret_key": "sk_old",
+        }
+        with mock.patch.dict("os.environ", env, clear=True):
+            for tenant in ("nursery", "ggg", "goldberry", None):
+                self.assertEqual(grove_main._tenant_secret_key(tenant), "sk_new")
+
+    def test_tenant_secret_key_legacy_owner_pins_fallback(self):
+        """GOL-1892 option 2: with ``stripe_legacy_key_tenant`` set, only that
+        LLC may use the single fallback key even in pure single-merchant mode;
+        every other tenant (and an unresolved None) fails closed. Protects prod
+        TODAY, before per-tenant vars land."""
+        env = {
+            "stripe_secret_key": "sk_nursery_live",
+            "stripe_legacy_key_tenant": "nursery",
+        }
+        with mock.patch.dict("os.environ", env, clear=True):
+            self.assertEqual(grove_main._tenant_secret_key("nursery"), "sk_nursery_live")
+            self.assertEqual(grove_main._tenant_secret_key("ggg"), "")
+            self.assertEqual(grove_main._tenant_secret_key("goldberry"), "")
+            self.assertEqual(grove_main._tenant_secret_key(None), "")
 
     def test_tenant_secret_key_empty_when_unconfigured(self):
         """No key at all → "" so the caller keeps returning the 503 'not
