@@ -8,6 +8,7 @@ keys are read (the handlers take the env, not the HTTP request).
 
 import hashlib
 import hmac
+import json
 import time
 from datetime import date
 from unittest import mock
@@ -15,6 +16,7 @@ from unittest import mock
 from odoo.addons.grove_headless.controllers import main as grove_main
 from odoo.addons.grove_headless.models import stripe_gateway
 from odoo.tests import TransactionCase, tagged
+from odoo.tests.common import HttpCase, get_db_name
 from odoo.tools import mute_logger
 from psycopg2 import IntegrityError
 
@@ -793,9 +795,7 @@ class TestStripeCheckout(TransactionCase):
         grove_main._notify_discord = lambda message: pings.append(message)
         try:
             with mute_logger("odoo.addons.mail.models.mail_mail"):
-                result = grove_main._handle_session_completed(
-                    self.env, {"id": "cs_disc", "payment_intent": "pi_disc"}
-                )
+                result = grove_main._handle_session_completed(self.env, {"id": "cs_disc", "payment_intent": "pi_disc"})
         finally:
             grove_main._notify_discord = orig
         self.assertEqual(result, "paid")
@@ -923,4 +923,105 @@ class TestStripeCheckout(TransactionCase):
             grove_main._notify_discord = orig
             Template.send_mail = orig_tmpl
         self.assertEqual(result, "paid")
+        self.assertEqual(order.grove_checkout_status, "paid")
+
+
+@tagged("post_install", "-at_install")
+class TestStripeWebhookRedelivery(HttpCase):
+    """End-to-end idempotency of the new-order ops chain through the real
+    `/grove/api/v1/stripe/webhook` route (GOL-1941).
+
+    The dedupe that guarantees "notify exactly once" lives in the route itself
+    (the `grove.stripe.event` ledger short-circuits a redelivered event BEFORE
+    `_handle_session_completed` runs), not in the notify helpers. The direct-call
+    tests in TestStripeCheckout prove the ping + merchant email fire with the
+    right content; this proves a Stripe retry of the SAME event id does not fire
+    either of them a second time. HttpCase (not TransactionCase) so the request
+    goes through signature verification and the ledger gate for real.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.ref("base.main_company")
+        self.company.email = "ops@goldberrygrove.farm"
+        self.partner = self.env["res.partner"].create(
+            {"name": "Cart Customer", "email": "cart@example.com", "company_id": self.company.id}
+        )
+        self.warehouse = self.env["stock.warehouse"].search([("company_id", "=", self.company.id)], limit=1)
+        self.location = self.warehouse.lot_stock_id
+        self.product = self.env["product.product"].create(
+            {"name": "Pawpaw 'Shenandoah'", "type": "consu", "is_storable": True, "list_price": 25.0}
+        )
+        self.env["stock.quant"]._update_available_quantity(self.product, self.location, 5)
+        self.product.invalidate_recordset(["qty_available", "free_qty"])
+
+    def _make_order(self, session_id, qty=2.0):
+        order = (
+            self.env["sale.order"]
+            .with_company(self.company)
+            .create(
+                {
+                    "partner_id": self.partner.id,
+                    "company_id": self.company.id,
+                    "order_line": [(0, 0, {"product_id": self.product.id, "product_uom_qty": qty})],
+                }
+            )
+        )
+        order.grove_fulfillment = "ship"
+        order.grove_stripe_session_id = session_id
+        return order
+
+    def test_redelivered_event_notifies_exactly_once(self):
+        """Posting the SAME checkout.session.completed event twice reconciles the
+        order once and pings ops + emails the merchant exactly once; the second
+        delivery is reported as a duplicate and never re-enters the notify path."""
+        secret = "whsec_redeliver"
+        order = self._make_order("cs_redeliver")
+        body = json.dumps(
+            {
+                "id": "evt_redeliver",
+                "type": "checkout.session.completed",
+                "data": {"object": {"id": "cs_redeliver", "payment_intent": "pi_redeliver"}},
+            }
+        ).encode("utf-8")
+        sig = TestStripeCheckout._sign(secret, body)
+        headers = {
+            "X-Odoo-Database": get_db_name(),
+            "Stripe-Signature": sig,
+            "Content-Type": "application/json",
+        }
+
+        new_order_calls = []
+        merchant_calls = []
+        orig_new_order = grove_main._notify_new_order
+        orig_merchant = grove_main._notify_merchant_email
+        grove_main._notify_new_order = lambda env, order, is_deposit: new_order_calls.append(order.name)
+        grove_main._notify_merchant_email = lambda env, order, is_deposit: merchant_calls.append(order.name)
+        try:
+            with (
+                mock.patch.dict("os.environ", {"stripe_webhook_secret_nursery": secret}, clear=False),
+                mute_logger("odoo.addons.mail.models.mail_mail"),
+            ):
+                first = self.url_open("/grove/api/v1/stripe/webhook", data=body, headers=headers)
+                second = self.url_open("/grove/api/v1/stripe/webhook", data=body, headers=headers)
+        finally:
+            grove_main._notify_new_order = orig_new_order
+            grove_main._notify_merchant_email = orig_merchant
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json(), {"ok": True, "result": "paid"})
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.json(), {"ok": True, "duplicate": True})
+
+        # The whole notify chain ran once — the ledger gate stopped the retry
+        # before _handle_session_completed, so neither helper was re-invoked.
+        self.assertEqual(new_order_calls, [order.name])
+        self.assertEqual(merchant_calls, [order.name])
+        # And exactly one ledger row exists for the event id.
+        self.assertEqual(
+            self.env["grove.stripe.event"].search_count([("event_id", "=", "evt_redeliver")]),
+            1,
+        )
+        # The order reconciled to paid (proves delivery 1 actually processed,
+        # not just that both deliveries were treated as duplicates).
         self.assertEqual(order.grove_checkout_status, "paid")
