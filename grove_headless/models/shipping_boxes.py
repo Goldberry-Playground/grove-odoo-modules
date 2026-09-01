@@ -1,9 +1,10 @@
 """Box catalog + per-box packing engine for bareroot-only shipping (v2).
 
 Replaces the one-tree-one-box model: shipping now prices PER PACKED BOX, not
-per tree, because under UPS DIM billing the box drives the cost — 50 dormant
-bareroots and 10 dormant bareroots in the same 32x12x12 bill nearly the same.
-Design: vault wiki/Software/Grove Shipping (Box Engine v2, 2026-07-31).
+per tree, because under carrier dimensional billing the box drives the cost —
+50 dormant bareroots and 10 dormant bareroots in the same 32x12x12 bill nearly
+the same. Design: vault wiki/Software/Grove Shipping (Box Engine v2, 2026-07-31;
+recalibrated off UPS-only billing to the USPS/UPS least-cost race, GOL-1906).
 
 Two packing modes, resolved from the ship date (trees are dormant or leafed
 out at the nursery — it is a property of the season, not the product):
@@ -110,11 +111,61 @@ BOXES: dict[str, dict] = {
     # 3-5 yr stock at ~48 lb DIM. Add here + rates when Josh decides.
 }
 
-# UPS additional-handling fires above 48.0" — every catalog box must clear it.
-MAX_BOX_LONGEST_SIDE_IN = 48.0
-assert all(max(b["length"], b["width"], b["height"]) <= MAX_BOX_LONGEST_SIDE_IN for b in BOXES.values())
+# USPS Ground Advantage hard mailability limits (GOL-1906). Source: Shippo
+# (our broker), "USPS Ground Advantage" service guide — max weight 70 lb, max
+# combined length + girth 130" (girth = 2*width + 2*height). A box that violates
+# either is not mailable at all, so the catalog must clear both; this fails
+# loudly at import if a future box is added over-size. USPS is the binding
+# constraint in the least-cost race: it has the tighter combined-size limit, so
+# a box that clears USPS also clears UPS Ground's own 165" length+girth ceiling.
+#
+# This REPLACES the old UPS additional-handling rule (fired above a 48" longest
+# side). USPS has no single-longest-side cutoff; it prices oversize through
+# nonstandard SURCHARGES, which are cost tiers priced into the live Shippo quote,
+# NOT mailability limits — so they gate cost, not shippability:
+#   * length 22"-30"           -> +$4.50   (nonstandard length)
+#   * length over 30"          -> +$10.00  (nonstandard length; hits s32/s46/b32)
+#   * volume over 2 cu ft      -> +$21.00  (cubic surcharge; hits b32, 4608 cu in)
+# Length and shape surcharges do not stack (higher applies); the >2 cu ft
+# surcharge stacks on top. These are documented so a new box's cost impact is
+# visible; the rate-checker's live probe captures the actual dollar effect.
+MAX_SHIP_WEIGHT_LB = 70.0
+MAX_LENGTH_PLUS_GIRTH_IN = 130.0
 
-DIM_DIVISOR = 139  # UPS daily-rates dimensional divisor (cubic in / lb)
+# Back-compat alias: shipping_zones re-exports this and tests pin it. It now
+# carries the largest single side any catalog box may have while still clearing
+# the 130" length+girth limit at this catalog's cross-sections — an informational
+# ceiling, not a USPS rule. The authoritative gate is MAX_LENGTH_PLUS_GIRTH_IN.
+MAX_BOX_LONGEST_SIDE_IN = 108.0
+
+
+def length_plus_girth_in(box: dict) -> float:
+    """USPS combined length + girth: longest side + 2*(sum of the other two)."""
+    dims = sorted((box["length"], box["width"], box["height"]), reverse=True)
+    return dims[0] + 2 * (dims[1] + dims[2])
+
+
+assert all(length_plus_girth_in(b) <= MAX_LENGTH_PLUS_GIRTH_IN for b in BOXES.values())
+
+# USPS Ground Advantage dimensional-weight rule (GOL-1906). Source: Shippo,
+# "USPS Ground Advantage" service guide. Dimensional weight = L*W*H / divisor,
+# but ONLY for packages over 1 cubic foot (1,728 cu in); at or below 1 cu ft
+# USPS bills on actual scale weight alone. This differs from UPS, which applied
+# DIM to every package regardless of size — so br16 (384 cu in) and s20
+# (1,280 cu in) now take no dimensional penalty.
+#
+# In the two-carrier race this value is the DECLARED probe/label weight, i.e.
+# the USPS billing floor. It never under-declares for UPS: UPS re-derives its own
+# every-package DIM (divisor 139) from the declared box dimensions and floors the
+# rate to it, so a small box quotes USPS on actual weight while UPS still quotes
+# its higher DIM. Declaring the UPS DIM here instead would over-charge every USPS
+# quote below 1 cu ft (the s20 defect this fixes).
+#
+# The divisor is 139 as of 2026-07-12 (it was 166 before that date). It happens
+# to equal the old UPS daily-rates divisor, but the citation and the cubic-foot
+# applicability threshold are USPS's, not UPS's — do not conflate them.
+DIM_DIVISOR = 139
+DIM_APPLIES_ABOVE_CU_IN = 1728  # 1 cubic foot
 
 # Estimated per-tree weight in the box, by mode (root wrap + damp sphagnum;
 # leafed adds soil-free rootball moisture + foliage). Open question flagged
@@ -123,8 +174,18 @@ PER_TREE_LB = {"dormant": 0.5, "leafed": 2.0}
 
 
 def dim_weight_lb(box_id: str) -> float:
+    """USPS dimensional weight, or 0.0 for boxes at/under 1 cu ft.
+
+    USPS Ground Advantage applies dimensional weight only above 1 cubic foot
+    (DIM_APPLIES_ABOVE_CU_IN); smaller boxes bill on actual weight alone. A box
+    at or below the threshold returns 0.0 so ``billable_weight_lb`` falls back to
+    the actual scale weight.
+    """
     b = BOXES[box_id]
-    return round(b["length"] * b["width"] * b["height"] / DIM_DIVISOR, 1)
+    volume = b["length"] * b["width"] * b["height"]
+    if volume <= DIM_APPLIES_ABOVE_CU_IN:
+        return 0.0
+    return round(volume / DIM_DIVISOR, 1)
 
 
 def actual_weight_lb(box_id: str, count: int, mode: str) -> float:
@@ -133,7 +194,7 @@ def actual_weight_lb(box_id: str, count: int, mode: str) -> float:
 
 
 def billable_weight_lb(box_id: str, count: int, mode: str) -> float:
-    """What UPS bills: max(actual, DIM)."""
+    """What USPS bills: max(actual, DIM) — DIM is 0 at/under 1 cu ft."""
     return max(actual_weight_lb(box_id, count, mode), dim_weight_lb(box_id))
 
 
@@ -143,6 +204,11 @@ def representative_billable_lb(box_id: str) -> int:
     b = BOXES[box_id]
     worst = max(billable_weight_lb(box_id, cap, mode) for mode, cap in b["capacity"].items())
     return math.ceil(worst)
+
+
+# No catalog box may exceed the 70 lb USPS Ground Advantage ceiling at its
+# worst-case fill — fails loudly at import if a future box does (GOL-1906).
+assert all(representative_billable_lb(box_id) <= MAX_SHIP_WEIGHT_LB for box_id in BOXES)
 
 
 def usable_boxes(length_class: int, mode: str) -> list[str]:

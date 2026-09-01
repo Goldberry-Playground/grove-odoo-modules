@@ -28,9 +28,11 @@ def plan_summary(plan):
 
 
 class TestCatalog(unittest.TestCase):
-    def test_no_box_triggers_additional_handling(self):
-        for box in sb.BOXES.values():
-            self.assertLessEqual(max(box["length"], box["width"], box["height"]), sb.MAX_BOX_LONGEST_SIDE_IN)
+    def test_every_box_is_usps_mailable(self):
+        # USPS Ground Advantage hard limits: length + girth <= 130", weight <= 70 lb.
+        for box_id, box in sb.BOXES.items():
+            self.assertLessEqual(sb.length_plus_girth_in(box), sb.MAX_LENGTH_PLUS_GIRTH_IN, box_id)
+            self.assertLessEqual(sb.representative_billable_lb(box_id), sb.MAX_SHIP_WEIGHT_LB, box_id)
 
     def test_capacities_are_positive_and_mode_scoped(self):
         for box_id, box in sb.BOXES.items():
@@ -55,9 +57,12 @@ class TestCatalog(unittest.TestCase):
 
 
 class TestWeights(unittest.TestCase):
-    def test_dim_weight_matches_ups_divisor(self):
-        # 20x8x8 = 1280 cu in / 139 = 9.2 lb.
-        self.assertEqual(sb.dim_weight_lb("s20"), 9.2)
+    def test_dim_weight_respects_usps_cubic_foot_threshold(self):
+        # USPS Ground Advantage applies DIM only above 1 cu ft (1728 cu in).
+        # s20 = 20x8x8 = 1280 cu in (<= 1 cu ft) -> no DIM.
+        self.assertEqual(sb.dim_weight_lb("s20"), 0.0)
+        # b32 = 32x12x12 = 4608 cu in (> 1 cu ft) -> 4608 / 139 = 33.2 lb.
+        self.assertEqual(sb.dim_weight_lb("b32"), 33.2)
 
     def test_actual_weight_scales_with_count(self):
         lighter = sb.actual_weight_lb("s20", 1, "dormant")
@@ -65,10 +70,14 @@ class TestWeights(unittest.TestCase):
         self.assertGreater(heavier, lighter)
 
     def test_billable_is_max_of_actual_and_dim(self):
-        # One dormant whip in the s20: actual ~2 lb, DIM 9.2 -> billable 9.2.
-        self.assertEqual(sb.billable_weight_lb("s20", 1, "dormant"), 9.2)
-        # Full dormant b20: actual 2.9 + 50*0.5 = 27.9 > DIM 20.7.
+        # One dormant whip in the s20 (<= 1 cu ft, no USPS DIM): billable is the
+        # actual scale weight, tare 1.6 + 1*0.5 = 2.1 lb.
+        self.assertEqual(sb.billable_weight_lb("s20", 1, "dormant"), 2.1)
+        # Full dormant b20 (> 1 cu ft): actual 2.9 + 50*0.5 = 27.9 > DIM 20.7.
         self.assertEqual(sb.billable_weight_lb("b20", 50, "dormant"), 27.9)
+        # One dormant whip in the b32 (> 1 cu ft): actual 4.1 + 0.5 = 4.6 lb but
+        # DIM 33.2 dominates -> billable 33.2.
+        self.assertEqual(sb.billable_weight_lb("b32", 1, "dormant"), 33.2)
 
     def test_representative_billable_covers_worst_mode(self):
         # The rate-checker must quote the worst typical fill (never undercharge).
