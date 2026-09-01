@@ -7,12 +7,13 @@ shipped (the trigger the shipment email hangs off). Runs under Odoo's
 collection in conftest.py.
 """
 
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 from odoo.tools import mute_logger
 
 
 @tagged("post_install", "-at_install")
-class TestFulfillmentState(TransactionCase):
+class TestFulfillmentState(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.ref("base.main_company")
