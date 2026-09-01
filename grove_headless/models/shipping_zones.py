@@ -108,7 +108,7 @@ US_STATES: tuple[str, ...] = (
     "MP",
 )
 
-RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 6))
+RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 5))
 
 # Product tiers survive v2 as the shippability gate: bareroot ships, potted is
 # farm pickup only. DEFAULT_TIER stays potted so a mistagged product can never
@@ -163,42 +163,45 @@ GREEN_STATES: frozenset[str] = frozenset(
 
 # state code -> zone id. Example: {"WV": "zone_1", "OH": "zone_1", "PA": "zone_2", ...}
 #
-# !! CARRIER-SWITCH CAVEAT (UPS Ground -> USPS Ground Advantage, GOL-1906) !!
-# These five distance bands were assigned by UPS ground transit days from origin
-# 26651 (WV). USPS prices on its OWN zone map (zones 1-9 by distance from the
-# origin ZIP) which does not line up with UPS transit days, so the state->band
-# assignment below is NOT yet re-derived for USPS. Until the USPS-zone
-# recalibration lands (paired with the live worst-case reference-ZIP re-probe in
-# scripts/rate_check), the rate table these bands index can be internally
-# inconsistent with USPS rates. Do NOT advance the prod module pin for the sake
-# of the rate table until that recalibration ships (GOL-1906).
+# Carrier: USPS Ground Advantage (GOL-1906). The four bands are the USPS zone
+# map from origin 26651 (WV), NOT UPS transit days: USPS prices on zones 1-9 by
+# distance from the origin ZIP3. Each state is assigned to the band of its
+# WORST-CASE (highest) USPS zone reached by any ZIP3 in the state, derived from
+# the USPS Domestic Zone Chart for origin ZIP3 266 (postcalc.usps.com,
+# 2026-08-31, effective Aug 1 2026). Because a whole state maps to one band, the
+# state's far corner must not exceed the band's rate — so the higher of its
+# spanned zones wins (no undercharge, GOL-1495). The green list spans USPS zones
+# 3-6 (no state's far corner is nearer than zone 3, and MN reaches zone 6), so
+# there are four bands, not the five UPS transit bands this map used to carry.
+#
+#   zone_1 = USPS zone 3   zone_2 = USPS zone 4
+#   zone_3 = USPS zone 5   zone_4 = USPS zone 6
 ZONE_BY_STATE: dict[str, str] = {
-    # zone_1 — nearest (UPS transit ~2-4 days from 26651; pending USPS re-derive)
-    "WV": "zone_1",
+    # zone_1 — USPS zone 3 (nearest band; far corners of the origin-adjacent states)
+    "WV": "zone_1",  # e.g. eastern panhandle 254xx reaches z3
     "VA": "zone_1",
-    "KY": "zone_1",
-    "NC": "zone_1",
     "DE": "zone_1",
-    # zone_2
-    "MD": "zone_2",
+    "MD": "zone_1",
+    "OH": "zone_1",
+    # zone_2 — USPS zone 4
+    "KY": "zone_2",
+    "NC": "zone_2",
     "PA": "zone_2",
-    "OH": "zone_2",
     "IN": "zone_2",
     "NJ": "zone_2",
     "NY": "zone_2",
-    # zone_3
-    "IL": "zone_3",
+    "IL": "zone_2",
+    "CT": "zone_2",
+    "RI": "zone_2",
+    # zone_3 — USPS zone 5
     "MI": "zone_3",
-    "CT": "zone_3",
-    "RI": "zone_3",
-    # zone_4
-    "WI": "zone_4",
+    "WI": "zone_3",
+    "MA": "zone_3",
+    "VT": "zone_3",
+    "NH": "zone_3",
+    "ME": "zone_3",
+    # zone_4 — USPS zone 6 (farthest; only MN's NW corner reaches z6)
     "MN": "zone_4",
-    "MA": "zone_4",
-    "VT": "zone_4",
-    "NH": "zone_4",
-    # zone_5 — farthest (UPS transit ~5 days; pending USPS re-derive)
-    "ME": "zone_5",
 }
 
 assert set(ZONE_BY_STATE) == GREEN_STATES
@@ -242,7 +245,7 @@ def rate_feed(calendar_override=None, today=None) -> dict:
     stay in lockstep with. ``packing`` carries the box catalog + capacities so
     the frontend can mirror ``pack_order`` exactly. ``calendar`` is the annual,
     admin-editable shipping calendar keyed to USDA hardiness zone (NOT the
-    zone_1..zone_5 distance zones above) — replaces the old single global
+    zone_1..zone_4 distance zones above) — replaces the old single global
     ``dormant_window`` so the frontend can resolve (date, usdaZone) -> one of
     ``bareroot-preorder`` | ``bareroot-in-window`` | ``peat-and-bagged``.
 

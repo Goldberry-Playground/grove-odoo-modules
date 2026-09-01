@@ -12,17 +12,17 @@ It enforces two properties on the table, reading the table exactly as the
 checkout prices it (source of truth = the zone engine's ``rate_feed()``):
 
 1. **Coverage** — every one of the 6 catalog boxes has a rate in every one of
-   the 5 zones.
+   the 4 zones.
 2. **Box monotonicity** — within a zone, a heavier box (by representative
    billable weight, the same ordering the engine's own test asserts) is never
    cheaper than a lighter one.
 
 **Why no cross-zone monotonicity.** A prior version also asserted "for a fixed
-box, a farther zone (zone_1 -> zone_5) is never cheaper than a nearer one." That
-invariant is FALSE against real UPS Ground from Summersville WV 26651: the 5
-state-distance bands don't track UPS's own cost ordering (e.g. an OH/NY
-destination genuinely quotes cheaper than a NC one, and Boston MA in zone_4
-quotes higher than Portland ME in zone_5). It was only ever a proxy for the
+box, a farther zone (zone_1 -> zone_4) is never cheaper than a nearer one." That
+invariant is FALSE against real USPS Ground Advantage from Summersville WV 26651:
+the state-distance bands don't perfectly track USPS's own zone cost ordering at
+every box weight (e.g. a small parcel to zone_4/MN can quote under the same box
+to zone_3/ME). It was only ever a proxy for the
 thing we actually care about — *never undercharging* — and it blocked correct
 tables while protecting nothing real. That guarantee is now held upstream by
 ``rate_check`` quoting each zone's **worst-case (priciest) destination in the

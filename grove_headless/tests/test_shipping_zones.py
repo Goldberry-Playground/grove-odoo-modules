@@ -10,7 +10,7 @@ Two layers:
     times and guard against regression on the core routing logic.
   * Table-coverage tests — assert the finished table is complete and self-
     consistent. They automatically enforce full coverage across all 21 green
-    states, 5 zones, and every catalog box.
+    states, 4 zones, and every catalog box.
 """
 
 import importlib.util
@@ -102,8 +102,10 @@ class TestShippingZoneEngineContract(unittest.TestCase):
         self.assertIsNone(sz.box_rate("", "s20"))
         self.assertIsNone(sz.box_rate(None, "s20"))
 
-    def test_there_are_exactly_five_rate_zones(self):
-        self.assertEqual(len(sz.RATE_ZONE_IDS), 5)
+    def test_there_are_exactly_four_rate_zones(self):
+        # USPS zone map from origin 266 collapses the green list to four bands
+        # (USPS zones 3-6); see shipping_zones.ZONE_BY_STATE (GOL-1906).
+        self.assertEqual(len(sz.RATE_ZONE_IDS), 4)
 
     def test_rate_is_box_scoped(self):
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
@@ -194,7 +196,7 @@ class TestShippingZoneTableCoverage(unittest.TestCase):
     def test_every_mapped_zone_has_a_rate(self):
         for state, zone in sz.ZONE_BY_STATE.items():
             self.assertIn(zone, sz.ZONE_RATES, f"state {state} maps to {zone} with no rate rule")
-            self.assertIn(zone, sz.RATE_ZONE_IDS, f"{zone} is not one of the 5 zone ids")
+            self.assertIn(zone, sz.RATE_ZONE_IDS, f"{zone} is not one of the 4 zone ids")
 
     def test_full_state_coverage_when_configured(self):
         if not sz.is_configured():

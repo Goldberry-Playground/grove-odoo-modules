@@ -186,8 +186,8 @@ def serialize_ship_options(result: dict) -> dict:
 # drift over time, so ops can restate a zone's window (and its order deadline)
 # once a year through that parameter, no code change required.
 #
-# WARNING: the USDA hardiness zone keyed here is NOT the UPS distance "shipping
-# zone" (zone_1..zone_5) that keys the rate table in shipping_zones.py. Same
+# WARNING: the USDA hardiness zone keyed here is NOT the USPS distance "shipping
+# zone" (zone_1..zone_4) that keys the rate table in shipping_zones.py. Same
 # word, different axis.
 
 # Global preorder-open switch dates (month, day). Fall preorder opens Aug 15;

@@ -47,9 +47,9 @@ class TestReferenceAddresses(unittest.TestCase):
 
         with mock.patch.object(rc.requests, "post", fake_post):
             rc.quote_zone_box("k", "zone_2", next(iter(rc.PARCELS)))
-        # zone_2 reference is the band's worst-case (priciest) corner, NYC,
-        # not a mid-band representative like Columbus (GOL-1495).
-        self.assertEqual(captured["city"], "New York")
+        # zone_2 == USPS zone 4; its reference is a real in-zone destination
+        # (Chicago), not a placeholder or a mid-band city (GOL-1495/GOL-1906).
+        self.assertEqual(captured["city"], "Chicago")
 
 
 class TestRateMath(unittest.TestCase):
@@ -108,7 +108,7 @@ class TestNoUspsRatesSkips(unittest.TestCase):
             doc = json.load(fh)
         self.assertNotIn("_provisional", doc)
         zones = sorted(k for k in doc if not k.startswith("_"))
-        self.assertEqual(zones, ["zone_1", "zone_2", "zone_3", "zone_4", "zone_5"])
+        self.assertEqual(zones, ["zone_1", "zone_2", "zone_3", "zone_4"])
         for zone in zones:
             self.assertTrue(doc[zone], f"{zone}: expected per-box rates")
 

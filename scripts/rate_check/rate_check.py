@@ -42,33 +42,31 @@ ORIGIN = {
 # One reference residential destination per rate zone = the WORST-CASE
 # (priciest) destination in that zone's state band, so the published per-zone
 # rate is an upper bound for every customer in the band and no one is ever
-# undercharged (GOL-1495, board-approved 2026-08-14). Because the 5
-# state-distance bands don't track a carrier's own cost ordering, quoting a
-# merely-representative city (e.g. Columbus for all of zone_2) would undercharge
-# the band's far corner (NYC); quoting the far corner over-bills the cheapest
-# in-band destination modestly -- the accepted cost of static zone pricing.
+# undercharged (GOL-1495, board-approved 2026-08-14). Because the state->band
+# assignment groups states by their far corner's USPS zone, quoting a
+# merely-representative city would undercharge the band's far corner; quoting the
+# far corner over-bills the cheapest in-band destination modestly -- the accepted
+# cost of static zone pricing.
 #
-# !! CARRIER-SWITCH CAVEAT (UPS Ground -> USPS Ground Advantage) !!
-# These worst-case picks were derived from live Shippo probes of each band's
-# corner states against UPS GROUND (br16 + b32; box-invariant, UPS-zone driven).
-# USPS prices on its OWN zone map (zones 1-9 by distance from origin 26651),
-# which does not necessarily rank the same corners as worst-case. The GOL-1495
-# "never undercharge" guarantee is therefore NOT yet proven under USPS -- the
-# corner probes must be re-run per band before these picks can be trusted as
-# upper bounds. Until that re-derivation lands, treat the published table as
-# PROVISIONAL for USPS.
+# Carrier: USPS Ground Advantage (GOL-1906). USPS prices on its own zone map
+# (zones 1-9 by distance from origin ZIP3 266). Each grove band == one USPS zone,
+# and its reference ZIP is a real destination AT that USPS zone (verified against
+# the USPS Domestic Zone Chart for origin 266, 2026-08-31), so the probed rate is
+# exactly that zone's rate -- an upper bound for every state whose far corner
+# reaches at most that zone. Bands (see shipping_zones.ZONE_BY_STATE):
+#   zone_1 = USPS zone 3   zone_2 = USPS zone 4
+#   zone_3 = USPS zone 5   zone_4 = USPS zone 6
 #
 # The city MUST match the ZIP: carriers validate city against ZIP and can HARD-
 # reject a mismatch, dropping the rate for that probe. A placeholder city
 # ("n/a") passed silently on Shippo's shared test account but breaks on a live
-# account for strictly-validated ZIPs -- GOL-1446 (observed on UPS; assume the
-# same discipline applies to USPS).
+# account for strictly-validated ZIPs -- GOL-1446. All four ZIPs below round-trip
+# a live USPS Ground Advantage quote on the connected account.
 REFERENCE_ZIPS = {
-    "zone_1": ("Wilmington", "NC", "28401"),  # band {WV,VA,KY,NC,DE}; NC coast
-    "zone_2": ("New York", "NY", "10001"),  # band {MD,PA,OH,IN,NJ,NY}
-    "zone_3": ("Chicago", "IL", "60601"),  # band {IL,MI,CT,RI}
-    "zone_4": ("Boston", "MA", "02108"),  # band {WI,MN,MA,VT,NH}
-    "zone_5": ("Portland", "ME", "04101"),  # band {ME}
+    "zone_1": ("Martinsburg", "WV", "25401"),  # USPS z3; band {WV,VA,DE,MD,OH}
+    "zone_2": ("Chicago", "IL", "60601"),  # USPS z4; band {KY,NC,PA,IN,NJ,NY,IL,CT,RI}
+    "zone_3": ("Madawaska", "ME", "04756"),  # USPS z5; band {MI,WI,MA,VT,NH,ME}
+    "zone_4": ("Thief River Falls", "MN", "56701"),  # USPS z6; band {MN}
 }
 # Box Engine v2: reference parcels come straight from the box catalog —
 # one quote per box id per zone, at the box's representative billable weight

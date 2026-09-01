@@ -38,12 +38,16 @@ Keys beginning with `_` are ignored (used for comments).
   Any checkout address outside this set returns `None` from `compute_shipping_rate`
   and `compute_order_shipping`, which causes the checkout to add **no** shipping line
   (fail-safe — never a guessed charge).
-- **`ZONE_BY_STATE`** — maps each of the 21 green states to one of five rate zones
-  (`zone_1` … `zone_5`). The bands were originally keyed by UPS ground transit
-  distance from zip 26651 (WV); the carrier is now USPS Ground Advantage
-  (GOL-1906), so the state→band assignment is pending re-derivation from USPS's
-  own zone map for that origin — see the CARRIER-SWITCH CAVEAT in
-  `models/shipping_zones.py`.
+- **`ZONE_BY_STATE`** — maps each of the 21 green states to one of four rate zones
+  (`zone_1` … `zone_4`). The carrier is USPS Ground Advantage (GOL-1906), so the
+  bands are the USPS zone map from origin ZIP3 266 (WV): `zone_1` = USPS zone 3,
+  `zone_2` = USPS zone 4, `zone_3` = USPS zone 5, `zone_4` = USPS zone 6. Each
+  state is assigned to the band of the **highest** USPS zone any of its ZIP3s
+  reaches (worst case → no undercharge, GOL-1495). The green list spans USPS
+  zones 3-6 (no far corner is nearer than zone 3; only MN reaches zone 6), which
+  is why there are four bands, not the five UPS transit bands this map used to
+  carry. Derived from the USPS Domestic Zone Chart (postcalc.usps.com) on
+  2026-08-31; re-derive if USPS republishes the chart for origin 266.
 
 Green states (alphabetical): CT, DE, IL, IN, KY, MA, MD, ME, MI, MN, NC, NH, NJ,
 NY, OH, PA, RI, VA, VT, WI, WV.

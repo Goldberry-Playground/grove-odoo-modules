@@ -78,9 +78,9 @@ class TestLiveTable(unittest.TestCase):
         table = feed["zones"]
         zones = [z for z in sz.RATE_ZONE_IDS if z in table]
         boxes = mono.ordered_boxes(sb.BOXES, sb.representative_billable_lb)
-        # 6 boxes x 5 zones, exactly what the acceptance criteria names.
+        # 6 boxes x 4 zones, exactly what the acceptance criteria names.
         self.assertEqual(len(boxes), 6)
-        self.assertEqual(len(zones), 5)
+        self.assertEqual(len(zones), 4)
         self.assertEqual(mono.find_violations(table, boxes, zones), [])
 
 
