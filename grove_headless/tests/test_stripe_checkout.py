@@ -771,3 +771,156 @@ class TestStripeCheckout(TransactionCase):
         full_mail = self.env["mail.mail"].search([("body_html", "ilike", "TRK_FULL")])
         self.assertIn("deposit per tree", pre_mail.body_html or "")
         self.assertNotIn("deposit per tree", full_mail.body_html or "")
+
+    # ── new-order ops chain: Discord ping + merchant email (GOL-1933/1936) ─
+    #
+    # These exercise the webhook WIRING added in PR #140: _handle_session_completed
+    # → _notify_new_order / _notify_merchant_email. The pure formatters live in
+    # models/order_alerts.py and are unit-tested under pytest; here we prove the
+    # webhook actually calls them with the confirmed order's context, on the paid
+    # AND deposit paths, both fulfilment types, and that both are best-effort
+    # (a failure never rolls back a payment that was already recorded).
+
+    def test_new_order_fires_discord_ping_with_order_context(self):
+        """A paid in-stock checkout pings the ops channel exactly once, with the
+        order ref, customer, item lines, total, and the Shipping label."""
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=2)
+        order.grove_fulfillment = "ship"
+        order.grove_stripe_session_id = "cs_disc"
+        pings = []
+        orig = grove_main._notify_discord
+        grove_main._notify_discord = lambda message: pings.append(message)
+        try:
+            with mute_logger("odoo.addons.mail.models.mail_mail"):
+                result = grove_main._handle_session_completed(
+                    self.env, {"id": "cs_disc", "payment_intent": "pi_disc"}
+                )
+        finally:
+            grove_main._notify_discord = orig
+        self.assertEqual(result, "paid")
+        # exactly one ping: the new-order alert (no oversell fires on this path)
+        self.assertEqual(len(pings), 1)
+        msg = pings[0]
+        self.assertIn("New order", msg)
+        self.assertIn(order.name, msg)
+        self.assertIn("Shipping", msg)
+        self.assertIn("2× Pawpaw 'Shenandoah'", msg)
+        self.assertIn("Total:", msg)
+        self.assertIn("cart@example.com", msg)
+
+    def test_new_order_deposit_labels_preorder_ping(self):
+        """A deposit_paid preorder pings with the '(deposit)' wording so staff
+        can tell a reservation apart from a full-charge sale."""
+        self._set_stock(self.product, 0)
+        order = self._make_order(qty=1)
+        order.grove_fulfillment = "ship"
+        order.grove_stripe_session_id = "cs_disc_dep"
+        order.grove_preorder_variant_ids = str(self.product.id)
+        pings = []
+        orig = grove_main._notify_discord
+        grove_main._notify_discord = lambda message: pings.append(message)
+        try:
+            with mute_logger("odoo.addons.mail.models.mail_mail"):
+                result = grove_main._handle_session_completed(
+                    self.env, {"id": "cs_disc_dep", "payment_intent": "pi_disc_dep"}
+                )
+        finally:
+            grove_main._notify_discord = orig
+        self.assertEqual(result, "deposit_paid")
+        self.assertEqual(len(pings), 1)
+        self.assertIn("New preorder (deposit)", pings[0])
+
+    def test_new_order_pickup_labels_farm_pickup(self):
+        """A pickup order still pings (no label is owed, but staff must know),
+        worded with the Farm pickup label."""
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        order.grove_fulfillment = "pickup"
+        order.grove_stripe_session_id = "cs_pickup"
+        pings = []
+        orig = grove_main._notify_discord
+        grove_main._notify_discord = lambda message: pings.append(message)
+        try:
+            with mute_logger("odoo.addons.mail.models.mail_mail"):
+                grove_main._handle_session_completed(self.env, {"id": "cs_pickup", "payment_intent": "pi_pickup"})
+        finally:
+            grove_main._notify_discord = orig
+        self.assertEqual(len(pings), 1)
+        self.assertIn("Farm pickup", pings[0])
+
+    def test_new_order_sends_merchant_email_to_company(self):
+        """The merchant notification is a real email to order.company_id.email,
+        distinct from the customer receipt, carrying the order + ship-to."""
+        self.company.email = "ops@goldberrygrove.farm"
+        self.partner.write({"street": "1 Grove Ln", "city": "Elkview", "zip": "25071"})
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        order.grove_fulfillment = "ship"
+        order.partner_shipping_id = self.partner.id
+        order.grove_stripe_session_id = "cs_merch"
+        Template = type(self.env["mail.template"])
+        orig = Template.send_mail
+        Template.send_mail = lambda self_t, res_id, **kw: 0  # stub the branded customer receipt
+        try:
+            with mute_logger("odoo.addons.mail.models.mail_mail"):
+                grove_main._handle_session_completed(self.env, {"id": "cs_merch", "payment_intent": "pi_merch"})
+        finally:
+            Template.send_mail = orig
+        merch = self.env["mail.mail"].search([("email_to", "=", "ops@goldberrygrove.farm")])
+        self.assertEqual(len(merch), 1)
+        self.assertIn("New order", merch.subject)
+        self.assertIn("Shipping", merch.subject)
+        body = merch.body_html or ""
+        self.assertIn("Ship to:", body)
+        self.assertIn("Elkview", body)
+        self.assertIn(order.name, body)
+
+    def test_merchant_email_skipped_when_company_email_missing(self):
+        """No company email → no merchant alert, and the webhook still succeeds
+        (best-effort; the gap is logged loudly, never fatal)."""
+        self.company.email = False
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        order.grove_fulfillment = "pickup"
+        order.grove_stripe_session_id = "cs_no_company_email"
+        Template = type(self.env["mail.template"])
+        orig = Template.send_mail
+        Template.send_mail = lambda self_t, res_id, **kw: 0
+        try:
+            with mute_logger("odoo.addons.mail.models.mail_mail"):
+                result = grove_main._handle_session_completed(
+                    self.env, {"id": "cs_no_company_email", "payment_intent": "pi_nce"}
+                )
+        finally:
+            Template.send_mail = orig
+        self.assertEqual(result, "paid")
+        self.assertFalse(self.env["mail.mail"].search([("subject", "ilike", "New order")]))
+
+    def test_notify_failure_never_breaks_webhook(self):
+        """A raising Discord notify is swallowed — the payment is already
+        recorded, so the webhook must still report the order paid."""
+        self.company.email = "ops@goldberrygrove.farm"
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        order.grove_fulfillment = "ship"
+        order.grove_stripe_session_id = "cs_notify_raise"
+
+        def boom(message):
+            raise RuntimeError("discord down")
+
+        orig = grove_main._notify_discord
+        grove_main._notify_discord = boom
+        Template = type(self.env["mail.template"])
+        orig_tmpl = Template.send_mail
+        Template.send_mail = lambda self_t, res_id, **kw: 0
+        try:
+            with mute_logger("odoo.addons.mail.models.mail_mail"):
+                result = grove_main._handle_session_completed(
+                    self.env, {"id": "cs_notify_raise", "payment_intent": "pi_raise"}
+                )
+        finally:
+            grove_main._notify_discord = orig
+            Template.send_mail = orig_tmpl
+        self.assertEqual(result, "paid")
+        self.assertEqual(order.grove_checkout_status, "paid")
