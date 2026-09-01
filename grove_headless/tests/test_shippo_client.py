@@ -44,8 +44,8 @@ class TestShippoClient(unittest.TestCase):
             "rates": [
                 {
                     "object_id": "r1",
-                    "provider": "UPS",
-                    "servicelevel": {"token": "ups_ground"},
+                    "provider": "USPS",
+                    "servicelevel": {"token": "usps_ground_advantage"},
                     "amount": "14.23",
                 }
             ]
@@ -62,23 +62,28 @@ class TestShippoClient(unittest.TestCase):
                 mock.Mock(status_code=201, json=lambda: transaction, raise_for_status=lambda: None),
             ]
         )
-        out = sp.buy_ups_ground_label("key", sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed"), post=posts)
+        out = sp.buy_usps_ground_advantage_label(
+            "key", sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed"), post=posts
+        )
         self.assertEqual(out["tracking_number"], "1Z999")
 
-    def test_no_ups_ground_rate_raises(self):
+    def test_no_usps_ground_advantage_rate_raises(self):
+        # Only a non-matching carrier/service is returned -> nothing to buy.
         shipment = {
             "rates": [
                 {
                     "object_id": "r1",
-                    "provider": "USPS",
-                    "servicelevel": {"token": "usps_ground_advantage"},
+                    "provider": "UPS",
+                    "servicelevel": {"token": "ups_ground"},
                     "amount": "9.99",
                 }
             ]
         }
         posts = mock.Mock(return_value=mock.Mock(status_code=201, json=lambda: shipment, raise_for_status=lambda: None))
         with self.assertRaises(sp.ShippoError):
-            sp.buy_ups_ground_label("key", sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed"), post=posts)
+            sp.buy_usps_ground_advantage_label(
+                "key", sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed"), post=posts
+            )
 
 
 class TestTrackingValidation(unittest.TestCase):

@@ -162,8 +162,18 @@ GREEN_STATES: frozenset[str] = frozenset(
 )
 
 # state code -> zone id. Example: {"WV": "zone_1", "OH": "zone_1", "PA": "zone_2", ...}
+#
+# !! CARRIER-SWITCH CAVEAT (UPS Ground -> USPS Ground Advantage, GOL-1906) !!
+# These five distance bands were assigned by UPS ground transit days from origin
+# 26651 (WV). USPS prices on its OWN zone map (zones 1-9 by distance from the
+# origin ZIP) which does not line up with UPS transit days, so the state->band
+# assignment below is NOT yet re-derived for USPS. Until the USPS-zone
+# recalibration lands (paired with the live worst-case reference-ZIP re-probe in
+# scripts/rate_check), the rate table these bands index can be internally
+# inconsistent with USPS rates. Do NOT advance the prod module pin for the sake
+# of the rate table until that recalibration ships (GOL-1906).
 ZONE_BY_STATE: dict[str, str] = {
-    # zone_1 — nearest (UPS ~2-4 from 26651)
+    # zone_1 — nearest (UPS transit ~2-4 days from 26651; pending USPS re-derive)
     "WV": "zone_1",
     "VA": "zone_1",
     "KY": "zone_1",
@@ -187,7 +197,7 @@ ZONE_BY_STATE: dict[str, str] = {
     "MA": "zone_4",
     "VT": "zone_4",
     "NH": "zone_4",
-    # zone_5 — farthest (UPS ~5)
+    # zone_5 — farthest (UPS transit ~5 days; pending USPS re-derive)
     "ME": "zone_5",
 }
 

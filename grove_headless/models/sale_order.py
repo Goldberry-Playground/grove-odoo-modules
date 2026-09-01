@@ -49,7 +49,7 @@ class SaleOrder(models.Model):
             self.with_env(self.env(cr=cr)).write(vals)
 
     def action_buy_shipping_labels(self):
-        """Buy one UPS Ground label per PACKED BOX via Shippo (Box Engine v2:
+        """Buy one USPS Ground Advantage label per PACKED BOX via Shippo (Box Engine v2:
         the same packer that priced the order plans the labels, so the boxes
         bought are the boxes charged). Idempotent-ish: refuses to run twice
         on an order that already has tracking numbers."""
@@ -112,7 +112,7 @@ class SaleOrder(models.Model):
             tracking, labels = [], []
             try:
                 for payload, _box_id in purchase_plan:
-                    result = shippo_client.buy_ups_ground_label(api_key, payload)
+                    result = shippo_client.buy_usps_ground_advantage_label(api_key, payload)
                     tracking.append(result["tracking_number"])
                     labels.append(result["label_url"])
                     order._persist_label_result(

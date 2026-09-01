@@ -34,8 +34,8 @@ def is_valid_tracking(value) -> bool:
 # "SET_AT_DEPLOY" with a comment claiming GROVE_SHIP_FROM_STREET overrode it —
 # but nothing ever read that variable and ORIGIN was never mutated, so every
 # Shippo call shipped from the literal string (GOL-988). Rate quotes hid this
-# because UPS rates off city/state/ZIP, but a purchased label carried a garbage
-# return address. The real farm street is now the default and the documented
+# because the carrier rates off city/state/ZIP, but a purchased label carried a
+# garbage return address. The real farm street is now the default and the documented
 # env override is actually wired.
 ORIGIN = {
     "name": "Goldberry Grove",
@@ -54,8 +54,9 @@ class ShippoError(RuntimeError):
 def build_shipment_payload(address: dict, box_id: str, count: int, mode: str) -> dict:
     """Shippo shipment payload for ONE packed box (Box Engine v2).
 
-    Declares the estimated actual scale weight; UPS applies DIM billing on
-    its side from the dimensions, so we never under- or over-declare.
+    Declares the estimated actual scale weight; USPS applies dimensional
+    billing on its side from the dimensions (only above 1 cu ft — see
+    ``shipping_boxes.dim_weight_lb``), so we never under- or over-declare.
     """
     box = shipping_boxes.BOXES[box_id]
     parcel = {
@@ -71,17 +72,17 @@ def build_shipment_payload(address: dict, box_id: str, count: int, mode: str) ->
     return {"address_from": dict(ORIGIN), "address_to": addr_to, "parcels": [parcel], "async": False}
 
 
-def buy_ups_ground_label(api_key: str, payload: dict, post=requests.post) -> dict:
+def buy_usps_ground_advantage_label(api_key: str, payload: dict, post=requests.post) -> dict:
     headers = {"Authorization": f"ShippoToken {api_key}"}
     resp = post(f"{API}/shipments/", json=payload, headers=headers, timeout=30)
     resp.raise_for_status()
     rates = [
         r
         for r in resp.json().get("rates", [])
-        if r.get("provider") == "UPS" and r.get("servicelevel", {}).get("token") == "ups_ground"
+        if r.get("provider") == "USPS" and r.get("servicelevel", {}).get("token") == "usps_ground_advantage"
     ]
     if not rates:
-        raise ShippoError("no UPS Ground rate returned for shipment")
+        raise ShippoError("no USPS Ground Advantage rate returned for shipment")
     rate = min(rates, key=lambda r: float(r["amount"]))
     resp2 = post(
         f"{API}/transactions/",

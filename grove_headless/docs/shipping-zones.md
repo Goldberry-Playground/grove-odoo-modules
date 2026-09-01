@@ -39,7 +39,11 @@ Keys beginning with `_` are ignored (used for comments).
   and `compute_order_shipping`, which causes the checkout to add **no** shipping line
   (fail-safe — never a guessed charge).
 - **`ZONE_BY_STATE`** — maps each of the 21 green states to one of five rate zones
-  (`zone_1` … `zone_5`), keyed by UPS ground transit distance from zip 26651 (WV).
+  (`zone_1` … `zone_5`). The bands were originally keyed by UPS ground transit
+  distance from zip 26651 (WV); the carrier is now USPS Ground Advantage
+  (GOL-1906), so the state→band assignment is pending re-derivation from USPS's
+  own zone map for that origin — see the CARRIER-SWITCH CAVEAT in
+  `models/shipping_zones.py`.
 
 Green states (alphabetical): CT, DE, IL, IN, KY, MA, MD, ME, MI, MN, NC, NH, NJ,
 NY, OH, PA, RI, VA, VT, WI, WV.
@@ -94,7 +98,7 @@ the rate zone) to determine:
 `scripts/rate_check/rate_check.py` + `.github/workflows/rate-check.yml`:
 
 - Runs daily at 07:00 ET via GitHub Actions cron
-- Fetches real UPS Ground quotes from Shippo for each zone × tier parcel profile
+- Fetches real USPS Ground Advantage quotes from Shippo for each zone × tier parcel profile
 - If any rate drifts ≥ $1.00 from the JSON file, opens a PR to update
   `data/shipping_rates.json` and posts a Discord notification
 - Gated on `SHIPPO_API_KEY` (required — the run is skipped cleanly when absent).

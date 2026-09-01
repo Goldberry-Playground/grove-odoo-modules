@@ -67,7 +67,7 @@ Each React website sends an `X-Grove-Tenant` header. The `grove_headless` module
 - Implements a 5-zone × 2-tier (bareroot/potted) shipping rate engine over 21 green states; rates live in `data/shipping_rates.json` (maintained by the daily rate-checker — see `scripts/rate_check/`)
 - Adds `grove_shipping_tier` (selection: bareroot/potted) to `product.template`; order creation applies per-line tier×qty shipping charges via `compute_order_shipping`; fail-safe: no rate → no shipping line (never a guessed charge)
 - ZIP→USDA-zone lookup via vendored PHZM 2023 matrix (`data/zip_usda_zone.csv`) drives wave-schedule and freeze-window calendar logic in `models/shipping_calendar.py`
-- Adds a "Buy Shipping Labels" server action on `sale.order` (one UPS label per tree box via Shippo; two-pass validate-then-buy; partial purchases persisted with status `partial_purchase`); tracks labels and delivery status via `grove_tracking_numbers`, `grove_label_urls`, `grove_delivery_status`
+- Adds a "Buy Shipping Labels" server action on `sale.order` (one USPS Ground Advantage label per tree box via Shippo; two-pass validate-then-buy; partial purchases persisted with status `partial_purchase`); tracks labels and delivery status via `grove_tracking_numbers`, `grove_label_urls`, `grove_delivery_status`
 - Adds custom fields to `product.template`: `grove_featured` (Boolean), `grove_seo_description` (Text, translatable), `grove_slug` (Char, indexed), `grove_shipping_tier` (Selection)
 - Overrides `website.get_current_website()` to resolve tenants via `X-Grove-Tenant` header
 - Extends the product form view with a "Grove Headless" tab for the custom fields
