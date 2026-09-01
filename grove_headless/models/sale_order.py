@@ -262,6 +262,26 @@ class SaleOrder(models.Model):
         self.ensure_one()
         return self.grove_fulfillment != "pickup"
 
+    def _preorder_variant_id_set(self):
+        """Variant ids on this order charged as a preorder deposit (GOL-1982).
+
+        A preorder consumes a per-variant ``preorder_cap`` (GOL-1671), never
+        on-hand stock, and owes no shipping label at order time (GOL-1933 guard).
+        Two paths consult this set: the oversell webhook (controllers/main.py),
+        which excludes preorder lines from its on-hand check unconditionally, and
+        ``action_buy_shipping_labels``, which excludes them only while the ship
+        wave is still closed (once wave_assigned they pack — see there). Parsing
+        lives here so both paths share one source of truth for "is this a preorder
+        line" instead of re-deriving it from the comma-joined field independently.
+        """
+        self.ensure_one()
+        ids = set()
+        for raw in (self.grove_preorder_variant_ids or "").split(","):
+            raw = raw.strip()
+            if raw.isdigit():
+                ids.add(int(raw))
+        return ids
+
     def _persist_label_result(self, vals):
         """Write label results through an independent cursor so they survive
         the request-transaction rollback that follows a raised UserError.
@@ -283,6 +303,22 @@ class SaleOrder(models.Model):
         for order in self:
             if order.grove_tracking_numbers:
                 raise UserError(f"{order.name} already has labels; clear fields to re-buy.")
+            # Preorder lines owe no label UNTIL their ship wave opens.
+            # grove_preorder_variant_ids is the permanent order-time record of
+            # which variants were charged as a deposit — it is never cleared, so
+            # skipping on it unconditionally would strand a preorder forever (it
+            # could never ship). action_grove_assign_wave (-> wave_assigned) is
+            # the signal the wave has opened and those lines rejoin the ship path
+            # (label_purchased is a legal move from wave_assigned; see the
+            # lifecycle comment above, and GOL-2053 settles the deferred balance
+            # at the end of THIS method). So exclude preorder lines only while the
+            # wave is still closed; once it is open, this method IS the preorder
+            # ship + settle path and must pack them.
+            skip_preorder_ids = (
+                set()
+                if order.grove_fulfillment_stage == "wave_assigned"
+                else order._preorder_variant_id_set()
+            )
             partner = order.partner_shipping_id
             address = {
                 "name": partner.name,
@@ -309,6 +345,13 @@ class SaleOrder(models.Model):
                 tmpl = line.product_id.product_tmpl_id
                 if tmpl.type == "service":  # skip the shipping-charge line itself
                     continue
+                if line.product_id.id in skip_preorder_ids:
+                    # Pre-wave preorder line: consumes preorder_cap, not on-hand,
+                    # and owes no label yet (GOL-1982 / GOL-1933) — never pack it,
+                    # even on a bareroot (shippable-tier) variant. The label is
+                    # bought later, when the wave opens and the balance is charged
+                    # (at which point skip_preorder_ids is empty and it packs).
+                    continue
                 tier = line.product_id.grove_effective_shipping_tier or "potted"
                 qty = line.product_uom_qty
                 if qty != int(qty):
@@ -317,6 +360,14 @@ class SaleOrder(models.Model):
                         f"non-integer quantity {qty}; trees pack per whole unit."
                     )
                 items.append((tier, int(tmpl.grove_tree_length or "20"), qty))
+            if not items:
+                # Nothing shippable remains — the order is all-preorder with its
+                # wave still closed (or has no real product lines). No on-hand pool
+                # is decremented and no label is owed; refuse rather than silently
+                # "succeed" with zero labels (which would falsely flip
+                # grove_delivery_status). Once the wave opens (wave_assigned) the
+                # preorder lines pack and this branch is not reached.
+                raise UserError(f"{order.name}: no shippable lines — all preorder (wave not open) or pickup, no label is owed.")
             reason = unshippable_reason(items)
             if reason:
                 raise UserError(f"{order.name}: {reason}")
