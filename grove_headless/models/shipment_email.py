@@ -101,25 +101,24 @@ def shipment_notice_copy(status, order_name, customer_name, shipments, balance_l
 
     items = [_shipment_line(c, t) for c, t in shipments if str(t or "").strip()]
     tracking_block = (
-        '<p style="margin:0 0 8px">Tracking:</p>'
-        f'<ul style="margin:0 0 16px;padding-left:20px">{"".join(items)}</ul>'
+        f'<p style="margin:0 0 8px">Tracking:</p><ul style="margin:0 0 16px;padding-left:20px">{"".join(items)}</ul>'
         if items
         else ""
     )
     balance_block = f'<p style="margin:0 0 16px">{escape(balance_line)}</p>' if balance_line else ""
 
     body = (
-        '<div style="font-family:Georgia,\'Times New Roman\',serif;color:#1F3F2B;'
+        "<div style=\"font-family:Georgia,'Times New Roman',serif;color:#1F3F2B;"
         'max-width:560px;margin:0 auto;padding:24px">'
         f'<div style="font-size:20px;font-weight:bold;letter-spacing:0.5px;'
         f'border-bottom:2px solid #1F3F2B;padding-bottom:12px;margin-bottom:20px">{escape(brand)}</div>'
         f'<p style="margin:0 0 16px">Hi {greeting},</p>'
         f'<p style="margin:0 0 16px">{escape(lead)}</p>'
         f'<p style="margin:0 0 16px">Order: <strong>{escape(str(order_name))}</strong></p>'
-        f'{tracking_block}'
-        f'{balance_block}'
+        f"{tracking_block}"
+        f"{balance_block}"
         '<p style="margin:24px 0 0;font-size:13px;color:#4a5a4a">'
-        f'Thank you for growing with us. {escape(brand)}.</p>'
-        '</div>'
+        f"Thank you for growing with us. {escape(brand)}.</p>"
+        "</div>"
     )
     return subject, body
