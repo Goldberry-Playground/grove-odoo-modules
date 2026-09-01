@@ -285,6 +285,7 @@ jobs:
             -e PASSWORD=odoo \
             odoo:19 \
             -- --addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons \
+               --database=odoo \
                --without-demo=all \
                --init=grove_headless \
                --test-enable \
@@ -306,17 +307,38 @@ jobs:
         run: |
           status=$(docker inspect odoo --format '{{.State.ExitCode}}')
           echo "Odoo init+test exited: $status"
-          if [ "$status" != "0" ]; then
+          logs=$(docker logs odoo 2>&1)
+          # GOL-1941: without -d/--database, Odoo runs ZERO tests and still exits
+          # 0 — the smoke-test was a silent no-op for its entire life (green !=
+          # ran). Hard-fail if Odoo ever reports it skipped the suite, so this
+          # gate can never again pass without actually running the tests.
+          if printf '%s\n' "$logs" | grep -qiE "tests won't run|database not initialized"; then
+            echo "::error::Odoo reported it would NOT run tests (missing database?). The grove_headless suite did not execute."
             echo "::group::Odoo logs"
-            docker logs odoo
+            printf '%s\n' "$logs"
             echo "::endgroup::"
             exit 1
           fi
-          # Even on exit 0, surface test result lines so reviewers can see
-          # what ran. Odoo logs each test class with a "Module loaded" or
-          # "Running tests" prefix.
-          echo "::group::Test summary"
-          docker logs odoo 2>&1 | grep -E "(odoo.tests|FAIL|PASS|tests/test_|Module grove_headless)" || true
+          # Positive assertion: the suite must actually have executed at least one
+          # grove_headless test class. Odoo logs each running class as
+          # `odoo.addons.grove_headless.tests.<module>.<Class>`.
+          if ! printf '%s\n' "$logs" | grep -qE "odoo\.addons\.grove_headless\.tests\."; then
+            echo "::error::No grove_headless test class was executed — the suite is not being run."
+            echo "::group::Odoo logs"
+            printf '%s\n' "$logs"
+            echo "::endgroup::"
+            exit 1
+          fi
+          if [ "$status" != "0" ]; then
+            echo "::group::Odoo logs"
+            printf '%s\n' "$logs"
+            echo "::endgroup::"
+            exit 1
+          fi
+          # Surface the full run log (not just a grep) so a future silent-skip is
+          # visible to reviewers rather than hidden behind a green check.
+          echo "::group::Odoo test run log"
+          printf '%s\n' "$logs"
           echo "::endgroup::"
 
   ci-scripts:
