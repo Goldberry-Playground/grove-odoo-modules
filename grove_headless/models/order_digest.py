@@ -1,0 +1,250 @@
+"""Weekly order/preorder rollup digest (GOL-1978).
+
+Pure Python / stdlib so the rollup logic unit-tests without an Odoo DB,
+mirroring the preorder_email / shipping_calendar convention.  The Odoo-side
+cron (order_rollup.py) queries sale.order, maps records to the plain-dict
+shape expected here, and emits the result via mail.mail + Discord.
+
+No em dashes in customer or merchant copy (house voice rule).
+"""
+
+from datetime import date, timedelta
+
+# Thresholds for the preorder reminder section.
+_WAVE_SOON_DAYS = 30  # highlight a wave as "ships soon" if start <= today + 30d
+
+
+def _fmt_currency(cents_or_float) -> str:
+    """Dollar string with cents, e.g. '$1,234.50'.  Accepts a float or int."""
+    v = float(cents_or_float or 0)
+    return f"${v:,.2f}"
+
+
+def _fmt_date(d) -> str:
+    """Format a date or ISO string as 'Mon D, YYYY'."""
+    if isinstance(d, str):
+        d = date.fromisoformat(d[:10])
+    if not isinstance(d, date):
+        return str(d)
+    return d.strftime("%b %-d, %Y")
+
+
+def build_digest(
+    orders: list[dict],
+    today: date | None = None,
+    period_days: int = 7,
+    next_wave_fn=None,
+    usda_zone_fn=None,
+) -> dict:
+    """Compute the weekly rollup from a flat list of order dicts.
+
+    Each order dict must carry:
+      - id: int or str
+      - name: str (e.g. "S00042")
+      - date_order: date | ISO str
+      - amount_total: float
+      - grove_checkout_status: str | None
+      - grove_delivery_status: str | None
+      - grove_preorder_variant_ids: str | None  (comma-sep variant ids when deposit taken)
+      - partner_name: str
+      - partner_shipping_zip: str | None
+      - is_pickup: bool  (True when fulfillment == pickup)
+
+    Returns a structured digest dict ready for rendering.  Pure -- no I/O.
+    """
+    if today is None:
+        today = date.today()
+    period_start = today - timedelta(days=period_days)
+
+    # Partition into period orders (placed in window) vs all outstanding
+    period_orders = [o for o in orders if _order_date(o) >= period_start]
+
+    # --- Revenue & volume ---
+    orders_placed = len(period_orders)
+    revenue_total = sum(float(o.get("amount_total") or 0) for o in period_orders)
+
+    # --- Units shipped in period (label_purchased / transit / delivered) ---
+    shipped_statuses = {"label_purchased", "shipped", "transit", "delivered"}
+    orders_shipped = [o for o in period_orders if (o.get("grove_delivery_status") or "").lower() in shipped_statuses]
+    units_shipped = len(orders_shipped)
+
+    # --- Outstanding preorders ---
+    outstanding_preorders = [
+        o
+        for o in orders
+        if (o.get("grove_checkout_status") or "") == "deposit_paid"
+        and (o.get("grove_delivery_status") or "") not in shipped_statuses
+    ]
+    preorder_entries = _build_preorder_entries(outstanding_preorders, today, next_wave_fn, usda_zone_fn)
+
+    # --- Pickups awaiting collection ---
+    # Pickup orders with no terminal status (not shipped/collected/delivered)
+    pickup_awaiting = [
+        o
+        for o in orders
+        if o.get("is_pickup")
+        and (o.get("grove_delivery_status") or "") not in shipped_statuses | {"collected"}
+        and (o.get("grove_checkout_status") or "") in ("paid", "deposit_paid")
+    ]
+
+    return {
+        "period_start": period_start,
+        "period_end": today,
+        "period_days": period_days,
+        "orders_placed": orders_placed,
+        "revenue_total": revenue_total,
+        "units_shipped": units_shipped,
+        "outstanding_preorders": preorder_entries,
+        "preorder_count": len(preorder_entries),
+        "pickups_awaiting": [_pickup_summary(o) for o in pickup_awaiting],
+        "pickup_count": len(pickup_awaiting),
+    }
+
+
+def _order_date(o: dict) -> date:
+    d = o.get("date_order") or ""
+    if isinstance(d, date):
+        return d
+    try:
+        return date.fromisoformat(str(d)[:10])
+    except ValueError:
+        return date.min
+
+
+def _build_preorder_entries(orders, today, next_wave_fn, usda_zone_fn) -> list[dict]:
+    """Return one entry per outstanding preorder, annotated with computed ship window."""
+    entries = []
+    for o in orders:
+        zip_code = o.get("partner_shipping_zip") or ""
+        wave = None
+        if zip_code and next_wave_fn and usda_zone_fn:
+            zone = usda_zone_fn(zip_code)
+            if zone is not None:
+                wave = next_wave_fn(zone, today)
+
+        entry = {
+            "order_name": o.get("name") or "",
+            "partner_name": o.get("partner_name") or "",
+            "amount_total": float(o.get("amount_total") or 0),
+            "date_order": _order_date(o),
+        }
+        if wave:
+            entry["ship_season"] = wave.get("season") or ""
+            entry["ship_start"] = wave.get("ship_start")
+            entry["ship_end"] = wave.get("ship_end")
+            entry["ships_soon"] = isinstance(wave.get("ship_start"), date) and wave["ship_start"] <= today + timedelta(
+                days=_WAVE_SOON_DAYS
+            )
+        else:
+            entry["ship_season"] = ""
+            entry["ship_start"] = None
+            entry["ship_end"] = None
+            entry["ships_soon"] = False
+        entries.append(entry)
+
+    # Sort: soon-shipping first, then by order date
+    entries.sort(key=lambda e: (not e["ships_soon"], e["date_order"]))
+    return entries
+
+
+def _pickup_summary(o: dict) -> dict:
+    return {
+        "order_name": o.get("name") or "",
+        "partner_name": o.get("partner_name") or "",
+        "date_order": _order_date(o),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Rendering helpers  (plain text + HTML — no Odoo dependency)
+# ---------------------------------------------------------------------------
+
+
+def render_digest_text(digest: dict) -> str:
+    """Plain-text version for Discord ops ping."""
+    ps = _fmt_date(digest["period_start"])
+    pe = _fmt_date(digest["period_end"])
+    lines = [
+        f"Weekly order rollup ({ps} to {pe})",
+        "",
+        f"Orders placed:   {digest['orders_placed']}",
+        f"Revenue:         {_fmt_currency(digest['revenue_total'])}",
+        f"Units shipped:   {digest['units_shipped']}",
+    ]
+
+    preorders = digest["outstanding_preorders"]
+    if preorders:
+        lines += ["", f"Outstanding preorders ({len(preorders)}):"]
+        for p in preorders:
+            ship_window = _wave_label(p)
+            soon = " [ships soon]" if p.get("ships_soon") else ""
+            lines.append(
+                f"  {p['order_name']} | {p['partner_name']} | {_fmt_currency(p['amount_total'])} | {ship_window}{soon}"
+            )
+    else:
+        lines += ["", "No outstanding preorders."]
+
+    pickups = digest["pickups_awaiting"]
+    if pickups:
+        lines += ["", f"Pickups awaiting collection ({len(pickups)}):"]
+        for pk in pickups:
+            lines.append(f"  {pk['order_name']} | {pk['partner_name']} | ordered {_fmt_date(pk['date_order'])}")
+    else:
+        lines += ["", "No pickups awaiting collection."]
+
+    return "\n".join(lines)
+
+
+def render_digest_html(digest: dict) -> str:
+    """HTML version for merchant inbox email."""
+    ps = _fmt_date(digest["period_start"])
+    pe = _fmt_date(digest["period_end"])
+    parts = [
+        "<h2>Weekly order rollup</h2>",
+        f"<p><em>{ps} to {pe}</em></p>",
+        "<table>",
+        f"<tr><td><strong>Orders placed</strong></td><td>{digest['orders_placed']}</td></tr>",
+        f"<tr><td><strong>Revenue</strong></td><td>{_fmt_currency(digest['revenue_total'])}</td></tr>",
+        f"<tr><td><strong>Units shipped</strong></td><td>{digest['units_shipped']}</td></tr>",
+        "</table>",
+    ]
+
+    preorders = digest["outstanding_preorders"]
+    if preorders:
+        parts.append(f"<h3>Outstanding preorders ({len(preorders)})</h3>")
+        parts.append("<ul>")
+        for p in preorders:
+            ship_window = _wave_label(p)
+            soon_flag = " <strong>(ships soon)</strong>" if p.get("ships_soon") else ""
+            parts.append(
+                f"<li><strong>{p['order_name']}</strong> | {p['partner_name']} | "
+                f"{_fmt_currency(p['amount_total'])} | ship window: {ship_window}{soon_flag}</li>"
+            )
+        parts.append("</ul>")
+    else:
+        parts.append("<p>No outstanding preorders this week.</p>")
+
+    pickups = digest["pickups_awaiting"]
+    if pickups:
+        parts.append(f"<h3>Pickups awaiting collection ({len(pickups)})</h3>")
+        parts.append("<ul>")
+        for pk in pickups:
+            parts.append(
+                f"<li><strong>{pk['order_name']}</strong> | {pk['partner_name']} | "
+                f"ordered {_fmt_date(pk['date_order'])}</li>"
+            )
+        parts.append("</ul>")
+    else:
+        parts.append("<p>No pickups awaiting collection.</p>")
+
+    return "\n".join(parts)
+
+
+def _wave_label(entry: dict) -> str:
+    start = entry.get("ship_start")
+    end = entry.get("ship_end")
+    season = entry.get("ship_season") or ""
+    if start and end:
+        label = f"{_fmt_date(start)} to {_fmt_date(end)}"
+        return f"{season} {label}".strip() if season else label
+    return "ship window TBD"

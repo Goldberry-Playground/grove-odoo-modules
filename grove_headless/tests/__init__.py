@@ -23,4 +23,5 @@ from . import (
     test_stripe_checkout,  # noqa: F401
     test_tenant_routing,  # noqa: F401
     test_wv_taxes,  # noqa: F401
+    test_order_digest,  # noqa: F401
 )

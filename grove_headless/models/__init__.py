@@ -3,6 +3,7 @@ from . import (
     grove_publish_event,  # noqa: F401
     grove_stripe_event,  # noqa: F401
     newsletter,  # noqa: F401  pure tag-name helper (GOL-221), no ORM models
+    order_rollup,  # noqa: F401  weekly order/preorder digest cron (GOL-1978)
     potting_batch,  # noqa: F401
     product_product,  # noqa: F401
     product_template,  # noqa: F401
