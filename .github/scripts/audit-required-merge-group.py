@@ -231,19 +231,23 @@ def reconcile():
         # opt-out: the default GITHUB_TOKEN provably cannot read classic branch
         # protection, so soft-skip with a notice.
         if os.environ.get("REQUIRED_CHECKS_ADMIN_TOKEN_SET") == "true":
-            print(f"::error::--reconcile FAILED: REQUIRED_CHECKS_ADMIN_TOKEN is set "
-                  f"but was rejected (401/403) reading branch-protection / rulesets "
-                  f"on {repo}@{branch}. The credential is present but under-scoped or "
-                  f"expired — grant it fine-grained Administration: read (or a classic "
-                  f"token with `repo` scope + admin) so the live drift check can run. "
-                  f"Refusing to soft-skip a present-but-insufficient token.")
+            print(
+                f"::error::--reconcile FAILED: REQUIRED_CHECKS_ADMIN_TOKEN is set "
+                f"but was rejected (401/403) reading branch-protection / rulesets "
+                f"on {repo}@{branch}. The credential is present but under-scoped or "
+                f"expired — grant it fine-grained Administration: read (or a classic "
+                f"token with `repo` scope + admin) so the live drift check can run. "
+                f"Refusing to soft-skip a present-but-insufficient token."
+            )
             return 1
-        print(f"::warning::--reconcile skipped: no REQUIRED_CHECKS_ADMIN_TOKEN "
-              f"provisioned; the default GITHUB_TOKEN cannot read branch-protection "
-              f"on {repo}@{branch}. Provision an admin-scoped "
-              f"REQUIRED_CHECKS_ADMIN_TOKEN secret (fine-grained: Administration "
-              f"read) to enable the live drift check; the static audit above still "
-              f"gates.")
+        print(
+            f"::warning::--reconcile skipped: no REQUIRED_CHECKS_ADMIN_TOKEN "
+            f"provisioned; the default GITHUB_TOKEN cannot read branch-protection "
+            f"on {repo}@{branch}. Provision an admin-scoped "
+            f"REQUIRED_CHECKS_ADMIN_TOKEN secret (fine-grained: Administration "
+            f"read) to enable the live drift check; the static audit above still "
+            f"gates."
+        )
         return 0
 
     live = sorted(live)
