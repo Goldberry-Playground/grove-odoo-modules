@@ -2208,9 +2208,7 @@ def _order_alert_context(order):
     lines = [
         (line.product_id.display_name, line.product_uom_qty)
         for line in order.order_line
-        if not line.display_type
-        and line.product_id
-        and line.product_id.product_tmpl_id.type != "service"
+        if not line.display_type and line.product_id and line.product_id.product_tmpl_id.type != "service"
     ]
     tracking = (order.grove_tracking_numbers or "").strip().replace("\n", ", ") or None
     carrier = getattr(order, "grove_carrier", False) or None

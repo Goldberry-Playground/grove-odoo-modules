@@ -108,10 +108,7 @@ def format_merchant_email(
     subject = f"New {kind} {order_ref} — {fulfillment_label(fulfillment)}"
 
     rows = "".join(
-        f"<li>{q}× {name}</li>"
-        for name, q in (
-            (name, int(qty) if _is_int(qty) else qty) for name, qty in lines
-        )
+        f"<li>{q}× {name}</li>" for name, q in ((name, int(qty) if _is_int(qty) else qty) for name, qty in lines)
     )
     who = customer or "Unknown customer"
     if customer_email:
