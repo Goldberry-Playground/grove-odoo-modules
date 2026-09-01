@@ -25,6 +25,17 @@ class SaleOrder(models.Model):
     grove_shipping_carriers = fields.Text(readonly=True, copy=False)
     grove_shipping_services = fields.Text(readonly=True, copy=False)
 
+    # Fulfilment intent resolved at draft creation (GOL-1057/GOL-1933). Persisted
+    # so the post-purchase chain has an unambiguous source of truth instead of
+    # re-inferring "did this ship?" from the presence of a shipping line: the
+    # new-order Discord/merchant alert words itself off it, and the auto-label
+    # gate (GOL-1906) skips "pickup" orders (no label is ever owed on pickup).
+    grove_fulfillment = fields.Selection(
+        [("ship", "Shipping"), ("pickup", "Farm pickup")],
+        readonly=True,
+        copy=False,
+    )
+
     # Stripe Checkout linkage (GOL-642). Written when a checkout session is
     # created; read by the webhook to reconcile session.completed/expired back
     # to this order. copy=False so a duplicated order never inherits a payment.
