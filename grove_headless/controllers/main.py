@@ -16,6 +16,7 @@ from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME
 from ..models import stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.newsletter import newsletter_tag_names
+from ..models.order_alerts import format_merchant_email, format_new_order_discord
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
 from ..models.shipping_boxes import packing_mode
 from ..models.shipping_calendar import (
@@ -1795,6 +1796,12 @@ def _create_draft_order(website, env, payload):
     if not is_pickup:
         _apply_destination_tax(env, order, shipping)
 
+    # Persist the resolved fulfilment intent (GOL-1933) for the post-purchase
+    # chain. A non-ship, non-pickup order (absent `fulfillment` with no ship-to
+    # state → the pre-1057 $0-shipping local case) carries no shipping line and
+    # is never labelled, so it collapses to "pickup" for alerting/label-gating.
+    order.grove_fulfillment = "ship" if is_ship_to else "pickup"
+
     return order, None
 
 
@@ -2069,6 +2076,11 @@ def _handle_session_completed(env, session):
     except Exception:  # noqa: BLE001 — payment is already recorded; don't fail the webhook
         _logger.exception("action_confirm failed for %s (payment recorded, confirm deferred)", order.name)
     _send_order_confirmation_email(env, order)
+    # Post-purchase ops chain (GOL-1933): alert staff on EVERY new paid order —
+    # both fulfilment types, deposit or full. Pickup orders get no label but must
+    # still notify (Josh). Both are best-effort and must never fail the webhook.
+    _notify_new_order(env, order, has_preorder)
+    _notify_merchant_email(env, order, has_preorder)
     if has_preorder:
         # Deposit explainer alongside the branded receipt (GOL-1666): the
         # standard sale template lists the charged-today totals; this line
@@ -2185,6 +2197,90 @@ def _notify_discord(message):
         requests.post(url, json={"content": message}, timeout=10)
     except Exception:  # noqa: BLE001
         _logger.warning("Discord ops notify failed", exc_info=True)
+
+
+def _order_alert_context(order):
+    """Primitive values the pure alert formatters need, read off the order once
+    (GOL-1933). Kept together so the Discord ping and the merchant email describe
+    the same order identically. Carrier is read defensively so the alert lights
+    up automatically once GOL-1906 persists it — no field reference that would
+    break on origin/main where it does not yet exist."""
+    lines = [
+        (line.product_id.display_name, line.product_uom_qty)
+        for line in order.order_line
+        if not line.display_type
+        and line.product_id
+        and line.product_id.product_tmpl_id.type != "service"
+    ]
+    tracking = (order.grove_tracking_numbers or "").strip().replace("\n", ", ") or None
+    carrier = getattr(order, "grove_carrier", False) or None
+    return {
+        "order_ref": order.name,
+        "customer": order.partner_id.name,
+        "customer_email": order.partner_id.email,
+        "fulfillment": order.grove_fulfillment,
+        "lines": lines,
+        "total": order.amount_total,
+        "currency": order.currency_id.name or "USD",
+        "carrier": carrier,
+        "tracking": tracking,
+    }
+
+
+def _shipping_address_text(order):
+    """One-line ship-to for the merchant email, or None for pickup/no address."""
+    if order.grove_fulfillment != "ship":
+        return None
+    p = order.partner_shipping_id or order.partner_id
+    if not p:
+        return None
+    bits = [p.name, p.street, p.street2, p.city]
+    tail = " ".join(x for x in [p.state_id.code, p.zip] if x)
+    if tail:
+        bits.append(tail)
+    return "<br/>".join(x for x in bits if x) or None
+
+
+def _notify_new_order(env, order, is_deposit):
+    """Best-effort Discord ops ping on a new paid order (GOL-1933). Fires for
+    both fulfilment types; a missing DISCORD_OPS_WEBHOOK_URL or a failed POST is
+    swallowed by _notify_discord so it never breaks webhook processing."""
+    try:
+        message = format_new_order_discord(is_deposit=is_deposit, **_order_alert_context(order))
+        _notify_discord(message)
+    except Exception:  # noqa: BLE001 — ops alert is best-effort
+        _logger.warning("New-order Discord alert failed for %s", order.name, exc_info=True)
+
+
+def _notify_merchant_email(env, order, is_deposit):
+    """Best-effort internal merchant notification to order.company_id.email
+    (GOL-1933), separate from the customer receipt. Never fatal — the payment is
+    already recorded. A missing company email is logged loudly (it means staff
+    get no alert) rather than silently dropped."""
+    recipient = order.company_id.email
+    if not recipient:
+        _logger.warning(
+            "No company email on %s; merchant order alert not sent for %s",
+            order.company_id.display_name,
+            order.name,
+        )
+        return
+    try:
+        subject, body_html = format_merchant_email(
+            is_deposit=is_deposit,
+            shipping_address=_shipping_address_text(order),
+            **_order_alert_context(order),
+        )
+        env["mail.mail"].sudo().create(
+            {
+                "subject": subject,
+                "email_to": recipient,
+                "body_html": body_html,
+                "auto_delete": True,
+            }
+        ).send()
+    except Exception:  # noqa: BLE001 — merchant alert is best-effort
+        _logger.warning("Merchant order alert failed for %s", order.name, exc_info=True)
 
 
 def _send_order_confirmation_email(env, order):
