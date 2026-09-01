@@ -19,6 +19,7 @@ from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.newsletter import newsletter_tag_names
 from ..models.order_alerts import format_merchant_email, format_new_order_discord
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
+from ..models.shipment_email import NOTIFY_STATUSES, shipment_notice_copy
 from ..models.shipping_boxes import packing_mode
 from ..models.shipping_calendar import (
     MODE_PREORDER,
@@ -2313,23 +2314,13 @@ def _send_order_confirmation_email(env, order):
         _logger.warning("Order confirmation email failed for %s", order.name, exc_info=True)
 
 
-# Shippo tracking statuses that warrant a customer email, mapped to the
-# subject template + lead line of the notification. Backs the shipping-
-# notification promise on the /shipping-warranty page (GOL-988). Repeated
-# webhooks for the same status are de-duplicated by only emailing on a status
-# *transition* (see _apply_delivery_status), so a customer gets one "shipped"
-# and one "delivered" — not one per Shippo poll.
-_SHIPPING_NOTIFY = {
-    "transit": ("Your order {order} has shipped", "Good news — your order is on its way!"),
-    "delivered": ("Your order {order} has been delivered", "Your order has been delivered. We hope you love it!"),
-}
-
-
 def _apply_delivery_status(env, order, new_status, tracking):
     """Record the new Shippo delivery status and, on a *transition* into a
     notify-worthy state, email the customer. Idempotent: a repeated webhook for
-    a status the order already has sends no second email. Returns True when the
-    status changed."""
+    a status the order already has sends no second email, so a customer gets one
+    "shipped" and one "delivered" notice even when both the operator signal
+    (Phase 2) and the Shippo transit scan fire. Returns True when the status
+    changed."""
     if new_status == order.grove_delivery_status:
         return False
     order.grove_delivery_status = new_status
@@ -2337,34 +2328,56 @@ def _apply_delivery_status(env, order, new_status, tracking):
     return True
 
 
+def _order_shipments(order, fallback_tracking=None):
+    """(carrier, tracking) pairs for the branded shipment notice, read from the
+    per-box fields Shippo persists (grove_shipping_carriers index-aligned with
+    grove_tracking_numbers, GOL-1906). Falls back to the single webhook tracking
+    number when the order carries no persisted boxes."""
+    trackings = (order.grove_tracking_numbers or "").splitlines()
+    carriers = (order.grove_shipping_carriers or "").splitlines()
+    pairs = []
+    for i, number in enumerate(trackings):
+        number = number.strip()
+        if not number:
+            continue
+        carrier = carriers[i].strip() if i < len(carriers) else ""
+        pairs.append((carrier, number))
+    if not pairs and fallback_tracking:
+        pairs.append(("", fallback_tracking))
+    return pairs
+
+
 def _notify_shipping_status(env, order, status, tracking):
-    """Best-effort shipping-notification email (GOL-988). Never fatal — the
-    delivery-status write has already landed, and a mail failure must not make
-    Shippo retry the webhook. Only notify-worthy statuses (see _SHIPPING_NOTIFY)
-    produce an email; everything else is a silent status update."""
-    notice = _SHIPPING_NOTIFY.get(status)
-    if not notice or not order.partner_id.email:
+    """Best-effort branded shipment-notification email (GOL-988 / GOL-1979).
+    Never fatal — the delivery-status write has already landed, and a mail
+    failure must not make Shippo retry the webhook. Only notify-worthy statuses
+    (NOTIFY_STATUSES) produce an email; everything else is a silent status
+    update. Renders the carrier and a clickable per-carrier tracking link for
+    each packed box."""
+    if status not in NOTIFY_STATUSES or not order.partner_id.email:
         return
-    subject_tmpl, lead = notice
     # Pre-ship balance reminder (GOL-1666): only on the "shipped"/transit notice
     # and only for orders that took a preorder deposit, so a full-charge order
     # never sees a balance line it does not owe.
-    balance_html = ""
+    balance_line = None
     if status == "transit" and (order.grove_preorder_variant_ids or "").strip():
-        balance_html = f"<p>{preship_balance_line(_preorder_ship_season(env, order))}</p>"
-    body = (
-        f"<p>Hi {order.partner_id.name or 'there'},</p>"
-        f"<p>{lead}</p>"
-        f"<p>Order: <strong>{order.name}</strong><br/>"
-        f"Tracking number: <strong>{tracking}</strong></p>"
-        f"{balance_html}"
-        f"<p>— Goldberry Grove Nursery</p>"
+        balance_line = preship_balance_line(_preorder_ship_season(env, order))
+    subject, body = shipment_notice_copy(
+        status=status,
+        order_name=order.name,
+        customer_name=order.partner_id.name,
+        shipments=_order_shipments(order, fallback_tracking=tracking),
+        balance_line=balance_line,
     )
+    # Reply-To to the selling company's formatted address so a customer reply
+    # lands with the operator, not the no-reply envelope sender.
+    reply_to = getattr(order.company_id, "email_formatted", False) or order.company_id.email or None
     try:
         env["mail.mail"].sudo().create(
             {
-                "subject": subject_tmpl.format(order=order.name),
+                "subject": subject,
                 "email_to": order.partner_id.email,
+                "reply_to": reply_to,
                 "body_html": body,
                 "auto_delete": True,
             }
