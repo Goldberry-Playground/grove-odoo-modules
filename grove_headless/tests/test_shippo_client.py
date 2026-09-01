@@ -39,46 +39,116 @@ class TestShippoClient(unittest.TestCase):
         p = sp.build_shipment_payload(self.ADDR, "br16", 0, "dormant")
         self.assertGreaterEqual(float(p["parcels"][0]["weight"]), 1.0)
 
-    def test_buy_label_happy_path(self):
-        shipment = {
-            "rates": [
-                {
-                    "object_id": "r1",
-                    "provider": "UPS",
-                    "servicelevel": {"token": "ups_ground"},
-                    "amount": "14.23",
-                }
-            ]
-        }
-        transaction = {
-            "status": "SUCCESS",
-            "tracking_number": "1Z999",
-            "label_url": "https://deliver.goshippo.com/x.pdf",
-            "object_id": "t1",
-        }
-        posts = mock.Mock(
+    @staticmethod
+    def _posts(shipment, transaction):
+        return mock.Mock(
             side_effect=[
                 mock.Mock(status_code=201, json=lambda: shipment, raise_for_status=lambda: None),
                 mock.Mock(status_code=201, json=lambda: transaction, raise_for_status=lambda: None),
             ]
         )
-        out = sp.buy_ups_ground_label("key", sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed"), post=posts)
-        self.assertEqual(out["tracking_number"], "1Z999")
 
-    def test_no_ups_ground_rate_raises(self):
+    TXN = {
+        "status": "SUCCESS",
+        "tracking_number": "1Z999",
+        "label_url": "https://deliver.goshippo.com/x.pdf",
+        "object_id": "t1",
+    }
+
+    def test_buy_label_happy_path(self):
+        shipment = {
+            "rates": [
+                {"object_id": "r1", "provider": "UPS", "servicelevel": {"token": "ups_ground"}, "amount": "14.23"}
+            ]
+        }
+        posts = self._posts(shipment, self.TXN)
+        out = sp.buy_cheapest_ground_label("key", sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed"), post=posts)
+        self.assertEqual(out["tracking_number"], "1Z999")
+        self.assertEqual(out["carrier"], "UPS")
+        self.assertEqual(out["servicelevel"], "ups_ground")
+
+    def test_buy_label_picks_cheapest_across_carriers(self):
+        # USPS Ground Advantage is cheaper than UPS Ground here -> it must win,
+        # and the winning carrier/service must be reported for persistence.
+        shipment = {
+            "rates": [
+                {"object_id": "ru", "provider": "UPS", "servicelevel": {"token": "ups_ground"}, "amount": "29.70"},
+                {
+                    "object_id": "rp",
+                    "provider": "USPS",
+                    "servicelevel": {"token": "usps_ground_advantage"},
+                    "amount": "10.08",
+                },
+            ]
+        }
+        posts = self._posts(shipment, self.TXN)
+        out = sp.buy_cheapest_ground_label("key", sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed"), post=posts)
+        # The transaction call must reference the cheaper USPS rate object.
+        bought = posts.call_args_list[1].kwargs["json"]["rate"]
+        self.assertEqual(bought, "rp")
+        self.assertEqual(out["carrier"], "USPS")
+        self.assertEqual(out["servicelevel"], "usps_ground_advantage")
+
+    def test_buy_label_single_carrier_failover(self):
+        # Only USPS quotes (UPS outage). Failover: buy it rather than raise.
         shipment = {
             "rates": [
                 {
-                    "object_id": "r1",
+                    "object_id": "rp",
                     "provider": "USPS",
                     "servicelevel": {"token": "usps_ground_advantage"},
                     "amount": "9.99",
                 }
             ]
         }
+        posts = self._posts(shipment, self.TXN)
+        out = sp.buy_cheapest_ground_label("key", sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed"), post=posts)
+        self.assertEqual(out["carrier"], "USPS")
+
+    def test_no_allowlisted_ground_rate_raises(self):
+        # Only a non-allowlisted service present (UPS 3-Day Select). The
+        # allowlist must reject it — never buy an off-list service.
+        shipment = {
+            "rates": [
+                {"object_id": "r1", "provider": "UPS", "servicelevel": {"token": "ups_3_day_select"}, "amount": "9.99"}
+            ]
+        }
         posts = mock.Mock(return_value=mock.Mock(status_code=201, json=lambda: shipment, raise_for_status=lambda: None))
         with self.assertRaises(sp.ShippoError):
-            sp.buy_ups_ground_label("key", sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed"), post=posts)
+            sp.buy_cheapest_ground_label("key", sp.build_shipment_payload(self.ADDR, "s20", 4, "leafed"), post=posts)
+
+
+class TestCheapestGroundSelector(unittest.TestCase):
+    """select_cheapest_ground: allowlist + transit guard + least-cost."""
+
+    def _r(self, provider, token, amount, days=None):
+        r = {"provider": provider, "servicelevel": {"token": token}, "amount": str(amount)}
+        if days is not None:
+            r["estimated_days"] = days
+        return r
+
+    def test_none_when_no_allowlisted_rate(self):
+        self.assertIsNone(sp.select_cheapest_ground([self._r("UPS", "ups_3_day_select", 5)]))
+
+    def test_off_list_carrier_ignored_even_if_cheapest(self):
+        # FedEx is not on the allowlist; the more expensive UPS Ground wins.
+        rates = [self._r("FedEx", "fedex_ground", 1.00), self._r("UPS", "ups_ground", 20.00)]
+        self.assertEqual(sp.select_cheapest_ground(rates)["provider"], "UPS")
+
+    def test_cheapest_wins_within_transit_tolerance(self):
+        rates = [self._r("UPS", "ups_ground", 29.70, days=2), self._r("USPS", "usps_ground_advantage", 10.08, days=3)]
+        # tolerance 1 day: 3 <= fastest(2)+1 -> USPS allowed and cheaper.
+        self.assertEqual(sp.select_cheapest_ground(rates)["provider"], "USPS")
+
+    def test_transit_guard_excludes_too_slow_cheaper_rate(self):
+        # USPS is cheaper but 3 days slower than fastest -> guard drops it.
+        rates = [self._r("UPS", "ups_ground", 29.70, days=2), self._r("USPS", "usps_ground_advantage", 10.08, days=5)]
+        self.assertEqual(sp.select_cheapest_ground(rates, tolerance_days=1)["provider"], "UPS")
+
+    def test_missing_eta_not_excluded(self):
+        # No estimated_days anywhere -> guard is a no-op, cheapest still wins.
+        rates = [self._r("UPS", "ups_ground", 29.70), self._r("USPS", "usps_ground_advantage", 10.08)]
+        self.assertEqual(sp.select_cheapest_ground(rates)["provider"], "USPS")
 
 
 class TestTrackingValidation(unittest.TestCase):

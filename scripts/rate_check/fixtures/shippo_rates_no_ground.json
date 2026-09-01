@@ -1,0 +1,12 @@
+{
+  "rates": [
+    {
+      "provider": "UPS",
+      "servicelevel": {
+        "token": "ups_3_day_select"
+      },
+      "amount": "31.10",
+      "currency": "USD"
+    }
+  ]
+}

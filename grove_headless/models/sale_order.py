@@ -17,6 +17,13 @@ class SaleOrder(models.Model):
     grove_tracking_numbers = fields.Text(readonly=True, copy=False)
     grove_label_urls = fields.Text(readonly=True, copy=False)
     grove_delivery_status = fields.Char(readonly=True, copy=False)
+    # Which carrier + ground service actually shipped each packed box, newline-
+    # joined and index-aligned with grove_tracking_numbers (GOL-1906). Labels are
+    # bought least-cost across UPS Ground / USPS Ground Advantage, so the carrier
+    # can differ per box and per order; fulfilment and cost reconciliation read
+    # these to audit the live label cost against the quoted rate table.
+    grove_shipping_carriers = fields.Text(readonly=True, copy=False)
+    grove_shipping_services = fields.Text(readonly=True, copy=False)
 
     # Stripe Checkout linkage (GOL-642). Written when a checkout session is
     # created; read by the webhook to reconcile session.completed/expired back
@@ -49,10 +56,12 @@ class SaleOrder(models.Model):
             self.with_env(self.env(cr=cr)).write(vals)
 
     def action_buy_shipping_labels(self):
-        """Buy one UPS Ground label per PACKED BOX via Shippo (Box Engine v2:
-        the same packer that priced the order plans the labels, so the boxes
-        bought are the boxes charged). Idempotent-ish: refuses to run twice
-        on an order that already has tracking numbers."""
+        """Buy one least-cost ground label per PACKED BOX via Shippo (Box Engine
+        v2: the same packer that priced the order plans the labels, so the boxes
+        bought are the boxes charged). Each box races UPS Ground vs USPS Ground
+        Advantage and buys the cheaper, transit-guarded (GOL-1906); the carrier
+        that won is persisted per box. Idempotent-ish: refuses to run twice on
+        an order that already has tracking numbers."""
         api_key = os.environ.get("SHIPPO_API_KEY", "")
         if not api_key:
             raise UserError("SHIPPO_API_KEY is not configured on this server.")
@@ -109,16 +118,20 @@ class SaleOrder(models.Model):
             # Each label is committed through an independent cursor immediately
             # after purchase, so money spent at Shippo is recorded even if a
             # subsequent label fails and the request transaction rolls back.
-            tracking, labels = [], []
+            tracking, labels, carriers, services = [], [], [], []
             try:
                 for payload, _box_id in purchase_plan:
-                    result = shippo_client.buy_ups_ground_label(api_key, payload)
+                    result = shippo_client.buy_cheapest_ground_label(api_key, payload)
                     tracking.append(result["tracking_number"])
                     labels.append(result["label_url"])
+                    carriers.append(result.get("carrier") or "")
+                    services.append(result.get("servicelevel") or "")
                     order._persist_label_result(
                         {
                             "grove_tracking_numbers": "\n".join(tracking),
                             "grove_label_urls": "\n".join(labels),
+                            "grove_shipping_carriers": "\n".join(carriers),
+                            "grove_shipping_services": "\n".join(services),
                             "grove_delivery_status": "label_purchased",
                         }
                     )
@@ -136,6 +149,8 @@ class SaleOrder(models.Model):
                         {
                             "grove_tracking_numbers": "\n".join(tracking),
                             "grove_label_urls": "\n".join(labels),
+                            "grove_shipping_carriers": "\n".join(carriers),
+                            "grove_shipping_services": "\n".join(services),
                             "grove_delivery_status": "partial_purchase",
                         }
                     )

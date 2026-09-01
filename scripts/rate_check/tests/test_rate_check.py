@@ -13,7 +13,9 @@ rc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rc)
 
 FIXTURE = os.path.join(os.path.dirname(__file__), "..", "fixtures", "shippo_rates_response.json")
-NO_UPS_FIXTURE = os.path.join(os.path.dirname(__file__), "..", "fixtures", "shippo_rates_no_ups.json")
+# No allowlisted ground rate at all (only a non-ground service present) — the
+# "carrier not connected / lapsed" state under least-cost selection (GOL-1906).
+NO_GROUND_FIXTURE = os.path.join(os.path.dirname(__file__), "..", "fixtures", "shippo_rates_no_ground.json")
 
 
 class TestReferenceAddresses(unittest.TestCase):
@@ -53,10 +55,12 @@ class TestReferenceAddresses(unittest.TestCase):
 
 
 class TestRateMath(unittest.TestCase):
-    def test_ups_ground_rate_selected(self):
+    def test_cheapest_ground_rate_selected(self):
+        # Fixture: UPS Ground 14.23 vs USPS Ground Advantage 15.80 -> cheaper
+        # UPS wins the least-cost race (GOL-1906).
         with open(FIXTURE) as fh:
             data = json.load(fh)
-        self.assertEqual(rc.pick_ups_ground(data), 14.23)
+        self.assertEqual(rc.pick_cheapest_ground(data), 14.23)
 
     def test_target_formula_ceil(self):
         # 14.23 + 4.50 (s20 packaging) + 2.00 = 20.73 -> 21
@@ -90,12 +94,12 @@ class TestNoUpsRatesSkips(unittest.TestCase):
         # table gets investigated, and must not rewrite the file (GOL-1312).
         with open(rc.RATES_PATH, encoding="utf-8") as fh:
             rates_before = fh.read()
-        with mock.patch("sys.argv", ["rate_check.py", "--fixture", NO_UPS_FIXTURE]):
+        with mock.patch("sys.argv", ["rate_check.py", "--fixture", NO_GROUND_FIXTURE]):
             err = io.StringIO()
             with redirect_stdout(io.StringIO()), redirect_stderr(err):
                 code = rc.main()
         self.assertEqual(code, 1)
-        self.assertIn("UPS connection lost", err.getvalue())
+        self.assertIn("ground carrier connection lost", err.getvalue())
         with open(rc.RATES_PATH, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), rates_before)
 
@@ -122,7 +126,7 @@ class TestNoUpsRatesSkips(unittest.TestCase):
             json.dump(doc, fh)
             path = fh.name
         try:
-            argv = ["rate_check.py", "--fixture", NO_UPS_FIXTURE]
+            argv = ["rate_check.py", "--fixture", NO_GROUND_FIXTURE]
             with mock.patch.object(rc, "RATES_PATH", path), mock.patch("sys.argv", argv):
                 err = io.StringIO()
                 with redirect_stdout(io.StringIO()), redirect_stderr(err):
@@ -135,7 +139,7 @@ class TestNoUpsRatesSkips(unittest.TestCase):
 
     def test_all_missing_with_real_published_rates_fails(self):
         # Real published rates exist (no `_provisional` marker) but Shippo now
-        # returns zero UPS Ground rates for every probe: the carrier link has
+        # returns zero ground rates for every probe: the carrier link(s) have
         # lapsed. The checker must FAIL (exit 1) so the fossilized table gets
         # investigated, and must not rewrite the file (GOL-1312).
         real = {
@@ -146,7 +150,7 @@ class TestNoUpsRatesSkips(unittest.TestCase):
         before = json.dumps(real)
         code, err, after = self._run_no_ups_against(real)
         self.assertEqual(code, 1)
-        self.assertIn("UPS connection lost", err)
+        self.assertIn("ground carrier connection lost", err)
         self.assertEqual(after, before)
 
     def test_all_missing_with_empty_table_skips_cleanly(self):
