@@ -11,6 +11,7 @@ from . import (
     test_effective_shipping_tier,  # noqa: F401
     test_growing_facts,  # noqa: F401
     test_kit_boms,  # noqa: F401
+    test_mark_shipped,  # noqa: F401
     test_newsletter_subscribe,  # noqa: F401
     test_pos,  # noqa: F401
     test_potting_batch,  # noqa: F401

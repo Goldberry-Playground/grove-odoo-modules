@@ -916,6 +916,66 @@ class GroveHeadlessAPI(http.Controller):
             }
         )
 
+    @http.route(
+        "/grove/api/v1/orders/<int:order_id>/mark-shipped",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def order_mark_shipped(self, order_id, **_kwargs):
+        """Operator "packed & shipped" signal from the Discord bridge (GOL-1980).
+
+        Bearer-auth'd like /orders (only the scoped bridge service key reaches
+        it, never the public internet). Transitions the order to the terminal
+        ``shipped`` state and fires the branded customer shipment email exactly
+        once. Idempotent: a double-click returns 200 with ``already_shipped:
+        true`` and re-sends nothing, so the operator UI is double-safe. A
+        missing or foreign-tenant order is 404 (an id from another company never
+        leaks or mutates here). The signal must fail VISIBLY — a non-2xx on any
+        failure — rather than acking in Discord and silently dropping the write
+        (GOL-1975 guard); the bridge surfaces the non-2xx as an ephemeral error.
+
+        Body (optional): ``{"actor": "<discord user id>"}`` — stamped into the
+        order chatter for the audit trail.
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        actor = payload.get("actor")
+        actor = actor if isinstance(actor, str) and actor.strip() else None
+
+        current_company = request.website.company_id
+        order = (
+            request.env["sale.order"]
+            .sudo()
+            .with_company(current_company)
+            .search(
+                [("id", "=", order_id), ("company_id", "=", current_company.id)],
+                limit=1,
+            )
+        )
+        if not order:
+            return _json_response({"error": "Order not found"}, status=404)
+
+        result = order._grove_mark_shipped(actor=actor)
+
+        tracking = order.grove_tracking_numbers
+        carriers = order.grove_shipping_carriers
+        return _json_response(
+            {
+                "id": order.id,
+                "name": order.name,
+                "state": order.state,
+                "grove_delivery_status": order.grove_delivery_status,
+                "already_shipped": not result["newly_shipped"],
+                "tracking_numbers": tracking.split("\n") if tracking else [],
+                "carriers": carriers.split("\n") if carriers else [],
+            }
+        )
+
     # ── Stripe checkout ──────────────────────────────────────────────────
 
     @http.route(

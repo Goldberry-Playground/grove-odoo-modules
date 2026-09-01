@@ -10,6 +10,15 @@ from .shipping_zones import pack_for_state, unshippable_reason
 
 _logger = logging.getLogger(__name__)
 
+# Terminal delivery state written by the operator "Mark shipped" signal
+# (GOL-1980). Sits at the end of the grove_delivery_status lifecycle
+# (label_purchased / partial_purchase → shipped).
+GROVE_SHIPPED_STATUS = "shipped"
+
+# XML id of the branded customer shipment email (Phase 3, GOL-1975). Resolved
+# defensively so mark-shipped works before the template lands.
+_SHIPMENT_EMAIL_TEMPLATE = "grove_headless.mail_template_order_shipped"
+
 
 class SaleOrder(models.Model):
     _inherit = "sale.order"
@@ -182,3 +191,68 @@ class SaleOrder(models.Model):
                 ) from exc
 
         return True
+
+    def _grove_mark_shipped(self, actor=None):
+        """Idempotently mark this order shipped and fire the customer shipment
+        email EXACTLY ONCE (GOL-1980).
+
+        "Shipped" is a terminal delivery state: a repeat call — an operator
+        double-click, a retried request — is a safe no-op that neither
+        re-transitions nor re-sends the customer email. The row is locked
+        ``FOR UPDATE`` so two concurrent requests serialise and only the first
+        crosses the transition (the second blocks, then reads ``shipped`` and
+        no-ops), so "double-click ≠ double-send" holds under real concurrency,
+        not just at human speed (GOL-1975 guard).
+
+        ``actor`` is the operator's Discord id, stamped into the chatter for the
+        audit trail. Returns ``{"newly_shipped": bool}`` — True only when THIS
+        call performed the transition.
+        """
+        self.ensure_one()
+        # Serialise concurrent mark-shipped requests on this exact order. The
+        # lock is read INSIDE this transaction; a second request blocks here
+        # until we commit, then sees the terminal state below and no-ops.
+        self.env.cr.execute(
+            "SELECT grove_delivery_status FROM sale_order WHERE id = %s FOR UPDATE",
+            (self.id,),
+        )
+        row = self.env.cr.fetchone()
+        current = row[0] if row else self.grove_delivery_status
+        if current == GROVE_SHIPPED_STATUS:
+            return {"newly_shipped": False}
+
+        self.write({"grove_delivery_status": GROVE_SHIPPED_STATUS})
+        if actor:
+            # Audit: who signalled the shipment (Discord operator id). This is an
+            # internal chatter note, not a channel post, so mentions stay inert.
+            self.message_post(body=f"Marked shipped by operator {actor} (Discord bridge).")
+        # Phase 3 (GOL-1975): the branded "your order has shipped" email. Fired
+        # only on the real transition, so a double-click never double-emails.
+        self._grove_send_shipment_email()
+        return {"newly_shipped": True}
+
+    def _grove_send_shipment_email(self):
+        """Send the branded customer shipment email (Phase 3 integration point,
+        GOL-1975).
+
+        The Phase-3 sibling owns the template body; this is the single call site
+        that fires it on the shipped transition. Best-effort and guarded: the
+        template is looked up by xml id and skipped-with-a-log when it is not yet
+        installed, so marking an order shipped (and its Odoo write) can never
+        fail because Phase 3 has not landed. A send failure is likewise swallowed
+        — the shipment state is the source of truth; the email is a notification.
+        """
+        self.ensure_one()
+        template = self.env.ref(_SHIPMENT_EMAIL_TEMPLATE, raise_if_not_found=False)
+        if not template:
+            _logger.info(
+                "grove_headless: %s marked shipped but the Phase-3 shipment email "
+                "template (%s) is not installed yet; skipping customer email.",
+                self.name,
+                _SHIPMENT_EMAIL_TEMPLATE,
+            )
+            return
+        try:
+            template.sudo().send_mail(self.id, force_send=False)
+        except Exception:  # noqa: BLE001 — notification is best-effort
+            _logger.warning("grove_headless: shipment email send failed for %s", self.name, exc_info=True)
