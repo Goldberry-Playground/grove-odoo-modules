@@ -12,6 +12,7 @@ from . import (
     test_growing_facts,  # noqa: F401
     test_kit_boms,  # noqa: F401
     test_newsletter_subscribe,  # noqa: F401
+    test_order_digest,  # noqa: F401
     test_pos,  # noqa: F401
     test_potting_batch,  # noqa: F401
     test_product_slug,  # noqa: F401
@@ -23,5 +24,4 @@ from . import (
     test_stripe_checkout,  # noqa: F401
     test_tenant_routing,  # noqa: F401
     test_wv_taxes,  # noqa: F401
-    test_order_digest,  # noqa: F401
 )
