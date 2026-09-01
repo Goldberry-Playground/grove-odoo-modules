@@ -146,9 +146,7 @@ def buy_cheapest_ground_label(api_key: str, payload: dict, post=requests.post) -
     resp.raise_for_status()
     rate = select_cheapest_ground(resp.json().get("rates", []))
     if rate is None:
-        raise ShippoError(
-            "no allowlisted ground rate (UPS Ground / USPS Ground Advantage) returned for shipment"
-        )
+        raise ShippoError("no allowlisted ground rate (UPS Ground / USPS Ground Advantage) returned for shipment")
     resp2 = post(
         f"{API}/transactions/",
         json={"rate": rate["object_id"], "label_file_type": "PDF", "async": False},
