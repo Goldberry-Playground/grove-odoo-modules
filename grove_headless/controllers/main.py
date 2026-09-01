@@ -1,4 +1,5 @@
 import hmac
+import html
 import json
 import logging
 import os
@@ -2194,7 +2195,14 @@ def _notify_discord(message):
     if not url:
         return
     try:
-        requests.post(url, json={"content": message}, timeout=10)
+        # allowed_mentions parse:[] disarms every mention — a customer named
+        # "@everyone"/"@here" reaching the ops channel via order alerts (GOL-1933)
+        # must not ping staff.
+        requests.post(
+            url,
+            json={"content": message, "allowed_mentions": {"parse": []}},
+            timeout=10,
+        )
     except Exception:  # noqa: BLE001
         _logger.warning("Discord ops notify failed", exc_info=True)
 
@@ -2226,7 +2234,11 @@ def _order_alert_context(order):
 
 
 def _shipping_address_text(order):
-    """One-line ship-to for the merchant email, or None for pickup/no address."""
+    """One-line ship-to for the merchant email, or None for pickup/no address.
+
+    Each partner field is HTML-escaped before the ``<br/>`` join so untrusted
+    address input can't inject markup into the staff email (GOL-1933 review);
+    the caller inserts the result as pre-escaped HTML and must not re-escape it."""
     if order.grove_fulfillment != "ship":
         return None
     p = order.partner_shipping_id or order.partner_id
@@ -2236,7 +2248,7 @@ def _shipping_address_text(order):
     tail = " ".join(x for x in [p.state_id.code, p.zip] if x)
     if tail:
         bits.append(tail)
-    return "<br/>".join(x for x in bits if x) or None
+    return "<br/>".join(html.escape(x) for x in bits if x) or None
 
 
 def _notify_new_order(env, order, is_deposit):

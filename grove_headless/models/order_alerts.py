@@ -10,7 +10,12 @@ primitive values off the confirmed order once and calls these to build:
 Side-effect free by design: the caller owns the actual Discord POST and the
 ``mail.mail`` send, and their best-effort error handling — a formatter never
 does I/O and never raises on ordinary input.
+
+Only stdlib is imported (``html``), so the pure-pytest file-path load still works
+and the module stays odoo-free.
 """
+
+import html
 
 _FULFILLMENT_LABELS = {"ship": "Shipping", "pickup": "Farm pickup"}
 
@@ -105,14 +110,21 @@ def format_merchant_email(
     the other direction — telling staff a sale happened.
     """
     kind = "preorder" if is_deposit else "order"
+    # subject is a plain-text mail header; body_html is hand-built (not QWeb) so
+    # every dynamic value below is HTML-escaped — customer name/email, product
+    # names, carrier and tracking all originate from untrusted checkout input
+    # (GOL-1933 review). `shipping_address` is the exception: the caller already
+    # escaped its parts and joined them with intentional `<br/>`, so it is
+    # inserted as-is and must NOT be re-escaped here.
     subject = f"New {kind} {order_ref} — {fulfillment_label(fulfillment)}"
 
     rows = "".join(
-        f"<li>{q}× {name}</li>" for name, q in ((name, int(qty) if _is_int(qty) else qty) for name, qty in lines)
+        f"<li>{html.escape(str(q))}× {html.escape(str(name))}</li>"
+        for name, q in ((name, int(qty) if _is_int(qty) else qty) for name, qty in lines)
     )
-    who = customer or "Unknown customer"
+    who = html.escape(customer) if customer else "Unknown customer"
     if customer_email:
-        who = f"{who} ({customer_email})"
+        who = f"{who} ({html.escape(customer_email)})"
 
     ship_html = ""
     if shipping_address:
@@ -121,18 +133,18 @@ def format_merchant_email(
     if carrier or tracking:
         bits = []
         if carrier:
-            bits.append(f"Carrier: {carrier}")
+            bits.append(f"Carrier: {html.escape(str(carrier))}")
         if tracking:
-            bits.append(f"Tracking: {tracking}")
+            bits.append(f"Tracking: {html.escape(str(tracking))}")
         track_html = f"<p>{' &middot; '.join(bits)}</p>"
 
     body_html = (
         f"<p>A new {kind} was paid on the website.</p>"
-        f"<p><strong>Order:</strong> {order_ref}<br/>"
+        f"<p><strong>Order:</strong> {html.escape(str(order_ref))}<br/>"
         f"<strong>Fulfilment:</strong> {fulfillment_label(fulfillment)}<br/>"
         f"<strong>Customer:</strong> {who}</p>"
         f"<ul>{rows}</ul>"
-        f"<p><strong>Total:</strong> {format_money(total, currency)}</p>"
+        f"<p><strong>Total:</strong> {html.escape(format_money(total, currency))}</p>"
         f"{ship_html}"
         f"{track_html}"
     )

@@ -1,8 +1,8 @@
 """Pure tests for the post-purchase alert formatters (GOL-1933).
 
-``order_alerts`` has no imports at all, so it loads by file path like the other
-pure tests and runs under plain pytest (the webhook wiring that calls it is a
-TransactionCase, covered separately).
+``order_alerts`` imports only stdlib (``html``), so it loads by file path like
+the other pure tests and runs under plain pytest (the webhook wiring that calls
+it is a TransactionCase, covered separately).
 """
 
 import importlib.util
@@ -116,6 +116,30 @@ class MerchantEmailTests(unittest.TestCase):
     def test_deposit_subject(self):
         subject, _ = self._mail(is_deposit=True)
         self.assertEqual(subject, "New preorder NURS-0042 — Shipping")
+
+    def test_customer_html_is_escaped(self):
+        # Untrusted checkout input must not inject markup into the staff email
+        # (GOL-1933 review finding #1). shipping_address is pre-escaped by the
+        # caller, so it is exercised separately.
+        _, body = self._mail(
+            customer="<script>alert(1)</script>",
+            customer_email='x@y.z"><b>',
+            lines=[("<img src=x onerror=1>", 2)],
+            carrier="<i>UPS</i>",
+            tracking="<u>1Z9</u>",
+        )
+        self.assertNotIn("<script>", body)
+        self.assertIn("&lt;script&gt;alert(1)&lt;/script&gt;", body)
+        self.assertIn("&lt;img src=x onerror=1&gt;", body)
+        self.assertIn("&lt;i&gt;UPS&lt;/i&gt;", body)
+        self.assertIn("&lt;u&gt;1Z9&lt;/u&gt;", body)
+
+    def test_pre_escaped_shipping_address_not_double_escaped(self):
+        # The caller (_shipping_address_text) already escaped the parts and joined
+        # them with intentional <br/>; those breaks must survive verbatim.
+        _, body = self._mail(shipping_address="A &amp; B<br/>123 Main St")
+        self.assertIn("A &amp; B<br/>123 Main St", body)
+        self.assertNotIn("&amp;amp;", body)
 
 
 if __name__ == "__main__":
