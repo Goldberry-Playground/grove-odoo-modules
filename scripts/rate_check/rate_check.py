@@ -1,10 +1,13 @@
 #!/usr/bin/env python3
 """Morning shipping rate-checker (design: vault wiki/Software/Grove Shipping).
 
-Quotes Shippo (UPS Ground, residential) for each rate zone x catalog box
-(shipping_boxes.BOXES at representative billable weight), computes
-target = ceil(quote + per-box packaging + 2.00), and rewrites
-grove_headless/data/shipping_rates.json when any zone drifts >= $1.
+Quotes Shippo (least-cost ground: UPS Ground vs USPS Ground Advantage,
+residential) for each rate zone x catalog box (shipping_boxes.BOXES at
+representative billable weight), computes target = ceil(quote + per-box
+packaging + 2.00), and rewrites grove_headless/data/shipping_rates.json when any
+zone drifts >= $1. Selection uses the SAME shippo_client.select_cheapest_ground
+helper label purchase uses, so the published table matches what is bought
+(GOL-1906).
 
 Before writing, the proposed table is run through the monotonicity guard
 (monotonicity.find_violations): within a zone a bigger box must never be
@@ -13,11 +16,11 @@ can never publish an exploitable table — the workflow alerts and rates stay
 untouched. Each zone quotes its band's worst-case (priciest) destination so the
 published rate is a band-wide upper bound — no undercharge (GOL-1495).
 
-Exit codes: 0 no material drift (or Shippo has no UPS Ground rates at all yet
-AND the current table is the provisional placeholder — account not finished,
-skipped cleanly) | 3 rates file rewritten | 1 API failure, a partial rate gap
-(some boxes quoted, some did not), or zero UPS Ground rates for every probe
-while real published rates exist (UPS connection lapsed) | 4 proposed table
+Exit codes: 0 no material drift (or Shippo has no allowlisted ground rates at
+all yet AND the current table is the provisional placeholder — account not
+finished, skipped cleanly) | 3 rates file rewritten | 1 API failure, a partial
+rate gap (some boxes quoted, some did not), or zero ground rates for every probe
+while real published rates exist (both carriers lapsed) | 4 proposed table
 failed the monotonicity guard (not published).
 Requires env SHIPPO_API_KEY (unless --dry-run with --fixture).
 """
@@ -79,6 +82,16 @@ _mspec = _ilu.spec_from_file_location("grove_rate_monotonicity", _MONO_PATH)
 monotonicity = _ilu.module_from_spec(_mspec)
 _mspec.loader.exec_module(monotonicity)
 
+# Least-cost ground selector — the SAME helper label purchase uses
+# (grove_headless/models/shippo_client.select_cheapest_ground), loaded by file
+# path so this script stays standalone. Sharing one selector guarantees the
+# published table and the live label are computed by identical rules: allowlist
+# {UPS Ground, USPS Ground Advantage}, transit-guarded, cheapest wins (GOL-1906).
+_SC_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless", "models", "shippo_client.py")
+_scspec = _ilu.spec_from_file_location("grove_shippo_client", _SC_PATH)
+shippo_client = _ilu.module_from_spec(_scspec)
+_scspec.loader.exec_module(shippo_client)
+
 PARCELS = {
     box_id: {
         "length": str(box["length"]),
@@ -98,13 +111,13 @@ RATES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless
 OUT_DIR = os.path.join(os.path.dirname(__file__), "out")
 
 
-def pick_ups_ground(shipment_json: dict) -> float | None:
-    rates = [
-        float(r["amount"])
-        for r in shipment_json.get("rates", [])
-        if r.get("provider") == "UPS" and r.get("servicelevel", {}).get("token") == "ups_ground"
-    ]
-    return min(rates) if rates else None
+def pick_cheapest_ground(shipment_json: dict) -> float | None:
+    """Cheapest allowlisted ground rate (UPS Ground vs USPS Ground Advantage),
+    transit-guarded — the same selection the label purchase makes, so the
+    published table matches what will actually be bought. None when neither
+    carrier returns a ground rate for this probe (GOL-1906)."""
+    rate = shippo_client.select_cheapest_ground(shipment_json.get("rates", []))
+    return float(rate["amount"]) if rate else None
 
 
 def target_rate(quote: float, box_id: str) -> int:
@@ -134,7 +147,7 @@ def quote_zone_box(api_key: str, zone: str, box_id: str) -> float | None:
         headers={"Authorization": f"ShippoToken {api_key}"},
     )
     resp.raise_for_status()
-    return pick_ups_ground(resp.json())
+    return pick_cheapest_ground(resp.json())
 
 
 def compute_drift(current: dict, proposed: dict) -> list:
@@ -171,7 +184,7 @@ def main() -> int:
         for box_id in PARCELS:
             if args.fixture:
                 with open(args.fixture, encoding="utf-8") as fh:
-                    quote = pick_ups_ground(json.load(fh))
+                    quote = pick_cheapest_ground(json.load(fh))
             else:
                 api_key = os.environ.get("SHIPPO_API_KEY", "")
                 if not api_key:
@@ -183,9 +196,10 @@ def main() -> int:
                     print(f"shippo error for {zone}/{box_id}: {exc}", file=sys.stderr)
                     return 1
             if quote is None:
-                # Shippo answered (HTTP 200) but returned no UPS Ground rate
-                # for this probe. Record it and keep going so we can tell a
-                # total absence (account not finished) from a partial gap.
+                # Shippo answered (HTTP 200) but returned no allowlisted ground
+                # rate (neither UPS Ground nor USPS Ground Advantage) for this
+                # probe. Record it and keep going so we can tell a total absence
+                # (account not finished) from a partial gap.
                 missing.append(f"{zone}/{box_id}")
                 continue
             proposed[zone][box_id] = target_rate(quote, box_id)
@@ -194,30 +208,30 @@ def main() -> int:
         total = len(REFERENCE_ZIPS) * len(PARCELS)
         if len(missing) == total:
             if provisional or not current:
-                # Zero UPS Ground rates across every probe AND the current
-                # table is the placeholder/empty one (no real published
-                # rates to protect): the SHIPPO_API_KEY secret exists but no
-                # UPS carrier is connected in the Shippo account yet — the
-                # same not-ready state the workflow's pre-key guard covers.
-                # Skip cleanly (exit 0) instead of paging ops every morning;
-                # the job self-heals the day UPS goes live (GOL-1296).
+                # Zero ground rates across every probe AND the current table is
+                # the placeholder/empty one (no real published rates to
+                # protect): the SHIPPO_API_KEY secret exists but neither ground
+                # carrier is connected in the Shippo account yet — the same
+                # not-ready state the workflow's pre-key guard covers. Skip
+                # cleanly (exit 0) instead of paging ops every morning; the job
+                # self-heals the day a ground carrier goes live (GOL-1296).
                 print(
-                    "::notice::Shippo returned no UPS Ground rate for any probe — "
-                    "UPS carrier not connected in the Shippo account yet; "
+                    "::notice::Shippo returned no allowlisted ground rate for any probe — "
+                    "no ground carrier connected in the Shippo account yet; "
                     "rate-check skipped (see GOL-1296)"
                 )
-                print("no UPS Ground rates available yet — skipped")
+                print("no ground rates available yet — skipped")
                 return 0
-            # Real published rates exist (non-placeholder table) yet Shippo
-            # now returns zero UPS Ground rates for EVERY probe: the carrier
-            # connection that produced those rates has lapsed (auth expiry,
-            # billing, Shippo-side disconnect). Fail loudly — a clean skip
-            # here would let shipping_rates.json fossilize while a later UPS
-            # rate hike silently under-bills every order (GOL-1312).
+            # Real published rates exist (non-placeholder table) yet Shippo now
+            # returns zero ground rates for EVERY probe: the carrier
+            # connection(s) that produced those rates have lapsed (auth expiry,
+            # billing, Shippo-side disconnect). Fail loudly — a clean skip here
+            # would let shipping_rates.json fossilize while a later rate hike
+            # silently under-bills every order (GOL-1312).
             print(
-                f"no UPS Ground rate for any of {total} probe(s) but "
+                f"no ground rate for any of {total} probe(s) but "
                 "shipping_rates.json holds real published rates — "
-                "UPS connection lost? (see GOL-1312)",
+                "ground carrier connection lost? (see GOL-1312)",
                 file=sys.stderr,
             )
             return 1
@@ -225,7 +239,7 @@ def main() -> int:
         # — e.g. an oversize box or a bad reference address — and must fail
         # loudly so it gets investigated, never silently drop a rate.
         print(
-            f"no UPS Ground rate for {len(missing)} of {total} probe(s): {', '.join(missing)}",
+            f"no ground rate for {len(missing)} of {total} probe(s): {', '.join(missing)}",
             file=sys.stderr,
         )
         return 1
@@ -258,8 +272,9 @@ def main() -> int:
 
     new_doc = {
         "_comment": "Maintained by scripts/rate_check (morning rate-checker). "
-        "Per-box rates (Box Engine v2): ceil(Shippo UPS Ground at the box's "
-        "representative billable weight + per-box packaging + 2.00 buffer). "
+        "Per-box rates (Box Engine v2): ceil(Shippo least-cost ground [UPS "
+        "Ground vs USPS Ground Advantage] at the box's representative billable "
+        "weight + per-box packaging + 2.00 buffer). "
         "Design: vault wiki/Software/Grove Shipping.",
         "_schema": 2,
     }
