@@ -5,6 +5,17 @@
   "required_contexts": [
     "Lint Python",
     "Validate Module Manifests",
-    "Validate Tenant Slug Map"
+    "Validate Tenant Slug Map",
+    "Protected paths guard",
+    "Config freeze",
+    "fix touches a test",
+    "CI scripts",
+    "Required-checks audit",
+    "actionlint (workflows)",
+    "pip-audit (CVE scan)",
+    "trufflehog (verified)",
+    "Reject tracked .env files",
+    "Validate XML data files",
+    "Pure-Python unit tests"
   ]
 }
