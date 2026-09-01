@@ -318,10 +318,13 @@ jobs:
           echo "::group::Test summary"
           docker logs odoo 2>&1 | grep -E "(odoo.tests|FAIL|PASS|tests/test_|Module grove_headless)" || true
           echo "::endgroup::"
-          # GOL-1941 DIAGNOSTIC (throwaway): dump FULL odoo logs on exit 0 to see
-          # exactly which tests ran and whether a failing test propagates.
-          echo "::group::FULL odoo logs (GOL-1941 diagnostic)"
-          docker logs odoo 2>&1 | grep -iE "stripe|gol1941|test_|Ran |FAIL|ERROR|failed, |assert|post_install|at_install|Starting Test|odoo.tests" || true
+          # GOL-1941 DIAGNOSTIC (throwaway): dump RAW odoo logs to see exactly
+          # which tests ran and whether a failing test propagates.
+          echo "::group::RAW odoo logs tail (GOL-1941 diagnostic)"
+          docker logs odoo 2>&1 | tail -150
+          echo "::endgroup::"
+          echo "::group::grove_headless test/module lines (GOL-1941 diagnostic)"
+          docker logs odoo 2>&1 | grep -inE "grove_headless|loading module|test.*grove|tests? \(|Ran|tagged|Starting|selected" | tail -80 || true
           echo "::endgroup::"
 
   ci-scripts:
