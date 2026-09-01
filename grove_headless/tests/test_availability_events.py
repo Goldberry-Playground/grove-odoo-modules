@@ -15,6 +15,7 @@ import os
 from unittest import mock
 
 from odoo.addons.grove_headless.models import grove_publish, grove_publish_event
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 
 WEBHOOK_ENV = {
@@ -39,7 +40,7 @@ class _FakePost:
 
 
 @tagged("grove_headless", "publish_event", "post_install", "-at_install")
-class TestAvailabilityEvents(TransactionCase):
+class TestAvailabilityEvents(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.ref("base.main_company")  # → 'goldberry' tenant

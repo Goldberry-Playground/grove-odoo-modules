@@ -10,11 +10,12 @@ post_install: needs the post_init_hook + data files to have run during init.
 
 from odoo.addons.grove_headless.controllers import main as gh_main
 from odoo.addons.grove_headless.hooks import WV_GROUP_NAME
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 
 
 @tagged("post_install", "-at_install")
-class TestWvSalesTax(TransactionCase):
+class TestWvSalesTax(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.ref("base.main_company")
@@ -87,7 +88,7 @@ class TestWvSalesTax(TransactionCase):
 
 
 @tagged("post_install", "-at_install")
-class TestDestinationTax(TransactionCase):
+class TestDestinationTax(GroveTaxFixtureMixin, TransactionCase):
     """GOL-1021 defect 2 — WV sales tax is destination-based: it must apply only
     to WV-bound orders and be stripped for any other ship-to state (e.g. Ohio),
     since Grove's only sales-tax nexus is West Virginia."""

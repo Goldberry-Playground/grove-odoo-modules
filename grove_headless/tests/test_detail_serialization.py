@@ -13,6 +13,7 @@ from odoo.addons.grove_headless.controllers.main import (
     _structure_variant,
     _template_rootstock,
 )
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 
 # 1x1 transparent PNG.
@@ -20,7 +21,7 @@ _PNG_1X1 = b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwA
 
 
 @tagged("post_install", "-at_install")
-class TestDetailSerialization(TransactionCase):
+class TestDetailSerialization(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.cultivar = self.env["product.attribute"].create({"name": "Cultivar", "create_variant": "always"})
