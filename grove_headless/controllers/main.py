@@ -1522,9 +1522,9 @@ def _apply_destination_tax(env, order, shipping):
     for line in order.order_line:
         if line.display_type or not line.product_id:
             continue
-        wv_taxes = line.tax_id.filtered(lambda t: t.name in WV_TAX_NAMES)
+        wv_taxes = line.tax_ids.filtered(lambda t: t.name in WV_TAX_NAMES)
         if wv_taxes:
-            line.tax_id = [(3, tax.id) for tax in wv_taxes]
+            line.tax_ids = [(3, tax.id) for tax in wv_taxes]
             changed = True
     if changed:
         order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])

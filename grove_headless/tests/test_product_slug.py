@@ -7,11 +7,12 @@ The CI install-smoke-test job in .github/workflows/ci.yml runs them on
 every PR.
 """
 
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests.common import HttpCase, TransactionCase, get_db_name, tagged
 
 
 @tagged("grove_headless", "grove_slug", "post_install", "-at_install")
-class TestGroveSlug(TransactionCase):
+class TestGroveSlug(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.Product = self.env["product.template"]
@@ -77,7 +78,7 @@ class TestGroveSlug(TransactionCase):
 
 
 @tagged("grove_headless", "grove_slug", "post_install", "-at_install")
-class TestProductSlugEndpoint(HttpCase):
+class TestProductSlugEndpoint(GroveTaxFixtureMixin, HttpCase):
     def setUp(self):
         super().setUp()
         # Seed a published product belonging to the Goldberry company so that

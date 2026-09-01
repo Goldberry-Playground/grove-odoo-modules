@@ -1,11 +1,12 @@
 """Growing-facts fields (2026-07-13 catalog spec). DB tests — Odoo runner only."""
 
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.exceptions import ValidationError
 from odoo.tests import TransactionCase, tagged
 
 
 @tagged("post_install", "-at_install")
-class TestGrowingFacts(TransactionCase):
+class TestGrowingFacts(GroveTaxFixtureMixin, TransactionCase):
     def _tmpl(self, **vals):
         base = {"name": "Test Pear", "type": "consu"}
         base.update(vals)

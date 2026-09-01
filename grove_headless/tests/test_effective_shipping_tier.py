@@ -1,10 +1,11 @@
 """Variant-level shipping tier (fixes bareroot variants quoting potted rates)."""
 
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 
 
 @tagged("post_install", "-at_install")
-class TestEffectiveShippingTier(TransactionCase):
+class TestEffectiveShippingTier(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.fmt = self.env["product.attribute"].create({"name": "Format", "create_variant": "always"})

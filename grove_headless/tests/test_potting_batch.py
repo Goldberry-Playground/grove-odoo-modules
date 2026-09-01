@@ -5,12 +5,13 @@ seeding stock.quants — the math we care about (consumption + production +
 scrap) is identical between consumable and storable products.
 """
 
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.exceptions import ValidationError
 from odoo.tests import TransactionCase, tagged
 
 
 @tagged("post_install", "-at_install")
-class TestPottingBatch(TransactionCase):
+class TestPottingBatch(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         Product = self.env["product.product"]

@@ -10,11 +10,12 @@ Post-install only: mrp.bom isn't available during at_install because
 the dependency chain hasn't finished resolving yet.
 """
 
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 
 
 @tagged("post_install", "-at_install")
-class TestKitBoms(TransactionCase):
+class TestKitBoms(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         # Two cheap components and one parent kit. We don't use the

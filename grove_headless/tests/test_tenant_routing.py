@@ -82,18 +82,24 @@ class TestTenantRouting(TransactionCase):
                     f"raw id '{ident}' must not resolve",
                 )
 
-    def test_returns_only_active_records(self):
-        """If a website is archived (active=False), _resolve_tenant_slug
-        should still find it via the name match — Odoo searches don't
-        filter on `active` by default. This test documents that
-        deliberate behavior so a future change to add `('active', '=', True)`
-        is intentional, not a refactor accident.
+    def test_resolution_is_not_filtered_by_a_status_field(self):
+        """`_resolve_tenant_slug` matches purely on name — it does not add a
+        status/active filter that could silently hide a seeded tenant.
+
+        The Odoo 19 ``website`` model has no ``active`` field (websites are not
+        archivable), so this documents that resolution stays a plain name match;
+        a future change that starts filtering on some status flag would then be
+        an intentional edit here, not a refactor accident.
         """
         Website = self.env["website"]
         website = Website._resolve_tenant_slug("goldberry")
         self.assertTrue(website)
-        # The seeded record should be active by default.
-        self.assertTrue(website.active)
+        self.assertNotIn(
+            "active",
+            website._fields,
+            "website gained an `active` field — revisit whether "
+            "_resolve_tenant_slug should now filter archived tenants",
+        )
 
 
 @tagged("grove_headless", "tenant_routing", "-at_install", "post_install")
