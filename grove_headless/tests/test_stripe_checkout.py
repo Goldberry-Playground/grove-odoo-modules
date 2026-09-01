@@ -65,6 +65,12 @@ class TestStripeCheckout(TransactionCase):
         digest = hmac.new(secret.encode("utf-8"), signed, hashlib.sha256).hexdigest()
         return f"t={ts},v1={digest}"
 
+    def test_gol1941_intentional_failure_probe(self):
+        """TEMP PROOF (GOL-1941): deliberate failure to prove this TransactionCase
+        suite is actually executed by install-smoke-test once registered in
+        tests/__init__.py (green != ran). This PR is throwaway — never merged."""
+        self.assertTrue(False, "GOL-1941 probe: test_stripe_checkout DID run in install-smoke-test")
+
     # ── multi-tenant webhook signature verification (GOL-1020) ────────────
 
     def test_webhook_secrets_collects_all_tenants_deduped(self):
