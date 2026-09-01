@@ -20,8 +20,11 @@ _logger = logging.getLogger(__name__)
 # How many days back the "orders placed this week" window covers.
 _ROLLUP_PERIOD_DAYS = 7
 
-# Delivery statuses that indicate an order has shipped / been collected.
-_TERMINAL_DELIVERY = {"label_purchased", "shipped", "transit", "delivered", "collected"}
+# The storefront shipping-charge line's product code (mirrors
+# controllers/main.SHIPPING_PRODUCT_CODE). A confirmed order with no such line
+# was farm pickup — pickup is the one legitimate $0-shipping fulfillment
+# (GOL-1057), so absence of the line is the reliable pickup signal.
+_SHIPPING_PRODUCT_CODE = "GROVE-SHIP"
 
 
 class SaleOrderRollup(models.AbstractModel):
@@ -92,15 +95,29 @@ class SaleOrderRollup(models.AbstractModel):
         result = []
         for o in orders:
             partner_ship = o.partner_shipping_id
-            is_pickup = (o.grove_delivery_status or "").startswith("pickup") or (
-                # Pickup orders have no tracking numbers and no delivery charge;
-                # detect by absence of shipping charge line + no tracking field.
-                not o.grove_tracking_numbers
-                and any(
-                    (line.product_id.type == "service" and "pickup" in (line.name or "").lower())
-                    for line in o.order_line
-                )
-            )
+            # Farm pickup is the absence of a storefront shipping-charge line
+            # (pickup is the one legitimate $0-shipping fulfillment, GOL-1057),
+            # mirroring controllers/main.is_ship_order. Also count physical tree
+            # units for the units-shipped metric.
+            is_pickup = True
+            units = 0
+            for line in o.order_line:
+                product = line.product_id
+                if line.display_type or not product:
+                    continue
+                if product.default_code == _SHIPPING_PRODUCT_CODE:
+                    is_pickup = False
+                    continue
+                if product.product_tmpl_id.type == "service":
+                    continue
+                units += int(line.product_uom_qty)
+            # The ship window keys off the destination zone: the FARM's zone for
+            # pickup (we lift on our schedule, not the buyer's, GOL-1669), else
+            # the customer's shipping ZIP.
+            if is_pickup:
+                window_zip = self._farm_pickup_zip(company)
+            else:
+                window_zip = partner_ship.zip if partner_ship else ""
             result.append(
                 {
                     "id": o.id,
@@ -111,11 +128,27 @@ class SaleOrderRollup(models.AbstractModel):
                     "grove_delivery_status": o.grove_delivery_status,
                     "grove_preorder_variant_ids": o.grove_preorder_variant_ids,
                     "partner_name": o.partner_id.name or "",
-                    "partner_shipping_zip": partner_ship.zip or "" if partner_ship else "",
+                    "partner_shipping_zip": (window_zip or "").strip(),
                     "is_pickup": is_pickup,
+                    "units": units,
                 }
             )
         return result
+
+    def _farm_pickup_zip(self, company):
+        """Farm origin ZIP (warehouse -> company partner -> config param), the
+        same precedence controllers/main._farm_pickup_zip uses."""
+        warehouse = self.env["stock.warehouse"].sudo()
+        wh = warehouse.search([("company_id", "=", company.id)], limit=1) if company else warehouse.browse()
+        for candidate in (
+            wh.partner_id.zip if wh and wh.partner_id else None,
+            company.partner_id.zip if company and company.partner_id else None,
+            self.env["ir.config_parameter"].sudo().get_param("grove_headless.farm_pickup_zip"),
+        ):
+            candidate = (candidate or "").strip()
+            if candidate:
+                return candidate
+        return None
 
     def _mail_digest(self, company, subject, html_body):
         """Send the HTML digest to the company's merchant email (best-effort)."""

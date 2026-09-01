@@ -29,6 +29,7 @@ def _order(
     partner_name="Alice",
     zip_code="26651",
     is_pickup=False,
+    units=1,
 ):
     return {
         "name": name,
@@ -40,6 +41,7 @@ def _order(
         "partner_name": partner_name,
         "partner_shipping_zip": zip_code,
         "is_pickup": is_pickup,
+        "units": units,
     }
 
 
@@ -102,6 +104,23 @@ class TestShippedFiltering(unittest.TestCase):
         orders = [_order(delivery_status=None)]
         d = od.build_digest(orders, today=TODAY)
         self.assertEqual(d["units_shipped"], 0)
+
+    def test_units_shipped_sums_line_units_not_orders(self):
+        # Two shipped orders carrying 3 and 2 tree units -> 5 units, not 2 orders.
+        orders = [
+            _order(name="S1", delivery_status="transit", units=3),
+            _order(name="S2", delivery_status="delivered", units=2),
+            _order(name="S3", delivery_status=None, units=9),  # not shipped -> excluded
+        ]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertEqual(d["units_shipped"], 5)
+
+    def test_units_shipped_falls_back_to_one_when_units_absent(self):
+        # A record without a units field counts as 1 (order-level fallback).
+        order = _order(delivery_status="transit")
+        del order["units"]
+        d = od.build_digest([order], today=TODAY)
+        self.assertEqual(d["units_shipped"], 1)
 
 
 class TestPreorderSection(unittest.TestCase):

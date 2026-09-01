@@ -13,6 +13,8 @@ from datetime import date, timedelta
 # Thresholds for the preorder reminder section.
 _WAVE_SOON_DAYS = 30  # highlight a wave as "ships soon" if start <= today + 30d
 
+_MONTHS = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
 
 def _fmt_currency(cents_or_float) -> str:
     """Dollar string with cents, e.g. '$1,234.50'.  Accepts a float or int."""
@@ -21,12 +23,17 @@ def _fmt_currency(cents_or_float) -> str:
 
 
 def _fmt_date(d) -> str:
-    """Format a date or ISO string as 'Mon D, YYYY'."""
+    """Format a date or ISO string as 'Mon D, YYYY'.
+
+    Locale-free and no ``%-d`` (that strftime flag is a glibc-only extension the
+    rest of grove_headless avoids, see shipping_calendar._fmt) so the digest
+    formats identically on any platform / CI runner.
+    """
     if isinstance(d, str):
         d = date.fromisoformat(d[:10])
     if not isinstance(d, date):
         return str(d)
-    return d.strftime("%b %-d, %Y")
+    return f"{_MONTHS[d.month]} {d.day}, {d.year}"
 
 
 def build_digest(
@@ -47,8 +54,9 @@ def build_digest(
       - grove_delivery_status: str | None
       - grove_preorder_variant_ids: str | None  (comma-sep variant ids when deposit taken)
       - partner_name: str
-      - partner_shipping_zip: str | None
+      - partner_shipping_zip: str | None  (window zip: customer's, or the farm's for pickup)
       - is_pickup: bool  (True when fulfillment == pickup)
+      - units: int | None  (physical tree units on the order; used for units-shipped)
 
     Returns a structured digest dict ready for rendering.  Pure -- no I/O.
     """
@@ -64,9 +72,13 @@ def build_digest(
     revenue_total = sum(float(o.get("amount_total") or 0) for o in period_orders)
 
     # --- Units shipped in period (label_purchased / transit / delivered) ---
+    # Counts tree UNITS (order line qty), not orders: an order carries a "units"
+    # field summed by the cron from its physical lines. Falls back to 1 per
+    # shipped order when a record omits units, so a caller that only passes
+    # order-level data still gets a sane order-count rather than zero.
     shipped_statuses = {"label_purchased", "shipped", "transit", "delivered"}
     orders_shipped = [o for o in period_orders if (o.get("grove_delivery_status") or "").lower() in shipped_statuses]
-    units_shipped = len(orders_shipped)
+    units_shipped = sum(int(o["units"]) if o.get("units") is not None else 1 for o in orders_shipped)
 
     # --- Outstanding preorders ---
     outstanding_preorders = [
