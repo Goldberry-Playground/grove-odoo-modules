@@ -26,7 +26,9 @@ import { pathToFileURL } from "node:url";
 // guard, and auto-approve.yml).
 export const PROTECTED_GLOBS = [
   '.github/workflows/**',
-  'ownership.yml',
+  '**/*payment*.py',
+  '**/*stripe*',
+  '**/*webhook*',
 ];
 
 // glob -> RegExp (supports **, *, and literals; '/' is literal). MUST stay
