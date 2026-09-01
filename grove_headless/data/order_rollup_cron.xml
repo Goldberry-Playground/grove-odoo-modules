@@ -8,9 +8,10 @@
         <field name="code">model._cron_send_weekly_digest()</field>
         <field name="interval_number">1</field>
         <field name="interval_type">weeks</field>
-        <!-- Monday 08:00 UTC — before the team starts their week -->
+        <!-- Monday 08:00 UTC, before the team starts their week -->
         <field name="nextcall">2026-09-07 08:00:00</field>
-        <field name="doall" eval="False"/>
+        <!-- NB: ir.cron.doall was removed in Odoo 17+; setting it fails module
+             load with "Invalid field 'doall'" on Odoo 19. -->
         <field name="active" eval="True"/>
     </record>
 </odoo>
