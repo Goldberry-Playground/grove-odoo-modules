@@ -134,7 +134,7 @@ class TestDestinationTax(GroveTaxFixtureMixin, TransactionCase):
     def test_ohio_order_strips_wv_tax(self):
         order = self._order_with_wv_line()
         gh_main._apply_destination_tax(self.env, order, {"state": "OH"})
-        self.assertFalse(order.order_line.tax_id, "WV tax must be removed for an OH destination")
+        self.assertFalse(order.order_line.tax_ids, "WV tax must be removed for an OH destination")
         self.assertAlmostEqual(order.amount_tax, 0.0, places=2)
         self.assertAlmostEqual(order.amount_total, 100.0, places=2)
 
