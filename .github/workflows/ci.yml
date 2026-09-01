@@ -318,3 +318,35 @@ jobs:
           echo "::group::Test summary"
           docker logs odoo 2>&1 | grep -E "(odoo.tests|FAIL|PASS|tests/test_|Module grove_headless)" || true
           echo "::endgroup::"
+
+  ci-scripts:
+    # GOL-1919: run scripts/ci/*.test.mjs as a live gate. `scripts/` is not a
+    # Node workspace, so nothing else runs these. The load-bearing test is
+    # protected-paths-carveout.test.mjs: it asserts the auto-approve carve-out
+    # (scripts/ci/protected-paths-carveout.mjs) matches the protected-paths
+    # guard — if they drift, auto-approve could stamp a PR the guard would
+    # block. The generator lives in AgenticOS (single source); this repo only
+    # carries the generated carve-out + its test. node builtins only, no install.
+    name: CI scripts
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+      - name: Run scripts/ci/*.test.mjs
+        run: |
+          shopt -s nullglob
+          tests=(scripts/ci/*.test.mjs)
+          if [ ${#tests[@]} -eq 0 ]; then
+            echo "::error::no scripts/ci/*.test.mjs found — expected the protected-paths carve-out test"
+            exit 1
+          fi
+          fail=0
+          for f in "${tests[@]}"; do
+            echo "::group::node $f"
+            node "$f" || fail=1
+            echo "::endgroup::"
+          done
+          exit $fail
