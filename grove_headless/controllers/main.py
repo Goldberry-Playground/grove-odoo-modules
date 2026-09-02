@@ -354,8 +354,20 @@ def _template_rootstock(product):
 
 
 def _structure_variant(variant, template_rootstock=""):
-    """Structured variant entry: axes parsed into fields, not display-name strings."""
-    axis = {v.attribute_id.name: v.name for v in variant.product_template_variant_value_ids}
+    """Structured variant entry: axes parsed into fields, not display-name strings.
+
+    Reads ``product_template_attribute_value_ids`` (the full per-variant
+    combination, single-value axes included) rather than
+    ``product_template_variant_value_ids`` (only the axes with 2+ values, which
+    Odoo treats as variant-*differentiating*). A single-cultivar plant — the
+    common shape, where Format is the only multi-value axis — carries its
+    Cultivar as a single-value ``create_variant='always'`` line; that value is
+    absent from ``product_template_variant_value_ids``, so reading it there
+    surfaced a blank ``cultivar`` for every such product (GOL-2014). The
+    attribute-value field still excludes ``no_variant`` axes (e.g. a metadata
+    Rootstock line), so the ``_template_rootstock`` fallback below is unaffected.
+    """
+    axis = {v.attribute_id.name: v.name for v in variant.product_template_attribute_value_ids}
     return {
         "id": variant.id,
         "display_name": variant.display_name,

@@ -33,6 +33,11 @@ class TestPosConfig(AccountTestInvoicingCommon):
     def setUpClass(cls):
         super().setUpClass()
         cls.company = cls.company_data["company"]
+        # AccountTestInvoicingCommon runs as a pure-accountant user. Odoo 19
+        # enforces the pos.payment.method ACL both on the install hook's search
+        # and on the reads in the test bodies (GOL-2014), so grant POS manager —
+        # the access a real in-person cashier config would run under.
+        cls.env.user.group_ids |= cls.env.ref("point_of_sale.group_pos_manager")
         # Ensure the WV 7% group tax exists in this company (products in the
         # tax test bind to it explicitly), then stand up the POS channels.
         _ensure_company_wv_taxes(cls.env, cls.company)

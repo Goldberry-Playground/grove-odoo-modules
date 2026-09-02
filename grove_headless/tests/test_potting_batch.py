@@ -165,7 +165,8 @@ class TestPottingBatch(GroveTaxFixtureMixin, TransactionCase):
                 "login": "grove_test_user_a",
                 "company_id": company_a.id,
                 "company_ids": [(6, 0, [company_a.id])],
-                "groups_id": [(4, self.env.ref("stock.group_stock_user").id)],
+                # Odoo 19 renamed res.users.groups_id -> group_ids (GOL-2014).
+                "group_ids": [(4, self.env.ref("stock.group_stock_user").id)],
             }
         )
 
