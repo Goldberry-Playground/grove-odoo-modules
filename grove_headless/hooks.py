@@ -199,27 +199,28 @@ def setup_wv_sales_tax(env):
 
 POS_COMPANY_NAME = "Goldberry Grove Farm"
 
-# (journal code, journal name, journal type) for the payment journals the POS
-# settles to. Mirrors scripts/seed_payment_journals.py so the module is
-# self-sufficient in a fresh DB where that seed script has not been run.
-POS_JOURNAL_SPECS = [
-    ("CSH1", "Cash", "cash"),
+# Bank payment journals shared by every in-person channel — Card/Check settle to
+# one shared bank journal each. Cash is deliberately NOT here: Odoo 19 forbids
+# two POS configs sharing a cash payment method AND forbids two cash methods
+# sharing a cash journal (pos.config._check_payment_method_ids_journal), so each
+# channel owns its own cash journal + method (see POS_CONFIG_SPECS).
+POS_BANK_JOURNAL_SPECS = [
     ("CARD", "Card", "bank"),
     ("CHCK", "Check", "bank"),
 ]
 
-# (payment method label, journal code) — cash-vs-bank is derived by Odoo from
-# the linked journal's type, so we only bind the journal.
-POS_PAYMENT_METHOD_SPECS = [
-    ("Cash", "CSH1"),
+# (payment method label, bank journal code) for the shared non-cash methods.
+POS_BANK_METHOD_SPECS = [
     ("Card", "CARD"),
     ("Check", "CHCK"),
 ]
 
-# (pos.config name, crm.team name) for the two in-person channels.
+# One in-person channel per row. Each carries a DEDICATED cash journal + cash
+# method (the Odoo 19 constraint above), plus the shared bank methods.
+#   (pos.config name, crm.team name, cash journal code, cash journal/method label)
 POS_CONFIG_SPECS = [
-    ("Farmer's Market", "Farmer's Market"),
-    ("Nursery Counter", "Direct to Nursery"),
+    ("Farmer's Market", "Farmer's Market", "CSH1", "Cash (Farmer's Market)"),
+    ("Nursery Counter", "Direct to Nursery", "CSH2", "Cash (Nursery Counter)"),
 ]
 
 
@@ -299,17 +300,27 @@ def _ensure_pos_config(env, company, name, payment_methods, team):
 
 
 def _setup_company_pos(env, company):
-    """Stand up both in-person POS channels for a single company. Idempotent."""
-    journals = {code: _ensure_journal(env, company, code, name, jtype) for code, name, jtype in POS_JOURNAL_SPECS}
+    """Stand up both in-person POS channels for a single company. Idempotent.
 
-    methods = env["pos.payment.method"]
-    for label, code in POS_PAYMENT_METHOD_SPECS:
-        methods |= _ensure_payment_method(env, company, label, journals[code])
+    Bank methods (Card/Check) are shared across both channels; cash is per-channel
+    — a dedicated cash journal + cash method each — because Odoo 19 rejects a cash
+    payment method (or its journal) being reused by a second POS config.
+    """
+    bank_journals = {
+        code: _ensure_journal(env, company, code, name, jtype) for code, name, jtype in POS_BANK_JOURNAL_SPECS
+    }
+    bank_methods = env["pos.payment.method"]
+    for label, code in POS_BANK_METHOD_SPECS:
+        bank_methods |= _ensure_payment_method(env, company, label, bank_journals[code])
 
     configs = env["pos.config"]
-    for config_name, team_name in POS_CONFIG_SPECS:
+    methods = bank_methods
+    for config_name, team_name, cash_code, cash_label in POS_CONFIG_SPECS:
         team = _ensure_sales_team(env, company, team_name)
-        configs |= _ensure_pos_config(env, company, config_name, methods, team)
+        cash_journal = _ensure_journal(env, company, cash_code, cash_label, "cash")
+        cash_method = _ensure_payment_method(env, company, cash_label, cash_journal)
+        methods |= cash_method
+        configs |= _ensure_pos_config(env, company, config_name, cash_method | bank_methods, team)
 
     _logger.info(
         "grove_headless: POS ready for company %s — %s config(s), %s payment method(s)",

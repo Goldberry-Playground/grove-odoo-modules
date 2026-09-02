@@ -82,7 +82,12 @@ class TestAvailabilityEvents(GroveTaxFixtureMixin, TransactionCase):
         """Bring a product to `qty` on hand and clear the resulting transition so
         the test starts from a known, already-flushed baseline (no webhook env →
         nothing is delivered, the scratch is just drained)."""
-        self._add_stock(product, qty)
+        # A freshly-created product is already at 0 on hand, and Odoo 19's
+        # stock.quant._update_available_quantity rejects a 0 delta with
+        # "Quantity or Reserved Quantity should be set" (GOL-2014). Skip the
+        # no-op move so a 0 baseline still just drains the scratch buffer.
+        if qty:
+            self._add_stock(product, qty)
         self._flush()
         self._reset_buffer()
 

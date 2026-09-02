@@ -15,6 +15,7 @@ from unittest import mock
 
 from odoo.addons.grove_headless.controllers import main as grove_main
 from odoo.addons.grove_headless.models import stripe_gateway
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 from odoo.tests.common import HttpCase, get_db_name
 from odoo.tools import mute_logger
@@ -22,7 +23,7 @@ from psycopg2 import IntegrityError
 
 
 @tagged("post_install", "-at_install")
-class TestStripeCheckout(TransactionCase):
+class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.ref("base.main_company")
@@ -38,7 +39,12 @@ class TestStripeCheckout(TransactionCase):
     # ── helpers ──────────────────────────────────────────────────────────
 
     def _set_stock(self, product, qty):
-        self.env["stock.quant"]._update_available_quantity(product, self.location, qty)
+        # A freshly-created product is already at 0 on hand; Odoo 19's
+        # stock.quant._update_available_quantity rejects a 0 delta with
+        # "Quantity or Reserved Quantity should be set" (GOL-2014), so a
+        # _set_stock(product, 0) baseline is a no-op that must be skipped.
+        if qty:
+            self.env["stock.quant"]._update_available_quantity(product, self.location, qty)
         # free_qty as well as qty_available: the checkout line-item builder reads
         # free_qty (GOL-1036 defect 4), so a stale cache would misclassify stock.
         product.invalidate_recordset(["qty_available", "free_qty"])
@@ -927,7 +933,7 @@ class TestStripeCheckout(TransactionCase):
 
 
 @tagged("post_install", "-at_install")
-class TestStripeWebhookRedelivery(HttpCase):
+class TestStripeWebhookRedelivery(GroveTaxFixtureMixin, HttpCase):
     """End-to-end idempotency of the new-order ops chain through the real
     `/grove/api/v1/stripe/webhook` route (GOL-1941).
 
