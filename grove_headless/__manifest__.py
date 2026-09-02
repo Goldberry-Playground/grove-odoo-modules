@@ -33,6 +33,12 @@
         # post_init hook to stand up the Farmer's Market + Nursery Counter
         # in-person sales channels (GOL-13). See hooks.setup_pos_configs.
         "point_of_sale",
+        # pos_sale provides pos.config.crm_team_id — the field the POS hook
+        # writes to link each in-person channel to its sales team (GOL-13).
+        # Without this dependency that field is absent on a minimal install and
+        # _setup_company_pos aborts (silently skipping ALL POS wiring), which is
+        # exactly what a chart-less CI DB exposed (GOL-2014).
+        "pos_sale",
     ],
     "data": [
         "security/ir.model.access.csv",

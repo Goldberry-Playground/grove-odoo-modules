@@ -208,7 +208,10 @@ def _verify_stripe_webhook(raw, sig, secrets):
             verified = True
         except stripe_gateway.StripeError as exc:
             last_error = exc
-    return verified, last_error
+    # Honour the documented contract: (True, None) on success. Every secret is
+    # still tried (constant-time), but a match must not surface the mismatch
+    # error from a later, non-owning tenant's secret (GOL-2014).
+    return verified, (None if verified else last_error)
 
 
 # Each tenant (nursery/ggg/goldberry) is a separate LLC with its OWN Stripe

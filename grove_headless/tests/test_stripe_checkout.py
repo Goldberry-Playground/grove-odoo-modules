@@ -39,7 +39,12 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
     # ── helpers ──────────────────────────────────────────────────────────
 
     def _set_stock(self, product, qty):
-        self.env["stock.quant"]._update_available_quantity(product, self.location, qty)
+        # A freshly-created product is already at 0 on hand; Odoo 19's
+        # stock.quant._update_available_quantity rejects a 0 delta with
+        # "Quantity or Reserved Quantity should be set" (GOL-2014), so a
+        # _set_stock(product, 0) baseline is a no-op that must be skipped.
+        if qty:
+            self.env["stock.quant"]._update_available_quantity(product, self.location, qty)
         # free_qty as well as qty_available: the checkout line-item builder reads
         # free_qty (GOL-1036 defect 4), so a stale cache would misclassify stock.
         product.invalidate_recordset(["qty_available", "free_qty"])
