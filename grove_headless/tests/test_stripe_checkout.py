@@ -15,6 +15,7 @@ from unittest import mock
 
 from odoo.addons.grove_headless.controllers import main as grove_main
 from odoo.addons.grove_headless.models import stripe_gateway
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 from odoo.tests.common import HttpCase, get_db_name
 from odoo.tools import mute_logger
@@ -22,7 +23,7 @@ from psycopg2 import IntegrityError
 
 
 @tagged("post_install", "-at_install")
-class TestStripeCheckout(TransactionCase):
+class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.ref("base.main_company")
@@ -927,7 +928,7 @@ class TestStripeCheckout(TransactionCase):
 
 
 @tagged("post_install", "-at_install")
-class TestStripeWebhookRedelivery(HttpCase):
+class TestStripeWebhookRedelivery(GroveTaxFixtureMixin, HttpCase):
     """End-to-end idempotency of the new-order ops chain through the real
     `/grove/api/v1/stripe/webhook` route (GOL-1941).
 

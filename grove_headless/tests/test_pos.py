@@ -33,6 +33,12 @@ class TestPosConfig(AccountTestInvoicingCommon):
     def setUpClass(cls):
         super().setUpClass()
         cls.company = cls.company_data["company"]
+        # Odoo 19 tightened the POS ACLs: creating pos.payment.method / pos.config
+        # requires the POS manager group, which AccountTestInvoicingCommon's acting
+        # user does not carry (get_default_groups grants account/stock/system only).
+        # Grant it so the fixture can stand up the channels the way the install hook
+        # does at boot (as OdooBot). group_ids is the Odoo-19 name for groups_id.
+        cls.env.user.group_ids |= cls.env.ref("point_of_sale.group_pos_manager")
         # Ensure the WV 7% group tax exists in this company (products in the
         # tax test bind to it explicitly), then stand up the POS channels.
         _ensure_company_wv_taxes(cls.env, cls.company)

@@ -355,7 +355,14 @@ def _template_rootstock(product):
 
 def _structure_variant(variant, template_rootstock=""):
     """Structured variant entry: axes parsed into fields, not display-name strings."""
-    axis = {v.attribute_id.name: v.name for v in variant.product_template_variant_value_ids}
+    # Use product_template_attribute_value_ids (every attribute value in the
+    # variant's combination) rather than product_template_variant_value_ids,
+    # which is domain-filtered to attribute lines with value_count > 1 and so
+    # DROPS single-value axes — a single-cultivar plant (one "Magness" value) or
+    # a single-value grafted Rootstock axis would serialize with an empty
+    # cultivar/rootstock. no_variant attributes stay excluded from the
+    # combination, so the _template_rootstock fallback below is unaffected.
+    axis = {v.attribute_id.name: v.name for v in variant.product_template_attribute_value_ids}
     return {
         "id": variant.id,
         "display_name": variant.display_name,
