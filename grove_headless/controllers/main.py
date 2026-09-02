@@ -206,8 +206,15 @@ def _verify_stripe_webhook(raw, sig, secrets):
         try:
             stripe_gateway.verify_webhook_signature(raw, sig, secret)
             verified = True
+            # Contract is (True, None) on success. Once any secret validates,
+            # drop any mismatch recorded from an earlier/later tenant secret so
+            # a match that isn't last in the list still returns a clean error.
+            last_error = None
         except stripe_gateway.StripeError as exc:
-            last_error = exc
+            # Only surface a mismatch while nothing has validated yet — a later
+            # non-matching secret must not overwrite a successful verification.
+            if not verified:
+                last_error = exc
     return verified, last_error
 
 
