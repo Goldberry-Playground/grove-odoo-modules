@@ -6,7 +6,9 @@ channels correctly:
   * "Farmer's Market"  → crm.team "Farmer's Market"
   * "Nursery Counter"  → crm.team "Direct to Nursery"
 
-each wired to the CSH1 (cash) / CARD / CHCK (bank) payment journals, and that a
+each wired to a dedicated per-channel cash journal (CSH1 / CSH2) plus the shared
+CARD / CHCK bank journals — Odoo 19 forbids two POS configs sharing a cash
+method — and that a
 POS sale of a WV-taxed product is charged exactly 7% (the same tax POS applies
 server-side via account.tax). Full POS-session opening + browser ringing is
 CEO-arranged QA (no QA hire yet); this covers the config + tax wiring that the
@@ -53,14 +55,14 @@ class TestPosConfig(AccountTestInvoicingCommon):
 
     def test_both_channels_created(self):
         """One pos.config exists per in-person channel, in the farm company."""
-        for config_name, _team in POS_CONFIG_SPECS:
+        for config_name, *_ in POS_CONFIG_SPECS:
             config = self._config(config_name)
             self.assertTrue(config, f"pos.config {config_name!r} should exist")
             self.assertEqual(config.company_id, self.company)
 
     def test_channels_map_to_sales_teams(self):
         """Each channel points at its seeded sales team."""
-        for config_name, team_name in POS_CONFIG_SPECS:
+        for config_name, team_name, *_ in POS_CONFIG_SPECS:
             config = self._config(config_name)
             self.assertEqual(
                 config.crm_team_id.name,
@@ -69,23 +71,33 @@ class TestPosConfig(AccountTestInvoicingCommon):
             )
 
     def test_payment_methods_wired_to_journals(self):
-        """Both channels expose Cash/Card/Check, bound to CSH1/CARD/CHCK."""
-        expected = {"CSH1": "cash", "CARD": "bank", "CHCK": "bank"}
-        for config_name, _team in POS_CONFIG_SPECS:
+        """Each channel exposes its OWN cash method plus the shared Card/Check.
+
+        Odoo 19 forbids two POS configs sharing a cash method (and two cash
+        methods sharing a cash journal), so each channel settles to its dedicated
+        cash journal (CSH1 / CSH2) alongside the shared CARD / CHCK bank journals.
+        """
+        for config_name, _team, cash_code, cash_label in POS_CONFIG_SPECS:
             config = self._config(config_name)
             journals = config.payment_method_ids.mapped("journal_id")
             codes = {j.code: j.type for j in journals}
             self.assertEqual(
                 codes,
-                expected,
-                f"{config_name!r} payment methods should settle to CSH1/CARD/CHCK",
+                {cash_code: "cash", "CARD": "bank", "CHCK": "bank"},
+                f"{config_name!r} payment methods should settle to {cash_code}/CARD/CHCK",
             )
-        # The cash method must be recognised as cash (POS opening balance).
-        cash_method = self.env["pos.payment.method"].search(
-            [("name", "=", "Cash"), ("company_id", "=", self.company.id)], limit=1
-        )
-        self.assertTrue(cash_method, "Cash payment method should exist")
-        self.assertEqual(cash_method.journal_id.type, "cash")
+            # This channel's dedicated cash method is recognised as cash and is
+            # used by exactly this one config (the Odoo 19 constraint).
+            cash_method = self.env["pos.payment.method"].search(
+                [("name", "=", cash_label), ("company_id", "=", self.company.id)], limit=1
+            )
+            self.assertTrue(cash_method, f"cash method {cash_label!r} should exist")
+            self.assertEqual(cash_method.journal_id.type, "cash")
+            self.assertEqual(
+                self.env["pos.config"].search_count([("payment_method_ids", "in", cash_method.ids)]),
+                1,
+                f"cash method {cash_label!r} must belong to exactly one POS config",
+            )
 
     def test_pos_sale_charges_7_percent(self):
         """A $100 POS line is taxed exactly $7.00 via the WV group tax.
@@ -117,8 +129,11 @@ class TestPosConfig(AccountTestInvoicingCommon):
     def test_idempotent(self):
         """Re-running the setup does not duplicate configs, methods, or teams."""
         _setup_company_pos(self.env, self.company)
-        for config_name, team_name in POS_CONFIG_SPECS:
+        for config_name, team_name, _code, cash_label in POS_CONFIG_SPECS:
             self.assertEqual(self._count("pos.config", config_name), 1, f"{config_name!r} not duplicated")
             self.assertEqual(self._count("crm.team", team_name), 1, f"team {team_name!r} not duplicated")
-        for label in ("Cash", "Card", "Check"):
+            self.assertEqual(
+                self._count("pos.payment.method", cash_label), 1, f"cash method {cash_label!r} not duplicated"
+            )
+        for label in ("Card", "Check"):
             self.assertEqual(self._count("pos.payment.method", label), 1, f"method {label!r} not duplicated")

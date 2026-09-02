@@ -39,24 +39,23 @@ ODOO_PASSWORD = os.getenv("ODOO_PASSWORD")
 
 POS_COMPANY_NAME = "Goldberry Grove Farm"
 
-# (journal code, journal name, journal type)
-JOURNAL_SPECS = [
-    ("CSH1", "Cash", "cash"),
+# Shared bank journals (Card/Check). Cash is per-config below — Odoo 19 forbids
+# two POS configs sharing a cash method or two cash methods sharing a journal.
+BANK_JOURNAL_SPECS = [
     ("CARD", "Card", "bank"),
     ("CHCK", "Check", "bank"),
 ]
 
-# (payment method label, journal code)
-PAYMENT_METHOD_SPECS = [
-    ("Cash", "CSH1"),
+# (payment method label, bank journal code) — shared non-cash methods.
+BANK_METHOD_SPECS = [
     ("Card", "CARD"),
     ("Check", "CHCK"),
 ]
 
-# (pos.config name, crm.team name)
+# (pos.config name, crm.team name, cash journal code, cash journal/method label)
 CONFIG_SPECS = [
-    ("Farmer's Market", "Farmer's Market"),
-    ("Nursery Counter", "Direct to Nursery"),
+    ("Farmer's Market", "Farmer's Market", "CSH1", "Cash (Farmer's Market)"),
+    ("Nursery Counter", "Direct to Nursery", "CSH2", "Cash (Nursery Counter)"),
 ]
 
 
@@ -147,18 +146,22 @@ def main():
     company_id = lookup_id(models, uid, "res.company", [("name", "=", POS_COMPANY_NAME)], POS_COMPANY_NAME)
     print(f"Target company_id={company_id} ({POS_COMPANY_NAME})\n")
 
-    print("Payment journals:")
-    journals = {code: ensure_journal(models, uid, company_id, code, name, jtype) for code, name, jtype in JOURNAL_SPECS}
+    print("Shared bank journals:")
+    bank_journals = {
+        code: ensure_journal(models, uid, company_id, code, name, jtype) for code, name, jtype in BANK_JOURNAL_SPECS
+    }
 
-    print("\nPOS payment methods:")
-    method_ids = [
-        ensure_payment_method(models, uid, company_id, label, journals[code]) for label, code in PAYMENT_METHOD_SPECS
+    print("\nShared bank payment methods:")
+    bank_method_ids = [
+        ensure_payment_method(models, uid, company_id, label, bank_journals[code]) for label, code in BANK_METHOD_SPECS
     ]
 
-    print("\nPOS configs (channels):")
-    for config_name, team_name in CONFIG_SPECS:
+    print("\nPOS configs (channels), each with a dedicated cash method:")
+    for config_name, team_name, cash_code, cash_label in CONFIG_SPECS:
         team_id = ensure_team(models, uid, company_id, team_name)
-        ensure_config(models, uid, company_id, config_name, method_ids, team_id)
+        cash_journal_id = ensure_journal(models, uid, company_id, cash_code, cash_label, "cash")
+        cash_method_id = ensure_payment_method(models, uid, company_id, cash_label, cash_journal_id)
+        ensure_config(models, uid, company_id, config_name, [cash_method_id, *bank_method_ids], team_id)
 
     print("\nDone.")
 
