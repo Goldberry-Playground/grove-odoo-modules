@@ -8,6 +8,7 @@ inbox + the ops Discord webhook.  Aggregation logic lives in order_digest.py
 
 import logging
 import os
+from datetime import datetime, timedelta
 
 import requests
 from odoo import api, fields, models
@@ -54,9 +55,11 @@ class SaleOrderRollup(models.AbstractModel):
         if not orders:
             _logger.info("grove.order.rollup: no orders found for %s — skipping", company.name)
             return
+        pickings = self._fetch_pickings(company, today)
 
         digest = od.build_digest(
             orders,
+            pickings=pickings,
             today=today,
             period_days=_ROLLUP_PERIOD_DAYS,
             next_wave_fn=_next_wave,
@@ -83,7 +86,7 @@ class SaleOrderRollup(models.AbstractModel):
         Confirmed:       all non-cancelled sale.orders for this company.
         We deliberately include all-time orders for the outstanding-preorder
         and pickup sections (those are unbounded), and let build_digest filter
-        the 7-day window for the placed/revenue/shipped metrics.
+        the 7-day window for the placed/revenue/units-ordered metrics.
         """
         env = self.env["sale.order"].sudo()
         orders = env.search(
@@ -98,7 +101,8 @@ class SaleOrderRollup(models.AbstractModel):
             # Farm pickup is the absence of a storefront shipping-charge line
             # (pickup is the one legitimate $0-shipping fulfillment, GOL-1057),
             # mirroring controllers/main.is_ship_order. Also count physical tree
-            # units for the units-shipped metric.
+            # units for the units-ordered metric (units-shipped is measured
+            # separately from stock.picking in _fetch_pickings).
             is_pickup = True
             units = 0
             for line in o.order_line:
@@ -130,6 +134,47 @@ class SaleOrderRollup(models.AbstractModel):
                     "partner_name": o.partner_id.name or "",
                     "partner_shipping_zip": (window_zip or "").strip(),
                     "is_pickup": is_pickup,
+                    "units": units,
+                }
+            )
+        return result
+
+    def _fetch_pickings(self, company, today) -> list[dict]:
+        """Outgoing stock.picking records completed within the rollup window,
+        mapped to ``{date_done, units}``.
+
+        Units shipped is measured here — at the picking, on ``date_done`` — not
+        from orders placed in the window (GOL-1978 review, Josh's decision), so
+        a preorder booked this week but not yet fulfilled does not inflate the
+        shipped figure. The ``date_done >=`` filter is a coarse prefilter; the
+        pure aggregator (order_digest.build_digest) applies the exact window.
+        """
+        period_start = today - timedelta(days=_ROLLUP_PERIOD_DAYS)
+        start_dt = datetime.combine(period_start, datetime.min.time())
+        pickings = (
+            self.env["stock.picking"]
+            .sudo()
+            .search(
+                [
+                    ("company_id", "=", company.id),
+                    ("picking_type_id.code", "=", "outgoing"),
+                    ("state", "=", "done"),
+                    ("date_done", ">=", start_dt),
+                ]
+            )
+        )
+        result = []
+        for pk in pickings:
+            units = 0
+            for move in pk.move_ids:
+                product = move.product_id
+                # Skip service lines; count only physical tree units actually moved.
+                if not product or product.product_tmpl_id.type == "service":
+                    continue
+                units += int(move.quantity)
+            result.append(
+                {
+                    "date_done": pk.date_done.date() if pk.date_done else None,
                     "units": units,
                 }
             )

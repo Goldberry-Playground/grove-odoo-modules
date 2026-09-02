@@ -8,6 +8,7 @@ shape expected here, and emits the result via mail.mail + Discord.
 No em dashes in customer or merchant copy (house voice rule).
 """
 
+import html
 from datetime import date, timedelta
 
 # Thresholds for the preorder reminder section.
@@ -38,6 +39,7 @@ def _fmt_date(d) -> str:
 
 def build_digest(
     orders: list[dict],
+    pickings: list[dict] | None = None,
     today: date | None = None,
     period_days: int = 7,
     next_wave_fn=None,
@@ -56,7 +58,16 @@ def build_digest(
       - partner_name: str
       - partner_shipping_zip: str | None  (window zip: customer's, or the farm's for pickup)
       - is_pickup: bool  (True when fulfillment == pickup)
-      - units: int | None  (physical tree units on the order; used for units-shipped)
+      - units: int | None  (physical tree units on the order; used for units-ordered)
+
+    ``pickings`` is a separate list of completed-shipment dicts, each carrying:
+      - date_done: date | ISO str  (when the picking was completed)
+      - units: int                 (physical tree units on the picking)
+
+    Units shipped is measured from ``pickings`` (stock.picking date_done),
+    NOT from orders placed in the window (GOL-1978 review, Josh's call): a
+    preorder placed this week ships weeks later, so ordered and shipped
+    legitimately diverge.
 
     Returns a structured digest dict ready for rendering.  Pure -- no I/O.
     """
@@ -71,14 +82,19 @@ def build_digest(
     orders_placed = len(period_orders)
     revenue_total = sum(float(o.get("amount_total") or 0) for o in period_orders)
 
-    # --- Units shipped in period (label_purchased / transit / delivered) ---
-    # Counts tree UNITS (order line qty), not orders: an order carries a "units"
-    # field summed by the cron from its physical lines. Falls back to 1 per
-    # shipped order when a record omits units, so a caller that only passes
-    # order-level data still gets a sane order-count rather than zero.
+    # --- Units ordered vs shipped in period ---
+    # Ordered: physical tree units on orders PLACED in the window.
+    units_ordered = sum(int(o["units"]) for o in period_orders if o.get("units") is not None)
+    # Shipped: physical tree units on stock.picking records COMPLETED (date_done)
+    # in the window. Decoupled from orders placed, so a preorder booked this week
+    # but not yet fulfilled does not inflate the shipped figure.
+    units_shipped = sum(
+        int(p.get("units") or 0) for p in (pickings or []) if period_start <= _coerce_date(p.get("date_done")) <= today
+    )
+
+    # Delivery statuses that mean an order has left the farm; gates the
+    # outstanding-preorder and pickup-awaiting sections below.
     shipped_statuses = {"label_purchased", "shipped", "transit", "delivered"}
-    orders_shipped = [o for o in period_orders if (o.get("grove_delivery_status") or "").lower() in shipped_statuses]
-    units_shipped = sum(int(o["units"]) if o.get("units") is not None else 1 for o in orders_shipped)
 
     # --- Outstanding preorders ---
     outstanding_preorders = [
@@ -105,6 +121,7 @@ def build_digest(
         "period_days": period_days,
         "orders_placed": orders_placed,
         "revenue_total": revenue_total,
+        "units_ordered": units_ordered,
         "units_shipped": units_shipped,
         "outstanding_preorders": preorder_entries,
         "preorder_count": len(preorder_entries),
@@ -113,14 +130,18 @@ def build_digest(
     }
 
 
-def _order_date(o: dict) -> date:
-    d = o.get("date_order") or ""
+def _coerce_date(d) -> date:
+    """Coerce a date | ISO str | None to a ``date``; unparseable -> date.min."""
     if isinstance(d, date):
         return d
     try:
         return date.fromisoformat(str(d)[:10])
-    except ValueError:
+    except (ValueError, TypeError):
         return date.min
+
+
+def _order_date(o: dict) -> date:
+    return _coerce_date(o.get("date_order"))
 
 
 def _build_preorder_entries(orders, today, next_wave_fn, usda_zone_fn) -> list[dict]:
@@ -181,6 +202,7 @@ def render_digest_text(digest: dict) -> str:
         "",
         f"Orders placed:   {digest['orders_placed']}",
         f"Revenue:         {_fmt_currency(digest['revenue_total'])}",
+        f"Units ordered:   {digest['units_ordered']}",
         f"Units shipped:   {digest['units_shipped']}",
     ]
 
@@ -188,7 +210,7 @@ def render_digest_text(digest: dict) -> str:
     if preorders:
         lines += ["", f"Outstanding preorders ({len(preorders)}):"]
         for p in preorders:
-            ship_window = _wave_label(p)
+            ship_window = _wave_label(p)  # plain text: no HTML escaping
             soon = " [ships soon]" if p.get("ships_soon") else ""
             lines.append(
                 f"  {p['order_name']} | {p['partner_name']} | {_fmt_currency(p['amount_total'])} | {ship_window}{soon}"
@@ -217,6 +239,7 @@ def render_digest_html(digest: dict) -> str:
         "<table>",
         f"<tr><td><strong>Orders placed</strong></td><td>{digest['orders_placed']}</td></tr>",
         f"<tr><td><strong>Revenue</strong></td><td>{_fmt_currency(digest['revenue_total'])}</td></tr>",
+        f"<tr><td><strong>Units ordered</strong></td><td>{digest['units_ordered']}</td></tr>",
         f"<tr><td><strong>Units shipped</strong></td><td>{digest['units_shipped']}</td></tr>",
         "</table>",
     ]
@@ -226,10 +249,13 @@ def render_digest_html(digest: dict) -> str:
         parts.append(f"<h3>Outstanding preorders ({len(preorders)})</h3>")
         parts.append("<ul>")
         for p in preorders:
-            ship_window = _wave_label(p)
+            # Every interpolated checkout-derived field is HTML-escaped
+            # (partner_name, order_name, ship_season) per the GOL-1933/1978
+            # merchant-notification convention in order_alerts.py.
+            ship_window = _wave_label(p, esc=html.escape)
             soon_flag = " <strong>(ships soon)</strong>" if p.get("ships_soon") else ""
             parts.append(
-                f"<li><strong>{p['order_name']}</strong> | {p['partner_name']} | "
+                f"<li><strong>{html.escape(str(p['order_name']))}</strong> | {html.escape(str(p['partner_name']))} | "
                 f"{_fmt_currency(p['amount_total'])} | ship window: {ship_window}{soon_flag}</li>"
             )
         parts.append("</ul>")
@@ -242,7 +268,7 @@ def render_digest_html(digest: dict) -> str:
         parts.append("<ul>")
         for pk in pickups:
             parts.append(
-                f"<li><strong>{pk['order_name']}</strong> | {pk['partner_name']} | "
+                f"<li><strong>{html.escape(str(pk['order_name']))}</strong> | {html.escape(str(pk['partner_name']))} | "
                 f"ordered {_fmt_date(pk['date_order'])}</li>"
             )
         parts.append("</ul>")
@@ -252,10 +278,13 @@ def render_digest_html(digest: dict) -> str:
     return "\n".join(parts)
 
 
-def _wave_label(entry: dict) -> str:
+def _wave_label(entry: dict, esc=None) -> str:
+    """Human ship-window label. ``esc`` (e.g. ``html.escape``) is applied to the
+    untrusted ``ship_season``; dates are machine-formatted and need no escaping."""
+    esc = esc or (lambda s: s)
     start = entry.get("ship_start")
     end = entry.get("ship_end")
-    season = entry.get("ship_season") or ""
+    season = esc(entry.get("ship_season") or "")
     if start and end:
         label = f"{_fmt_date(start)} to {_fmt_date(end)}"
         return f"{season} {label}".strip() if season else label

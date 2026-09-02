@@ -45,11 +45,16 @@ def _order(
     }
 
 
+def _picking(date_done=TODAY, units=1):
+    return {"date_done": date_done, "units": units}
+
+
 class TestBuildDigestEmpty(unittest.TestCase):
     def test_empty_orders(self):
         d = od.build_digest([], today=TODAY)
         self.assertEqual(d["orders_placed"], 0)
         self.assertEqual(d["revenue_total"], 0.0)
+        self.assertEqual(d["units_ordered"], 0)
         self.assertEqual(d["units_shipped"], 0)
         self.assertEqual(d["preorder_count"], 0)
         self.assertEqual(d["pickup_count"], 0)
@@ -81,46 +86,64 @@ class TestBuildDigestPeriodWindow(unittest.TestCase):
         self.assertEqual(d["preorder_count"], 1)  # still outstanding
 
 
-class TestShippedFiltering(unittest.TestCase):
-    def test_transit_counts_as_shipped(self):
-        orders = [
-            _order(name="S00001", delivery_status="transit"),
-            _order(name="S00002", delivery_status=None),
-        ]
-        d = od.build_digest(orders, today=TODAY)
-        self.assertEqual(d["units_shipped"], 1)
+class TestUnitsMetric(unittest.TestCase):
+    """Units shipped is sourced from stock.picking (date_done) within the
+    window; units ordered from orders PLACED in the window. The two legitimately
+    diverge (GOL-1978 review, Josh's decision)."""
 
-    def test_delivered_counts_as_shipped(self):
-        orders = [_order(delivery_status="delivered")]
-        d = od.build_digest(orders, today=TODAY)
-        self.assertEqual(d["units_shipped"], 1)
-
-    def test_label_purchased_counts_as_shipped(self):
-        orders = [_order(delivery_status="label_purchased")]
-        d = od.build_digest(orders, today=TODAY)
-        self.assertEqual(d["units_shipped"], 1)
-
-    def test_no_delivery_status_not_shipped(self):
-        orders = [_order(delivery_status=None)]
-        d = od.build_digest(orders, today=TODAY)
+    def test_no_pickings_zero_shipped(self):
+        d = od.build_digest([_order(units=4)], today=TODAY)
         self.assertEqual(d["units_shipped"], 0)
 
-    def test_units_shipped_sums_line_units_not_orders(self):
-        # Two shipped orders carrying 3 and 2 tree units -> 5 units, not 2 orders.
-        orders = [
-            _order(name="S1", delivery_status="transit", units=3),
-            _order(name="S2", delivery_status="delivered", units=2),
-            _order(name="S3", delivery_status=None, units=9),  # not shipped -> excluded
-        ]
-        d = od.build_digest(orders, today=TODAY)
+    def test_picking_inside_window_counted(self):
+        d = od.build_digest([_order()], pickings=[_picking(date_done=TODAY, units=4)], today=TODAY)
+        self.assertEqual(d["units_shipped"], 4)
+
+    def test_picking_on_period_start_boundary_counted(self):
+        d = od.build_digest([], pickings=[_picking(date_done=PERIOD_START, units=3)], today=TODAY)
+        self.assertEqual(d["units_shipped"], 3)
+
+    def test_picking_outside_window_excluded(self):
+        # Completed before the 7-day window opened -> not counted.
+        old = _picking(date_done=date(2026, 1, 1), units=9)
+        d = od.build_digest([], pickings=[old], today=TODAY)
+        self.assertEqual(d["units_shipped"], 0)
+
+    def test_picking_future_date_excluded(self):
+        # Guard the upper bound too: a date_done after `today` is out of window.
+        future = _picking(date_done=date(2026, 9, 8), units=5)
+        d = od.build_digest([], pickings=[future], today=TODAY)
+        self.assertEqual(d["units_shipped"], 0)
+
+    def test_units_shipped_sums_across_pickings(self):
+        d = od.build_digest([], pickings=[_picking(units=3), _picking(units=2)], today=TODAY)
         self.assertEqual(d["units_shipped"], 5)
 
-    def test_units_shipped_falls_back_to_one_when_units_absent(self):
-        # A record without a units field counts as 1 (order-level fallback).
-        order = _order(delivery_status="transit")
-        del order["units"]
-        d = od.build_digest([order], today=TODAY)
-        self.assertEqual(d["units_shipped"], 1)
+    def test_picking_iso_string_date(self):
+        d = od.build_digest([], pickings=[{"date_done": "2026-09-01", "units": 2}], today=TODAY)
+        self.assertEqual(d["units_shipped"], 2)
+
+    def test_units_ordered_only_counts_window_orders(self):
+        orders = [
+            _order(name="S1", date_order=TODAY, units=5),
+            _order(name="S2", date_order=date(2026, 1, 1), units=8),  # outside window
+        ]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertEqual(d["units_ordered"], 5)
+
+    def test_ordered_and_shipped_diverge_preorder_this_week(self):
+        # A preorder placed this week contributes ordered units but nothing has
+        # shipped yet -> ordered > 0, shipped == 0.
+        preorder = _order(
+            name="P1",
+            date_order=TODAY,
+            checkout_status="deposit_paid",
+            preorder_ids="42",
+            units=5,
+        )
+        d = od.build_digest([preorder], pickings=[], today=TODAY)
+        self.assertEqual(d["units_ordered"], 5)
+        self.assertEqual(d["units_shipped"], 0)
 
 
 class TestPreorderSection(unittest.TestCase):
@@ -237,6 +260,7 @@ class TestRenderers(unittest.TestCase):
         self.assertIn("Weekly order rollup", text)
         self.assertIn("Orders placed", text)
         self.assertIn("Revenue", text)
+        self.assertIn("Units ordered", text)
         self.assertIn("Units shipped", text)
         self.assertIn("preorder", text.lower())
         self.assertIn("pickup", text.lower())
@@ -244,6 +268,8 @@ class TestRenderers(unittest.TestCase):
     def test_html_render_contains_key_sections(self):
         html = od.render_digest_html(self._digest())
         self.assertIn("<h2>", html)
+        self.assertIn("Units ordered", html)
+        self.assertIn("Units shipped", html)
         self.assertIn("Outstanding preorders", html)
         self.assertIn("Pickups awaiting collection", html)
 
@@ -272,3 +298,59 @@ class TestRenderers(unittest.TestCase):
         label = od._wave_label(entry)
         self.assertIn("spring", label)
         self.assertIn("Mar 15, 2027", label)
+
+
+class TestHtmlEscaping(unittest.TestCase):
+    """Checkout-derived fields (partner_name, order_name, ship_season) must be
+    HTML-escaped in the merchant email (GOL-1933/1978 review convention)."""
+
+    def test_preorder_partner_and_order_name_escaped(self):
+        malicious = _order(
+            name="<script>x</script>",
+            partner_name="<img src=x onerror=alert(1)>",
+            date_order=date(2026, 5, 1),
+            checkout_status="deposit_paid",
+            preorder_ids="7",
+        )
+        html_out = od.render_digest_html(od.build_digest([malicious], today=TODAY))
+        self.assertNotIn("<script>x</script>", html_out)
+        self.assertNotIn("<img src=x", html_out)
+        self.assertIn("&lt;script&gt;", html_out)
+        self.assertIn("&lt;img", html_out)
+
+    def test_pickup_partner_name_escaped(self):
+        pk = _order(
+            name="S9",
+            partner_name="<b>evil</b>",
+            is_pickup=True,
+            checkout_status="paid",
+            delivery_status=None,
+        )
+        html_out = od.render_digest_html(od.build_digest([pk], today=TODAY))
+        self.assertNotIn("<b>evil</b>", html_out)
+        self.assertIn("&lt;b&gt;evil&lt;/b&gt;", html_out)
+
+    def test_ship_season_escaped_in_html_only(self):
+        def fake_zone(z):
+            return 6
+
+        def fake_wave(zone, today):
+            return {
+                "season": "<em>spring</em>",
+                "ship_start": date(2027, 3, 15),
+                "ship_end": date(2027, 3, 31),
+            }
+
+        pre = _order(
+            name="S1",
+            date_order=date(2026, 5, 1),
+            checkout_status="deposit_paid",
+            preorder_ids="7",
+        )
+        digest = od.build_digest([pre], today=TODAY, next_wave_fn=fake_wave, usda_zone_fn=fake_zone)
+        html_out = od.render_digest_html(digest)
+        self.assertNotIn("<em>spring</em>", html_out)
+        self.assertIn("&lt;em&gt;spring&lt;/em&gt;", html_out)
+        # Plain-text Discord output stays raw (not entity-encoded).
+        text_out = od.render_digest_text(digest)
+        self.assertIn("<em>spring</em>", text_out)
