@@ -2104,7 +2104,11 @@ def _oversold_lines(order):
 # Product knobs (CEO-tunable via ir.config_parameter, no code change):
 #   grove_headless.settlement_max_retries — automatic retries of a declined card
 #     before it drops to manual-only (default 3; the retry cron enforces it).
-# See the confirmation on GOL-2052 for the ratified retry/dunning policy.
+# Ratified retry/dunning policy (CEO ruling GOL-2054): a declined ship-time
+# charge flags the order settlement_failed, duns the customer (hosted Stripe
+# pay-link email) + alerts ops on Discord, then AUTO-RETRIES the saved card
+# DAILY up to settlement_max_retries. After the final decline the order HOLDS
+# in settlement_failed for a human (Josh/Wesley) — it is never auto-cancelled.
 
 
 def _settlement_shipping_line(order):
