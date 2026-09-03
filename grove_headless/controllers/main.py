@@ -2291,8 +2291,16 @@ def settle_order_at_ship(env, order):
         _mark_settlement_failed(env, order, secret_key, amount_cents, reason="no saved card on file")
         return "settlement_failed"
 
-    # Order-scoped so a retried ship never double-charges (GOL-2053 acceptance 3).
-    idem = f"grove-settle-{order.id}-{order.grove_stripe_session_id or order.grove_stripe_payment_intent or order.id}"
+    # Per-ATTEMPT idempotency key (GOL-2053/2054). Stripe caches a response —
+    # including a card-decline error — against an idempotency key for 24h, so a
+    # key that is stable across retries would make every retry within the day
+    # replay the ORIGINAL decline instead of re-charging, silently defeating the
+    # ratified daily×3 auto-retry (GOL-2054 ruling 2). Scoping the key to the
+    # attempt number gives each retry a genuinely new charge while still deduping
+    # a concurrent double-fire of the SAME attempt (label-purchase + mark-shipped
+    # both compute attempts=N from the same committed value → identical key). The
+    # primary double-charge guard is the status=="settled" short-circuit above.
+    idem = f"grove-settle-{order.id}-{attempts}"
     try:
         intent = stripe_gateway.create_payment_intent(
             secret_key,
