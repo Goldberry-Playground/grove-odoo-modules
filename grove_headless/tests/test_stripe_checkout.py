@@ -240,6 +240,79 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
         self.assertEqual(deposit["kind"], "deposit")
 
+    # ── GOL-2052: preorder defers shipping + tax to ship-time settlement ──
+
+    def _seed_wv_tax(self):
+        """Put the WV group tax on the product so a today-charge would tax."""
+        wv_group = self.env["account.tax"].search(
+            [("name", "=", "WV Sales Tax 7%"), ("amount_type", "=", "group")], limit=1
+        )
+        self.assertTrue(wv_group, "WV group tax must exist (post_init_hook)")
+        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_group.ids)]
+        return wv_group
+
+    def test_preorder_charges_deposit_only_no_shipping_no_tax(self):
+        """Acceptance 1: a preorder cart charges exactly $10 x preorder units
+        today — the quoted shipping line and WV tax are BOTH deferred to the
+        off-session settlement at ship, never charged now."""
+        self._seed_wv_tax()
+        self._set_stock(self.product, 0)  # short stock → preorder
+        order = self._make_order(qty=2)
+        self._add_shipping_line(order)  # a real ship order carries GROVE-SHIP
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order)
+        # preorder_variant_ids is per-variant (one id per deferred line), not
+        # per-unit — the 2-unit count rides the deposit line's `quantity`, and
+        # the downstream settlement keys off `product.id in preorder_ids` as a
+        # set membership (see GOL-1057 sibling test, line_charge splitting).
+        self.assertEqual(preorder_ids, [self.product.id])
+        # Only the deposit is charged today.
+        deposit = next(li for li in line_items if li["kind"] == "deposit")
+        self.assertEqual(deposit["quantity"], 2)  # both preorder units deferred
+        kinds = {li["kind"] for li in line_items}
+        self.assertEqual(kinds, {"deposit"})
+        self.assertFalse([li for li in line_items if li["kind"] == "shipping"])
+        self.assertFalse([li for li in line_items if li["kind"] == "tax"])
+        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT) * 2)
+
+    def test_mixed_order_defers_shipping_and_tax_but_bills_in_stock_goods(self):
+        """A cart with both in-stock and preorder units bills the in-stock goods
+        today (they still ship with the wave) but defers shipping + all tax —
+        the split is per-cart on has_preorder, not per-line."""
+        self._seed_wv_tax()
+        self._set_stock(self.product, 2)  # 2 in stock, 3 short
+        order = self._make_order(qty=5)
+        self._add_shipping_line(order)
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        self.assertEqual(preorder_ids, [self.product.id])
+        goods = next(li for li in line_items if li["kind"] == "goods")
+        self.assertEqual(goods["quantity"], 2)
+        self.assertTrue([li for li in line_items if li["kind"] == "deposit"])
+        # Shipping + tax deferred even though in-stock goods are billed today.
+        self.assertFalse([li for li in line_items if li["kind"] == "shipping"])
+        self.assertFalse([li for li in line_items if li["kind"] == "tax"])
+
+    def test_in_stock_order_still_charges_shipping_and_tax_today(self):
+        """Acceptance 5: a fully-in-stock (non-preorder) order ships now and is
+        UNCHANGED — shipping and WV tax ride the today-charge as before."""
+        self._seed_wv_tax()
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=2)
+        self._add_shipping_line(order)
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        self.assertEqual(preorder_ids, [])
+        self.assertTrue([li for li in line_items if li["kind"] == "shipping"])
+        self.assertTrue([li for li in line_items if li["kind"] == "tax"])
+
+    def test_pickup_preorder_has_no_shipping_line_to_defer(self):
+        """Acceptance 5 (pickup): a farm-pickup preorder never had a shipping
+        line; deferral leaves the deposit-only charge intact and adds nothing."""
+        self._set_stock(self.product, 0)
+        order = self._make_order(qty=1)  # no GROVE-SHIP line → pickup
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order)
+        self.assertEqual(preorder_ids, [self.product.id])
+        self.assertFalse([li for li in line_items if li["kind"] in ("shipping", "tax")])
+        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+
     # ── shipping-calendar preorder gate (GOL-1309) ───────────────────────
 
     def _ship_payload(self, zip_code, **extra):
@@ -631,6 +704,179 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
 
     def test_unknown_session_is_not_found(self):
         self.assertEqual(grove_main._handle_session_expired(self.env, {"id": "cs_missing"}), "order_not_found")
+
+    # ── ship-time settlement (GOL-2053) ──────────────────────────────────
+
+    def _settleable_order(self, qty=2, charged_today=20.0, actual_shipping=15.0, ship=True):
+        """A deposit-paid order primed for ship-time settlement: short stock
+        (preorder), the deposit already taken, and the actual label cost known."""
+        self._seed_wv_tax()
+        self._set_stock(self.product, 0)
+        order = self._make_order(qty=qty)
+        if ship:
+            self._add_shipping_line(order)
+        order.write(
+            {
+                "grove_checkout_status": "deposit_paid",
+                "grove_fulfillment": "ship" if ship else "pickup",
+                "grove_amount_charged_today": charged_today,
+                "grove_actual_shipping_cost": actual_shipping,
+                "grove_stripe_customer": "cus_test",
+                "grove_stripe_payment_method": "pm_test",
+                "grove_stripe_session_id": "cs_settle",
+            }
+        )
+        return order
+
+    def test_settlement_charges_balance_off_session(self):
+        """Acceptance 2/3: the deferred balance = recomputed total (ACTUAL
+        shipping + WV tax) − deposit already paid, captured off-session against
+        the saved card with an order-scoped Idempotency-Key."""
+        order = self._settleable_order()
+        captured = {}
+
+        def fake_pi(secret_key, **kwargs):
+            captured.update(kwargs)
+            captured["secret_key"] = secret_key
+            return {"id": "pi_settled", "status": "succeeded"}
+
+        with (
+            mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
+        ):
+            result = grove_main.settle_order_at_ship(self.env, order)
+
+        self.assertEqual(result, "settled")
+        self.assertEqual(order.grove_checkout_status, "settled")
+        self.assertEqual(order.grove_settlement_payment_intent, "pi_settled")
+        self.assertEqual(order.grove_settlement_attempts, 1)
+        # The quoted shipping line was rewritten to the ACTUAL bought cost.
+        self.assertEqual(grove_main._settlement_shipping_line(order).price_unit, 15.0)
+        # Charged exactly recomputed total − the deposit already taken.
+        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents(order.amount_total - 20.0))
+        self.assertEqual(captured["customer"], "cus_test")
+        self.assertEqual(captured["payment_method"], "pm_test")
+        self.assertTrue(captured["idempotency_key"].startswith("grove-settle-"))
+
+    def test_settlement_is_idempotent_once_settled(self):
+        """A retried ship on an already-settled order never charges again."""
+        order = self._settleable_order()
+        order.grove_checkout_status = "settled"
+        pi = mock.Mock()
+        with mock.patch.object(stripe_gateway, "create_payment_intent", pi):
+            result = grove_main.settle_order_at_ship(self.env, order)
+        self.assertEqual(result, "already_settled")
+        pi.assert_not_called()
+
+    def test_settlement_skips_fully_paid_order(self):
+        """A fully-in-stock 'paid' order collected shipping+tax at checkout and
+        has nothing to settle."""
+        order = self._settleable_order()
+        order.grove_checkout_status = "paid"
+        pi = mock.Mock()
+        with mock.patch.object(stripe_gateway, "create_payment_intent", pi):
+            self.assertEqual(grove_main.settle_order_at_ship(self.env, order), "not_applicable")
+        pi.assert_not_called()
+
+    def test_settlement_decline_marks_failed_and_duns(self):
+        """Acceptance 4: a card decline keeps the order shipped, flags
+        settlement_failed, and emails the customer a dunning link."""
+        order = self._settleable_order()
+        mails_before = self.env["mail.mail"].search_count([])
+
+        def fake_decline(secret_key, **kwargs):
+            raise stripe_gateway.StripeCardError(
+                "declined", code="card_declined", decline_code="do_not_honor", payment_intent="pi_bad"
+            )
+
+        with (
+            mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_decline),
+            mock.patch.object(stripe_gateway, "create_checkout_session", return_value={"url": "https://pay.example/x"}),
+            mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
+            mute_logger("odoo.addons.mail.models.mail_mail"),
+        ):
+            result = grove_main.settle_order_at_ship(self.env, order)
+
+        self.assertEqual(result, "settlement_failed")
+        self.assertEqual(order.grove_checkout_status, "settlement_failed")
+        self.assertEqual(order.grove_settlement_attempts, 1)
+        self.assertEqual(order.grove_settlement_payment_intent, "pi_bad")
+        self.assertGreater(self.env["mail.mail"].search_count([]), mails_before)
+
+    def test_settlement_resolves_card_from_deposit_intent(self):
+        """When the card ids weren't cached on the order, settlement reads them
+        back from the deposit intent and caches them for the retry."""
+        order = self._settleable_order()
+        order.write(
+            {
+                "grove_stripe_customer": False,
+                "grove_stripe_payment_method": False,
+                "grove_stripe_payment_intent": "pi_dep",
+            }
+        )
+        captured = {}
+
+        def fake_pi(secret_key, **kwargs):
+            captured.update(kwargs)
+            return {"id": "pi_s"}
+
+        with (
+            mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            mock.patch.object(
+                stripe_gateway, "retrieve_payment_intent", return_value={"customer": "cus_r", "payment_method": "pm_r"}
+            ),
+            mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
+        ):
+            self.assertEqual(grove_main.settle_order_at_ship(self.env, order), "settled")
+
+        self.assertEqual(captured["customer"], "cus_r")
+        self.assertEqual(captured["payment_method"], "pm_r")
+        self.assertEqual(order.grove_stripe_customer, "cus_r")
+        self.assertEqual(order.grove_stripe_payment_method, "pm_r")
+
+    def test_settlement_pickup_has_no_shipping_line(self):
+        """Acceptance verification: a farm-pickup preorder settles the tree
+        balance + WV tax with no shipping line to rewrite."""
+        order = self._settleable_order(qty=1, charged_today=10.0, actual_shipping=0.0, ship=False)
+        captured = {}
+
+        def fake_pi(secret_key, **kwargs):
+            captured.update(kwargs)
+            return {"id": "pi_pickup"}
+
+        with (
+            mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
+        ):
+            self.assertEqual(grove_main.settle_order_at_ship(self.env, order), "settled")
+
+        self.assertFalse(grove_main._settlement_shipping_line(order))
+        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents(order.amount_total - 10.0))
+
+    def test_dunning_payment_settles_without_reconfirming(self):
+        """A customer paying the dunning link (purpose=settlement) settles the
+        order directly — no oversell/confirm/receipt replay."""
+        order = self._settleable_order()
+        order.grove_checkout_status = "settlement_failed"
+        session = {
+            "id": "cs_dun",
+            "payment_intent": "pi_dun",
+            "metadata": {"order_id": str(order.id), "purpose": "settlement"},
+        }
+        self.assertEqual(grove_main._handle_session_completed(self.env, session), "settled")
+        self.assertEqual(order.grove_checkout_status, "settled")
+        self.assertEqual(order.grove_settlement_payment_intent, "pi_dun")
+
+    def test_retry_cron_reattempts_within_limit(self):
+        """The retry cron re-settles a failed order while attempts remain, and
+        stops once grove_headless.settlement_max_retries is reached."""
+        order = self._settleable_order()
+        order.write({"grove_checkout_status": "settlement_failed", "grove_settlement_attempts": 3})
+        self.env["ir.config_parameter"].sudo().set_param("grove_headless.settlement_max_retries", "3")
+        pi = mock.Mock()
+        with mock.patch.object(stripe_gateway, "create_payment_intent", pi):
+            self.env["sale.order"]._cron_retry_settlements()
+        pi.assert_not_called()  # already at the cap → left for manual re-trigger
 
     # ── idempotency ledger ───────────────────────────────────────────────
 

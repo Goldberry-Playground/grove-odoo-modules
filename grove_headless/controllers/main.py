@@ -1019,8 +1019,31 @@ class GroveHeadlessAPI(http.Controller):
                 "grove_stripe_payment_intent": session.get("payment_intent") or False,
                 "grove_preorder_variant_ids": ",".join(str(i) for i in preorder_ids) or False,
                 "grove_checkout_status": "pending",
+                # Dollars actually taken today — the base the ship-time settlement
+                # subtracts from the (recomputed) order total (GOL-2053).
+                "grove_amount_charged_today": round(charged_cents / 100.0, 2),
             }
         )
+
+        # Disclosure for the review page (GOL-2052 constraint 1): a preorder
+        # defers shipping + tax to an off-session charge at ship, so we tell the
+        # shopper the ESTIMATED shipping/tax and what settles later, plainly. The
+        # estimate is the quoted zone rate (kept for display only); the actual
+        # amount is recomputed and charged when the box is packed.
+        amount_due_today = round(charged_cents / 100.0, 2)
+        shipping_deferred = bool(preorder_ids)
+        estimated_shipping = round(
+            sum(
+                ol.price_unit
+                for ol in order.order_line
+                if ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE
+            ),
+            2,
+        )
+        # amount_total carries the full goods + shipping + tax; anything not
+        # charged today (preorder tree balances, deferred shipping, deferred tax)
+        # settles at ship.
+        amount_due_at_ship = round(order.amount_total - amount_due_today, 2)
 
         return _json_response(
             {
@@ -1030,8 +1053,17 @@ class GroveHeadlessAPI(http.Controller):
                 "order_ref": order.name,
                 "access_token": access_token,
                 "has_preorder": bool(preorder_ids),
-                "amount_due_today": round(charged_cents / 100.0, 2),
+                "amount_due_today": amount_due_today,
                 "amount_total": order.amount_total,
+                # GOL-2052: shipping + tax deferral disclosure. When
+                # `shipping_deferred` is true the review page must show
+                # `estimated_shipping`/`estimated_tax` as ESTIMATES and state the
+                # real amount is charged at ship; `amount_due_at_ship` is the
+                # deferred remainder (tree balances + shipping + tax).
+                "shipping_deferred": shipping_deferred,
+                "estimated_shipping": estimated_shipping,
+                "estimated_tax": round(order.amount_tax, 2),
+                "amount_due_at_ship": amount_due_at_ship,
                 "currency": order.currency_id.name,
                 # Itemized charged-today breakdown — the SAME array Stripe renders
                 # (goods / per-unit deposit / shipping / WV tax), so the review page
@@ -1893,12 +1925,17 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
 
     Returns (line_items, preorder_variant_ids, charged_cents). Applies the
     charging matrix per product line (in-stock units = full price; short-stock
-    units = a per-unit flat deposit) and adds the WV sales tax as ONE explicit
-    line (Stripe Tax OFF) covering only what is charged today — preorder units
-    contribute a deposit and no tax now; their goods + tax settle off-session
-    when they ship. A partially-stocked line splits into an in-stock charge and
-    a deposit charge (GOL-1036 defect 3); tax today is prorated to only the
-    in-stock units so the deposit units aren't taxed before they ship.
+    units = a per-unit flat deposit).
+
+    GOL-2052 (CEO directive 2026-09-03): when an order contains ANY preorder
+    unit, ONLY the per-unit deposit(s) — and any in-stock goods that bill in
+    full — are charged today; SHIPPING and TAX are deferred and collected
+    off-session at ship time, at *actual* cost (see ``_settle_at_ship``). A
+    stale quoted rate can then never be the charge, and tax is recomputed on the
+    settled total (WV tax applies to the shipping line, whose real amount is not
+    known until the box is packed). A fully-in-stock / farm-pickup order has no
+    preorder unit, ships now, and is unchanged: shipping + WV tax ride the
+    today-charge as one explicit line each (Stripe Tax OFF).
 
     ``calendar_preorder_ids`` (GOL-1309): variant ids whose bareroot ship wave
     is not yet open per the shipping calendar (see
@@ -1911,6 +1948,11 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
     line_items = []
     preorder_variant_ids = []
     tax_today = 0.0
+    # Shipping is captured here and only committed to the today-charge AFTER the
+    # loop, once we know whether the cart contains a preorder — a preorder defers
+    # shipping (and all tax) to the ship-time settlement (GOL-2052).
+    shipping_item = None
+    shipping_tax = 0.0
     # Calendar-window preorders (GOL-1666) apply to bareroot regardless of
     # fulfillment: a bareroot line that can't be filled now charges the flat
     # deposit even when in stock, matching the product page. The zone that keys
@@ -1935,8 +1977,10 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
             amount = stripe_gateway.to_cents(line.price_unit)
             if amount <= 0:
                 continue
-            line_items.append({"name": name, "kind": "shipping", "amount_cents": amount, "quantity": 1})
-            tax_today += line.price_tax
+            # Held, not appended: whether this rides today or defers to ship is
+            # decided after the loop from has_preorder (GOL-2052).
+            shipping_item = {"name": name, "kind": "shipping", "amount_cents": amount, "quantity": 1}
+            shipping_tax = line.price_tax
             continue
         # free_qty (on-hand minus reserved), not qty_available: a unit another
         # order already reserved is not sellable now and must fall to preorder
@@ -1974,10 +2018,25 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
                 line_items.append({"name": name, "kind": "goods", "amount_cents": amount, "quantity": qty})
                 # Prorate the line's tax to the units billed today.
                 tax_today += line.price_tax * (qty / ordered_qty) if ordered_qty else 0.0
-    if tax_today > 0:
-        line_items.append(
-            {"name": "Sales tax (WV)", "kind": "tax", "amount_cents": stripe_gateway.to_cents(tax_today), "quantity": 1}
-        )
+    # GOL-2052: a cart with any preorder unit collects ONLY deposits (+ any
+    # in-stock goods) today; its shipping and ALL tax are settled off-session at
+    # ship on actual cost, so neither the quoted shipping line nor a tax line is
+    # charged now. A non-preorder cart ships now and keeps the prior behaviour:
+    # shipping + WV tax ride today's charge.
+    has_preorder = bool(preorder_variant_ids)
+    if not has_preorder:
+        if shipping_item is not None:
+            line_items.append(shipping_item)
+            tax_today += shipping_tax
+        if tax_today > 0:
+            line_items.append(
+                {
+                    "name": "Sales tax (WV)",
+                    "kind": "tax",
+                    "amount_cents": stripe_gateway.to_cents(tax_today),
+                    "quantity": 1,
+                }
+            )
     charged_cents = sum(li["amount_cents"] * li["quantity"] for li in line_items)
     return line_items, preorder_variant_ids, charged_cents
 
@@ -2036,6 +2095,274 @@ def _oversold_lines(order):
     return oversold
 
 
+# ── Ship-time settlement (GOL-2053) ─────────────────────────────────────────
+#
+# A deposit-only preorder takes ONLY grove_amount_charged_today at checkout; the
+# balance — tree prices + ACTUAL shipping (the labels we bought) + WV tax
+# recomputed on that real cost — is captured off-session when the box ships.
+#
+# Product knobs (CEO-tunable via ir.config_parameter, no code change):
+#   grove_headless.settlement_max_retries — automatic retries of a declined card
+#     before it drops to manual-only (default 3; the retry cron enforces it).
+# Ratified retry/dunning policy (CEO ruling GOL-2054): a declined ship-time
+# charge flags the order settlement_failed, duns the customer (hosted Stripe
+# pay-link email) + alerts ops on Discord, then AUTO-RETRIES the saved card
+# DAILY up to settlement_max_retries. After the final decline the order HOLDS
+# in settlement_failed for a human (Josh/Wesley) — it is never auto-cancelled.
+
+
+def _settlement_shipping_line(order):
+    """The GROVE-SHIP line whose price the settlement rewrites to ACTUAL cost,
+    or an empty recordset for a pickup order that never carried one."""
+    return order.order_line.filtered(lambda ol: ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE)[
+        :1
+    ]
+
+
+def _recompute_ship_total(env, order):
+    """Rebuild the order total on the ACTUAL packed shipping + destination-aware
+    WV tax, so settlement bills what really shipped, not the checkout estimate.
+
+    The quoted GROVE-SHIP line price is replaced with grove_actual_shipping_cost;
+    Odoo then recomputes amount_tax from each line's existing (destination-
+    correct) taxes. For a SHIP order we re-run _apply_destination_tax against the
+    current ship-to state as well, so an address edited between checkout and ship
+    still taxes correctly; PICKUP orders always transfer at the WV farm and keep
+    WV tax (mirroring the draft path, which skips destination de-taxing)."""
+    ship_line = _settlement_shipping_line(order)
+    if ship_line:
+        ship_line.price_unit = order.grove_actual_shipping_cost or 0.0
+    if order.grove_fulfillment == "ship":
+        state = order.partner_shipping_id.state_id.code or None
+        _apply_destination_tax(env, order, {"state": state})
+    order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
+
+
+def _resolve_saved_card(secret_key, order):
+    """(customer, payment_method) for the off-session charge.
+
+    Prefers the ids already persisted on the order; otherwise reads them back
+    from the DEPOSIT intent (setup_future_usage attached the method to the
+    customer) and caches them so a retry does not re-hit Stripe. Returns
+    (None, None) when neither the order nor a retrievable intent yields a card —
+    the caller then duns for a manual payment instead of charging."""
+    customer = order.grove_stripe_customer or None
+    payment_method = order.grove_stripe_payment_method or None
+    if customer and payment_method:
+        return customer, payment_method
+    pi_id = order.grove_stripe_payment_intent
+    if not pi_id:
+        return customer, payment_method
+    try:
+        intent = stripe_gateway.retrieve_payment_intent(secret_key, pi_id)
+    except stripe_gateway.StripeError as exc:
+        _logger.error("Could not retrieve deposit intent %s for %s: %s", pi_id, order.name, exc)
+        return customer, payment_method
+    customer = customer or intent.get("customer")
+    payment_method = payment_method or intent.get("payment_method")
+    vals = {}
+    if customer and not order.grove_stripe_customer:
+        vals["grove_stripe_customer"] = customer
+    if payment_method and not order.grove_stripe_payment_method:
+        vals["grove_stripe_payment_method"] = payment_method
+    if vals:
+        order.write(vals)
+    return customer, payment_method
+
+
+def _settlement_pay_link(env, order, secret_key, amount_cents):
+    """A hosted Stripe Checkout URL for the customer to pay the balance manually
+    after an off-session decline (GOL-2053 acceptance 4). Best-effort: returns
+    None if the session can't be created, so the dunning email still sends with
+    a 'contact us' fallback. The session is tagged purpose=settlement so its
+    completion webhook settles the order without re-confirming it."""
+    base = (env["ir.config_parameter"].sudo().get_param("web.base.url") or "").rstrip("/")
+    try:
+        session = stripe_gateway.create_checkout_session(
+            secret_key,
+            line_items=[{"name": f"Balance due — order {order.name}", "amount_cents": amount_cents, "quantity": 1}],
+            success_url=f"{base}/shop/confirmation?order={order.id}",
+            cancel_url=f"{base}/shop/cart",
+            customer_email=order.partner_id.email,
+            metadata={"order_id": order.id, "order_ref": order.name, "purpose": "settlement"},
+        )
+    except stripe_gateway.StripeError as exc:
+        _logger.error("Dunning pay-link creation failed for %s: %s", order.name, exc)
+        return None
+    return session.get("url")
+
+
+def _send_dunning_email(env, order, amount_due, pay_url):
+    """Best-effort dunning email after a ship-time decline. Copy is deliberately
+    plain and honest (the plant already shipped); the ratified final wording is
+    a CEO decision on GOL-2052 — this is the functional default."""
+    email = order.partner_id.email
+    if not email:
+        return
+    if pay_url:
+        cta = f'<p><a href="{pay_url}">Pay your balance securely here</a>.</p>'
+    else:
+        cta = "<p>Please reply to this email and we'll send you a secure payment link.</p>"
+    body = (
+        f"<p>Hi {order.partner_id.name or 'there'},</p>"
+        f"<p>Your order {order.name} has shipped! We tried to collect the remaining "
+        f"balance of ${amount_due:.2f} (your tree total plus actual shipping and tax) "
+        f"on the card you used at checkout, but it didn't go through.</p>"
+        f"{cta}"
+        f"<p>Thank you — Goldberry Grove Nursery</p>"
+    )
+    try:
+        env["mail.mail"].sudo().create(
+            {
+                "subject": f"Payment needed for your shipped order {order.name}",
+                "email_to": email,
+                "body_html": body,
+                "auto_delete": True,
+            }
+        ).send()
+    except Exception:  # noqa: BLE001 — dunning email is best-effort
+        _logger.warning("Dunning email failed for %s", order.name, exc_info=True)
+
+
+def _mark_settlement_failed(env, order, secret_key, amount_cents, *, reason):
+    """Record a shipped-but-unsettled order and start the dunning path: flag the
+    status, post chatter, alert ops on Discord, and email the customer a hosted
+    payment link. The order STAYS shipped — the decline never rolls back the
+    fulfilment (GOL-2053 acceptance 4)."""
+    balance = round(amount_cents / 100.0, 2)
+    order.write({"grove_checkout_status": "settlement_failed"})
+    note = (
+        f"Ship-time settlement of ${balance:.2f} failed ({reason}). Order stays "
+        f"SHIPPED; customer has been emailed a payment link. Attempt "
+        f"{order.grove_settlement_attempts}."
+    )
+    order.message_post(body=note)
+    _notify_discord(
+        f":rotating_light: Settlement FAILED on {order.name} — ${balance:.2f} unpaid "
+        f"({reason}). Shipped but unsettled; customer dunned. Attempt "
+        f"{order.grove_settlement_attempts}."
+    )
+    pay_url = _settlement_pay_link(env, order, secret_key, amount_cents)
+    _send_dunning_email(env, order, balance, pay_url)
+
+
+def settle_order_at_ship(env, order):
+    """Capture a preorder's deferred balance off-session at ship (GOL-2053).
+
+    Idempotent and safe to call from either ship trigger (label purchase or the
+    operator mark-shipped path): an order already ``settled`` is a no-op, and the
+    order-scoped Idempotency-Key means a replayed charge returns the original
+    intent instead of double-billing. Never raises — a decline or gateway error
+    is recorded on the order (the plant has shipped), never propagated.
+
+    Returns a short status string for the caller/tests:
+      settled | already_settled | not_applicable | nothing_due | no_key |
+      settlement_failed | settlement_error
+    """
+    order.ensure_one()
+    status = order.grove_checkout_status
+    if status == "settled":
+        return "already_settled"
+    # Only a deposit-only order (or one whose earlier settlement failed) has a
+    # deferred balance. A fully-in-stock order already collected shipping+tax at
+    # checkout, and a non-checkout order has nothing to settle.
+    if status not in ("deposit_paid", "settlement_failed"):
+        return "not_applicable"
+
+    _recompute_ship_total(env, order)
+    balance = round((order.amount_total or 0.0) - (order.grove_amount_charged_today or 0.0), 2)
+    if balance <= 0:
+        order.write({"grove_checkout_status": "settled"})
+        order.message_post(body=f"Ship-time settlement: nothing further due (balance ${balance:.2f}).")
+        return "nothing_due"
+    amount_cents = stripe_gateway.to_cents(balance)
+
+    tenant = order.website_id.grove_tenant_slug() if order.website_id else None
+    secret_key = _tenant_secret_key(tenant)
+    if not secret_key:
+        _logger.error("Ship-time settlement: no Stripe key for %s (tenant %s)", order.name, tenant)
+        order.message_post(body="Ship-time settlement could not run: Stripe key is not configured.")
+        return "no_key"
+
+    attempts = (order.grove_settlement_attempts or 0) + 1
+    customer, payment_method = _resolve_saved_card(secret_key, order)
+    if not customer or not payment_method:
+        order.write({"grove_settlement_attempts": attempts})
+        _mark_settlement_failed(env, order, secret_key, amount_cents, reason="no saved card on file")
+        return "settlement_failed"
+
+    # Per-ATTEMPT idempotency key (GOL-2053/2054). Stripe caches a response —
+    # including a card-decline error — against an idempotency key for 24h, so a
+    # key that is stable across retries would make every retry within the day
+    # replay the ORIGINAL decline instead of re-charging, silently defeating the
+    # ratified daily×3 auto-retry (GOL-2054 ruling 2). Scoping the key to the
+    # attempt number gives each retry a genuinely new charge while still deduping
+    # a concurrent double-fire of the SAME attempt (label-purchase + mark-shipped
+    # both compute attempts=N from the same committed value → identical key). The
+    # primary double-charge guard is the status=="settled" short-circuit above.
+    idem = f"grove-settle-{order.id}-{attempts}"
+    try:
+        intent = stripe_gateway.create_payment_intent(
+            secret_key,
+            amount_cents=amount_cents,
+            customer=customer,
+            payment_method=payment_method,
+            metadata={"order_ref": order.name, "purpose": "ship_settlement"},
+            idempotency_key=idem,
+            description=f"Ship-time balance for {order.name}",
+        )
+    except stripe_gateway.StripeCardError as exc:
+        order.write(
+            {
+                "grove_settlement_attempts": attempts,
+                "grove_settlement_payment_intent": exc.payment_intent or order.grove_settlement_payment_intent,
+            }
+        )
+        _mark_settlement_failed(
+            env, order, secret_key, amount_cents, reason=f"card declined ({exc.decline_code or exc.code or 'declined'})"
+        )
+        return "settlement_failed"
+    except stripe_gateway.StripeError as exc:
+        # Transport/config error (not a decline) — retryable. Keep the order in
+        # its current status so the retry cron / manual re-trigger tries again.
+        order.write({"grove_settlement_attempts": attempts})
+        _logger.error("Ship-time settlement gateway error for %s: %s", order.name, exc)
+        order.message_post(body=f"Ship-time settlement could not reach Stripe (will retry): {exc}")
+        _notify_discord(f":warning: Settlement gateway error on {order.name} (${balance:.2f}) — will retry: {exc}")
+        return "settlement_error"
+
+    order.write(
+        {
+            "grove_checkout_status": "settled",
+            "grove_settlement_payment_intent": intent.get("id") or order.grove_settlement_payment_intent,
+            "grove_settlement_attempts": attempts,
+        }
+    )
+    order.message_post(
+        body=(
+            f"Ship-time settlement captured ${balance:.2f} off-session — actual shipping "
+            f"${order.grove_actual_shipping_cost or 0.0:.2f}, recomputed tax ${order.amount_tax:.2f}."
+        )
+    )
+    return "settled"
+
+
+def _handle_settlement_paid(env, order, session):
+    """A customer paid the dunning link (purpose=settlement): mark the order
+    settled and record the intent, WITHOUT re-running the oversell / confirm /
+    receipt path a first-time checkout does."""
+    if order.grove_checkout_status != "settled":
+        order.write(
+            {
+                "grove_checkout_status": "settled",
+                "grove_settlement_payment_intent": session.get("payment_intent")
+                or order.grove_settlement_payment_intent,
+            }
+        )
+        order.message_post(body="Ship-time balance paid by the customer via the payment link.")
+    return "settled"
+
+
 def _handle_session_completed(env, session):
     """checkout.session.completed: record the payment intent, then either
     refund an oversell or mark the order paid/deposit-paid and confirm it."""
@@ -2043,10 +2370,22 @@ def _handle_session_completed(env, session):
     if not order:
         return "order_not_found"
 
+    # A dunning payment (customer clearing a failed ship-time settlement) settles
+    # the order directly — it must not re-run oversell/confirm/receipt (GOL-2053).
+    if (session.get("metadata") or {}).get("purpose") == "settlement":
+        return _handle_settlement_paid(env, order, session)
+
     payment_intent = session.get("payment_intent")
     vals = {}
     if payment_intent:
         vals["grove_stripe_payment_intent"] = payment_intent
+    # Persist the saved-card handle for the ship-time off-session settlement
+    # (GOL-2053): setup_future_usage=off_session attaches the payment method to a
+    # Customer, whose id the completed session carries. The payment_method id is
+    # resolved from the deposit intent at settlement (it is not on the session).
+    customer = session.get("customer")
+    if customer:
+        vals["grove_stripe_customer"] = customer
 
     oversold = _oversold_lines(order)
     if oversold:

@@ -161,6 +161,112 @@ class TestRefund(unittest.TestCase):
             sg.create_refund("sk", "", post=mock.Mock())
 
 
+class TestPaymentIntent(unittest.TestCase):
+    """GOL-2052: off-session ship-time settlement primitive."""
+
+    def _charge(self, post, **over):
+        kwargs = dict(
+            amount_cents=3120,
+            customer="cus_1",
+            payment_method="pm_1",
+            post=post,
+        )
+        kwargs.update(over)
+        return sg.create_payment_intent("sk_test", **kwargs)
+
+    def test_happy_path_confirms_off_session(self):
+        post = mock.Mock(return_value=_ok(200, {"id": "pi_9", "status": "succeeded"}))
+        out = self._charge(post, idempotency_key="order-42-settle")
+        self.assertEqual(out["id"], "pi_9")
+        data = post.call_args.kwargs["data"]
+        self.assertEqual(data["amount"], 3120)
+        self.assertEqual(data["currency"], "usd")
+        self.assertEqual(data["customer"], "cus_1")
+        self.assertEqual(data["payment_method"], "pm_1")
+        # off_session + confirm are what make the saved card settle without the
+        # shopper present.
+        self.assertEqual(data["off_session"], "true")
+        self.assertEqual(data["confirm"], "true")
+        self.assertEqual(post.call_args.kwargs["auth"], ("sk_test", ""))
+        # Idempotency-Key rides as a header so a retried settlement never
+        # double-charges.
+        self.assertEqual(post.call_args.kwargs["headers"], {"Idempotency-Key": "order-42-settle"})
+
+    def test_missing_key_raises_before_network(self):
+        post = mock.Mock()
+        with self.assertRaises(sg.StripeError):
+            sg.create_payment_intent("", amount_cents=100, customer="c", payment_method="pm", post=post)
+        post.assert_not_called()
+
+    def test_missing_customer_or_pm_raises_before_network(self):
+        post = mock.Mock()
+        with self.assertRaises(sg.StripeError):
+            sg.create_payment_intent("sk", amount_cents=100, customer="", payment_method="pm", post=post)
+        with self.assertRaises(sg.StripeError):
+            sg.create_payment_intent("sk", amount_cents=100, customer="c", payment_method="", post=post)
+        post.assert_not_called()
+
+    def test_nonpositive_amount_raises_before_network(self):
+        post = mock.Mock()
+        with self.assertRaises(sg.StripeError):
+            self._charge(post, amount_cents=0)
+        post.assert_not_called()
+
+    def test_card_decline_raises_card_error_with_detail(self):
+        # Stripe's off-session decline shape: HTTP 402, error.type card_error,
+        # with the failed payment_intent echoed back for the retry path.
+        body = {
+            "error": {
+                "type": "card_error",
+                "code": "card_declined",
+                "decline_code": "insufficient_funds",
+                "message": "Your card has insufficient funds.",
+                "payment_intent": {"id": "pi_dead"},
+            }
+        }
+        post = mock.Mock(return_value=_ok(402, body))
+        with self.assertRaises(sg.StripeCardError) as ctx:
+            self._charge(post)
+        err = ctx.exception
+        self.assertEqual(err.code, "card_declined")
+        self.assertEqual(err.decline_code, "insufficient_funds")
+        self.assertEqual(err.payment_intent, "pi_dead")
+        # A card decline is still a StripeError subclass so blanket handlers catch it.
+        self.assertIsInstance(err, sg.StripeError)
+
+    def test_non_card_error_raises_plain_stripe_error(self):
+        post = mock.Mock(return_value=_ok(400, {"error": {"type": "invalid_request_error", "message": "bad"}}))
+        with self.assertRaises(sg.StripeError) as ctx:
+            self._charge(post)
+        self.assertNotIsInstance(ctx.exception, sg.StripeCardError)
+
+
+class TestRetrievePaymentIntent(unittest.TestCase):
+    """GOL-2053: read the deposit intent back to recover the saved card ids."""
+
+    def test_returns_customer_and_payment_method(self):
+        get = mock.Mock(return_value=_ok(200, {"id": "pi_1", "customer": "cus_9", "payment_method": "pm_9"}))
+        out = sg.retrieve_payment_intent("sk_test", "pi_1", get=get)
+        self.assertEqual(out["customer"], "cus_9")
+        self.assertEqual(out["payment_method"], "pm_9")
+        # GET by id, authed with the secret key.
+        self.assertTrue(get.call_args.args[0].endswith("/v1/payment_intents/pi_1"))
+        self.assertEqual(get.call_args.kwargs["auth"], ("sk_test", ""))
+
+    def test_missing_key_or_id_raises_before_network(self):
+        get = mock.Mock()
+        with self.assertRaises(sg.StripeError):
+            sg.retrieve_payment_intent("", "pi_1", get=get)
+        with self.assertRaises(sg.StripeError):
+            sg.retrieve_payment_intent("sk", "", get=get)
+        get.assert_not_called()
+
+    def test_non_2xx_raises_stripe_error(self):
+        get = mock.Mock(return_value=_ok(404, {"error": {"message": "No such payment_intent"}}))
+        with self.assertRaises(sg.StripeError):
+            sg.retrieve_payment_intent("sk", "pi_missing", get=get)
+
+
 class TestWebhookSignature(unittest.TestCase):
     SECRET = "whsec_test"
 
