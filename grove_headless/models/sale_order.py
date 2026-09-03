@@ -69,6 +69,24 @@ class SaleOrder(models.Model):
         copy=False,
     )
 
+    def _preorder_variant_id_set(self):
+        """Variant ids on this order charged as a preorder deposit (GOL-1982).
+
+        A preorder consumes a per-variant ``preorder_cap`` (GOL-1671), never
+        on-hand stock, and owes no shipping label at order time (GOL-1933 guard).
+        Both inventory checks that touch on-hand exclude these lines: the oversell
+        webhook (controllers/main.py) and the label-buy path below. Parsing lives
+        here so the two paths share one source of truth for "is this a preorder
+        line" instead of re-deriving it from the comma-joined field independently.
+        """
+        self.ensure_one()
+        ids = set()
+        for raw in (self.grove_preorder_variant_ids or "").split(","):
+            raw = raw.strip()
+            if raw.isdigit():
+                ids.add(int(raw))
+        return ids
+
     def _persist_label_result(self, vals):
         """Write label results through an independent cursor so they survive
         the request-transaction rollback that follows a raised UserError.
@@ -90,6 +108,7 @@ class SaleOrder(models.Model):
         for order in self:
             if order.grove_tracking_numbers:
                 raise UserError(f"{order.name} already has labels; clear fields to re-buy.")
+            preorder_ids = order._preorder_variant_id_set()
             partner = order.partner_shipping_id
             address = {
                 "name": partner.name,
@@ -112,6 +131,12 @@ class SaleOrder(models.Model):
                 tmpl = line.product_id.product_tmpl_id
                 if tmpl.type == "service":  # skip the shipping-charge line itself
                     continue
+                if line.product_id.id in preorder_ids:
+                    # Preorder lines consume preorder_cap, not on-hand, and owe no
+                    # label at order time (GOL-1982 / GOL-1933) — never pack them,
+                    # even on a bareroot (shippable-tier) variant. The label is
+                    # bought later, when the wave opens and the balance is charged.
+                    continue
                 tier = line.product_id.grove_effective_shipping_tier or "potted"
                 qty = line.product_uom_qty
                 if qty != int(qty):
@@ -120,6 +145,12 @@ class SaleOrder(models.Model):
                         f"non-integer quantity {qty}; trees pack per whole unit."
                     )
                 items.append((tier, int(tmpl.grove_tree_length or "20"), qty))
+            if not items:
+                # Nothing shippable remains — the order is all-preorder (or has no
+                # real product lines). No on-hand pool is decremented and no label
+                # is owed; refuse rather than silently "succeed" with zero labels
+                # (which would falsely flip grove_delivery_status).
+                raise UserError(f"{order.name}: no shippable lines — all preorder or pickup, no label is owed.")
             reason = unshippable_reason(items)
             if reason:
                 raise UserError(f"{order.name}: {reason}")
