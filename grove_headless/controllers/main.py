@@ -1022,6 +1022,26 @@ class GroveHeadlessAPI(http.Controller):
             }
         )
 
+        # Disclosure for the review page (GOL-2052 constraint 1): a preorder
+        # defers shipping + tax to an off-session charge at ship, so we tell the
+        # shopper the ESTIMATED shipping/tax and what settles later, plainly. The
+        # estimate is the quoted zone rate (kept for display only); the actual
+        # amount is recomputed and charged when the box is packed.
+        amount_due_today = round(charged_cents / 100.0, 2)
+        shipping_deferred = bool(preorder_ids)
+        estimated_shipping = round(
+            sum(
+                ol.price_unit
+                for ol in order.order_line
+                if ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE
+            ),
+            2,
+        )
+        # amount_total carries the full goods + shipping + tax; anything not
+        # charged today (preorder tree balances, deferred shipping, deferred tax)
+        # settles at ship.
+        amount_due_at_ship = round(order.amount_total - amount_due_today, 2)
+
         return _json_response(
             {
                 "session_id": session.get("id"),
@@ -1030,8 +1050,17 @@ class GroveHeadlessAPI(http.Controller):
                 "order_ref": order.name,
                 "access_token": access_token,
                 "has_preorder": bool(preorder_ids),
-                "amount_due_today": round(charged_cents / 100.0, 2),
+                "amount_due_today": amount_due_today,
                 "amount_total": order.amount_total,
+                # GOL-2052: shipping + tax deferral disclosure. When
+                # `shipping_deferred` is true the review page must show
+                # `estimated_shipping`/`estimated_tax` as ESTIMATES and state the
+                # real amount is charged at ship; `amount_due_at_ship` is the
+                # deferred remainder (tree balances + shipping + tax).
+                "shipping_deferred": shipping_deferred,
+                "estimated_shipping": estimated_shipping,
+                "estimated_tax": round(order.amount_tax, 2),
+                "amount_due_at_ship": amount_due_at_ship,
                 "currency": order.currency_id.name,
                 # Itemized charged-today breakdown — the SAME array Stripe renders
                 # (goods / per-unit deposit / shipping / WV tax), so the review page
@@ -1893,12 +1922,17 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
 
     Returns (line_items, preorder_variant_ids, charged_cents). Applies the
     charging matrix per product line (in-stock units = full price; short-stock
-    units = a per-unit flat deposit) and adds the WV sales tax as ONE explicit
-    line (Stripe Tax OFF) covering only what is charged today — preorder units
-    contribute a deposit and no tax now; their goods + tax settle off-session
-    when they ship. A partially-stocked line splits into an in-stock charge and
-    a deposit charge (GOL-1036 defect 3); tax today is prorated to only the
-    in-stock units so the deposit units aren't taxed before they ship.
+    units = a per-unit flat deposit).
+
+    GOL-2052 (CEO directive 2026-09-03): when an order contains ANY preorder
+    unit, ONLY the per-unit deposit(s) — and any in-stock goods that bill in
+    full — are charged today; SHIPPING and TAX are deferred and collected
+    off-session at ship time, at *actual* cost (see ``_settle_at_ship``). A
+    stale quoted rate can then never be the charge, and tax is recomputed on the
+    settled total (WV tax applies to the shipping line, whose real amount is not
+    known until the box is packed). A fully-in-stock / farm-pickup order has no
+    preorder unit, ships now, and is unchanged: shipping + WV tax ride the
+    today-charge as one explicit line each (Stripe Tax OFF).
 
     ``calendar_preorder_ids`` (GOL-1309): variant ids whose bareroot ship wave
     is not yet open per the shipping calendar (see
@@ -1911,6 +1945,11 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
     line_items = []
     preorder_variant_ids = []
     tax_today = 0.0
+    # Shipping is captured here and only committed to the today-charge AFTER the
+    # loop, once we know whether the cart contains a preorder — a preorder defers
+    # shipping (and all tax) to the ship-time settlement (GOL-2052).
+    shipping_item = None
+    shipping_tax = 0.0
     # Calendar-window preorders (GOL-1666) apply to bareroot regardless of
     # fulfillment: a bareroot line that can't be filled now charges the flat
     # deposit even when in stock, matching the product page. The zone that keys
@@ -1935,8 +1974,10 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
             amount = stripe_gateway.to_cents(line.price_unit)
             if amount <= 0:
                 continue
-            line_items.append({"name": name, "kind": "shipping", "amount_cents": amount, "quantity": 1})
-            tax_today += line.price_tax
+            # Held, not appended: whether this rides today or defers to ship is
+            # decided after the loop from has_preorder (GOL-2052).
+            shipping_item = {"name": name, "kind": "shipping", "amount_cents": amount, "quantity": 1}
+            shipping_tax = line.price_tax
             continue
         # free_qty (on-hand minus reserved), not qty_available: a unit another
         # order already reserved is not sellable now and must fall to preorder
@@ -1974,10 +2015,25 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
                 line_items.append({"name": name, "kind": "goods", "amount_cents": amount, "quantity": qty})
                 # Prorate the line's tax to the units billed today.
                 tax_today += line.price_tax * (qty / ordered_qty) if ordered_qty else 0.0
-    if tax_today > 0:
-        line_items.append(
-            {"name": "Sales tax (WV)", "kind": "tax", "amount_cents": stripe_gateway.to_cents(tax_today), "quantity": 1}
-        )
+    # GOL-2052: a cart with any preorder unit collects ONLY deposits (+ any
+    # in-stock goods) today; its shipping and ALL tax are settled off-session at
+    # ship on actual cost, so neither the quoted shipping line nor a tax line is
+    # charged now. A non-preorder cart ships now and keeps the prior behaviour:
+    # shipping + WV tax ride today's charge.
+    has_preorder = bool(preorder_variant_ids)
+    if not has_preorder:
+        if shipping_item is not None:
+            line_items.append(shipping_item)
+            tax_today += shipping_tax
+        if tax_today > 0:
+            line_items.append(
+                {
+                    "name": "Sales tax (WV)",
+                    "kind": "tax",
+                    "amount_cents": stripe_gateway.to_cents(tax_today),
+                    "quantity": 1,
+                }
+            )
     charged_cents = sum(li["amount_cents"] * li["quantity"] for li in line_items)
     return line_items, preorder_variant_ids, charged_cents
 
