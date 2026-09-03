@@ -290,6 +290,26 @@ def create_payment_intent(
     return _parse(resp, "payment intent")
 
 
+def retrieve_payment_intent(secret_key, payment_intent_id, *, get=requests.get, timeout=DEFAULT_TIMEOUT):
+    """Fetch a PaymentIntent by id. Returns the parsed intent dict.
+
+    The ship-time settlement (GOL-2053) reads back the DEPOSIT intent saved at
+    checkout to recover the ``customer`` and ``payment_method`` that
+    ``setup_future_usage=off_session`` attached — those are what the off-session
+    balance charge (``create_payment_intent``) needs, and the checkout webhook
+    only persisted the intent id. Raises StripeError on any non-2xx."""
+    if not secret_key:
+        raise StripeError("Stripe secret key is not configured")
+    if not payment_intent_id:
+        raise StripeError("cannot retrieve a payment intent without an id")
+    resp = get(
+        f"{STRIPE_API_BASE}/v1/payment_intents/{payment_intent_id}",
+        auth=(secret_key, ""),
+        timeout=timeout,
+    )
+    return _parse(resp, "payment intent")
+
+
 def _parse(resp, what):
     """Turn a Stripe HTTP response into a dict or a StripeError.
 

@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <!-- GOL-2053: automatically re-attempt shipped-but-unsettled orders whose
+         card can still be auto-charged. Stops at
+         grove_headless.settlement_max_retries (default 3), after which the
+         order is manual-only and stays in the ops queue via its Discord alert.
+         Hourly is frequent enough to clear a transient decline without hammering
+         a hard-declined card. -->
+    <record id="ir_cron_grove_retry_settlements" model="ir.cron">
+        <field name="name">Grove: retry failed ship-time settlements</field>
+        <field name="model_id" ref="sale.model_sale_order"/>
+        <field name="state">code</field>
+        <field name="code">model._cron_retry_settlements()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">hours</field>
+        <field name="active" eval="True"/>
+    </record>
+</odoo>

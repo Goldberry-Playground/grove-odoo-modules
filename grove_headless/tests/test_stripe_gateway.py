@@ -241,6 +241,32 @@ class TestPaymentIntent(unittest.TestCase):
         self.assertNotIsInstance(ctx.exception, sg.StripeCardError)
 
 
+class TestRetrievePaymentIntent(unittest.TestCase):
+    """GOL-2053: read the deposit intent back to recover the saved card ids."""
+
+    def test_returns_customer_and_payment_method(self):
+        get = mock.Mock(return_value=_ok(200, {"id": "pi_1", "customer": "cus_9", "payment_method": "pm_9"}))
+        out = sg.retrieve_payment_intent("sk_test", "pi_1", get=get)
+        self.assertEqual(out["customer"], "cus_9")
+        self.assertEqual(out["payment_method"], "pm_9")
+        # GET by id, authed with the secret key.
+        self.assertTrue(get.call_args.args[0].endswith("/v1/payment_intents/pi_1"))
+        self.assertEqual(get.call_args.kwargs["auth"], ("sk_test", ""))
+
+    def test_missing_key_or_id_raises_before_network(self):
+        get = mock.Mock()
+        with self.assertRaises(sg.StripeError):
+            sg.retrieve_payment_intent("", "pi_1", get=get)
+        with self.assertRaises(sg.StripeError):
+            sg.retrieve_payment_intent("sk", "", get=get)
+        get.assert_not_called()
+
+    def test_non_2xx_raises_stripe_error(self):
+        get = mock.Mock(return_value=_ok(404, {"error": {"message": "No such payment_intent"}}))
+        with self.assertRaises(sg.StripeError):
+            sg.retrieve_payment_intent("sk", "pi_missing", get=get)
+
+
 class TestWebhookSignature(unittest.TestCase):
     SECRET = "whsec_test"
 

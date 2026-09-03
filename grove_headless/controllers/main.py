@@ -1019,6 +1019,9 @@ class GroveHeadlessAPI(http.Controller):
                 "grove_stripe_payment_intent": session.get("payment_intent") or False,
                 "grove_preorder_variant_ids": ",".join(str(i) for i in preorder_ids) or False,
                 "grove_checkout_status": "pending",
+                # Dollars actually taken today — the base the ship-time settlement
+                # subtracts from the (recomputed) order total (GOL-2053).
+                "grove_amount_charged_today": round(charged_cents / 100.0, 2),
             }
         )
 
@@ -2092,6 +2095,262 @@ def _oversold_lines(order):
     return oversold
 
 
+# ── Ship-time settlement (GOL-2053) ─────────────────────────────────────────
+#
+# A deposit-only preorder takes ONLY grove_amount_charged_today at checkout; the
+# balance — tree prices + ACTUAL shipping (the labels we bought) + WV tax
+# recomputed on that real cost — is captured off-session when the box ships.
+#
+# Product knobs (CEO-tunable via ir.config_parameter, no code change):
+#   grove_headless.settlement_max_retries — automatic retries of a declined card
+#     before it drops to manual-only (default 3; the retry cron enforces it).
+# See the confirmation on GOL-2052 for the ratified retry/dunning policy.
+
+
+def _settlement_shipping_line(order):
+    """The GROVE-SHIP line whose price the settlement rewrites to ACTUAL cost,
+    or an empty recordset for a pickup order that never carried one."""
+    return order.order_line.filtered(lambda ol: ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE)[
+        :1
+    ]
+
+
+def _recompute_ship_total(env, order):
+    """Rebuild the order total on the ACTUAL packed shipping + destination-aware
+    WV tax, so settlement bills what really shipped, not the checkout estimate.
+
+    The quoted GROVE-SHIP line price is replaced with grove_actual_shipping_cost;
+    Odoo then recomputes amount_tax from each line's existing (destination-
+    correct) taxes. For a SHIP order we re-run _apply_destination_tax against the
+    current ship-to state as well, so an address edited between checkout and ship
+    still taxes correctly; PICKUP orders always transfer at the WV farm and keep
+    WV tax (mirroring the draft path, which skips destination de-taxing)."""
+    ship_line = _settlement_shipping_line(order)
+    if ship_line:
+        ship_line.price_unit = order.grove_actual_shipping_cost or 0.0
+    if order.grove_fulfillment == "ship":
+        state = order.partner_shipping_id.state_id.code or None
+        _apply_destination_tax(env, order, {"state": state})
+    order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
+
+
+def _resolve_saved_card(secret_key, order):
+    """(customer, payment_method) for the off-session charge.
+
+    Prefers the ids already persisted on the order; otherwise reads them back
+    from the DEPOSIT intent (setup_future_usage attached the method to the
+    customer) and caches them so a retry does not re-hit Stripe. Returns
+    (None, None) when neither the order nor a retrievable intent yields a card —
+    the caller then duns for a manual payment instead of charging."""
+    customer = order.grove_stripe_customer or None
+    payment_method = order.grove_stripe_payment_method or None
+    if customer and payment_method:
+        return customer, payment_method
+    pi_id = order.grove_stripe_payment_intent
+    if not pi_id:
+        return customer, payment_method
+    try:
+        intent = stripe_gateway.retrieve_payment_intent(secret_key, pi_id)
+    except stripe_gateway.StripeError as exc:
+        _logger.error("Could not retrieve deposit intent %s for %s: %s", pi_id, order.name, exc)
+        return customer, payment_method
+    customer = customer or intent.get("customer")
+    payment_method = payment_method or intent.get("payment_method")
+    vals = {}
+    if customer and not order.grove_stripe_customer:
+        vals["grove_stripe_customer"] = customer
+    if payment_method and not order.grove_stripe_payment_method:
+        vals["grove_stripe_payment_method"] = payment_method
+    if vals:
+        order.write(vals)
+    return customer, payment_method
+
+
+def _settlement_pay_link(env, order, secret_key, amount_cents):
+    """A hosted Stripe Checkout URL for the customer to pay the balance manually
+    after an off-session decline (GOL-2053 acceptance 4). Best-effort: returns
+    None if the session can't be created, so the dunning email still sends with
+    a 'contact us' fallback. The session is tagged purpose=settlement so its
+    completion webhook settles the order without re-confirming it."""
+    base = (env["ir.config_parameter"].sudo().get_param("web.base.url") or "").rstrip("/")
+    try:
+        session = stripe_gateway.create_checkout_session(
+            secret_key,
+            line_items=[{"name": f"Balance due — order {order.name}", "amount_cents": amount_cents, "quantity": 1}],
+            success_url=f"{base}/shop/confirmation?order={order.id}",
+            cancel_url=f"{base}/shop/cart",
+            customer_email=order.partner_id.email,
+            metadata={"order_id": order.id, "order_ref": order.name, "purpose": "settlement"},
+        )
+    except stripe_gateway.StripeError as exc:
+        _logger.error("Dunning pay-link creation failed for %s: %s", order.name, exc)
+        return None
+    return session.get("url")
+
+
+def _send_dunning_email(env, order, amount_due, pay_url):
+    """Best-effort dunning email after a ship-time decline. Copy is deliberately
+    plain and honest (the plant already shipped); the ratified final wording is
+    a CEO decision on GOL-2052 — this is the functional default."""
+    email = order.partner_id.email
+    if not email:
+        return
+    if pay_url:
+        cta = f'<p><a href="{pay_url}">Pay your balance securely here</a>.</p>'
+    else:
+        cta = "<p>Please reply to this email and we'll send you a secure payment link.</p>"
+    body = (
+        f"<p>Hi {order.partner_id.name or 'there'},</p>"
+        f"<p>Your order {order.name} has shipped! We tried to collect the remaining "
+        f"balance of ${amount_due:.2f} (your tree total plus actual shipping and tax) "
+        f"on the card you used at checkout, but it didn't go through.</p>"
+        f"{cta}"
+        f"<p>Thank you — Goldberry Grove Nursery</p>"
+    )
+    try:
+        env["mail.mail"].sudo().create(
+            {
+                "subject": f"Payment needed for your shipped order {order.name}",
+                "email_to": email,
+                "body_html": body,
+                "auto_delete": True,
+            }
+        ).send()
+    except Exception:  # noqa: BLE001 — dunning email is best-effort
+        _logger.warning("Dunning email failed for %s", order.name, exc_info=True)
+
+
+def _mark_settlement_failed(env, order, secret_key, amount_cents, *, reason):
+    """Record a shipped-but-unsettled order and start the dunning path: flag the
+    status, post chatter, alert ops on Discord, and email the customer a hosted
+    payment link. The order STAYS shipped — the decline never rolls back the
+    fulfilment (GOL-2053 acceptance 4)."""
+    balance = round(amount_cents / 100.0, 2)
+    order.write({"grove_checkout_status": "settlement_failed"})
+    note = (
+        f"Ship-time settlement of ${balance:.2f} failed ({reason}). Order stays "
+        f"SHIPPED; customer has been emailed a payment link. Attempt "
+        f"{order.grove_settlement_attempts}."
+    )
+    order.message_post(body=note)
+    _notify_discord(
+        f":rotating_light: Settlement FAILED on {order.name} — ${balance:.2f} unpaid "
+        f"({reason}). Shipped but unsettled; customer dunned. Attempt "
+        f"{order.grove_settlement_attempts}."
+    )
+    pay_url = _settlement_pay_link(env, order, secret_key, amount_cents)
+    _send_dunning_email(env, order, balance, pay_url)
+
+
+def settle_order_at_ship(env, order):
+    """Capture a preorder's deferred balance off-session at ship (GOL-2053).
+
+    Idempotent and safe to call from either ship trigger (label purchase or the
+    operator mark-shipped path): an order already ``settled`` is a no-op, and the
+    order-scoped Idempotency-Key means a replayed charge returns the original
+    intent instead of double-billing. Never raises — a decline or gateway error
+    is recorded on the order (the plant has shipped), never propagated.
+
+    Returns a short status string for the caller/tests:
+      settled | already_settled | not_applicable | nothing_due | no_key |
+      settlement_failed | settlement_error
+    """
+    order.ensure_one()
+    status = order.grove_checkout_status
+    if status == "settled":
+        return "already_settled"
+    # Only a deposit-only order (or one whose earlier settlement failed) has a
+    # deferred balance. A fully-in-stock order already collected shipping+tax at
+    # checkout, and a non-checkout order has nothing to settle.
+    if status not in ("deposit_paid", "settlement_failed"):
+        return "not_applicable"
+
+    _recompute_ship_total(env, order)
+    balance = round((order.amount_total or 0.0) - (order.grove_amount_charged_today or 0.0), 2)
+    if balance <= 0:
+        order.write({"grove_checkout_status": "settled"})
+        order.message_post(body=f"Ship-time settlement: nothing further due (balance ${balance:.2f}).")
+        return "nothing_due"
+    amount_cents = stripe_gateway.to_cents(balance)
+
+    tenant = order.website_id.grove_tenant_slug() if order.website_id else None
+    secret_key = _tenant_secret_key(tenant)
+    if not secret_key:
+        _logger.error("Ship-time settlement: no Stripe key for %s (tenant %s)", order.name, tenant)
+        order.message_post(body="Ship-time settlement could not run: Stripe key is not configured.")
+        return "no_key"
+
+    attempts = (order.grove_settlement_attempts or 0) + 1
+    customer, payment_method = _resolve_saved_card(secret_key, order)
+    if not customer or not payment_method:
+        order.write({"grove_settlement_attempts": attempts})
+        _mark_settlement_failed(env, order, secret_key, amount_cents, reason="no saved card on file")
+        return "settlement_failed"
+
+    # Order-scoped so a retried ship never double-charges (GOL-2053 acceptance 3).
+    idem = f"grove-settle-{order.id}-{order.grove_stripe_session_id or order.grove_stripe_payment_intent or order.id}"
+    try:
+        intent = stripe_gateway.create_payment_intent(
+            secret_key,
+            amount_cents=amount_cents,
+            customer=customer,
+            payment_method=payment_method,
+            metadata={"order_ref": order.name, "purpose": "ship_settlement"},
+            idempotency_key=idem,
+            description=f"Ship-time balance for {order.name}",
+        )
+    except stripe_gateway.StripeCardError as exc:
+        order.write(
+            {
+                "grove_settlement_attempts": attempts,
+                "grove_settlement_payment_intent": exc.payment_intent or order.grove_settlement_payment_intent,
+            }
+        )
+        _mark_settlement_failed(
+            env, order, secret_key, amount_cents, reason=f"card declined ({exc.decline_code or exc.code or 'declined'})"
+        )
+        return "settlement_failed"
+    except stripe_gateway.StripeError as exc:
+        # Transport/config error (not a decline) — retryable. Keep the order in
+        # its current status so the retry cron / manual re-trigger tries again.
+        order.write({"grove_settlement_attempts": attempts})
+        _logger.error("Ship-time settlement gateway error for %s: %s", order.name, exc)
+        order.message_post(body=f"Ship-time settlement could not reach Stripe (will retry): {exc}")
+        _notify_discord(f":warning: Settlement gateway error on {order.name} (${balance:.2f}) — will retry: {exc}")
+        return "settlement_error"
+
+    order.write(
+        {
+            "grove_checkout_status": "settled",
+            "grove_settlement_payment_intent": intent.get("id") or order.grove_settlement_payment_intent,
+            "grove_settlement_attempts": attempts,
+        }
+    )
+    order.message_post(
+        body=(
+            f"Ship-time settlement captured ${balance:.2f} off-session — actual shipping "
+            f"${order.grove_actual_shipping_cost or 0.0:.2f}, recomputed tax ${order.amount_tax:.2f}."
+        )
+    )
+    return "settled"
+
+
+def _handle_settlement_paid(env, order, session):
+    """A customer paid the dunning link (purpose=settlement): mark the order
+    settled and record the intent, WITHOUT re-running the oversell / confirm /
+    receipt path a first-time checkout does."""
+    if order.grove_checkout_status != "settled":
+        order.write(
+            {
+                "grove_checkout_status": "settled",
+                "grove_settlement_payment_intent": session.get("payment_intent")
+                or order.grove_settlement_payment_intent,
+            }
+        )
+        order.message_post(body="Ship-time balance paid by the customer via the payment link.")
+    return "settled"
+
+
 def _handle_session_completed(env, session):
     """checkout.session.completed: record the payment intent, then either
     refund an oversell or mark the order paid/deposit-paid and confirm it."""
@@ -2099,10 +2358,22 @@ def _handle_session_completed(env, session):
     if not order:
         return "order_not_found"
 
+    # A dunning payment (customer clearing a failed ship-time settlement) settles
+    # the order directly — it must not re-run oversell/confirm/receipt (GOL-2053).
+    if (session.get("metadata") or {}).get("purpose") == "settlement":
+        return _handle_settlement_paid(env, order, session)
+
     payment_intent = session.get("payment_intent")
     vals = {}
     if payment_intent:
         vals["grove_stripe_payment_intent"] = payment_intent
+    # Persist the saved-card handle for the ship-time off-session settlement
+    # (GOL-2053): setup_future_usage=off_session attaches the payment method to a
+    # Customer, whose id the completed session carries. The payment_method id is
+    # resolved from the deposit intent at settlement (it is not on the session).
+    customer = session.get("customer")
+    if customer:
+        vals["grove_stripe_customer"] = customer
 
     oversold = _oversold_lines(order)
     if oversold:
