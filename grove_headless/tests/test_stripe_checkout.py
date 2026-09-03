@@ -260,8 +260,14 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         order = self._make_order(qty=2)
         self._add_shipping_line(order)  # a real ship order carries GROVE-SHIP
         line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order)
-        self.assertEqual(preorder_ids, [self.product.id, self.product.id])
+        # preorder_variant_ids is per-variant (one id per deferred line), not
+        # per-unit — the 2-unit count rides the deposit line's `quantity`, and
+        # the downstream settlement keys off `product.id in preorder_ids` as a
+        # set membership (see GOL-1057 sibling test, line_charge splitting).
+        self.assertEqual(preorder_ids, [self.product.id])
         # Only the deposit is charged today.
+        deposit = next(li for li in line_items if li["kind"] == "deposit")
+        self.assertEqual(deposit["quantity"], 2)  # both preorder units deferred
         kinds = {li["kind"] for li in line_items}
         self.assertEqual(kinds, {"deposit"})
         self.assertFalse([li for li in line_items if li["kind"] == "shipping"])
