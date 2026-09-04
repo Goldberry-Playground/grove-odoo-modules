@@ -1,38 +1,59 @@
 #!/usr/bin/env python3
-"""Seed the 11 "coming soon" placeholder plant products (GOL-757, PR 2).
+"""Seed the 11 "coming soon" placeholder plant products (GOL-757, GOL-2020).
 
-These are species the nursery intends to carry but has NO stock for yet. Josh's
-spec (Asana 1216758513298024, 2026-07-23) wants their product pages to RENDER —
-so a visitor browsing the catalog can see they are on the way — while being
-NOT purchasable. This is a distinct storefront state from an in-stock, sold-out,
-or unpublished product, and the grove_headless catalog controller already draws
-the line we need:
+These are species the nursery intends to carry but has NO stock for yet. The
+script supports two visibility modes, selected by the ``PUBLISHED`` env flag; in
+BOTH modes the placeholders are ``sale_ok = False``, ``list_price = 0.0``, qty 0.
 
-  * ``product_detail`` (``/grove/api/v1/products/<id>``) filters ONLY on
-    ``website_published = True`` — so a published placeholder renders its own
-    product page.
-  * ``build_product_domain`` (the ``/shop`` grid and every ``?cat=<slug>``
-    facet) requires BOTH ``website_published = True`` AND ``sale_ok = True``.
+PUBLISHED=1 (default — the original QA behaviour, GOL-757)
+  Josh's spec (Asana 1216758513298024, 2026-07-23) wants their product pages to
+  RENDER — so a visitor browsing the catalog can see they are on the way — while
+  being NOT purchasable. The grove_headless catalog controller draws that line:
 
-So a placeholder set to ``website_published = True`` + ``sale_ok = False``:
-  * renders as a not-purchasable product page (sale_ok False = no add-to-cart), and
-  * is EXCLUDED from the cat-bar counts and the shop grid.
+    * ``product_detail`` (``/grove/api/v1/products/<id>``) filters ONLY on
+      ``website_published = True`` — so a published placeholder renders its page.
+    * ``build_product_domain`` (the ``/shop`` grid and every ``?cat=<slug>``
+      facet) requires BOTH ``website_published = True`` AND ``sale_ok = True``.
 
-That exclusion is not incidental — it is required by Josh's own verify-done
-targets. Seven of the eleven placeholders are Native (Black Cherry, PawPaw,
-Eastern Redbud, American Hazelnut, Shagbark Hickory, Black Walnut, Butternut),
-but the target is ``?cat=native`` returns 5 (the live natives only). A
-``sale_ok = True`` + ``qty 0`` model would push all seven into that facet
-(``build_product_domain`` has no quantity filter), inflating native to 12 and
-breaking the target. ``sale_ok = False`` is therefore the correct, spec-
-consistent encoding of "published but not purchasable" — qty 0 is retained as a
-belt-and-suspenders signal for the buy box, but it is ``sale_ok`` that keeps the
-facet counts honest.
+  So ``website_published = True`` + ``sale_ok = False`` renders a not-purchasable
+  product page and is EXCLUDED from the cat-bar counts and the shop grid. That
+  exclusion is required by Josh's verify-done targets: seven of the eleven are
+  Native, but ``?cat=native`` must return 5 (the live natives only). A
+  ``sale_ok = True`` + qty 0 model would push all seven into that facet
+  (``build_product_domain`` has no quantity filter), inflating native to 12.
+  ``sale_ok = False`` is therefore the correct encoding of "published but not
+  purchasable"; qty 0 is a belt-and-suspenders buy-box signal.
 
-When a species graduates to live stock, the operator flips ``sale_ok = True``,
-sets ``list_price``, and adds stock quants (or re-runs ``seed_variety_products``
-after archiving the placeholder) — the Format axis and use-type categories are
-already in place.
+PUBLISHED=0 (staged/unpublished — GOL-2020, the mode wanted for PROD)
+  Josh's 2026-09-01 decision: stage these species (and their photos, migrated by
+  ``copy_product_images.py``) in prod Odoo WITHOUT them appearing on the
+  storefront until each has real stock and a price. Because the API visibility
+  gate is ``website_published`` ALONE (``controllers/product_domain.py``, it does
+  NOT consider ``sale_ok``), an unpublished placeholder is invisible to
+  ``/grove/api/v1/products`` entirely — it will not appear on ``/shop``, cannot
+  be previewed on the storefront, and is reachable only from the Odoo backend.
+  That is the intent: the prod product count stays flat until a species graduates.
+
+The $0.00 fragility — READ BEFORE WRITING PROMOTION TOOLING
+  These placeholders carry ``list_price = 0.0``. In PUBLISHED=1 mode the ONLY
+  thing keeping them unbuyable is ``sale_ok = False``; PUBLISHED=0 adds a second
+  layer (``website_published = False``). Any future promotion tooling MUST
+  preserve BOTH flags faithfully — flipping ``sale_ok`` OR ``website_published``
+  alone (without also setting a real ``list_price``) yields a species purchasable
+  at zero dollars. Never toggle one flag in isolation.
+
+AAA QA E2E fixtures are NEVER seeded here
+  This script only ever creates the 11 species in ``PRODUCTS`` below. The two
+  ``AAA QA E2E`` test fixtures (``E2E-*-INSTOCK``, ``sale_ok = True`` at $42) live
+  only in QA and must never reach prod; they are absent from ``PRODUCTS`` by
+  construction, and ``copy_product_images.py`` additionally hard-excludes them.
+
+Graduation (operator UI workflow, per GOL-1893)
+  When a species gets real stock, the operator on the Odoo product form flips
+  ``website_published = True`` AND ``sale_ok = True`` (BOTH — see fragility note),
+  sets a real ``list_price``, adds stock quants, and fills the growing-fact fields
+  (now editable on the form thanks to GOL-1893). The Format axis and use-type
+  categories are already in place from this seed.
 
 Categories (public_categ_ids, m2m) MUST already exist: this script RESOLVES
 them by name and FAILS LOUD if any is missing, because their creation +
@@ -55,7 +76,8 @@ Usage
     ODOO_PASSWORD=<admin> \\
     DRY_RUN=1 python3 scripts/seed_coming_soon_products.py
 
-    # Live: DRY_RUN unset -> creates the placeholder templates.
+    # Live, PUBLISHED (QA): DRY_RUN unset -> creates published placeholder templates.
+    # Live, UNPUBLISHED (PROD, GOL-2020): add PUBLISHED=0 to stage them hidden.
 
 Exit codes: 0 ok, 1 auth/data failure (fails loudly; each template is one
 create call).
@@ -73,6 +95,13 @@ ODOO_DB = os.getenv("ODOO_DB", "Goldberry")
 ODOO_USER = os.getenv("ODOO_USER", "josh@goldberrygrove.farm")
 ODOO_PASSWORD = os.getenv("ODOO_PASSWORD")
 DRY_RUN = os.getenv("DRY_RUN") == "1"
+# PUBLISHED controls website_published on the seeded placeholders. Default "1"
+# preserves the original QA behaviour (published, page renders). PUBLISHED=0
+# seeds them UNPUBLISHED — invisible to /grove/api/v1/products entirely (the API
+# visibility gate is website_published ALONE; see controllers/product_domain.py),
+# so the records + photos stage in the Odoo backend without touching /shop. This
+# is the mode GOL-2020 wants for prod. sale_ok stays False in BOTH modes.
+PUBLISHED = os.getenv("PUBLISHED", "1") != "0"
 
 COMPANY_NAME = "At The Grove Nursery"
 
@@ -202,7 +231,11 @@ def resolve_category(models, uid, name: str) -> int:
 
 
 def main() -> None:
-    print(f"Target: {ODOO_URL} db={ODOO_DB} company={COMPANY_NAME}  DRY_RUN={'yes' if DRY_RUN else 'NO — LIVE'}")
+    print(
+        f"Target: {ODOO_URL} db={ODOO_DB} company={COMPANY_NAME}  "
+        f"PUBLISHED={'yes' if PUBLISHED else 'NO — staged/unpublished'}  "
+        f"DRY_RUN={'yes' if DRY_RUN else 'NO — LIVE'}"
+    )
     models, uid = authenticate()
 
     company_ids = call(models, uid, "res.company", "search", [[("name", "=", COMPANY_NAME)]], {"limit": 1})
@@ -299,7 +332,8 @@ def main() -> None:
         if DRY_RUN:
             print(
                 f"  + WOULD CREATE {sku} ({product['name']}) — {product['botanical']}; "
-                f"cats=[{cat_names}]; published, NOT sale_ok, qty 0; Format={list(FORMAT_VALUES)}"
+                f"cats=[{cat_names}]; {'published' if PUBLISHED else 'UNPUBLISHED'}, "
+                f"NOT sale_ok, qty 0; Format={list(FORMAT_VALUES)}"
             )
             continue
 
@@ -312,7 +346,7 @@ def main() -> None:
             "company_id": company_id,
             "type": "consu",
             "is_storable": True,
-            "is_published": True,  # website_published -> the product page renders
+            "is_published": PUBLISHED,  # website_published; PUBLISHED=0 -> staged, page hidden
             "sale_ok": False,  # excluded from /shop grid + ?cat= facets; not purchasable
             "purchase_ok": False,
             "attribute_line_ids": [
@@ -384,8 +418,10 @@ def main() -> None:
             if not r:
                 problems.append(f"{p['sku']}: template id={tmpl_id} not found after seed")
                 continue
-            if not r["website_published"]:
-                problems.append(f"{p['sku']}: website_published is False (page would not render)")
+            if bool(r["website_published"]) != PUBLISHED:
+                problems.append(
+                    f"{p['sku']}: website_published is {r['website_published']} but PUBLISHED={PUBLISHED} was requested"
+                )
             if r["sale_ok"]:
                 problems.append(f"{p['sku']}: sale_ok is True (would leak into /shop + ?cat= facets)")
             want = {cat_id[c] for c in p["cats"]}
@@ -393,7 +429,7 @@ def main() -> None:
                 problems.append(f"{p['sku']}: categories {r['public_categ_ids']} != wanted {sorted(want)}")
         if problems:
             fail("Verify failed:\n  - " + "\n  - ".join(problems))
-        print(f"  OK — {len(rows)} placeholders: website_published=True, sale_ok=False, categories exact.")
+        print(f"  OK — {len(rows)} placeholders: website_published={PUBLISHED}, sale_ok=False, categories exact.")
 
     print(f"\nDone. {created} created." + (" (dry run — nothing written)" if DRY_RUN else ""))
 
