@@ -2205,9 +2205,13 @@ def _notify_customer_apology(env, order, product_names, refunded):
 
 
 def _notify_discord(message):
-    """Best-effort ops ping. DISCORD_OPS_WEBHOOK_URL is optional; a missing URL
-    or a failed POST never breaks webhook processing."""
-    url = os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+    """Best-effort order-ops ping. Order/pickup summaries go to their own
+    channel (DISCORD_ORDERS_WEBHOOK_URL — Josh 2026-09-03), separate from the
+    bot-logs/observability channel CI posts to. Falls back to
+    DISCORD_OPS_WEBHOOK_URL so a missing orders webhook surfaces alerts in the
+    ops channel (visibly misrouted) instead of dropping them silently; both
+    unset, or a failed POST, never breaks webhook processing."""
+    url = os.environ.get("DISCORD_ORDERS_WEBHOOK_URL", "") or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
     if not url:
         return
     try:
