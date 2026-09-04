@@ -223,28 +223,70 @@ def _verify_stripe_webhook(raw, sig, secrets):
 # into another LLC's account, and a refund whose payment_intent lives in a
 # different account fails outright. Names are lowercase to match the odoo
 # process-env convention already used for stripe_*_secret (Terra wires the
-# per-tenant vars, GOL-973). `stripe_test_secret_key` is the legacy single-key
-# fallback: an env that sets only it (and no per-tenant keys) routes every
-# tenant to one account — i.e. a single merchant-of-record — with zero code
-# change, so the per-tenant-vs-single-account choice stays a config decision.
+# per-tenant vars, GOL-973). The single fallback key routes every tenant to one
+# account — a single merchant-of-record — with zero code change, so the
+# per-tenant-vs-single-account choice stays a config decision.
 STRIPE_SECRET_KEY_ENV_PREFIX = "stripe_secret_key_"
-STRIPE_SECRET_KEY_LEGACY_ENV = "stripe_test_secret_key"
+# Single merchant-of-record fallback key. Prefer the non-"test" name; the old
+# ``stripe_test_secret_key`` name is still read as a fallback while prod serves
+# a worktree that predates this rename (dual-read, GOL-1892 item d). The var
+# holds a LIVE key in prod, so the old "test" name was a sandbox trap.
+STRIPE_SECRET_KEY_FALLBACK_ENV = "stripe_secret_key"
+STRIPE_SECRET_KEY_LEGACY_ENV = "stripe_test_secret_key"  # deprecated alias
+# When set to a known tenant slug, the single fallback key belongs to THAT LLC
+# only; every other known tenant fails closed even in pure single-merchant mode.
+# This protects prod TODAY (before per-tenant vars land) from misrouting a
+# goldberry/ggg checkout into the nursery LLC's account (GOL-1892 option 2).
+# Inert until Terra wires the var, so pure-legacy/QA behaviour is unchanged.
+STRIPE_LEGACY_KEY_TENANT_ENV = "stripe_legacy_key_tenant"
+
+
+def _fallback_secret_key():
+    """The single merchant-of-record fallback key.
+
+    Reads the non-"test" ``stripe_secret_key`` name first, then the deprecated
+    ``stripe_test_secret_key`` alias so the rename can land before Terra's env
+    change without a flag day (GOL-1892 item d).
+    """
+    return os.environ.get(STRIPE_SECRET_KEY_FALLBACK_ENV, "") or os.environ.get(STRIPE_SECRET_KEY_LEGACY_ENV, "")
+
+
+def _any_per_tenant_key_configured():
+    """True when ANY non-empty ``stripe_secret_key_{slug}`` var is set — i.e.
+    per-tenant (one-account-per-LLC) mode is active for this deployment."""
+    return any(name.startswith(STRIPE_SECRET_KEY_ENV_PREFIX) and value for name, value in os.environ.items())
 
 
 def _tenant_secret_key(tenant):
     """Return the Stripe secret key to charge/refund `tenant`'s orders with.
 
-    Prefers the per-tenant ``stripe_secret_key_{tenant}`` env var so each LLC's
-    money lands in its own account; falls back to the legacy single-tenant
-    ``stripe_test_secret_key`` when no per-tenant key is configured (or the
-    tenant slug is unknown). Returns ``""`` when neither is set so callers can
-    keep emitting the existing "not configured yet" 503.
+    Fail-closed money-flow guard (GOL-1892): a known tenant is NEVER charged
+    with another LLC's key. Resolution order:
+
+    1. The per-tenant ``stripe_secret_key_{tenant}`` key wins — each LLC's money
+       lands in its own account.
+    2. If per-tenant mode is active (any per-tenant key is set) but THIS tenant
+       has no key, return ``""`` so the caller emits its 503 — never borrow the
+       fallback key, which would misroute revenue into the wrong LLC's books.
+    3. Pure single-merchant mode (no per-tenant keys at all): use the single
+       fallback key. If ``stripe_legacy_key_tenant`` pins that key to one LLC,
+       only that tenant may use it; every other known tenant fails closed.
+
+    Returns ``""`` when no eligible key is configured so callers keep emitting
+    the existing "not configured yet" 503 rather than calling Stripe empty.
     """
     if tenant:
         key = os.environ.get(f"{STRIPE_SECRET_KEY_ENV_PREFIX}{tenant}", "")
         if key:
             return key
-    return os.environ.get(STRIPE_SECRET_KEY_LEGACY_ENV, "")
+    # (2) Per-tenant mode is active but this tenant is unwired → fail closed.
+    if _any_per_tenant_key_configured():
+        return ""
+    # (3) Single-merchant mode. Honour an explicit legacy-key owner if set.
+    legacy_owner = os.environ.get(STRIPE_LEGACY_KEY_TENANT_ENV, "").strip().lower()
+    if legacy_owner and tenant != legacy_owner:
+        return ""
+    return _fallback_secret_key()
 
 
 def _image_url(model, record, size):
