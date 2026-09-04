@@ -240,6 +240,79 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
         self.assertEqual(deposit["kind"], "deposit")
 
+    # ── GOL-2052: preorder defers shipping + tax to ship-time settlement ──
+
+    def _seed_wv_tax(self):
+        """Put the WV group tax on the product so a today-charge would tax."""
+        wv_group = self.env["account.tax"].search(
+            [("name", "=", "WV Sales Tax 7%"), ("amount_type", "=", "group")], limit=1
+        )
+        self.assertTrue(wv_group, "WV group tax must exist (post_init_hook)")
+        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_group.ids)]
+        return wv_group
+
+    def test_preorder_charges_deposit_only_no_shipping_no_tax(self):
+        """Acceptance 1: a preorder cart charges exactly $10 x preorder units
+        today — the quoted shipping line and WV tax are BOTH deferred to the
+        off-session settlement at ship, never charged now."""
+        self._seed_wv_tax()
+        self._set_stock(self.product, 0)  # short stock → preorder
+        order = self._make_order(qty=2)
+        self._add_shipping_line(order)  # a real ship order carries GROVE-SHIP
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order)
+        # preorder_variant_ids is per-variant (one id per deferred line), not
+        # per-unit — the 2-unit count rides the deposit line's `quantity`, and
+        # the downstream settlement keys off `product.id in preorder_ids` as a
+        # set membership (see GOL-1057 sibling test, line_charge splitting).
+        self.assertEqual(preorder_ids, [self.product.id])
+        # Only the deposit is charged today.
+        deposit = next(li for li in line_items if li["kind"] == "deposit")
+        self.assertEqual(deposit["quantity"], 2)  # both preorder units deferred
+        kinds = {li["kind"] for li in line_items}
+        self.assertEqual(kinds, {"deposit"})
+        self.assertFalse([li for li in line_items if li["kind"] == "shipping"])
+        self.assertFalse([li for li in line_items if li["kind"] == "tax"])
+        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT) * 2)
+
+    def test_mixed_order_defers_shipping_and_tax_but_bills_in_stock_goods(self):
+        """A cart with both in-stock and preorder units bills the in-stock goods
+        today (they still ship with the wave) but defers shipping + all tax —
+        the split is per-cart on has_preorder, not per-line."""
+        self._seed_wv_tax()
+        self._set_stock(self.product, 2)  # 2 in stock, 3 short
+        order = self._make_order(qty=5)
+        self._add_shipping_line(order)
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        self.assertEqual(preorder_ids, [self.product.id])
+        goods = next(li for li in line_items if li["kind"] == "goods")
+        self.assertEqual(goods["quantity"], 2)
+        self.assertTrue([li for li in line_items if li["kind"] == "deposit"])
+        # Shipping + tax deferred even though in-stock goods are billed today.
+        self.assertFalse([li for li in line_items if li["kind"] == "shipping"])
+        self.assertFalse([li for li in line_items if li["kind"] == "tax"])
+
+    def test_in_stock_order_still_charges_shipping_and_tax_today(self):
+        """Acceptance 5: a fully-in-stock (non-preorder) order ships now and is
+        UNCHANGED — shipping and WV tax ride the today-charge as before."""
+        self._seed_wv_tax()
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=2)
+        self._add_shipping_line(order)
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        self.assertEqual(preorder_ids, [])
+        self.assertTrue([li for li in line_items if li["kind"] == "shipping"])
+        self.assertTrue([li for li in line_items if li["kind"] == "tax"])
+
+    def test_pickup_preorder_has_no_shipping_line_to_defer(self):
+        """Acceptance 5 (pickup): a farm-pickup preorder never had a shipping
+        line; deferral leaves the deposit-only charge intact and adds nothing."""
+        self._set_stock(self.product, 0)
+        order = self._make_order(qty=1)  # no GROVE-SHIP line → pickup
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order)
+        self.assertEqual(preorder_ids, [self.product.id])
+        self.assertFalse([li for li in line_items if li["kind"] in ("shipping", "tax")])
+        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+
     # ── shipping-calendar preorder gate (GOL-1309) ───────────────────────
 
     def _ship_payload(self, zip_code, **extra):
