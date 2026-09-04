@@ -287,9 +287,9 @@ jobs:
             -- --addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons \
                --database=odoo \
                --without-demo=all \
-               --init=grove_headless \
+               --init=grove_headless,grove_support \
                --test-enable \
-               --test-tags='/grove_headless' \
+               --test-tags='/grove_headless,/grove_support' \
                --stop-after-init \
                --log-level=info
           # Tests can take longer than install — give it 5 minutes.
@@ -324,6 +324,15 @@ jobs:
           # `odoo.addons.grove_headless.tests.<module>.<Class>`.
           if ! printf '%s\n' "$logs" | grep -qE "odoo\.addons\.grove_headless\.tests\."; then
             echo "::error::No grove_headless test class was executed — the suite is not being run."
+            echo "::group::Odoo logs"
+            printf '%s\n' "$logs"
+            echo "::endgroup::"
+            exit 1
+          fi
+          # GOL-2022: same positive assertion for grove_support — a green check
+          # must never again hide a module whose suite silently never ran.
+          if ! printf '%s\n' "$logs" | grep -qE "odoo\.addons\.grove_support\.tests\."; then
+            echo "::error::No grove_support test class was executed — the suite is not being run."
             echo "::group::Odoo logs"
             printf '%s\n' "$logs"
             echo "::endgroup::"
