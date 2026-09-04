@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.26.0",
+    "version": "19.0.1.27.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -29,6 +29,10 @@
         # Transitive via sale/mrp but listed explicitly because we use it
         # directly (stock.scrap.create, stock.group_stock_user ACLs).
         "stock",
+        # sale_stock provides stock.picking.sale_id, which the fulfilment
+        # mirror (models/stock_picking.py) relates through. It auto-installs
+        # alongside sale+stock, but the explicit dep guarantees load order.
+        "sale_stock",
         # point_of_sale provides pos.config / pos.payment.method, used by the
         # post_init hook to stand up the Farmer's Market + Nursery Counter
         # in-person sales channels (GOL-13). See hooks.setup_pos_configs.
@@ -46,6 +50,7 @@
         "views/product_template_views.xml",
         "views/potting_batch_views.xml",
         "views/grove_publish_event_views.xml",
+        "views/fulfillment_views.xml",
         "data/shipping_actions.xml",
     ],
     "installable": True,
