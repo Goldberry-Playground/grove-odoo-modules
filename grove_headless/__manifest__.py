@@ -58,6 +58,7 @@
         "views/grove_publish_event_views.xml",
         "views/fulfillment_views.xml",
         "data/shipping_actions.xml",
+        "data/order_rollup_cron.xml",
     ],
     "installable": True,
     "application": False,
