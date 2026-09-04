@@ -344,11 +344,11 @@ jobs:
   ci-scripts:
     # GOL-1919: run scripts/ci/*.test.mjs as a live gate. `scripts/` is not a
     # Node workspace, so nothing else runs these. The load-bearing test is
-    # protected-paths-carveout.test.mjs: it asserts the auto-approve carve-out
-    # (scripts/ci/protected-paths-carveout.mjs) matches the protected-paths
-    # guard — if they drift, auto-approve could stamp a PR the guard would
-    # block. The generator lives in AgenticOS (single source); this repo only
-    # carries the generated carve-out + its test. node builtins only, no install.
+    # protected-paths-carveout.test.mjs, the behavioral test for the auto-approve
+    # carve-out (scripts/ci/protected-paths-carveout.mjs) — the module that stops
+    # the bot from auto-approving an agent PR that touches a sensitive path.
+    # (GOL-2013 removed the protected-paths guard + its AgenticOS generator; the
+    # carve-out is now a standalone, hand-maintained module.) node builtins only.
     name: CI scripts
     runs-on: ubuntu-latest
     timeout-minutes: 5
