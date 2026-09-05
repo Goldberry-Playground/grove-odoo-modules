@@ -136,12 +136,17 @@ def build_session_params(
     metadata=None,
     customer_email=None,
     setup_future_usage=False,
+    discount_coupon_id=None,
 ):
     """Build the flat form params for POST /v1/checkout/sessions.
 
     `line_items` is a list of {"name": str, "amount_cents": int, "quantity": int}
-    already resolved through the charging matrix. Stripe Tax is OFF — tax rides
-    in as its own explicit line item built by the caller from Odoo's amount_tax.
+    already resolved through the charging matrix — all POSITIVE. Stripe Tax is
+    OFF; tax rides in as its own explicit line item built by the caller from
+    Odoo's amount_tax. A promo discount cannot be a negative line item (Stripe
+    rejects a negative `unit_amount`); it is applied via `discount_coupon_id` —
+    an existing one-time coupon id — which Stripe subtracts from the total
+    (GOL-2088).
     """
     nested = {
         "mode": "payment",
@@ -159,6 +164,8 @@ def build_session_params(
             for li in line_items
         ],
     }
+    if discount_coupon_id:
+        nested["discounts"] = [{"coupon": discount_coupon_id}]
     if customer_email:
         nested["customer_email"] = customer_email
     if metadata:
@@ -168,6 +175,34 @@ def build_session_params(
         # off-session when the plant actually ships.
         nested["payment_intent_data"] = {"setup_future_usage": "off_session"}
     return _flatten("", nested, {})
+
+
+def create_coupon(secret_key, *, amount_off_cents, name=None, post=requests.post, timeout=DEFAULT_TIMEOUT):
+    """Create a one-time Stripe coupon worth `amount_off_cents` (minor units) in
+    CURRENCY. Used to represent a storefront promo discount on a Checkout
+    Session, which cannot itself carry a negative line item (GOL-2088). Returns
+    the parsed coupon dict (has `id`). Raises StripeError on a non-positive
+    amount, a missing key, or any non-2xx response."""
+    if not secret_key:
+        raise StripeError("Stripe secret key is not configured")
+    amount_off_cents = int(amount_off_cents)
+    if amount_off_cents <= 0:
+        raise StripeError("coupon amount_off must be positive")
+    nested = {
+        "amount_off": amount_off_cents,
+        "currency": CURRENCY,
+        "duration": "once",
+        "max_redemptions": 1,
+    }
+    if name:
+        nested["name"] = name
+    resp = post(
+        f"{STRIPE_API_BASE}/v1/coupons",
+        data=_flatten("", nested, {}),
+        auth=(secret_key, ""),
+        timeout=timeout,
+    )
+    return _parse(resp, "coupon")
 
 
 def create_checkout_session(
@@ -183,18 +218,39 @@ def create_checkout_session(
     timeout=DEFAULT_TIMEOUT,
 ):
     """Create a Stripe Checkout Session. Returns the parsed session dict
-    (has `id`, `url`, `payment_intent`). Raises StripeError on any non-2xx."""
+    (has `id`, `url`, `payment_intent`). Raises StripeError on any non-2xx.
+
+    A promo discount is passed in as one or more NEGATIVE-amount entries in
+    `line_items` (kind "discount"). Stripe Checkout can't take a negative
+    `unit_amount`, so those are summed into a one-time coupon (`create_coupon`)
+    and applied via the session's `discounts` — the positive lines alone become
+    Stripe line items. `charged_cents` at the call site already nets the
+    negative, so the total Stripe collects (positives − coupon) matches
+    (GOL-2088)."""
     if not secret_key:
         raise StripeError("Stripe secret key is not configured")
     if not line_items:
         raise StripeError("cannot create a checkout session with no line items")
+    positives = [li for li in line_items if int(li["amount_cents"]) > 0]
+    if not positives:
+        raise StripeError("cannot create a checkout session with no chargeable line items")
+    discount_cents = -sum(
+        int(li["amount_cents"]) * int(li.get("quantity", 1)) for li in line_items if int(li["amount_cents"]) < 0
+    )
+    coupon_id = None
+    if discount_cents > 0:
+        coupon = create_coupon(
+            secret_key, amount_off_cents=discount_cents, name="Promo discount", post=post, timeout=timeout
+        )
+        coupon_id = coupon.get("id")
     params = build_session_params(
-        line_items=line_items,
+        line_items=positives,
         success_url=success_url,
         cancel_url=cancel_url,
         metadata=metadata,
         customer_email=customer_email,
         setup_future_usage=setup_future_usage,
+        discount_coupon_id=coupon_id,
     )
     resp = post(
         f"{STRIPE_API_BASE}/v1/checkout/sessions",

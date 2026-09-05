@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.28.0",
+    "version": "19.0.1.29.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -21,6 +21,13 @@
         "account",
         "website_sale",
         "website",
+        # sale_loyalty provides the promo/coupon engine (loyalty.program,
+        # sale.order._try_apply_code, the reward-line fields on
+        # sale.order.line). The headless checkout applies storefront promo
+        # codes (e.g. FLATWOODS) through it — see controllers/main.py
+        # _apply_promo_code (GOL-2088). Already present on prod via
+        # website_sale_loyalty; listed explicitly because we call it directly.
+        "sale_loyalty",
         # mrp provides mrp.bom (Bills of Materials), required for Kit-type
         # BOMs that bundle multiple variants behind one storefront line item,
         # and for the variant→variant transformation in potting-up batches.
