@@ -226,9 +226,7 @@ class TestPottedWeights(unittest.TestCase):
         self.assertEqual(sb.potted_dim_weight_lb("p24x9"), 0.0)
 
     def test_actual_scales_with_units(self):
-        self.assertGreater(
-            sb.potted_actual_weight_lb("p24x9", 10), sb.potted_actual_weight_lb("p24x9", 1)
-        )
+        self.assertGreater(sb.potted_actual_weight_lb("p24x9", 10), sb.potted_actual_weight_lb("p24x9", 1))
 
     def test_representative_under_seventy_pound_ceiling(self):
         for box_id in sb.POTTED_BOXES:
