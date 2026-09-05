@@ -92,20 +92,32 @@ _scspec = _ilu.spec_from_file_location("grove_shippo_client", _SC_PATH)
 shippo_client = _ilu.module_from_spec(_scspec)
 _scspec.loader.exec_module(shippo_client)
 
+# Probe every catalog at its own representative billable weight. Bareroot boxes
+# (BOXES) use representative_billable_lb; potted/peat-and-bagged boxes
+# (POTTED_BOXES, GOL-2031) pack on the separate unit-count/actual-weight axis and
+# use potted_representative_billable_lb. Both go through the same live Shippo probe
+# at their true dimensions, so the 24" nonstandard-length surcharge on the potted
+# boxes lands in the quoted rate exactly as the 32"/46" bareroot boxes do. The two
+# catalogs share no ids (asserted in shipping_boxes), so one flat probe map is safe.
+_CATALOGS = (
+    (shipping_boxes.BOXES, shipping_boxes.representative_billable_lb),
+    (shipping_boxes.POTTED_BOXES, shipping_boxes.potted_representative_billable_lb),
+)
 PARCELS = {
     box_id: {
         "length": str(box["length"]),
         "width": str(box["width"]),
         "height": str(box["height"]),
         "distance_unit": "in",
-        "weight": str(shipping_boxes.representative_billable_lb(box_id)),
+        "weight": str(weight_of(box_id)),
         "mass_unit": "lb",
     }
-    for box_id, box in shipping_boxes.BOXES.items()
+    for catalog, weight_of in _CATALOGS
+    for box_id, box in catalog.items()
 }
 # Per-box packaging (box + consumables: bag, paper, corrugate, bands, tape,
 # sticker, care card, thank-you note) replaces the old flat $3.50/tree.
-PACKAGING = {box_id: box["packaging_usd"] for box_id, box in shipping_boxes.BOXES.items()}
+PACKAGING = {box_id: box["packaging_usd"] for catalog, _ in _CATALOGS for box_id, box in catalog.items()}
 BUFFER = 2.00
 RATES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless", "data", "shipping_rates.json")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "out")
@@ -250,8 +262,16 @@ def main() -> int:
     # untouched. Cross-zone monotonicity is intentionally NOT enforced: real UPS
     # doesn't order our state bands by cost, and worst-case reference ZIPs above
     # already guarantee no undercharge (GOL-1495).
-    box_order = monotonicity.ordered_boxes(shipping_boxes.BOXES, shipping_boxes.representative_billable_lb)
-    violations = monotonicity.find_violations(proposed, box_order, list(REFERENCE_ZIPS))
+    # Monotonicity is enforced WITHIN each catalog, never across them: bareroot and
+    # potted boxes are independent axes (a potted-only cart can't select a bareroot
+    # box, so a potted box being "cheaper than" a heavier bareroot box is not a
+    # cart-gaming vector). Interleaving the two by weight would raise spurious
+    # violations and could mask a real inversion inside one catalog. So order and
+    # check each catalog separately and combine the findings.
+    violations = []
+    for catalog, weight_of in _CATALOGS:
+        box_order = monotonicity.ordered_boxes(catalog, weight_of)
+        violations += monotonicity.find_violations(proposed, box_order, list(REFERENCE_ZIPS))
     if violations:
         print(f"proposed rate table failed monotonicity guard ({len(violations)}):", file=sys.stderr)
         for v in violations:
