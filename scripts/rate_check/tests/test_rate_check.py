@@ -85,6 +85,55 @@ class TestRateMath(unittest.TestCase):
         self.assertEqual(drift, [])
 
 
+class TestCarrierVisibility(unittest.TestCase):
+    def test_present_carriers_reports_both_allowlisted_carriers(self):
+        # Fixture carries UPS Ground + USPS Ground Advantage (and a non-ground
+        # UPS 3-Day, which must be ignored). Visibility is independent of who
+        # wins on price (GOL-1906).
+        with open(FIXTURE) as fh:
+            data = json.load(fh)
+        self.assertEqual(
+            rc.present_carriers(data),
+            {("UPS", "ups_ground"), ("USPS", "usps_ground_advantage")},
+        )
+
+    def test_present_carriers_empty_when_no_ground_returned(self):
+        with open(NO_GROUND_FIXTURE) as fh:
+            data = json.load(fh)
+        self.assertEqual(rc.present_carriers(data), set())
+
+    def test_visibility_report_flags_absent_carrier(self):
+        # USPS returned on every probe, UPS on none -> UPS flagged as never
+        # returned. This is the readout that proves whether a carrier reaches
+        # the automation's token (GOL-1906 CEO ruling step (b)).
+        report = rc.visibility_report({("USPS", "usps_ground_advantage"): 5}, 5)
+        self.assertIn("USPS usps_ground_advantage: 5/5", report)
+        self.assertIn("UPS ups_ground: 0/5", report)
+        self.assertIn("NEVER RETURNED", report)
+
+    def test_quote_zone_box_returns_quote_and_present_carriers(self):
+        def fake_post(url, json=None, timeout=None, headers=None):
+            class _R:
+                @staticmethod
+                def raise_for_status():
+                    pass
+
+                @staticmethod
+                def json():
+                    return {
+                        "rates": [
+                            {"provider": "USPS", "servicelevel": {"token": "usps_ground_advantage"}, "amount": "12.74"},
+                        ]
+                    }
+
+            return _R()
+
+        with mock.patch.object(rc.requests, "post", fake_post):
+            quote, present = rc.quote_zone_box("k", "zone_4", next(iter(rc.PARCELS)))
+        self.assertEqual(quote, 12.74)
+        self.assertEqual(present, {("USPS", "usps_ground_advantage")})
+
+
 class TestNoUpsRatesSkips(unittest.TestCase):
     def test_no_ups_against_real_shipped_file_fails(self):
         # GOL-1495 published the real UPS Ground table, so the shipped file no

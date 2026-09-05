@@ -23,6 +23,13 @@ rate gap (some boxes quoted, some did not), or zero ground rates for every probe
 while real published rates exist (both carriers lapsed) | 4 proposed table
 failed the monotonicity guard (not published).
 Requires env SHIPPO_API_KEY (unless --dry-run with --fixture).
+
+Every run also prints a per-carrier visibility report to stderr (which
+allowlisted ground carriers Shippo returned to this token, X/N probes). A
+carrier at 0/N means it is not being returned to the automation's API key even
+if it shows in the Shippo dashboard — run `--dry-run` via workflow_dispatch to
+confirm both UPS Ground and USPS Ground Advantage reach the token before
+publishing the re-derived table (GOL-1906).
 """
 
 import argparse
@@ -120,6 +127,34 @@ def pick_cheapest_ground(shipment_json: dict) -> float | None:
     return float(rate["amount"]) if rate else None
 
 
+def present_carriers(shipment_json: dict) -> set:
+    """Set of allowlisted (provider, servicelevel token) pairs Shippo actually
+    returned for this probe — visibility into which ground carriers reach the
+    rate-check token, independent of which one wins on price.
+
+    The cheapest-of-both selector only reveals the winner, so a table can look
+    fine while one carrier is silently absent from the automation's Shippo
+    account/token (present in the dashboard is not the same as returned to the
+    API key). This exposes that gap so it can be confirmed before the re-derived
+    table publishes (GOL-1906 CEO ruling 2026-09-05, step (b))."""
+    present = set()
+    for r in shipment_json.get("rates", []):
+        key = (r.get("provider"), (r.get("servicelevel") or {}).get("token"))
+        if key in shippo_client.GROUND_SERVICE_ALLOWLIST:
+            present.add(key)
+    return present
+
+
+def visibility_report(counts: dict, total: int) -> str:
+    """Human-readable per-carrier visibility summary for the probe run."""
+    lines = ["Carrier visibility — allowlisted ground rates returned to this Shippo token:"]
+    for provider, token in sorted(shippo_client.GROUND_SERVICE_ALLOWLIST):
+        n = counts.get((provider, token), 0)
+        flag = "" if n else "  <-- NEVER RETURNED (not connected to this token?)"
+        lines.append(f"  {provider} {token}: {n}/{total} probe(s){flag}")
+    return "\n".join(lines)
+
+
 def target_rate(quote: float, box_id: str) -> int:
     return math.ceil(quote + PACKAGING[box_id] + BUFFER)
 
@@ -147,7 +182,8 @@ def quote_zone_box(api_key: str, zone: str, box_id: str) -> float | None:
         headers={"Authorization": f"ShippoToken {api_key}"},
     )
     resp.raise_for_status()
-    return pick_cheapest_ground(resp.json())
+    data = resp.json()
+    return pick_cheapest_ground(data), present_carriers(data)
 
 
 def compute_drift(current: dict, proposed: dict) -> list:
@@ -179,22 +215,29 @@ def main() -> int:
 
     proposed = {}
     missing = []
+    seen_counts = {}
+    probes = 0
     for zone in REFERENCE_ZIPS:
         proposed[zone] = {}
         for box_id in PARCELS:
+            probes += 1
             if args.fixture:
                 with open(args.fixture, encoding="utf-8") as fh:
-                    quote = pick_cheapest_ground(json.load(fh))
+                    fixture_json = json.load(fh)
+                quote = pick_cheapest_ground(fixture_json)
+                present = present_carriers(fixture_json)
             else:
                 api_key = os.environ.get("SHIPPO_API_KEY", "")
                 if not api_key:
                     print("SHIPPO_API_KEY not set", file=sys.stderr)
                     return 1
                 try:
-                    quote = quote_zone_box(api_key, zone, box_id)
+                    quote, present = quote_zone_box(api_key, zone, box_id)
                 except requests.RequestException as exc:
                     print(f"shippo error for {zone}/{box_id}: {exc}", file=sys.stderr)
                     return 1
+            for key in present:
+                seen_counts[key] = seen_counts.get(key, 0) + 1
             if quote is None:
                 # Shippo answered (HTTP 200) but returned no allowlisted ground
                 # rate (neither UPS Ground nor USPS Ground Advantage) for this
@@ -203,6 +246,13 @@ def main() -> int:
                 missing.append(f"{zone}/{box_id}")
                 continue
             proposed[zone][box_id] = target_rate(quote, box_id)
+
+    # Always surface which allowlisted ground carriers actually reached this
+    # token. A carrier at 0/N is the smoking gun for "connected in the Shippo
+    # dashboard but not returned to the API key" — the exact state that keeps
+    # the cheapest-of-both table UPS-priced (GOL-1906). Emit before the
+    # missing/monotonicity gates so the readout survives an early return.
+    print(visibility_report(seen_counts, probes), file=sys.stderr)
 
     if missing:
         total = len(REFERENCE_ZIPS) * len(PARCELS)
