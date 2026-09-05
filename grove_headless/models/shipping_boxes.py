@@ -348,54 +348,51 @@ def pack_order(items: list[tuple[int, float]], mode: str, cost_of) -> list[Packe
 # shippability flip (SHIPPABLE_TIERS) and the checkout wiring live in
 # shipping_zones and stay gated until go-live (still money-flow / CEO gated).
 #
-# Geometry is Josh's real bench inventory for leafed-out trees (2026-09-05):
-#   p24x6  24 x 6 x 4  -> 1-5 seedlings
-#   p24x9  24 x 9 x 6  -> 5-10 seedlings
+# Geometry is Josh's real bench inventory — the boxes physically in hand and
+# measured with leafed-out trees flat-packed (2026-09-06, supersedes the
+# 2026-09-05 pre-measurement estimate of 24x6x4 / 24x9x6):
+#   p24x10x4  24 x 10 x 4 = 960 in³   -> 1-5 seedlings
+#   p24x10x6  24 x 10 x 6 = 1,440 in³ -> 5-10 seedlings
 # Both are 24" long (> 22"), so USPS charges its nonstandard-length surcharge on
 # every potted label. As with the 32"/46" bareroot boxes, that surcharge is NOT
 # modelled here — the rate-checker's live Shippo probe quotes each box at its
 # real dimensions and captures the actual dollar effect, so the surcharge lands
 # in the per-box zone rate. The only requirement is that these boxes reach the
-# probe list with their true 24" length (see scripts/rate_check).
+# probe list with their true 24" length (see scripts/rate_check). Both sit under
+# 1 cu ft (1,728 in³), so USPS bills actual scale weight and DIM never bites.
 #
-# POTTED_UNIT_LB is CALIBRATED off Josh's bench weigh-in (2026-09-05): 5 peat-
-# and-bagged seedlings packed in a p24x6 = ~8 lb full total, box included. Net
-# of that box's 1.0 lb tare (below) that leaves 7.0 lb / 5 units = 1.4 lb/unit —
-# the per-tree increment. (The averaged 8/5 = 1.6 lb/unit Josh quoted folds the
-# box share back in; the tare is modelled separately per box, so the net figure
-# is what belongs here.) This replaces the old conservative 4.0 lb guess. Peat-
-# and-bagged units run much lighter than that estimate; billable = actual scale
-# weight at these masses (DIM never bites under 1 cu ft). p24x9's tare is still
-# an estimate (Josh hasn't bench-weighed a full one — see its comment); the
-# per-unit increment is shared and now measured. Re-run rate_check when p24x9 is
-# firmed. The calibration point is regression-locked in test_shipping_boxes.py.
-POTTED_UNIT_LB = 1.4  # measured packed weight of one potted/peat-bagged seedling, net of box tare
+# POTTED_UNIT_LB = 1.3 is Josh's measured per-tree increment (2026-09-06): 5 trees
+# flat-packed in the 24x10x6 weighed 8 lb full, decomposing to ~1.3 lb/tree + ~1.4
+# lb box tare; the full 10-tree box weighs ~15 lb (1.3*10 + ~1.5 tare). This is the
+# leafed flat-pack figure. Peat-and-bagged / potted root-mass is HEAVIER by the
+# damp-media weight, which Josh has NOT yet bench-weighed — per his instruction we
+# use 1.3 lb/tree as the planning proxy until a real potted box is weighed, then
+# re-run rate_check. representative_billable uses ceil(), so pricing stays on the
+# never-undercharge side at these masses. The 8 lb / 15 lb calibration points are
+# regression-locked in test_shipping_boxes.py and feed the GOL-1906 rate re-derive.
+POTTED_UNIT_LB = 1.3  # Josh bench 2026-09-06: leafed flat-pack lb/tree; potted media weight TBD (planning proxy)
 
 POTTED_BOXES: dict[str, dict] = {
-    "p24x6": {
+    "p24x10x4": {
         "length": 24,
-        "width": 6,
-        "height": 4,
+        "width": 10,
+        "height": 4,  # 960 in³ (< 1 cu ft -> no DIM)
         "capacity": 5,  # seedlings — single axis, no season mode
         "packaging_usd": 3.50,
-        # tare set to 1.0 lb: back-solved from Josh's bench datum (8 lb full at 5
-        # units) against the measured 1.4 lb/unit increment (8 - 5*1.4 = 1.0), and
-        # consistent with br16's 0.7 lb tare scaled by surface area (368->528 sq in).
-        "tare_lb": 1.0,
+        # tare 1.4 lb = Josh's measured box tare (2026-09-06). 5 trees -> 1.4 + 5*1.3
+        # = 7.9 lb, matching his "5 trees ≈ 7.5-8 lb" bench read; ceil -> 8 lb probe.
+        "tare_lb": 1.4,
     },
-    "p24x9": {
+    "p24x10x6": {
         "length": 24,
-        "width": 9,
-        "height": 6,
+        "width": 10,
+        "height": 6,  # 1,440 in³ (< 1 cu ft -> no DIM)
         "capacity": 10,
         "packaging_usd": 4.50,
-        # tare ESTIMATE (Josh hasn't bench-weighed a full p24x9): 1.0 lb p24x6 tare
-        # scaled by surface area (528->828 sq in ~= 1.57x) rounds to ~1.6-1.8 lb;
-        # held at 1.8 for a conservative (never-undercharge) billable. A full box
-        # is ~1.8 + 10*1.4 = 15.8 lb -> ceil 16; USPS GA prices per pound, so this
-        # tare mildly moves the p24x9 rate. Firm it with a real weigh-in before the
-        # CEO go-live flip; guess-and-refine until then.
-        "tare_lb": 1.8,
+        # tare 1.5 lb: reconciles both of Josh's 24x10x6 data points — 5 trees at
+        # 1.5 + 5*1.3 = 8.0 lb (his measured 8 lb), and full 10 at 1.5 + 10*1.3 =
+        # 14.5 -> ceil 15 lb (his "≈15 lb"). Re-firm with a potted weigh-in.
+        "tare_lb": 1.5,
     },
 }
 
