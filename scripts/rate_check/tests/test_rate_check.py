@@ -67,11 +67,26 @@ class TestRateMath(unittest.TestCase):
         self.assertEqual(rc.target_rate(14.23, "s20"), 21)
 
     def test_parcels_come_from_box_catalog(self):
-        # One reference parcel per catalog box, quoted at representative
-        # billable weight (never undercharge).
-        self.assertEqual(set(rc.PARCELS), set(rc.shipping_boxes.BOXES))
+        # One reference parcel per catalog box across BOTH catalogs (bareroot
+        # BOXES + potted POTTED_BOXES, GOL-2031), each quoted at its own
+        # representative billable weight (never undercharge).
+        self.assertEqual(
+            set(rc.PARCELS), set(rc.shipping_boxes.BOXES) | set(rc.shipping_boxes.POTTED_BOXES)
+        )
         for box_id, parcel in rc.PARCELS.items():
-            self.assertEqual(float(parcel["weight"]), rc.shipping_boxes.representative_billable_lb(box_id))
+            if box_id in rc.shipping_boxes.POTTED_BOXES:
+                expected = rc.shipping_boxes.potted_representative_billable_lb(box_id)
+            else:
+                expected = rc.shipping_boxes.representative_billable_lb(box_id)
+            self.assertEqual(float(parcel["weight"]), expected)
+
+    def test_potted_boxes_probe_at_true_dims_and_calibrated_weight(self):
+        # GOL-2031: potted boxes reach the probe at their real 24" length (so the
+        # USPS nonstandard-length surcharge lands in the quote) and at the
+        # bench-calibrated weight (p24x6 full = 8 lb per Josh's 2026-09-05 datum).
+        self.assertEqual(rc.PARCELS["p24x6"]["length"], "24")
+        self.assertEqual(rc.PARCELS["p24x9"]["length"], "24")
+        self.assertEqual(float(rc.PARCELS["p24x6"]["weight"]), 8.0)
 
     def test_diff_detects_material_drift(self):
         current = {"zone_1": {"bareroot": {"base": 21.0}}}

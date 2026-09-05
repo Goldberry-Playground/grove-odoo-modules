@@ -228,6 +228,13 @@ class TestPottedWeights(unittest.TestCase):
     def test_actual_scales_with_units(self):
         self.assertGreater(sb.potted_actual_weight_lb("p24x9", 10), sb.potted_actual_weight_lb("p24x9", 1))
 
+    def test_p24x6_matches_josh_bench_datum(self):
+        # Calibration lock: Josh weighed 5 peat-and-bagged seedlings in a p24x6 at
+        # ~8 lb full total (box included), 2026-09-05. tare 1.0 + 5*1.4 = 8.0.
+        self.assertEqual(sb.potted_actual_weight_lb("p24x6", 5), 8.0)
+        # Per-unit increment is the measured 1.4 lb (net of tare), not the old 4.0.
+        self.assertEqual(sb.POTTED_UNIT_LB, 1.4)
+
     def test_representative_under_seventy_pound_ceiling(self):
         for box_id in sb.POTTED_BOXES:
             rep = sb.potted_representative_billable_lb(box_id)
