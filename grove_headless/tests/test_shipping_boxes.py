@@ -183,5 +183,108 @@ class TestPacking(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+# ── Potted / peat-and-bagged engine (GOL-2031) ───────────────────────────────
+# Provisional zone_1 potted card; real rates come from rate_check once the
+# potted boxes are in the live Shippo probe list.
+POTTED_COSTS = {"p24x6": 20.0, "p24x9": 32.0}
+
+
+def potted_cost_of(box_id):
+    return POTTED_COSTS.get(box_id)
+
+
+class TestPottedCatalog(unittest.TestCase):
+    def test_capacities_positive_and_scalar(self):
+        for box_id, box in sb.POTTED_BOXES.items():
+            self.assertIsInstance(box["capacity"], int, box_id)
+            self.assertGreater(box["capacity"], 0, box_id)
+
+    def test_boxes_clear_usps_length_plus_girth(self):
+        for box_id, box in sb.POTTED_BOXES.items():
+            self.assertLessEqual(sb.length_plus_girth_in(box), sb.MAX_LENGTH_PLUS_GIRTH_IN, box_id)
+
+    def test_bench_geometry_matches_josh(self):
+        # Josh's real bench boxes for leafed-out trees (2026-09-05).
+        def dims(box_id):
+            b = sb.POTTED_BOXES[box_id]
+            return (b["length"], b["width"], b["height"])
+
+        self.assertEqual(dims("p24x6"), (24, 6, 4))
+        self.assertEqual(dims("p24x9"), (24, 9, 6))
+        # Both are 24" long (> 22") -> USPS nonstandard-length surcharge applies.
+        for box in sb.POTTED_BOXES.values():
+            self.assertGreater(box["length"], 22)
+
+    def test_potted_is_separate_from_bareroot(self):
+        # No id collision — a mistagged tier can never cross catalogs.
+        self.assertFalse(set(sb.POTTED_BOXES) & set(sb.BOXES))
+
+
+class TestPottedWeights(unittest.TestCase):
+    def test_dim_is_zero_under_one_cubic_foot(self):
+        # p24x9 = 24x9x6 = 1296 cu in (<= 1 cu ft) -> no USPS DIM.
+        self.assertEqual(sb.potted_dim_weight_lb("p24x9"), 0.0)
+
+    def test_actual_scales_with_units(self):
+        self.assertGreater(
+            sb.potted_actual_weight_lb("p24x9", 10), sb.potted_actual_weight_lb("p24x9", 1)
+        )
+
+    def test_representative_under_seventy_pound_ceiling(self):
+        for box_id in sb.POTTED_BOXES:
+            rep = sb.potted_representative_billable_lb(box_id)
+            self.assertLessEqual(rep, sb.MAX_SHIP_WEIGHT_LB, box_id)
+            self.assertGreaterEqual(
+                rep, sb.potted_billable_weight_lb(box_id, sb.POTTED_BOXES[box_id]["capacity"]), box_id
+            )
+
+
+class TestPottedPacking(unittest.TestCase):
+    def test_empty_packs_empty(self):
+        self.assertEqual(sb.pack_potted(0, potted_cost_of), [])
+
+    def test_single_unit_uses_small_box(self):
+        self.assertEqual(plan_summary(sb.pack_potted(1, potted_cost_of)), [("p24x6", 1)])
+
+    def test_five_units_one_small_box(self):
+        self.assertEqual(plan_summary(sb.pack_potted(5, potted_cost_of)), [("p24x6", 5)])
+
+    def test_six_units_prefer_one_large_over_two_small(self):
+        # 6 units: one p24x9 ($32) beats two p24x6 ($40).
+        self.assertEqual(plan_summary(sb.pack_potted(6, potted_cost_of)), [("p24x9", 6)])
+
+    def test_ten_units_one_large_box(self):
+        self.assertEqual(plan_summary(sb.pack_potted(10, potted_cost_of)), [("p24x9", 10)])
+
+    def test_eleven_units_large_plus_small(self):
+        # 11: p24x9 ($32) + p24x6 ($20) = $52 beats 2x p24x9 ($64).
+        self.assertEqual(plan_summary(sb.pack_potted(11, potted_cost_of)), [("p24x6", 1), ("p24x9", 10)])
+
+    def test_never_exceeds_capacity(self):
+        for n in (1, 3, 7, 15, 44):
+            plan = sb.pack_potted(n, potted_cost_of)
+            self.assertIsNotNone(plan, n)
+            self.assertEqual(sum(pb.count for pb in plan), n)
+            for pb in plan:
+                self.assertLessEqual(pb.count, sb.POTTED_BOXES[pb.box_id]["capacity"])
+
+    def test_negative_fails_safe(self):
+        self.assertIsNone(sb.pack_potted(-1, potted_cost_of))
+
+    def test_non_integer_fails_safe(self):
+        self.assertIsNone(sb.pack_potted(1.5, potted_cost_of))
+
+    def test_none_count_fails_safe(self):
+        self.assertIsNone(sb.pack_potted(None, potted_cost_of))
+
+    def test_unrated_boxes_fail_safe(self):
+        self.assertIsNone(sb.pack_potted(3, lambda b: None))
+
+    def test_partially_rated_still_packs(self):
+        # Only the small box rated: 7 units -> two p24x6 (5 + 2).
+        only_small = lambda b: 20.0 if b == "p24x6" else None  # noqa: E731
+        self.assertEqual(plan_summary(sb.pack_potted(7, only_small)), [("p24x6", 2), ("p24x6", 5)])
+
+
 if __name__ == "__main__":
     unittest.main()

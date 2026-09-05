@@ -235,12 +235,16 @@ class PackedBox:
         return f"PackedBox({self.box_id}, count={self.count})"
 
 
-def _min_cost_combo(n: int, options: list[tuple[str, int, float]]) -> list[str] | None:
+def _min_cost_combo(
+    n: int, options: list[tuple[str, int, float]], catalog: dict[str, dict] = BOXES
+) -> list[str] | None:
     """Cheapest multiset of boxes covering `n` trees.
 
     options: (box_id, capacity, cost). Exact DP (covering knapsack); ties
     break toward fewer boxes, then smaller total volume, then box id — fully
     deterministic. Returns list of box_ids or None when options is empty.
+    ``catalog`` is the box dict the ids resolve against (BOXES for bareroot,
+    POTTED_BOXES for the potted engine) — only used for the volume tie-break.
     """
     if n <= 0:
         return []
@@ -248,7 +252,7 @@ def _min_cost_combo(n: int, options: list[tuple[str, int, float]]) -> list[str] 
         return None
 
     def volume(box_id):
-        b = BOXES[box_id]
+        b = catalog[box_id]
         return b["length"] * b["width"] * b["height"]
 
     # dp[i] = (cost, n_boxes, total_volume, ids_tuple) best way to cover i trees
@@ -331,4 +335,128 @@ def pack_order(items: list[tuple[int, float]], mode: str, cost_of) -> list[Packe
             packed.append(PackedBox(box_id, take))
             n -= take
         assert n <= 0
+    return packed
+
+
+# ── Potted / peat-and-bagged box catalog + packing (GOL-2031) ────────────────
+# Potted (peat-and-bagged) units pack on a DIFFERENT axis than bareroot: by
+# UNIT COUNT and ACTUAL packed weight (soil/rootball moisture dominates; DIM
+# does not bite at these volumes), NOT by season dormancy mode or tree length
+# class. Kept as its own catalog + packer so the bareroot Box Engine v2 above
+# is untouched — a mistagged bareroot can never be priced at potted rates and
+# vice versa. This module only knows how to PACK and WEIGH potted boxes; the
+# shippability flip (SHIPPABLE_TIERS) and the checkout wiring live in
+# shipping_zones and stay gated until go-live (still money-flow / CEO gated).
+#
+# Geometry is Josh's real bench inventory for leafed-out trees (2026-09-05):
+#   p24x6  24 x 6 x 4  -> 1-5 seedlings
+#   p24x9  24 x 9 x 6  -> 5-10 seedlings
+# Both are 24" long (> 22"), so USPS charges its nonstandard-length surcharge on
+# every potted label. As with the 32"/46" bareroot boxes, that surcharge is NOT
+# modelled here — the rate-checker's live Shippo probe quotes each box at its
+# real dimensions and captures the actual dollar effect, so the surcharge lands
+# in the per-box zone rate. The only requirement is that these boxes reach the
+# probe list with their true 24" length (see scripts/rate_check).
+#
+# POTTED_UNIT_LB is an ESTIMATE, seeded per Josh's guess-and-refine note: a
+# potted/peat-bagged unit is heavier than a bareroot (reference datum: 5
+# bareroot 22" chestnuts in a 24x9x3 = 10 lb packed, ~1.5 lb/tree net of tare).
+# Seeded conservatively HIGH so we never undercharge, to be tuned from season-1
+# packed-box weigh-ins. Josh owes real per-class packed weights; when they land,
+# update here (or split per pot-gal) and re-run rate_check. Open question in the
+# vault, same as PER_TREE_LB above.
+POTTED_UNIT_LB = 4.0  # est. packed weight of one potted/peat-bagged seedling
+
+POTTED_BOXES: dict[str, dict] = {
+    "p24x6": {
+        "length": 24,
+        "width": 6,
+        "height": 4,
+        "capacity": 5,  # seedlings — single axis, no season mode
+        "packaging_usd": 3.50,
+        "tare_lb": 1.0,
+    },
+    "p24x9": {
+        "length": 24,
+        "width": 9,
+        "height": 6,
+        "capacity": 10,
+        "packaging_usd": 4.50,
+        "tare_lb": 1.8,
+    },
+}
+
+# Potted boxes obey the same USPS Ground Advantage envelope gates as bareroot:
+# 130" length+girth and the 70 lb ceiling at worst-case fill. Fail loudly at
+# import if a future potted box or a re-tuned POTTED_UNIT_LB breaks either.
+assert all(length_plus_girth_in(b) <= MAX_LENGTH_PLUS_GIRTH_IN for b in POTTED_BOXES.values())
+
+
+def potted_dim_weight_lb(box_id: str) -> float:
+    """USPS dimensional weight of a potted box, or 0.0 at/under 1 cu ft.
+
+    Same rule as ``dim_weight_lb`` (DIM only above DIM_APPLIES_ABOVE_CU_IN);
+    both catalog boxes sit under 1 cu ft, so this is 0.0 today and actual scale
+    weight governs — kept explicit so a larger future potted box is handled.
+    """
+    b = POTTED_BOXES[box_id]
+    volume = b["length"] * b["width"] * b["height"]
+    if volume <= DIM_APPLIES_ABOVE_CU_IN:
+        return 0.0
+    return round(volume / DIM_DIVISOR, 1)
+
+
+def potted_actual_weight_lb(box_id: str, count: int) -> float:
+    """Estimated scale weight of a packed potted box (what the label declares)."""
+    return round(POTTED_BOXES[box_id]["tare_lb"] + POTTED_UNIT_LB * max(0, count), 1)
+
+
+def potted_billable_weight_lb(box_id: str, count: int) -> float:
+    """What USPS bills: max(actual, DIM) — DIM is 0 at/under 1 cu ft."""
+    return max(potted_actual_weight_lb(box_id, count), potted_dim_weight_lb(box_id))
+
+
+def potted_representative_billable_lb(box_id: str) -> int:
+    """Worst-case billable weight at full capacity — the weight the
+    rate-checker quotes each potted box at (never undercharge)."""
+    return math.ceil(potted_billable_weight_lb(box_id, POTTED_BOXES[box_id]["capacity"]))
+
+
+assert all(potted_representative_billable_lb(box_id) <= MAX_SHIP_WEIGHT_LB for box_id in POTTED_BOXES)
+
+
+def pack_potted(count, cost_of) -> list[PackedBox] | None:
+    """Cheapest combo of potted boxes for ``count`` seedlings.
+
+    ``cost_of(box_id) -> float | None`` supplies the destination-zone rate; a
+    box with no configured rate is unusable. Returns the packed plan, ``[]`` for
+    zero units, or ``None`` when the units cannot be packed (negative/non-integer
+    count, or no rated potted box) — fail-safe like ``pack_order``: None means
+    "add no shipping line", never guess.
+    """
+    if count is None:
+        return None
+    n = int(count)
+    if n != count or n < 0:
+        return None
+    if n == 0:
+        return []
+    options = []
+    for box_id, b in POTTED_BOXES.items():
+        cost = cost_of(box_id)
+        if cost is None:
+            continue
+        options.append((box_id, b["capacity"], float(cost)))
+    combo = _min_cost_combo(n, options, POTTED_BOXES)
+    if combo is None:
+        return None
+    # Distribute into the chosen boxes (largest capacity first so a partial fill
+    # lands in one box), mirroring pack_order's deterministic layout.
+    combo.sort(key=lambda bid: POTTED_BOXES[bid]["capacity"], reverse=True)
+    packed: list[PackedBox] = []
+    for box_id in combo:
+        take = min(n, POTTED_BOXES[box_id]["capacity"])
+        packed.append(PackedBox(box_id, take))
+        n -= take
+    assert n <= 0
     return packed
