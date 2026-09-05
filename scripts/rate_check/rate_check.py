@@ -117,9 +117,7 @@ PARCELS = {
 }
 # Per-box packaging (box + consumables: bag, paper, corrugate, bands, tape,
 # sticker, care card, thank-you note) replaces the old flat $3.50/tree.
-PACKAGING = {
-    box_id: box["packaging_usd"] for catalog, _ in _CATALOGS for box_id, box in catalog.items()
-}
+PACKAGING = {box_id: box["packaging_usd"] for catalog, _ in _CATALOGS for box_id, box in catalog.items()}
 BUFFER = 2.00
 RATES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless", "data", "shipping_rates.json")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "out")

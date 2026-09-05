@@ -70,9 +70,7 @@ class TestRateMath(unittest.TestCase):
         # One reference parcel per catalog box across BOTH catalogs (bareroot
         # BOXES + potted POTTED_BOXES, GOL-2031), each quoted at its own
         # representative billable weight (never undercharge).
-        self.assertEqual(
-            set(rc.PARCELS), set(rc.shipping_boxes.BOXES) | set(rc.shipping_boxes.POTTED_BOXES)
-        )
+        self.assertEqual(set(rc.PARCELS), set(rc.shipping_boxes.BOXES) | set(rc.shipping_boxes.POTTED_BOXES))
         for box_id, parcel in rc.PARCELS.items():
             if box_id in rc.shipping_boxes.POTTED_BOXES:
                 expected = rc.shipping_boxes.potted_representative_billable_lb(box_id)
