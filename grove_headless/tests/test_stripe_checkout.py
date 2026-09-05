@@ -347,17 +347,20 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
 
     def test_promo_code_applies_reward_line(self):
         """A valid code on an eligible cart adds a sale_loyalty reward line and
-        drops the order's untaxed total by the discount amount."""
+        drops the order's GRAND total by the discount amount. sale_loyalty's
+        fixed per-order discount is tax-INCLUSIVE: a "$10 off" reward splits into
+        a negative untaxed subtotal + negative tax that together total exactly
+        -$10 off `amount_total` (so the untaxed subtotal alone is ~-$9.35 at 7%)."""
         self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
         self._set_stock(self.product, 5)
         order = self._make_order(qty=2)  # 2 * $25 = $50 subtotal, meets min_qty
-        before = order.amount_untaxed
+        before_total = order.amount_total
         err = grove_main._apply_promo_code(order, "TESTPROMO")
         self.assertIsNone(err)
         reward_lines = order.order_line.filtered(lambda line: line.reward_id)
         self.assertTrue(reward_lines, "a reward order line should exist")
-        self.assertAlmostEqual(sum(reward_lines.mapped("price_subtotal")), -10.0, places=2)
-        self.assertAlmostEqual(order.amount_untaxed, before - 10.0, places=2)
+        self.assertLess(sum(reward_lines.mapped("price_subtotal")), 0.0)
+        self.assertAlmostEqual(order.amount_total, before_total - 10.0, places=2)
 
     def test_promo_code_ineligible_cart_returns_error(self):
         """A real code whose rule the cart doesn't meet (min_qty) is a
@@ -392,13 +395,16 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order)
 
         discount = next(li for li in line_items if li["kind"] == "discount")
-        self.assertEqual(discount["amount_cents"], stripe_gateway.to_cents(-10.0))
+        self.assertLess(discount["amount_cents"], 0)  # negative (untaxed portion)
         self.assertEqual(preorder_ids, [])
         # charged is the sum over the itemized lines (the review page renders the
         # same array) and matches Odoo's discounted grand total to the cent — the
         # reward's own negative tax nets the WV tax line, so no over/under-charge.
         self.assertEqual(charged, sum(li["amount_cents"] * li["quantity"] for li in line_items))
         self.assertEqual(charged, stripe_gateway.to_cents(order.amount_total))
+        # And today's charge is exactly $10 below the undiscounted cart — the
+        # tax-inclusive discount lands as a full $10 off regardless of the split.
+        self.assertEqual(full_charged - charged, stripe_gateway.to_cents(10.0))
         # And it is strictly below the undiscounted cart (goods + full tax).
         self.assertLess(charged, full_charged)
 
