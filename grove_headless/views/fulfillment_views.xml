@@ -1,0 +1,84 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+
+    <!-- Fulfilment badge on the transfer form: warehouse staff must see
+         "Farm pickup" vs "Shipping" without opening the sale order. Hidden on
+         pickings with no fulfilment (receipts, internal moves, legacy orders
+         that predate grove_fulfillment). -->
+    <record id="view_picking_form_grove_fulfillment" model="ir.ui.view">
+        <field name="name">stock.picking.form.grove.fulfillment</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_form" />
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='origin']" position="after">
+                <field
+                    name="grove_fulfillment"
+                    widget="badge"
+                    invisible="not grove_fulfillment"
+                    decoration-warning="grove_fulfillment == 'pickup'"
+                    decoration-info="grove_fulfillment == 'ship'"
+                />
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Same badge as an optional column in the transfers list. -->
+    <record id="vpicktree_grove_fulfillment" model="ir.ui.view">
+        <field name="name">stock.picking.list.grove.fulfillment</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.vpicktree" />
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='origin']" position="after">
+                <field
+                    name="grove_fulfillment"
+                    optional="show"
+                    widget="badge"
+                    decoration-warning="grove_fulfillment == 'pickup'"
+                    decoration-info="grove_fulfillment == 'ship'"
+                />
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Filters so "show me today's pickups" is one click. -->
+    <record id="view_picking_search_grove_fulfillment" model="ir.ui.view">
+        <field name="name">stock.picking.search.grove.fulfillment</field>
+        <field name="model">stock.picking</field>
+        <field name="inherit_id" ref="stock.view_picking_internal_search" />
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <separator />
+                <filter
+                    name="grove_pickup"
+                    string="Farm pickup"
+                    domain="[('grove_fulfillment', '=', 'pickup')]"
+                />
+                <filter
+                    name="grove_ship"
+                    string="Shipping"
+                    domain="[('grove_fulfillment', '=', 'ship')]"
+                />
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Mirror on the sale order form (Other Info tab) so back-office staff
+         see the fulfilment there too. -->
+    <record id="view_order_form_grove_fulfillment" model="ir.ui.view">
+        <field name="name">sale.order.form.grove.fulfillment</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form" />
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='origin']" position="after">
+                <field
+                    name="grove_fulfillment"
+                    widget="badge"
+                    invisible="not grove_fulfillment"
+                    decoration-warning="grove_fulfillment == 'pickup'"
+                    decoration-info="grove_fulfillment == 'ship'"
+                />
+            </xpath>
+        </field>
+    </record>
+
+</odoo>
