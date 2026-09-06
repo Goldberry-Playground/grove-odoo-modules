@@ -37,6 +37,15 @@ def is_valid_tracking(value) -> bool:
 # because UPS rates off city/state/ZIP, but a purchased label carried a garbage
 # return address. The real farm street is now the default and the documented
 # env override is actually wired.
+# USPS Ground Advantage HARD-REQUIRES the sender's email AND phone on every
+# label purchase — Shippo rejects the transaction with `sender_info_missing`
+# ("Seller info missing email or phone") otherwise. UPS Ground never required
+# them, so this stayed latent until the carrier switch (GOL-1906): once USPS
+# wins the least-cost race (the cheaper carrier in most zones), a contact-less
+# ORIGIN fails EVERY such label buy. Both are env-overridable like the street
+# above. Email defaults to the farm inbox; phone has NO safe default — never
+# print a fabricated number on a real label — so prod MUST set
+# GROVE_SHIP_FROM_PHONE to a real, reachable number or USPS labels won't buy.
 ORIGIN = {
     "name": "Goldberry Grove",
     "street1": os.environ.get("GROVE_SHIP_FROM_STREET", "2291 Armstrong Road"),
@@ -44,6 +53,8 @@ ORIGIN = {
     "state": "WV",
     "zip": "26651",
     "country": "US",
+    "email": os.environ.get("GROVE_SHIP_FROM_EMAIL", "josh@goldberrygrove.farm"),
+    "phone": os.environ.get("GROVE_SHIP_FROM_PHONE", ""),
 }
 
 
