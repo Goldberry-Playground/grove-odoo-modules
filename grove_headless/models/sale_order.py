@@ -263,6 +263,10 @@ class SaleOrder(models.Model):
                 "zip": partner.zip or "",
                 "country": "US",
                 "email": partner.email or "",
+                # USPS Ground Advantage wants a recipient contact too; pass the
+                # partner's phone (mobile fallback) so a USPS label isn't left
+                # thin on delivery-contact info (GOL-1906).
+                "phone": partner.phone or partner.mobile or "",
             }
 
             # ── Pass 1: validate all lines and pack BEFORE buying anything ─
