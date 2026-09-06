@@ -361,16 +361,19 @@ def pack_order(items: list[tuple[int, float]], mode: str, cost_of) -> list[Packe
 # probe list with their true 24" length (see scripts/rate_check). Both sit under
 # 1 cu ft (1,728 in³), so USPS bills actual scale weight and DIM never bites.
 #
-# POTTED_UNIT_LB = 1.3 is Josh's measured per-tree increment (2026-09-06): 5 trees
-# flat-packed in the 24x10x6 weighed 8 lb full, decomposing to ~1.3 lb/tree + ~1.4
-# lb box tare; the full 10-tree box weighs ~15 lb (1.3*10 + ~1.5 tare). This is the
-# leafed flat-pack figure. Peat-and-bagged / potted root-mass is HEAVIER by the
-# damp-media weight, which Josh has NOT yet bench-weighed — per his instruction we
-# use 1.3 lb/tree as the planning proxy until a real potted box is weighed, then
-# re-run rate_check. representative_billable uses ceil(), so pricing stays on the
-# never-undercharge side at these masses. The 8 lb / 15 lb calibration points are
-# regression-locked in test_shipping_boxes.py and feed the GOL-1906 rate re-derive.
-POTTED_UNIT_LB = 1.3  # Josh bench 2026-09-06: leafed flat-pack lb/tree; potted media weight TBD (planning proxy)
+# POTTED_UNIT_LB = 2.0 is Josh's FIRMED damp peat-and-bagged per-tree increment
+# (weigh-in 2026-09-06): a damp potted/peat-bagged unit weighs ~2 lb, so a 5-pack
+# runs ~10 lb + tare and a 10-pack ~20 lb + tare — both far under the 70 lb ceiling
+# and (at < 1 cu ft) DIM-irrelevant. This supersedes the earlier 1.3 lb planning
+# proxy, which was the LEAFED flat-pack figure (bench reads of leafed trees dry-
+# packed as a stand-in) and always ran light for the damp root-mass this catalog
+# actually ships. Leafed flat-pack stays ~1.3, but that inventory ships on the
+# bareroot Box Engine above (PER_TREE_LB), not here — this potted catalog is
+# peat-and-bagged only, so 2.0 is the right calibration. representative_billable
+# uses ceil(), so pricing stays on the never-undercharge side. The resulting
+# 12 lb / 22 lb representative points are regression-locked in test_shipping_boxes.py
+# and feed the GOL-1906 rate re-derive once USPS-GA is live on the Shippo token.
+POTTED_UNIT_LB = 2.0  # Josh weigh-in 2026-09-06: firmed damp peat-and-bagged lb/tree
 
 POTTED_BOXES: dict[str, dict] = {
     "p24x10x4": {
@@ -379,8 +382,8 @@ POTTED_BOXES: dict[str, dict] = {
         "height": 4,  # 960 in³ (< 1 cu ft -> no DIM)
         "capacity": 5,  # seedlings — single axis, no season mode
         "packaging_usd": 3.50,
-        # tare 1.4 lb = Josh's measured box tare (2026-09-06). 5 trees -> 1.4 + 5*1.3
-        # = 7.9 lb, matching his "5 trees ≈ 7.5-8 lb" bench read; ceil -> 8 lb probe.
+        # tare 1.4 lb = Josh's measured box-only tare (2026-09-06; independent of dry
+        # vs damp contents). Damp 5-pack -> 1.4 + 5*2.0 = 11.4 lb; ceil -> 12 lb probe.
         "tare_lb": 1.4,
     },
     "p24x10x6": {
@@ -389,9 +392,8 @@ POTTED_BOXES: dict[str, dict] = {
         "height": 6,  # 1,440 in³ (< 1 cu ft -> no DIM)
         "capacity": 10,
         "packaging_usd": 4.50,
-        # tare 1.5 lb: reconciles both of Josh's 24x10x6 data points — 5 trees at
-        # 1.5 + 5*1.3 = 8.0 lb (his measured 8 lb), and full 10 at 1.5 + 10*1.3 =
-        # 14.5 -> ceil 15 lb (his "≈15 lb"). Re-firm with a potted weigh-in.
+        # tare 1.5 lb = box-only tare back-solved from Josh's leafed reads (independent
+        # of contents). Damp full 10-pack -> 1.5 + 10*2.0 = 21.5 lb; ceil -> 22 lb probe.
         "tare_lb": 1.5,
     },
 }

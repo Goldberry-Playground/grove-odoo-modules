@@ -232,14 +232,15 @@ class TestPottedWeights(unittest.TestCase):
         self.assertGreater(sb.potted_actual_weight_lb("p24x10x6", 10), sb.potted_actual_weight_lb("p24x10x6", 1))
 
     def test_matches_josh_bench_data(self):
-        # Calibration lock: Josh's 2026-09-06 weigh-in of leafed trees flat-packed.
-        # 5 trees in the 24x10x6 = 8 lb (tare 1.5 + 5*1.3). Full 10-tree box ≈ 15 lb.
-        self.assertEqual(sb.potted_actual_weight_lb("p24x10x6", 5), 8.0)
-        self.assertEqual(sb.potted_representative_billable_lb("p24x10x6"), 15)
-        # 5 trees in the 24x10x4 ≈ 7.5-8 lb (tare 1.4 + 5*1.3 = 7.9); probes at 8.
-        self.assertEqual(sb.potted_representative_billable_lb("p24x10x4"), 8)
-        # Per-unit increment is the measured 1.3 lb (net of tare), not the old 4.0.
-        self.assertEqual(sb.POTTED_UNIT_LB, 1.3)
+        # Calibration lock: Josh's 2026-09-06 damp peat-and-bagged weigh-in — ~2 lb
+        # per tree. Full 24x10x6 10-pack = 1.5 tare + 10*2.0 = 21.5 -> ceil 22 lb.
+        self.assertEqual(sb.potted_actual_weight_lb("p24x10x6", 10), 21.5)
+        self.assertEqual(sb.potted_representative_billable_lb("p24x10x6"), 22)
+        # 24x10x4 5-pack = 1.4 tare + 5*2.0 = 11.4 -> ceil 12 lb.
+        self.assertEqual(sb.potted_actual_weight_lb("p24x10x4", 5), 11.4)
+        self.assertEqual(sb.potted_representative_billable_lb("p24x10x4"), 12)
+        # Per-unit increment is the firmed damp 2.0 lb, superseding the 1.3 leafed proxy.
+        self.assertEqual(sb.POTTED_UNIT_LB, 2.0)
 
     def test_representative_under_seventy_pound_ceiling(self):
         for box_id in sb.POTTED_BOXES:

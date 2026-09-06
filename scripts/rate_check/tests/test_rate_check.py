@@ -80,12 +80,12 @@ class TestRateMath(unittest.TestCase):
 
     def test_potted_boxes_probe_at_true_dims_and_calibrated_weight(self):
         # GOL-2031: potted boxes reach the probe at their real 24" length (so the
-        # USPS nonstandard-length surcharge lands in the quote) and at the
-        # bench-calibrated weights (Josh 2026-09-06: 5-tree box = 8 lb, 10-tree = 15 lb).
+        # USPS nonstandard-length surcharge lands in the quote) and at the firmed
+        # damp weights (Josh 2026-09-06: ~2 lb/tree -> 5-pack = 12 lb, 10-pack = 22 lb).
         self.assertEqual(rc.PARCELS["p24x10x4"]["length"], "24")
         self.assertEqual(rc.PARCELS["p24x10x6"]["length"], "24")
-        self.assertEqual(float(rc.PARCELS["p24x10x4"]["weight"]), 8.0)
-        self.assertEqual(float(rc.PARCELS["p24x10x6"]["weight"]), 15.0)
+        self.assertEqual(float(rc.PARCELS["p24x10x4"]["weight"]), 12.0)
+        self.assertEqual(float(rc.PARCELS["p24x10x6"]["weight"]), 22.0)
 
     def test_diff_detects_material_drift(self):
         current = {"zone_1": {"bareroot": {"base": 21.0}}}
