@@ -833,6 +833,7 @@ class GroveHeadlessAPI(http.Controller):
                            "zip": "...", "country": "US"},
               "billing":  {...} | null,            # null = same as shipping
               "payment_method": "card",            # informational; real payment in later sprint
+              "promo_code": "FLATWOODS",           # optional loyalty/promo code (GOL-2088)
               "items": [{"variant_id": 2, "quantity": 1}, ...]
             }
         """
@@ -1589,6 +1590,51 @@ def _format_payment_note(payment_method):
     return f"Payment method requested: {payment_method}"
 
 
+# Cap on the promo-code string accepted from the payload — defense-in-depth
+# against an abusive bearer-API caller (the BFF bounds it too). Real loyalty
+# codes are short; 64 is comfortably above any legitimate value.
+MAX_PROMO_CODE = 64
+
+
+def _apply_promo_code(order, code):
+    """Apply a storefront promo/loyalty code to ``order`` via sale_loyalty.
+
+    Returns ``None`` on success (a reward order line now exists on the order) or
+    a shopper-facing error string when the code is unknown, ineligible (the cart
+    doesn't meet the program's rule — e.g. FLATWOODS needs 2+ qualifying trees),
+    expired, or already applied. An invalid code is never silently ignored
+    (GOL-2088).
+
+    Mirrors the website_sale_loyalty coupon flow: ``_try_apply_code`` validates +
+    registers the code and returns the claimable rewards grouped by coupon; we
+    then apply each with ``_apply_program_reward``. We only auto-apply rewards
+    that need no product selection (a fixed/percent discount, which is all the
+    storefront advertises); a reward that requires choosing a free product can't
+    be resolved from the headless payload, so it is rejected with a clear
+    message rather than guessed at.
+    """
+    result = order._try_apply_code(code)
+    if not isinstance(result, dict):
+        return "This promo code can't be applied to your cart."
+    if result.get("error"):
+        return result["error"]
+    # Success: ``result`` maps coupon (loyalty.card) -> claimable rewards
+    # (loyalty.reward recordset). Empty when the code registered but yields no
+    # reward for this cart.
+    applied = False
+    for coupon, rewards in result.items():
+        for reward in rewards:
+            if reward.multi_product:
+                return "This promo needs a product choice we can't make at checkout — please contact us to redeem it."
+            status = order._apply_program_reward(reward, coupon)
+            if isinstance(status, dict) and status.get("error"):
+                return status["error"]
+            applied = True
+    if not applied:
+        return "This code isn't valid for the items in your cart."
+    return None
+
+
 def _create_draft_order(website, env, payload):
     """Build a draft sale.order from a posted cart payload.
 
@@ -1834,6 +1880,44 @@ def _create_draft_order(website, env, payload):
                 status=409,
             )
 
+    # ── Promo / loyalty code (GOL-2088) ──────────────────────────────────────
+    # Apply an optional storefront promo code (e.g. FLATWOODS) through
+    # sale_loyalty. Placed here — after the ship/potted/$0-shipping gates that
+    # can unlink the order, and after the shipping line exists so an order-level
+    # discount is split across the same tax groups — but BEFORE the destination
+    # tax step so the reward line is de-taxed with the goods when shipping out of
+    # state. An invalid or ineligible code is a shopper-facing 400, never a
+    # silent no-op; the cart is unlinked so no partial order persists.
+    promo_code = payload.get("promo_code")
+    if promo_code is not None and promo_code != "":
+        if not isinstance(promo_code, str) or len(promo_code) > MAX_PROMO_CODE:
+            order.unlink()
+            return None, _json_response({"error": "That promo code isn't valid."}, status=400)
+        # CEO directive 2026-09-06 (GOL-2088): a promo code is REJECTED on a
+        # preorder (deposit) cart rather than deferred to ship. The store is
+        # ships-now through Oct 16, so a preorder cart cannot occur during the
+        # FLATWOODS window — this branch is defensive and revisited when preorder
+        # season reopens. Rejecting keeps the money path simple: a deposit cart
+        # never carries a reward line to settle off-session at ship. Checked
+        # before _apply_promo_code so an eligible code is still refused (the cart
+        # shape, not the code, is the reason) and no reward line is ever written.
+        if _cart_has_preorder(env, order, payload):
+            order.unlink()
+            return None, _json_response(
+                {
+                    "error": (
+                        "Promo codes can't be applied to preorder (deposit) carts. "
+                        "Remove the code or the preorder items to continue."
+                    )
+                },
+                status=400,
+            )
+        promo_error = _apply_promo_code(order, promo_code.strip())
+        if promo_error:
+            order.unlink()
+            return None, _json_response({"error": promo_error}, status=400)
+        order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
+
     # WV sales tax is destination-based for SHIPPED orders (GOL-1021): keep it
     # only for WV-bound orders, strip it from every line (incl. shipping) for any
     # other ship-to state. Runs after the shipping line so it is de-taxed too when
@@ -1920,6 +2004,45 @@ def _calendar_preorder_variant_ids(env, order, payload, today=None):
     )
 
 
+def _cart_has_preorder(env, order, payload):
+    """True when any product line in ``order`` would charge as a preorder deposit.
+
+    Mirrors the per-line preorder determination in ``_build_stripe_line_items``
+    (calendar-window forcing + short/unknown free stock + the bareroot ship
+    window) but computes only the boolean — no line items, no writes. Used at
+    promo-apply time to reject a promo code on a deposit cart (GOL-2088 CEO
+    directive 2026-09-06). Kept next to ``_build_stripe_line_items`` and reusing
+    the same primitives (``_calendar_preorder_variant_ids``, ``free_qty``,
+    ``ship_options``, ``stripe_gateway.line_charge``) so the two stay in lockstep.
+    """
+    calendar_preorder_ids = _calendar_preorder_variant_ids(env, order, payload)
+    today = _date.today()
+    is_ship_order = any(
+        ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE for ol in order.order_line
+    )
+    dest_partner = order.partner_shipping_id or order.partner_id
+    dest_zip = dest_partner.zip if dest_partner else None
+    farm_zip = _farm_pickup_zip(order.env, order.company_id)
+    for line in order.order_line:
+        if line.display_type or not line.product_id or line.reward_id:
+            continue
+        product = line.product_id
+        if product.default_code == SHIPPING_PRODUCT_CODE:
+            continue
+        free_qty = 0 if product.id in calendar_preorder_ids else product.free_qty
+        tier = product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier or "potted"
+        line_ships_now = True
+        if tier == "bareroot":
+            window_zip = dest_zip if is_ship_order else farm_zip
+            line_ships_now = ship_options(window_zip, tier, today).get("ships_now", True)
+        for _amount, _qty, is_preorder in stripe_gateway.line_charge(
+            line.price_unit, line.product_uom_qty, free_qty, ships_now=line_ships_now
+        ):
+            if is_preorder:
+                return True
+    return False
+
+
 def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
     """Turn a draft order's lines into Stripe Checkout line items.
 
@@ -1970,6 +2093,13 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
     farm_zip = _farm_pickup_zip(order.env, order.company_id)
     for line in order.order_line:
         if line.display_type or not line.product_id:
+            continue
+        # sale_loyalty reward (discount) lines carry a real product but a
+        # negative amount — they are not goods to route through the deposit
+        # matrix. Handled after the loop so the discount nets against today's
+        # charge (and its negative tax against the WV tax line), or defers to
+        # ship on a preorder cart (GOL-2088).
+        if line.reward_id:
             continue
         product = line.product_id
         name = product.display_name
@@ -2031,6 +2161,26 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
         if shipping_item is not None:
             line_items.append(shipping_item)
             tax_today += shipping_tax
+        # Loyalty reward discount(s) (GOL-2088): a negative line that reduces
+        # today's charge, plus its negative tax that reduces the WV tax line.
+        # Netted BEFORE the tax line is emitted so an out-of-state (untaxed)
+        # cart doesn't sprout a spurious tax line, and a WV cart's tax reflects
+        # the discounted base. A preorder cart never reaches here with a reward:
+        # _create_draft_order rejects a promo code on a deposit cart upstream
+        # (CEO directive 2026-09-06), so this discount emission is scoped to the
+        # ships-now (non-preorder) branch and never leaks a discount onto a
+        # deposit-only charge.
+        discount_items = []
+        for line in order.order_line:
+            if not line.reward_id or line.display_type:
+                continue
+            cents = stripe_gateway.to_cents(line.price_subtotal)  # negative
+            if cents == 0:
+                continue
+            discount_items.append(
+                {"name": line.name or "Discount", "kind": "discount", "amount_cents": cents, "quantity": 1}
+            )
+            tax_today += line.price_tax  # negative → reduces tax owed today
         if tax_today > 0:
             line_items.append(
                 {
@@ -2040,6 +2190,7 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
                     "quantity": 1,
                 }
             )
+        line_items.extend(discount_items)
     charged_cents = sum(li["amount_cents"] * li["quantity"] for li in line_items)
     return line_items, preorder_variant_ids, charged_cents
 

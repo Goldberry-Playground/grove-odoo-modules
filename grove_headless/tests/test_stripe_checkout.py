@@ -63,6 +63,36 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         )
         return order
 
+    def _make_promo_program(self, code="TESTPROMO", min_qty=2, amount=10.0):
+        """A `with_code` promotion granting a flat `amount` off the order when at
+        least `min_qty` units are in the cart — the FLATWOODS shape (GOL-2088)."""
+        return (
+            self.env["loyalty.program"]
+            .with_company(self.company)
+            .create(
+                {
+                    "name": f"Promo {code}",
+                    "program_type": "promotion",
+                    "trigger": "with_code",
+                    "applies_on": "current",
+                    "company_id": self.company.id,
+                    "rule_ids": [(0, 0, {"mode": "with_code", "code": code, "minimum_qty": min_qty})],
+                    "reward_ids": [
+                        (
+                            0,
+                            0,
+                            {
+                                "reward_type": "discount",
+                                "discount": amount,
+                                "discount_mode": "per_order",
+                                "discount_applicability": "order",
+                            },
+                        )
+                    ],
+                }
+            )
+        )
+
     @staticmethod
     def _sign(secret, body, ts=None):
         """Build a valid Stripe-Signature header for `body` signed with `secret`
@@ -312,6 +342,109 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(preorder_ids, [self.product.id])
         self.assertFalse([li for li in line_items if li["kind"] in ("shipping", "tax")])
         self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+
+    # ── promo / loyalty discount (GOL-2088) ──────────────────────────────
+
+    def test_promo_code_applies_reward_line(self):
+        """A valid code on an eligible cart adds a sale_loyalty reward line and
+        drops the order's GRAND total by the discount amount. sale_loyalty's
+        fixed per-order discount is tax-INCLUSIVE: a "$10 off" reward splits into
+        a negative untaxed subtotal + negative tax that together total exactly
+        -$10 off `amount_total` (so the untaxed subtotal alone is ~-$9.35 at 7%)."""
+        self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=2)  # 2 * $25 = $50 subtotal, meets min_qty
+        before_total = order.amount_total
+        err = grove_main._apply_promo_code(order, "TESTPROMO")
+        self.assertIsNone(err)
+        reward_lines = order.order_line.filtered(lambda line: line.reward_id)
+        self.assertTrue(reward_lines, "a reward order line should exist")
+        self.assertLess(sum(reward_lines.mapped("price_subtotal")), 0.0)
+        self.assertAlmostEqual(order.amount_total, before_total - 10.0, places=2)
+
+    def test_promo_code_ineligible_cart_returns_error(self):
+        """A real code whose rule the cart doesn't meet (min_qty) is a
+        shopper-facing error, not a silent no-discount success."""
+        self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)  # below minimum_qty
+        err = grove_main._apply_promo_code(order, "TESTPROMO")
+        self.assertIsInstance(err, str)
+        self.assertTrue(err)
+        self.assertFalse(order.order_line.filtered(lambda line: line.reward_id))
+
+    def test_promo_code_unknown_returns_error(self):
+        """An unknown code returns a shopper-facing error and adds no reward."""
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=2)
+        err = grove_main._apply_promo_code(order, "NO-SUCH-CODE")
+        self.assertIsInstance(err, str)
+        self.assertFalse(order.order_line.filtered(lambda line: line.reward_id))
+
+    def test_discount_line_item_reduces_todays_charge(self):
+        """The reward line surfaces as a negative `discount` line item, and the
+        charged-today total equals the order's discounted grand total — Stripe
+        collects exactly `amount_total` on a fully-in-stock (ships-now) cart."""
+        self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
+        self._set_stock(self.product, 5)
+        plain = self._make_order(qty=2)
+        _, _, full_charged = grove_main._build_stripe_line_items(plain)
+
+        order = self._make_order(qty=2)
+        self.assertIsNone(grove_main._apply_promo_code(order, "TESTPROMO"))
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order)
+
+        discount = next(li for li in line_items if li["kind"] == "discount")
+        self.assertLess(discount["amount_cents"], 0)  # negative (untaxed portion)
+        self.assertEqual(preorder_ids, [])
+        # charged is the sum over the itemized lines (the review page renders the
+        # same array) and matches Odoo's discounted grand total to the cent — the
+        # reward's own negative tax nets the WV tax line, so no over/under-charge.
+        self.assertEqual(charged, sum(li["amount_cents"] * li["quantity"] for li in line_items))
+        self.assertEqual(charged, stripe_gateway.to_cents(order.amount_total))
+        # And today's charge is exactly $10 below the undiscounted cart — the
+        # tax-inclusive discount lands as a full $10 off regardless of the split.
+        self.assertEqual(full_charged - charged, stripe_gateway.to_cents(10.0))
+        # And it is strictly below the undiscounted cart (goods + full tax).
+        self.assertLess(charged, full_charged)
+
+    def test_promo_code_rejected_on_preorder_cart(self):
+        """CEO directive 2026-09-06 (GOL-2088): a promo code on a preorder
+        (deposit) cart is REJECTED with a shopper-facing 400 — not deferred to
+        ship. Even an otherwise-eligible code (min_qty met) is refused because the
+        cart charges deposits today; no order and no reward line persist."""
+        self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
+        self._set_stock(self.product, 0)  # zero stock → every unit is a deposit
+        payload = self._cart_payload("WV", fulfillment="pickup", promo_code="TESTPROMO")
+        payload["items"] = [{"variant_id": self.product.id, "quantity": 2}]  # meets min_qty
+        order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(order)
+        self.assertEqual(error.status_code, 400)
+        self.assertIn("preorder", error.data.decode().lower())
+        # No orphan draft (nor its reward line) persisted.
+        self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
+
+    def test_cart_has_preorder_agrees_with_line_builder(self):
+        """The promo-gate predicate (_cart_has_preorder) must classify a cart the
+        same way the charging path (_build_stripe_line_items) does — a deposit
+        cart is a preorder for both; a fully-in-stock cart is a preorder for
+        neither — so the reject can never diverge from what actually charges."""
+        pickup = self._cart_payload("WV", fulfillment="pickup")
+        pickup["items"] = [{"variant_id": self.product.id, "quantity": 2}]
+        # Deposit cart (zero stock) → preorder for both.
+        self._set_stock(self.product, 0)
+        order, error = grove_main._create_draft_order(self._website(), self.env, pickup)
+        self.assertIsNone(error)
+        _, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        self.assertTrue(preorder_ids)
+        self.assertTrue(grove_main._cart_has_preorder(self.env, order, pickup))
+        # In-stock cart → preorder for neither.
+        self._set_stock(self.product, 5)
+        order2, error2 = grove_main._create_draft_order(self._website(), self.env, pickup)
+        self.assertIsNone(error2)
+        _, preorder_ids2, _ = grove_main._build_stripe_line_items(order2)
+        self.assertFalse(preorder_ids2)
+        self.assertFalse(grove_main._cart_has_preorder(self.env, order2, pickup))
 
     # ── shipping-calendar preorder gate (GOL-1309) ───────────────────────
 

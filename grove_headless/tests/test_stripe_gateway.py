@@ -120,6 +120,16 @@ class TestSessionParams(unittest.TestCase):
         self.assertEqual(params["metadata[access_token]"], "tok")
         self.assertEqual(params["customer_email"], "j@x.com")
 
+    def test_discount_coupon_id_adds_discounts(self):
+        params = sg.build_session_params(
+            line_items=self.LINES, success_url="a", cancel_url="b", discount_coupon_id="coupon_9"
+        )
+        self.assertEqual(params["discounts[0][coupon]"], "coupon_9")
+
+    def test_no_discounts_without_coupon(self):
+        params = sg.build_session_params(line_items=self.LINES, success_url="a", cancel_url="b")
+        self.assertNotIn("discounts[0][coupon]", params)
+
 
 class TestCreateSession(unittest.TestCase):
     LINES = [{"name": "Pawpaw", "amount_cents": 2500, "quantity": 1}]
@@ -146,6 +156,71 @@ class TestCreateSession(unittest.TestCase):
         with self.assertRaises(sg.StripeError) as ctx:
             sg.create_checkout_session("sk", line_items=self.LINES, success_url="a", cancel_url="b", post=post)
         self.assertIn("Amount too small", str(ctx.exception))
+
+    # ── promo discount → Stripe coupon (GOL-2088) ────────────────────────────
+    def test_negative_discount_line_becomes_coupon(self):
+        """A negative-amount "discount" line can't be a Stripe line item (Stripe
+        rejects a negative unit_amount). create_checkout_session sums the
+        negatives into a one-time coupon, applies it via `discounts`, and sends
+        only the positive lines as Stripe line items."""
+        lines = [
+            {"name": "Apple 'Grimes'", "amount_cents": 4000, "quantity": 2, "kind": "goods"},
+            {"name": "Discount: FLATWOODS", "amount_cents": -1000, "quantity": 1, "kind": "discount"},
+        ]
+        post = mock.Mock(
+            side_effect=[
+                _ok(200, {"id": "coupon_x", "amount_off": 1000}),
+                _ok(200, {"id": "cs_1", "url": "https://pay/x", "payment_intent": "pi_1"}),
+            ]
+        )
+        out = sg.create_checkout_session("sk", line_items=lines, success_url="a", cancel_url="b", post=post)
+        self.assertEqual(out["id"], "cs_1")
+        # First call creates the coupon for the summed discount magnitude.
+        coupon_call = post.call_args_list[0]
+        self.assertTrue(coupon_call.args[0].endswith("/v1/coupons"))
+        self.assertEqual(coupon_call.kwargs["data"]["amount_off"], 1000)
+        self.assertEqual(coupon_call.kwargs["data"]["currency"], "usd")
+        self.assertEqual(coupon_call.kwargs["data"]["duration"], "once")
+        # Second call is the session: coupon applied via discounts, and NO line
+        # carries a negative unit_amount.
+        session_data = post.call_args_list[1].kwargs["data"]
+        self.assertEqual(session_data["discounts[0][coupon]"], "coupon_x")
+        self.assertEqual(session_data["line_items[0][price_data][unit_amount]"], 4000)
+        self.assertNotIn("line_items[1][price_data][unit_amount]", session_data)
+
+    def test_no_coupon_created_without_discount(self):
+        """The common (no-promo) path never touches /v1/coupons."""
+        post = mock.Mock(return_value=_ok(200, {"id": "cs_1", "url": "https://pay/x"}))
+        sg.create_checkout_session("sk", line_items=self.LINES, success_url="a", cancel_url="b", post=post)
+        self.assertEqual(post.call_count, 1)
+        self.assertNotIn("discounts[0][coupon]", post.call_args.kwargs["data"])
+
+    def test_all_negative_lines_raises(self):
+        """A cart that resolved to only a discount (no positive line) can't be
+        charged — fail loudly rather than post a zero/negative session."""
+        lines = [{"name": "Discount", "amount_cents": -500, "quantity": 1}]
+        with self.assertRaises(sg.StripeError):
+            sg.create_checkout_session("sk", line_items=lines, success_url="a", cancel_url="b", post=mock.Mock())
+
+
+class TestCoupon(unittest.TestCase):
+    def test_create_coupon_posts_amount_off(self):
+        post = mock.Mock(return_value=_ok(200, {"id": "coupon_1", "amount_off": 1000}))
+        out = sg.create_coupon("sk", amount_off_cents=1000, name="Promo discount", post=post)
+        self.assertEqual(out["id"], "coupon_1")
+        self.assertTrue(post.call_args.args[0].endswith("/v1/coupons"))
+        self.assertEqual(post.call_args.kwargs["data"]["amount_off"], 1000)
+        self.assertEqual(post.call_args.kwargs["data"]["name"], "Promo discount")
+
+    def test_create_coupon_nonpositive_raises_before_network(self):
+        post = mock.Mock()
+        with self.assertRaises(sg.StripeError):
+            sg.create_coupon("sk", amount_off_cents=0, post=post)
+        post.assert_not_called()
+
+    def test_create_coupon_missing_key_raises(self):
+        with self.assertRaises(sg.StripeError):
+            sg.create_coupon("", amount_off_cents=100, post=mock.Mock())
 
 
 class TestRefund(unittest.TestCase):
