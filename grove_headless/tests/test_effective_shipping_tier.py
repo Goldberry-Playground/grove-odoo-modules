@@ -29,6 +29,27 @@ class TestEffectiveShippingTier(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(tiers["Bareroot"], "bareroot")
         self.assertEqual(tiers["Potted"], "potted")
 
+    def test_potted_variant_overrides_bareroot_template_tier(self):
+        # Apples/pears carry template tier "bareroot"; their Potted variant must
+        # still be tier "potted" (pickup-only), not inherit "bareroot" — the
+        # inherited tier badged Potted as "Peat & bagged" with a ship quote on
+        # the live PDP (Josh 2026-09-06).
+        tmpl = self.env["product.template"].create(
+            {
+                "name": "Tier Apple",
+                "type": "consu",
+                "grove_shipping_tier": "bareroot",
+                "attribute_line_ids": [
+                    (0, 0, {"attribute_id": self.fmt.id, "value_ids": [(6, 0, [self.v_potted.id, self.v_bareroot.id])]})
+                ],
+            }
+        )
+        tiers = {
+            v.product_template_variant_value_ids.name: v.grove_effective_shipping_tier for v in tmpl.product_variant_ids
+        }
+        self.assertEqual(tiers["Potted"], "potted")
+        self.assertEqual(tiers["Bareroot"], "bareroot")
+
     def test_no_format_axis_falls_back_to_template(self):
         tmpl = self.env["product.template"].create(
             {"name": "Plain Aronia", "type": "consu", "grove_shipping_tier": "bareroot"}
