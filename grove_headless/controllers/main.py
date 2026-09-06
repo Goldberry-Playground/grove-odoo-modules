@@ -383,7 +383,10 @@ def _structure_variant(variant, template_rootstock=""):
         # which the storefront reads as "no rootstock pill / selector" (GOL-1112).
         "rootstock": axis.get("Rootstock", "") or template_rootstock,
         "price": variant.lst_price,
-        "qty_available": variant.qty_available,
+        # Shared-pool availability (GOL-2031 peat & bagged): a Bareroot variant
+        # ships the potted stock too (de-potted + bagged at packing), so the
+        # PDP must not show "sold out" while its potted sibling sits at 30.
+        "qty_available": variant.grove_shared_pool_qty("qty_available"),
         "shipping_tier": variant.grove_effective_shipping_tier,
         "image_url": _image_url("product.product", variant, "image_128"),
     }
@@ -1993,7 +1996,10 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
         #   * ships_now (GOL-1666 §2 / GOL-1669): the wave window from
         #     ship_options, keyed off the destination ZIP for shipped orders and
         #     the FARM's ZIP for pickup.
-        free_qty = 0 if product.id in calendar_preorder_ids else product.free_qty
+        # Shared pool (GOL-2031): bareroot sells the potted stock too, so the
+        # full-charge vs deposit split must count the whole pool or an in-stock
+        # peat-and-bagged tree wrongly falls to the preorder deposit path.
+        free_qty = 0 if product.id in calendar_preorder_ids else product.grove_shared_pool_qty("free_qty")
         # Only bareroot honors the mailing-window calendar; potted is pickup-only
         # and its sold-out handling is the GOL-1666 §2 bareroot steer, not here.
         tier = product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier or "potted"
@@ -2086,7 +2092,10 @@ def _oversold_lines(order):
         product = line.product_id
         if product.default_code == SHIPPING_PRODUCT_CODE or product.id in preorder_ids:
             continue
-        available = product.with_company(order.company_id).free_qty
+        # Shared pool (GOL-2031): count the potted sibling too, or a paid
+        # peat-and-bagged order gets auto-refunded as "oversold" while the
+        # trees it ships sit potted on the bench.
+        available = product.with_company(order.company_id).grove_shared_pool_qty("free_qty")
         if available < line.product_uom_qty:
             oversold.append(line)
     return oversold
