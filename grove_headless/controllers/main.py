@@ -1890,6 +1890,25 @@ def _create_draft_order(website, env, payload):
         if not isinstance(promo_code, str) or len(promo_code) > MAX_PROMO_CODE:
             order.unlink()
             return None, _json_response({"error": "That promo code isn't valid."}, status=400)
+        # CEO directive 2026-09-06 (GOL-2088): a promo code is REJECTED on a
+        # preorder (deposit) cart rather than deferred to ship. The store is
+        # ships-now through Oct 16, so a preorder cart cannot occur during the
+        # FLATWOODS window — this branch is defensive and revisited when preorder
+        # season reopens. Rejecting keeps the money path simple: a deposit cart
+        # never carries a reward line to settle off-session at ship. Checked
+        # before _apply_promo_code so an eligible code is still refused (the cart
+        # shape, not the code, is the reason) and no reward line is ever written.
+        if _cart_has_preorder(env, order, payload):
+            order.unlink()
+            return None, _json_response(
+                {
+                    "error": (
+                        "Promo codes can't be applied to preorder (deposit) carts. "
+                        "Remove the code or the preorder items to continue."
+                    )
+                },
+                status=400,
+            )
         promo_error = _apply_promo_code(order, promo_code.strip())
         if promo_error:
             order.unlink()
@@ -1980,6 +1999,45 @@ def _calendar_preorder_variant_ids(env, order, payload, today=None):
         for line in order.order_line
         if not line.display_type and line.product_id and _bareroot_tier(line.product_id)
     )
+
+
+def _cart_has_preorder(env, order, payload):
+    """True when any product line in ``order`` would charge as a preorder deposit.
+
+    Mirrors the per-line preorder determination in ``_build_stripe_line_items``
+    (calendar-window forcing + short/unknown free stock + the bareroot ship
+    window) but computes only the boolean — no line items, no writes. Used at
+    promo-apply time to reject a promo code on a deposit cart (GOL-2088 CEO
+    directive 2026-09-06). Kept next to ``_build_stripe_line_items`` and reusing
+    the same primitives (``_calendar_preorder_variant_ids``, ``free_qty``,
+    ``ship_options``, ``stripe_gateway.line_charge``) so the two stay in lockstep.
+    """
+    calendar_preorder_ids = _calendar_preorder_variant_ids(env, order, payload)
+    today = _date.today()
+    is_ship_order = any(
+        ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE for ol in order.order_line
+    )
+    dest_partner = order.partner_shipping_id or order.partner_id
+    dest_zip = dest_partner.zip if dest_partner else None
+    farm_zip = _farm_pickup_zip(order.env, order.company_id)
+    for line in order.order_line:
+        if line.display_type or not line.product_id or line.reward_id:
+            continue
+        product = line.product_id
+        if product.default_code == SHIPPING_PRODUCT_CODE:
+            continue
+        free_qty = 0 if product.id in calendar_preorder_ids else product.free_qty
+        tier = product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier or "potted"
+        line_ships_now = True
+        if tier == "bareroot":
+            window_zip = dest_zip if is_ship_order else farm_zip
+            line_ships_now = ship_options(window_zip, tier, today).get("ships_now", True)
+        for _amount, _qty, is_preorder in stripe_gateway.line_charge(
+            line.price_unit, line.product_uom_qty, free_qty, ships_now=line_ships_now
+        ):
+            if is_preorder:
+                return True
+    return False
 
 
 def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
@@ -2101,9 +2159,11 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
         # today's charge, plus its negative tax that reduces the WV tax line.
         # Netted BEFORE the tax line is emitted so an out-of-state (untaxed)
         # cart doesn't sprout a spurious tax line, and a WV cart's tax reflects
-        # the discounted base. On a preorder cart the reward line is left on the
-        # order untouched and settles at ship, mirroring how shipping+tax defer
-        # (GOL-2052) — so it is intentionally not added here.
+        # the discounted base. A preorder cart never reaches here with a reward:
+        # _create_draft_order rejects a promo code on a deposit cart upstream
+        # (CEO directive 2026-09-06), so this discount emission is scoped to the
+        # ships-now (non-preorder) branch and never leaks a discount onto a
+        # deposit-only charge.
         discount_items = []
         for line in order.order_line:
             if not line.reward_id or line.display_type:

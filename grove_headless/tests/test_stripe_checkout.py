@@ -408,17 +408,43 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         # And it is strictly below the undiscounted cart (goods + full tax).
         self.assertLess(charged, full_charged)
 
-    def test_preorder_cart_defers_discount_like_shipping(self):
-        """A preorder (deposit) cart charges only deposits today; the discount
-        is left on the order to settle at ship, so no discount line rides the
-        today-charge (mirrors GOL-2052 shipping/tax deferral)."""
+    def test_promo_code_rejected_on_preorder_cart(self):
+        """CEO directive 2026-09-06 (GOL-2088): a promo code on a preorder
+        (deposit) cart is REJECTED with a shopper-facing 400 — not deferred to
+        ship. Even an otherwise-eligible code (min_qty met) is refused because the
+        cart charges deposits today; no order and no reward line persist."""
         self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
         self._set_stock(self.product, 0)  # zero stock → every unit is a deposit
-        order = self._make_order(qty=2)
-        self.assertIsNone(grove_main._apply_promo_code(order, "TESTPROMO"))
-        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        payload = self._cart_payload("WV", fulfillment="pickup", promo_code="TESTPROMO")
+        payload["items"] = [{"variant_id": self.product.id, "quantity": 2}]  # meets min_qty
+        order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(order)
+        self.assertEqual(error.status_code, 400)
+        self.assertIn("preorder", error.data.decode().lower())
+        # No orphan draft (nor its reward line) persisted.
+        self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
+
+    def test_cart_has_preorder_agrees_with_line_builder(self):
+        """The promo-gate predicate (_cart_has_preorder) must classify a cart the
+        same way the charging path (_build_stripe_line_items) does — a deposit
+        cart is a preorder for both; a fully-in-stock cart is a preorder for
+        neither — so the reject can never diverge from what actually charges."""
+        pickup = self._cart_payload("WV", fulfillment="pickup")
+        pickup["items"] = [{"variant_id": self.product.id, "quantity": 2}]
+        # Deposit cart (zero stock) → preorder for both.
+        self._set_stock(self.product, 0)
+        order, error = grove_main._create_draft_order(self._website(), self.env, pickup)
+        self.assertIsNone(error)
+        _, preorder_ids, _ = grove_main._build_stripe_line_items(order)
         self.assertTrue(preorder_ids)
-        self.assertFalse([li for li in line_items if li["kind"] == "discount"])
+        self.assertTrue(grove_main._cart_has_preorder(self.env, order, pickup))
+        # In-stock cart → preorder for neither.
+        self._set_stock(self.product, 5)
+        order2, error2 = grove_main._create_draft_order(self._website(), self.env, pickup)
+        self.assertIsNone(error2)
+        _, preorder_ids2, _ = grove_main._build_stripe_line_items(order2)
+        self.assertFalse(preorder_ids2)
+        self.assertFalse(grove_main._cart_has_preorder(self.env, order2, pickup))
 
     # ── shipping-calendar preorder gate (GOL-1309) ───────────────────────
 
