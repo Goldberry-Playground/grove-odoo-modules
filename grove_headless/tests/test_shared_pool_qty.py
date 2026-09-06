@@ -85,6 +85,15 @@ class TestSharedPoolQty(GroveTaxFixtureMixin, TransactionCase):
         self._stock(self._variant(tmpl, "Potted", "Meader"), 30)
         self.assertEqual(meader_bareroot.grove_shared_pool_qty("qty_available"), 30)
 
+    def test_pool_works_on_bareroot_tier_template(self):
+        # Apple-shaped: template tier "bareroot". The Potted variant must be
+        # recognized as the pool sibling (its effective tier is "potted" via the
+        # symmetric Format override), so the Bareroot variant sells its stock.
+        tmpl = self._template([self.c_meader.id])
+        tmpl.grove_shipping_tier = "bareroot"
+        self._stock(self._variant(tmpl, "Potted"), 3)
+        self.assertEqual(self._variant(tmpl, "Bareroot").grove_shared_pool_qty("qty_available"), 3)
+
     def test_no_format_axis_is_own_stock_only(self):
         tmpl = self.env["product.template"].create(
             {"name": "Plain Aronia", "type": "consu", "is_storable": True, "grove_shipping_tier": "bareroot"}

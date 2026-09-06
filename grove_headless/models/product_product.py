@@ -2,6 +2,7 @@ from odoo import api, fields, models
 
 FORMAT_ATTRIBUTE = "Format"
 BAREROOT_VALUE = "Bareroot"
+POTTED_VALUE = "Potted"
 
 
 class ProductProduct(models.Model):
@@ -25,6 +26,12 @@ class ProductProduct(models.Model):
             )
             if fmt_values and fmt_values[0].name == BAREROOT_VALUE:
                 product.grove_effective_shipping_tier = "bareroot"
+            elif fmt_values and fmt_values[0].name == POTTED_VALUE:
+                # Symmetric override (Josh 2026-09-06): a Potted variant on a
+                # template whose tier is "bareroot" (apples, pears) inherited
+                # "bareroot" via the fallback below, so the storefront badged it
+                # "Peat & bagged" and quoted shipping — Potted is pickup-only.
+                product.grove_effective_shipping_tier = "potted"
             else:
                 product.grove_effective_shipping_tier = product.product_tmpl_id.grove_shipping_tier or "potted"
 
