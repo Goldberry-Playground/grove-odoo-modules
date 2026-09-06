@@ -8,10 +8,10 @@ https://prism.oregonstate.edu/phzm/ and pass it as argv[1].
 The PHZM zipcode file has columns: zipcode, zone (e.g. "6b"), trange,
 zonetitle — no state column.  A secondary ZIP→state reference (from
 github.com/scpike/us-state-county-zip) is fetched to filter down to the
-21 green states.
+22 green states.
 
 Output rows: zip,zone (integer zone, half-zone letter stripped),
-trimmed to the 21 green states.
+trimmed to the 22 green states.
 
 Run once per PHZM release: python3 scripts/build_zip_zone_matrix.py
 """
@@ -44,6 +44,7 @@ GREEN = {
     "OH",
     "PA",
     "RI",
+    "TN",
     "VT",
     "VA",
     "WV",

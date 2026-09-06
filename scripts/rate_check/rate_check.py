@@ -69,7 +69,12 @@ REFERENCE_ZIPS = {
     "zone_1": ("Wilmington", "NC", "28401"),  # band {WV,VA,KY,NC,DE}; NC coast
     "zone_2": ("New York", "NY", "10001"),  # band {MD,PA,OH,IN,NJ,NY}
     "zone_3": ("Chicago", "IL", "60601"),  # band {IL,MI,CT,RI}
-    "zone_4": ("Boston", "MA", "02108"),  # band {WI,MN,MA,VT,NH}
+    # band {WI,MN,MA,VT,NH,TN}. TN joined zone_4 (GOL-2128): a 2026-09-06 probe
+    # put every TN corner (incl. Memphis/Chattanooga, UPS-only) at or below the
+    # Boston cheapest-ground for every box, so Boston remains the worst corner
+    # this ZIP must track. If a future TN corner ever exceeds Boston, this zone
+    # needs a multi-corner max (tracked as a GOL-2128 follow-up).
+    "zone_4": ("Boston", "MA", "02108"),
     "zone_5": ("Portland", "ME", "04101"),  # band {ME}
 }
 # Box Engine v2: reference parcels come straight from the box catalog —

@@ -14,7 +14,7 @@ checker is active is not safe; they will be dropped on the next rates PR.
 Design is documented in the vault wiki at ``Software/Grove Shipping``.
 
 Fail-safe by design: ``compute_order_shipping`` returns ``None`` for any
-address outside the 21-state green list, any cart containing a potted line,
+address outside the 22-state green list, any cart containing a potted line,
 and any cart the packer cannot plan — the checkout then adds NO shipping line
 (and the checkout endpoint blocks with an explicit message via
 ``unshippable_reason``). We never emit a wrong or guessed charge.
@@ -154,6 +154,7 @@ GREEN_STATES: frozenset[str] = frozenset(
         "OH",
         "PA",
         "RI",
+        "TN",
         "VT",
         "VA",
         "WV",
@@ -187,6 +188,13 @@ ZONE_BY_STATE: dict[str, str] = {
     "MA": "zone_4",
     "VT": "zone_4",
     "NH": "zone_4",
+    # TN spans from cheap USPS-reach east (Knoxville/Nashville) to UPS-only
+    # west/southeast (Memphis, Chattanooga). Its worst-case corner requires
+    # zone_4 pricing to never undercharge — a live Shippo probe (2026-09-06,
+    # origin 26651, cheapest-of-{UPS Ground, USPS Ground Advantage}) put every
+    # TN corner AT OR BELOW the zone_4 reference corner (Boston MA) for every
+    # catalog box; zone_1/zone_2 would undercharge west TN. See GOL-2128.
+    "TN": "zone_4",
     # zone_5 — farthest (UPS ~5)
     "ME": "zone_5",
 }
@@ -228,7 +236,7 @@ def rate_feed(calendar_override=None, today=None) -> dict:
 
     ``zones`` mirrors ``data/shipping_rates.json`` (minus the ``_``-prefixed
     keys, already stripped at load). ``zone_by_state`` is the authoritative
-    21-state green list -> zone map — the compliance gate the frontend must
+    22-state green list -> zone map — the compliance gate the frontend must
     stay in lockstep with. ``packing`` carries the box catalog + capacities so
     the frontend can mirror ``pack_order`` exactly. ``calendar`` is the annual,
     admin-editable shipping calendar keyed to USDA hardiness zone (NOT the
