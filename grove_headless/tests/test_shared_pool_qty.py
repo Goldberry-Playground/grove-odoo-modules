@@ -53,7 +53,16 @@ class TestSharedPoolQty(GroveTaxFixtureMixin, TransactionCase):
         return tmpl.product_variant_ids.filtered(match)[:1]
 
     def _stock(self, variant, qty):
-        self.env["stock.quant"]._update_available_quantity(variant, self.location, qty)
+        # qty_available/free_qty are non-stored computes; a direct quant write
+        # does not invalidate them in-transaction, so a pool-qty read taken
+        # earlier in the same test (test_pool_is_per_cultivar reads before this
+        # write) would otherwise see a stale value and the sum come out wrong.
+        # Mirror test_stripe_checkout._set_stock (GOL-1036 defect 4 / GOL-2014):
+        # skip the no-op zero write, then invalidate the id-keyed cache so the
+        # next grove_shared_pool_qty read recomputes.
+        if qty:
+            self.env["stock.quant"]._update_available_quantity(variant, self.location, qty)
+        variant.invalidate_recordset(["qty_available", "free_qty"])
 
     def test_bareroot_pool_includes_potted_sibling(self):
         tmpl = self._template([self.c_meader.id])
