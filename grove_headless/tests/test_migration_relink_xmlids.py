@@ -1,4 +1,4 @@
-"""GOL-2134: the 19.0.1.30.0 pre-migrate re-links severed data-file xmlids.
+"""GOL-2134: the 19.0.1.31.0 pre-migrate re-links severed data-file xmlids.
 
 Simulates the Sep-2 severance (delete the ``ir.model.data`` row while leaving the
 business record live) and asserts the pre-migrate stitches the xmlid back onto the
@@ -17,7 +17,7 @@ from odoo.tests import TransactionCase, tagged
 
 
 def _load_premigrate():
-    path = os.path.join(os.path.dirname(__file__), "..", "migrations", "19.0.1.30.0", "pre-migrate.py")
+    path = os.path.join(os.path.dirname(__file__), "..", "migrations", "19.0.1.31.0", "pre-migrate.py")
     spec = importlib.util.spec_from_file_location("gol2134_premigrate", path)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
