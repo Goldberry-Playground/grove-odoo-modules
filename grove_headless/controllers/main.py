@@ -27,6 +27,7 @@ from ..models.shipping_calendar import (
     resolve_fulfillment,
     serialize_ship_options,
     ship_options,
+    unknown_zone_ships_now,
     usda_zone_for_zip,
 )
 from ..models.shipping_zones import (
@@ -1953,6 +1954,29 @@ def _bareroot_tier(product) -> bool:
     return tier == "bareroot"
 
 
+def _bareroot_ships_now(window_zip, tier, today):
+    """``ships_now`` for a bareroot line on the CHARGING path (GOL-1666 §2),
+    with the unknown-zone money-path fallback (GOL-2145).
+
+    ``ship_options`` is conservative on a ZIP absent from the PHZM matrix
+    (``ships_now`` False) — the right default for the display feed, but on the
+    money path it mispriced an in-stock leafed-season tree bound for a valid US
+    ZIP simply missing from the table as a $10 deposit. When the destination
+    zone is unknown, fall back to the calendar's current global season
+    (``unknown_zone_ships_now``) instead of forcing a deposit; only when the
+    season itself is dormant (all zones frozen) does the unknown ZIP still
+    defer. A resolvable zone is unchanged — its ``ships_now`` is honored
+    verbatim, so a genuine dormant-window bareroot still deposits.
+
+    Kept as one helper so ``_build_stripe_line_items`` and ``_cart_has_preorder``
+    stay in lockstep on the ships-now axis."""
+    opts = ship_options(window_zip, tier, today)
+    ships_now = opts.get("ships_now", True)
+    if not ships_now and opts.get("usda_zone") is None:
+        return unknown_zone_ships_now(today)
+    return ships_now
+
+
 def _calendar_preorder_variant_ids(env, order, payload, today=None):
     """Variant ids whose bareroot ship wave has not opened yet — force them to
     the preorder deposit path regardless of stock (GOL-1309).
@@ -2037,7 +2061,7 @@ def _cart_has_preorder(env, order, payload):
         line_ships_now = True
         if tier == "bareroot":
             window_zip = dest_zip if is_ship_order else farm_zip
-            line_ships_now = ship_options(window_zip, tier, today).get("ships_now", True)
+            line_ships_now = _bareroot_ships_now(window_zip, tier, today)
         for _amount, _qty, is_preorder in stripe_gateway.line_charge(
             line.price_unit, line.product_uom_qty, free_qty, ships_now=line_ships_now
         ):
@@ -2139,9 +2163,10 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
         line_ships_now = True
         if tier == "bareroot":
             # Ship orders resolve the window from the customer's zone; farm-pickup
-            # orders from the farm's own zone (GOL-1669).
+            # orders from the farm's own zone (GOL-1669). An unknown destination
+            # zone falls back to the global season, not a blanket deposit (GOL-2145).
             window_zip = dest_zip if is_ship_order else farm_zip
-            line_ships_now = ship_options(window_zip, tier, today).get("ships_now", True)
+            line_ships_now = _bareroot_ships_now(window_zip, tier, today)
         for amount, qty, is_preorder in stripe_gateway.line_charge(
             line.price_unit, ordered_qty, free_qty, ships_now=line_ships_now
         ):
