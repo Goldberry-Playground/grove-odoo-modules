@@ -51,18 +51,47 @@ MODES: tuple[str, ...] = ("dormant", "leafed")
 # constant encodes the intent — the shippable/quotable modes — directly.)
 QUOTABLE_MODES: tuple[str, ...] = ("dormant",)
 
-# Nursery dormancy window (month, day) inclusive — trees ship as dormant
-# bareroot inside it, leafed-out bareroot outside it. Conservative default
-# for the Summersville (z6) nursery; Josh + nursery manager own these dates
-# (edit via PR, tests assert shape only).
+# Nursery dormancy window (month, day) inclusive — bareroot stock can only be
+# lifted and shipped as dormant bareroot INSIDE it. Josh ratified Nov 1 – Apr 15
+# as the real operating window on 2026-09-07 ("do you ship bareroot outside
+# Nov 1 – Apr 15? — no, never"), so these two constants now gate REVENUE, not
+# just the packed weight: outside them a bareroot LABEL cannot be bought and a
+# bareroot line cannot ship now (it becomes a preorder — see
+# ``can_ship_bareroot`` and its callers in sale_order / controllers). A date
+# wrong by a week either blocks a saleable shipment or lets an underpriced one
+# through, so these are owned by Josh + the nursery manager and edited only by
+# PR (tests assert shape only). Nursery-manager sign-off on the exact dates is
+# the remaining ratification gate before this ships (GOL-1906 / GOL-2173).
 DORMANT_START = (11, 1)
 DORMANT_END = (4, 15)
 
 
 def packing_mode(today: date) -> str:
-    """ "dormant" inside the nursery dormancy window (wraps year end), else "leafed"."""
+    """ "dormant" inside the nursery dormancy window (wraps year end), else "leafed".
+
+    "leafed" is honored for the frontend season label and (for the potted
+    engine) the declared weight — but for BAREROOT it is not a shippable mode:
+    a bareroot label is only ever bought in a dormant window (see
+    ``QUOTABLE_MODES`` / ``can_ship_bareroot``), and outside it the order is a
+    preorder for the next dormant wave. Callers that turn a mode into a bareroot
+    parcel MUST gate on ``can_ship_bareroot`` first, or they would create a
+    leafed bareroot label this module treats as impossible.
+    """
     t = (today.month, today.day)
     return "dormant" if (t >= DORMANT_START or t <= DORMANT_END) else "leafed"
+
+
+def can_ship_bareroot(today: date) -> bool:
+    """True when the nursery may lift + ship dormant bareroot on ``today``.
+
+    The single authority for the seasonal gate (GOL-1906, Josh 2026-09-07):
+    bareroot only gets a shipping label, and only ships now, inside the dormancy
+    window (``packing_mode`` in ``QUOTABLE_MODES``). Outside it the same order is
+    a preorder that ships in the next dormant wave — so this must fail CLOSED for
+    a leafed date, never fall back to a leafed label. Kept here beside
+    ``packing_mode`` so the window definition and the ship/no-ship decision can
+    never drift across the module boundary."""
+    return packing_mode(today) in QUOTABLE_MODES
 
 
 # ── Tree length classes ─────────────────────────────────────────────────────

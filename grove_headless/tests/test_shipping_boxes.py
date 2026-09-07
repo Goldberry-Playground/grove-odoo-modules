@@ -117,6 +117,30 @@ class TestPackingMode(unittest.TestCase):
         self.assertEqual(sb.packing_mode(date(2026, 7, 31)), "leafed")
 
 
+class TestBarerootSeasonGate(unittest.TestCase):
+    """The seasonal gate that makes the dormant-only rate table hold (GOL-1906,
+    Josh 2026-09-07): bareroot may only be labeled / ship now inside the dormancy
+    window; every other date is a preorder for the next dormant wave."""
+
+    def test_dormant_dates_can_ship_bareroot(self):
+        # Inside the window (wraps year end) and on both inclusive edges.
+        for d in (date(2026, 11, 1), date(2026, 12, 31), date(2026, 1, 15), date(2026, 4, 15)):
+            self.assertTrue(sb.can_ship_bareroot(d), d)
+
+    def test_leafed_dates_cannot_ship_bareroot(self):
+        # Just outside each edge, and mid-summer — the Apr 16–Jun 6 band is the
+        # exact gap where a zone Arbor Day window still reads "in window" but the
+        # nursery is out of dormancy (the undercharge this gate closes).
+        for d in (date(2026, 4, 16), date(2026, 5, 15), date(2026, 6, 6), date(2026, 7, 31), date(2026, 10, 31)):
+            self.assertFalse(sb.can_ship_bareroot(d), d)
+
+    def test_gate_tracks_quotable_modes_exactly(self):
+        # can_ship_bareroot is the ship/no-ship face of QUOTABLE_MODES — never let
+        # the two drift, or a mode we quote could be one we refuse to label.
+        for d in (date(2026, 2, 1), date(2026, 7, 1), date(2026, 11, 15)):
+            self.assertEqual(sb.can_ship_bareroot(d), sb.packing_mode(d) in sb.QUOTABLE_MODES, d)
+
+
 class TestPacking(unittest.TestCase):
     def test_empty_cart_packs_empty(self):
         self.assertEqual(sb.pack_order([], "leafed", cost_of), [])

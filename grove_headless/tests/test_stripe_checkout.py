@@ -14,8 +14,10 @@ from datetime import date
 from unittest import mock
 
 from odoo.addons.grove_headless.controllers import main as grove_main
+from odoo.addons.grove_headless.models import sale_order as grove_sale_order
 from odoo.addons.grove_headless.models import stripe_gateway
 from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
+from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
 from odoo.tests.common import HttpCase, get_db_name
 from odoo.tools import mute_logger
@@ -627,7 +629,14 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             # ships_now False stands (deposit).
             return {"usda_zone": 6, "ships_now": False}
 
-        with mock.patch.object(grove_main, "ship_options", side_effect=spy):
+        # Pin a DORMANT date: the GOL-1906 nursery-dormancy gate short-circuits
+        # `_bareroot_ships_now` to a deposit before `ship_options` is consulted
+        # outside the window, so a leafed run date would never reach the spy —
+        # this test is about WHICH zip keys the window, so it must run in-season.
+        with mock.patch.object(grove_main, "ship_options", side_effect=spy), mock.patch.object(
+            grove_main, "_date"
+        ) as md:
+            md.today.return_value = date(2027, 1, 15)  # dormant window
             line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
         self.assertEqual(seen["zip"], "26651", "pickup window must key off the FARM ZIP, not the customer's")
         deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
@@ -650,34 +659,80 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             seen["zip"] = zip_code
             return {"ships_now": True}
 
-        with mock.patch.object(grove_main, "ship_options", side_effect=spy):
+        # Dormant date so the nursery-dormancy gate (GOL-1906) lets the window
+        # resolution reach `ship_options`; the assertion is about the ZIP key.
+        with mock.patch.object(grove_main, "ship_options", side_effect=spy), mock.patch.object(
+            grove_main, "_date"
+        ) as md:
+            md.today.return_value = date(2027, 1, 15)  # dormant window
             grove_main._build_stripe_line_items(order)
         self.assertEqual(seen["zip"], "04101", "shipped window must key off the destination ZIP")
 
     # ── unknown destination zone: global-season fallback, not deposit (GOL-2145) ──
 
-    def test_unknown_zone_bareroot_in_leafed_season_charges_full(self):
-        """GOL-2145: an IN-STOCK bareroot line shipped to a valid US ZIP that is
-        absent from the PHZM matrix must charge in FULL during the leafed /
-        peat-and-bagged (ships-now) season — not the $10 preorder deposit the old
-        'conservative on unknowns -> ships_now False' default forced. The ZIP is
-        real (99999 stands in for any untabulated ZIP like Cleveland 44101 /
-        Roanoke 24011); the fallback keys off the calendar's current global
-        season via the real ``unknown_zone_ships_now``."""
+    def test_leafed_season_bareroot_forced_to_preorder(self):
+        """GOL-1906 seasonal gate (Josh 2026-09-07, REVERSES the GOL-2145 leafed
+        path for bareroot): bareroot ships ONLY inside the nursery dormancy window
+        (Nov 1 – Apr 15). An in-stock bareroot line ordered in leafed season — the
+        exact case GOL-2145 previously charged in FULL and shipped now as
+        peat-and-bagged — is now a PREORDER deposit that ships in the next dormant
+        wave, because a leafed bareroot label is impossible (the rate table is
+        dormant-priced; a leafed parcel is ~2x heavier and would be undercharged).
+        The order is NOT rejected — the deposit path routes it forward. The
+        unknown-zone fallback still governs the DORMANT season (see the companion
+        test); this only removes leafed-season shipping for bareroot."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        self._set_stock(self.product, 10)  # in stock — the deposit is season-driven
+        self.partner.zip = "10001"  # a KNOWN zone, so this is the gate, not the fallback
+        order = self._make_order(qty=2)
+        self._add_shipping_line(order)  # → is_ship_order
+        with mock.patch.object(grove_main, "_date") as md:
+            md.today.return_value = date(2026, 9, 7)  # leafed season
+            line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        self.assertEqual(preorder_ids, [self.product.id], "leafed-season bareroot must defer to preorder")
+        deposit = next(li for li in line_items if li["kind"] == "deposit")
+        self.assertEqual(deposit["quantity"], 2)
+        self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+        self.assertFalse([li for li in line_items if li["kind"] == "goods"], "no full charge outside the window")
+
+    def test_dormant_season_bareroot_in_window_ships_now(self):
+        """Companion to the seasonal gate: inside the dormancy window an in-stock
+        bareroot line to a shippable zone still ships now and bills in full — the
+        gate must not over-block the season it is meant to protect."""
         self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
         self._set_stock(self.product, 10)
-        self.partner.zip = "99999"  # valid-shaped ZIP absent from the matrix
+        self.partner.zip = "10001"
         order = self._make_order(qty=2)
-        self._add_shipping_line(order)  # → is_ship_order, keys off destination ZIP
-        with mock.patch.object(grove_main, "_date") as md:
-            md.today.return_value = date(2026, 9, 7)  # leafed season (prod repro date)
+        self._add_shipping_line(order)
+
+        def spy(zip_code, tier, today):
+            return {"usda_zone": 6, "ships_now": True}  # in the zone's dormant ship window
+
+        with mock.patch.object(grove_main, "ship_options", side_effect=spy), mock.patch.object(
+            grove_main, "_date"
+        ) as md:
+            md.today.return_value = date(2027, 1, 15)  # dormant window
             line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
-        self.assertEqual(preorder_ids, [], "in-stock leafed-season tree must not become a preorder")
+        self.assertEqual(preorder_ids, [], "in-window dormant bareroot must charge in full and ship now")
         goods = next(li for li in line_items if li["name"] == self.product.display_name)
         self.assertEqual(goods["kind"], "goods")
         self.assertEqual(goods["quantity"], 2)
-        self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(25.0))
         self.assertFalse([li for li in line_items if li["kind"] == "deposit"])
+
+    def test_label_purchase_blocked_outside_dormancy(self):
+        """GOL-1906 seasonal gate, label side (Josh 2026-09-07): buying a bareroot
+        shipping label outside the nursery dormancy window is IMPOSSIBLE —
+        action_buy_shipping_labels fails closed with a loud error before any
+        Shippo call, so a mistimed label attempt can never buy a leafed
+        (underpriced, ~2x heavier) parcel against the dormant-priced table. Such
+        an order is a preorder that ships in the next dormant wave."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        order = self._make_order(qty=2)
+        with mock.patch.dict("os.environ", {"SHIPPO_API_KEY": "shippo_test"}, clear=False), mock.patch.object(
+            grove_sale_order, "can_ship_bareroot", return_value=False
+        ):
+            with self.assertRaisesRegex(UserError, "dormancy window"):
+                order.action_buy_shipping_labels()
 
     def test_unknown_zone_bareroot_in_dormant_season_still_deposits(self):
         """Guardrail: the unknown-zone fallback only relaxes to full charge when

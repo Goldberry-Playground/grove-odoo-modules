@@ -21,7 +21,7 @@ from ..models.newsletter import newsletter_tag_names
 from ..models.order_alerts import format_merchant_email, format_new_order_discord
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
 from ..models.shipment_email import NOTIFY_STATUSES, shipment_notice_copy
-from ..models.shipping_boxes import packing_mode
+from ..models.shipping_boxes import can_ship_bareroot, packing_mode
 from ..models.shipping_calendar import (
     MODE_PREORDER,
     merge_calendar_override,
@@ -2035,7 +2035,20 @@ def _bareroot_ships_now(window_zip, tier, today):
     verbatim, so a genuine dormant-window bareroot still deposits.
 
     Kept as one helper so ``_build_stripe_line_items`` and ``_cart_has_preorder``
-    stay in lockstep on the ships-now axis."""
+    stay in lockstep on the ships-now axis.
+
+    Nursery-dormancy override (GOL-1906, Josh 2026-09-07): bareroot NEVER ships
+    outside the nursery dormancy window, whatever the destination zone's Arbor
+    Day window says — the default per-zone spring windows run to Jun 6, well past
+    the Apr 15 dormancy end, so a naive in-window read would ship a leafed
+    (~2x heavier) parcel now and buy a leafed label against the dormant-priced
+    rate table (a systematic undercharge, and the label path now refuses it
+    outright). So when the nursery cannot ship bareroot today, the line fails
+    CLOSED to the preorder deposit path — the order is NOT rejected, it ships in
+    the next dormant wave and settles shipping at actual cost then (GOL-2053).
+    This gate is first because the origin constraint is absolute."""
+    if not can_ship_bareroot(today):
+        return False
     opts = ship_options(window_zip, tier, today)
     ships_now = opts.get("ships_now", True)
     if not ships_now and opts.get("usda_zone") is None:
