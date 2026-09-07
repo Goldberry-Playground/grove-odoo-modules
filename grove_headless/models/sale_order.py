@@ -328,9 +328,11 @@ class SaleOrder(models.Model):
                 "country": "US",
                 "email": partner.email or "",
                 # USPS Ground Advantage wants a recipient contact too; pass the
-                # partner's phone (mobile fallback) so a USPS label isn't left
-                # thin on delivery-contact info (GOL-1906).
-                "phone": partner.phone or partner.mobile or "",
+                # partner's phone so a USPS label isn't left thin on
+                # delivery-contact info (GOL-1906). NB: res.partner has no
+                # `mobile` field in Odoo 19 (removed in 18.0), so referencing it
+                # AttributeErrors on any phone-less partner — `phone` only.
+                "phone": partner.phone or "",
             }
 
             # ── Pass 1: validate all lines and pack BEFORE buying anything ─
