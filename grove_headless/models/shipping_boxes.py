@@ -36,6 +36,21 @@ from datetime import date
 # ── Packing modes ───────────────────────────────────────────────────────────
 MODES: tuple[str, ...] = ("dormant", "leafed")
 
+# Modes the published rate table is allowed to quote at (GOL-1906, Josh
+# 2026-09-07). A "mode" (dormant/leafed) is NOT the same axis as a shippability
+# "tier" (bareroot/potted, see shipping_zones.SHIPPABLE_TIERS): both modes are
+# bareroot. But a bareroot tree only ever gets a SHIPPING LABEL in its dormant
+# window — outside it the same stock resolves to peat-and-bagged (potted-
+# equivalent) and is farm-pickup only, so no leafed-weight parcel is ever bought.
+# ``representative_billable_lb`` must therefore quote the DORMANT parcel only;
+# taking max() across all modes let the heavier leafed weight (PER_TREE_LB 2.0)
+# drive the table, inflating small to 11 lb / large to 22 lb against a real
+# dormant 7 lb / 14 lb — a systematic OVERCHARGE off a parcel that can't be
+# ordered. (Josh phrased this as "capacity keys ∩ SHIPPABLE_TIERS"; because
+# modes and tiers are different axes that literal intersection is empty, so this
+# constant encodes the intent — the shippable/quotable modes — directly.)
+QUOTABLE_MODES: tuple[str, ...] = ("dormant",)
+
 # Nursery dormancy window (month, day) inclusive — trees ship as dormant
 # bareroot inside it, leafed-out bareroot outside it. Conservative default
 # for the Summersville (z6) nursery; Josh + nursery manager own these dates
@@ -66,7 +81,20 @@ DEFAULT_LENGTH = 20
 # per box, by mode — Josh's 1-5 / 6-10 ranges are season-independent, so both
 # modes carry the same count. packaging_usd: wholesale box + consumables
 # (biodegradable bag, packing paper, corrugate, rubber bands, tape, sticker,
-# care card, thank-you note). tare_lb: empty box + packing material weight.
+# care card, thank-you note).
+#
+# Packed weight is modelled as three explicit terms (Josh bench-measurement,
+# 2026-09-07): ``tare_lb`` = the empty CARTON alone; ``paper_lb`` = the void-fill
+# packing paper (a real, non-trivial term — a full small box carries ~2.5 lb of
+# paper, more than the trees themselves); and ``PER_TREE_LB[mode] * count`` for
+# the stock. Keeping paper as its own field rather than burying it in tare makes
+# the estimate auditable and each box tunable independently as boxes are weighed.
+#   small: carton 2.0 + paper 2.5 + 5*0.5 dormant trees = 7.0 lb (Josh measured
+#          the small box full at ~7 lb: 2.5 lb seedlings + 2.0 lb carton + paper).
+#   large: carton 3.1 + paper 5.0 + 10*0.5 dormant trees = 13.1 lb -> quoted 14.
+#          DERIVED by physical scaling from the small box (surface area for the
+#          carton, void volume for the paper), NOT yet measured — Josh to weigh a
+#          full large box to confirm; over-quote is the safe side (GOL-1906).
 BOXES: dict[str, dict] = {
     "small": {
         "length": 24,
@@ -74,7 +102,8 @@ BOXES: dict[str, dict] = {
         "height": 4,
         "capacity": {"dormant": 5, "leafed": 5},  # holds 1-5 trees
         "packaging_usd": 3.50,
-        "tare_lb": 0.9,
+        "tare_lb": 2.0,  # empty carton, measured (Josh 2026-09-07)
+        "paper_lb": 2.5,  # void-fill packing paper, measured
     },
     "large": {
         "length": 24,
@@ -82,7 +111,8 @@ BOXES: dict[str, dict] = {
         "height": 6,
         "capacity": {"dormant": 10, "leafed": 10},  # holds 6-10 trees
         "packaging_usd": 4.50,
-        "tare_lb": 1.4,
+        "tare_lb": 3.1,  # empty carton, DERIVED (scaled by surface area) — weigh to confirm
+        "paper_lb": 5.0,  # void-fill packing paper, DERIVED (scaled by void volume)
     },
 }
 
@@ -170,8 +200,14 @@ def dim_weight_lb(box_id: str) -> float:
 
 
 def actual_weight_lb(box_id: str, count: int, mode: str) -> float:
-    """Estimated scale weight of a packed box (what the label declares)."""
-    return round(BOXES[box_id]["tare_lb"] + PER_TREE_LB[mode] * max(0, count), 1)
+    """Estimated scale weight of a packed box (what the label declares).
+
+    Three terms: empty carton (``tare_lb``) + void-fill packing paper
+    (``paper_lb``) + stock (``PER_TREE_LB[mode] * count``). Paper is a real,
+    measured component — ~2.5 lb in a full small box — not rolled into tare.
+    """
+    b = BOXES[box_id]
+    return round(b["tare_lb"] + b["paper_lb"] + PER_TREE_LB[mode] * max(0, count), 1)
 
 
 def billable_weight_lb(box_id: str, count: int, mode: str) -> float:
@@ -180,10 +216,17 @@ def billable_weight_lb(box_id: str, count: int, mode: str) -> float:
 
 
 def representative_billable_lb(box_id: str) -> int:
-    """Worst typical billable weight across modes at full capacity — the
-    weight the rate-checker quotes each box at (never undercharge)."""
+    """Worst typical billable weight at full capacity across the QUOTABLE modes
+    — the weight the rate-checker declares for each box (never undercharge).
+
+    Only ``QUOTABLE_MODES`` (dormant) count: a bareroot parcel only ships in its
+    dormant window, so the leafed weight prices a parcel that is never bought
+    (see ``QUOTABLE_MODES``). Falls back to the box's own modes if a future box
+    declares none of the quotable modes, so this never silently returns 0.
+    """
     b = BOXES[box_id]
-    worst = max(billable_weight_lb(box_id, cap, mode) for mode, cap in b["capacity"].items())
+    modes = [m for m in QUOTABLE_MODES if m in b["capacity"]] or list(b["capacity"])
+    worst = max(billable_weight_lb(box_id, b["capacity"][mode], mode) for mode in modes)
     return math.ceil(worst)
 
 

@@ -3,42 +3,42 @@
   "_schema": 2,
   "zone_1": {
     "large": {
-      "base": 36.0
+      "base": 24.0
     },
     "small": {
-      "base": 22.0
+      "base": 20.0
     }
   },
   "zone_2": {
     "large": {
-      "base": 36.0
+      "base": 24.0
     },
     "small": {
-      "base": 22.0
+      "base": 20.0
     }
   },
   "zone_3": {
     "large": {
-      "base": 36.0
+      "base": 24.0
     },
     "small": {
-      "base": 22.0
+      "base": 20.0
     }
   },
   "zone_4": {
     "large": {
-      "base": 54.0
+      "base": 49.0
     },
     "small": {
-      "base": 47.0
+      "base": 45.0
     }
   },
   "zone_5": {
     "large": {
-      "base": 52.0
+      "base": 43.0
     },
     "small": {
-      "base": 41.0
+      "base": 39.0
     }
   }
 }

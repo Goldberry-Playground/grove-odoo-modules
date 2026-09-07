@@ -78,20 +78,28 @@ class TestWeights(unittest.TestCase):
         self.assertGreater(heavier, lighter)
 
     def test_billable_is_actual_when_no_dim(self):
-        # One dormant tree in the small box: tare 0.9 + 1*0.5 = 1.4 lb; no DIM.
-        self.assertEqual(sb.billable_weight_lb("small", 1, "dormant"), 1.4)
-        # Full leafed large: tare 1.4 + 10*2.0 = 21.4 lb; no DIM.
-        self.assertEqual(sb.billable_weight_lb("large", 10, "leafed"), 21.4)
+        # One dormant tree in the small box: carton 2.0 + paper 2.5 + 1*0.5 = 5.0; no DIM.
+        self.assertEqual(sb.billable_weight_lb("small", 1, "dormant"), 5.0)
+        # Full dormant large: carton 3.1 + paper 5.0 + 10*0.5 = 13.1 lb; no DIM.
+        self.assertEqual(sb.billable_weight_lb("large", 10, "dormant"), 13.1)
 
-    def test_representative_billable_covers_worst_mode(self):
-        # The rate-checker must quote the worst typical fill (never undercharge).
+    def test_representative_billable_quotes_dormant_not_leafed(self):
+        # The published table prices the DORMANT parcel only: a bareroot tree
+        # only ships in its dormant window; the heavier leafed weight prices a
+        # parcel that is never bought (GOL-1906, Josh 2026-09-07). Rep must cover
+        # every QUOTABLE mode's worst fill, but need NOT cover leafed.
         for box_id, box in sb.BOXES.items():
             rep = sb.representative_billable_lb(box_id)
-            for mode, cap in box["capacity"].items():
+            for mode in sb.QUOTABLE_MODES:
+                cap = box["capacity"][mode]
                 self.assertGreaterEqual(rep, sb.billable_weight_lb(box_id, cap, mode), box_id)
-        # Worst-case leafed fills: small ceil(10.9)=11, large ceil(21.4)=22.
-        self.assertEqual(sb.representative_billable_lb("small"), 11)
-        self.assertEqual(sb.representative_billable_lb("large"), 22)
+        # Dormant full fills: small ceil(2.0+2.5+5*0.5)=ceil(7.0)=7,
+        # large ceil(3.1+5.0+10*0.5)=ceil(13.1)=14.
+        self.assertEqual(sb.representative_billable_lb("small"), 7)
+        self.assertEqual(sb.representative_billable_lb("large"), 14)
+        # And it must NOT be inflated by the un-shippable leafed weight.
+        self.assertLess(sb.representative_billable_lb("small"), 11)
+        self.assertLess(sb.representative_billable_lb("large"), 22)
 
 
 class TestPackingMode(unittest.TestCase):

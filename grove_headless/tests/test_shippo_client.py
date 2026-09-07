@@ -30,8 +30,8 @@ class TestShippoClient(unittest.TestCase):
         self.assertEqual(p["parcels"][0]["length"], "24")
         self.assertEqual(p["parcels"][0]["width"], "9")
         self.assertEqual(p["parcels"][0]["height"], "6")
-        # 1.4 tare + 4 x 2.0 leafed = 9.4 lb declared actual weight.
-        self.assertEqual(p["parcels"][0]["weight"], "9.4")
+        # carton 3.1 + paper 5.0 + 4 x 2.0 leafed = 16.1 lb declared actual weight.
+        self.assertEqual(p["parcels"][0]["weight"], "16.1")
         self.assertTrue(p["address_to"]["is_residential"])
         self.assertEqual(p["address_from"]["zip"], "26651")
 
