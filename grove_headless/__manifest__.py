@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.29.0",
+    "version": "19.0.1.30.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -66,6 +66,7 @@
         "views/fulfillment_views.xml",
         "data/shipping_actions.xml",
         "data/settlement_cron.xml",
+        "data/order_rollup_cron.xml",
     ],
     "installable": True,
     "application": False,
