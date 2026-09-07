@@ -65,8 +65,8 @@ class TestRateMath(unittest.TestCase):
         self.assertEqual(rc.pick_cheapest_ground(data), 14.23)
 
     def test_target_formula_ceil(self):
-        # 14.23 + 4.50 (s20 packaging) + 2.00 = 20.73 -> 21
-        self.assertEqual(rc.target_rate(14.23, "s20"), 21)
+        # 14.23 + 3.50 (small packaging) + 2.00 = 19.73 -> 20
+        self.assertEqual(rc.target_rate(14.23, "small"), 20)
 
     def test_parcels_come_from_box_catalog(self):
         # One reference parcel per catalog box across BOTH catalogs (bareroot
@@ -210,7 +210,7 @@ class TestNoUpsRatesSkips(unittest.TestCase):
         real = {
             "_comment": "Maintained by scripts/rate_check",
             "_schema": 2,
-            "zone_1": {"br16": {"base": 18.0}},
+            "zone_1": {"small": {"base": 18.0}},
         }
         before = json.dumps(real)
         code, err, after = self._run_no_ups_against(real)

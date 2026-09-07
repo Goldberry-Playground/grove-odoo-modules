@@ -164,17 +164,19 @@ class ProductTemplate(models.Model):
         "potted so it can never ship undercharged.",
     )
 
-    # Tree length class (Box Engine v2): the minimum box length in inches
-    # this tree's height requires when packed. Drives which boxes the packer
-    # may use. "20" fits the current 1-2 yr inventory; "46" is the 3-5 yr
-    # stock (flowering dogwoods, jujubes). Values mirror
-    # shipping_boxes.LENGTH_CLASSES.
+    # Tree length class (Box Engine v2): the minimum box length in inches this
+    # tree's height requires when packed. Both descoped boxes are 24" long, so
+    # length is now only a fit GATE (a tree over 24" has no box) — it no longer
+    # picks between boxes. The tall 3-5 yr classes (32"/46") left the near-term
+    # catalog with their boxes (CEO directive 2026-09-07); a product still tagged
+    # over 24" fails safe at checkout (no shippable box) until one is restocked.
+    # Values mirror shipping_boxes.LENGTH_CLASSES.
     grove_tree_length = fields.Selection(
-        [("16", '16" (small whip)'), ("20", '20"'), ("32", '32"'), ("46", '46" (3-5 yr)')],
+        [("16", '16" (small whip)'), ("20", '20"')],
         string="Grove Tree Length Class",
         default="20",
-        help="Minimum shipping-box length this tree's height requires. "
-        "Determines which boxes the shipping packer may place it in.",
+        help='Height class this tree needs. Both current shipping boxes are 24" '
+        'long; a tree over 24" has no box and cannot ship until one is restocked.',
     )
 
     # ── Growing facts (2026-07-13 catalog spec) ─────────────────────────
