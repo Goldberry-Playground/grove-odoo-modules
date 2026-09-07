@@ -79,8 +79,24 @@ def build_digest(
     period_orders = [o for o in orders if _order_date(o) >= period_start]
 
     # --- Revenue & volume ---
+    # GOL-2052/2053 split a preorder's money in two: a deposit taken at
+    # checkout (grove_amount_charged_today) and the balance captured off-
+    # session when the box ships. A single "revenue" number over amount_total
+    # conflates booked value with cash actually collected and misreports the
+    # week, so we report three distinct figures:
+    #   booked_total        — gross value of orders written this week
+    #                         (amount_total, an estimate for preorders whose
+    #                         real shipping/tax settle at ship).
+    #   collected_total     — cash actually taken at checkout this week
+    #                         (deposits + full payments), via _collected_today.
+    #   deposit_balance_due — money still owed on this week's deposit-only
+    #                         preorders, captured off-session at ship.
     orders_placed = len(period_orders)
-    revenue_total = sum(float(o.get("amount_total") or 0) for o in period_orders)
+    booked_total = sum(float(o.get("amount_total") or 0) for o in period_orders)
+    collected_total = sum(_collected_today(o) for o in period_orders)
+    deposit_balance_due = sum(
+        _balance_due(o) for o in period_orders if (o.get("grove_checkout_status") or "") == "deposit_paid"
+    )
 
     # --- Units ordered vs shipped in period ---
     # Ordered: physical tree units on orders PLACED in the window.
@@ -112,7 +128,16 @@ def build_digest(
         for o in orders
         if o.get("is_pickup")
         and (o.get("grove_delivery_status") or "") not in shipped_statuses | {"collected"}
-        and (o.get("grove_checkout_status") or "") in ("paid", "deposit_paid")
+        and (o.get("grove_checkout_status") or "") in ("paid", "deposit_paid", "settled")
+    ]
+
+    # --- Settlement failures (shipped, balance NOT captured) ---
+    # GOL-2053: a preorder that shipped but whose off-session balance charge
+    # declined lands in "settlement_failed". That is money already-shipped-not-
+    # collected, the highest-priority signal in the digest, so it gets its own
+    # section rather than silently vanishing from every other bucket.
+    settlement_failures = [
+        _settlement_failure(o) for o in orders if (o.get("grove_checkout_status") or "") == "settlement_failed"
     ]
 
     return {
@@ -120,13 +145,51 @@ def build_digest(
         "period_end": today,
         "period_days": period_days,
         "orders_placed": orders_placed,
-        "revenue_total": revenue_total,
+        # revenue_total kept as an alias for booked_total (backward compat).
+        "revenue_total": booked_total,
+        "booked_total": booked_total,
+        "collected_total": collected_total,
+        "deposit_balance_due": deposit_balance_due,
         "units_ordered": units_ordered,
         "units_shipped": units_shipped,
         "outstanding_preorders": preorder_entries,
         "preorder_count": len(preorder_entries),
         "pickups_awaiting": [_pickup_summary(o) for o in pickup_awaiting],
         "pickup_count": len(pickup_awaiting),
+        "settlement_failures": settlement_failures,
+        "settlement_failed_count": len(settlement_failures),
+    }
+
+
+def _collected_today(o: dict) -> float:
+    """Cash actually taken at checkout for this order.
+
+    grove_amount_charged_today is persisted for every checkout session (full
+    payment == amount_total; a deposit-only preorder == just the deposit slice,
+    GOL-2052/2053). Legacy orders predating that field record 0.0; treat those
+    as fully paid (fall back to amount_total) so historical revenue is not
+    undercounted. A brand-new order's deposit is always a positive slice, so a
+    0.0 charge unambiguously means "no deposit split recorded".
+    """
+    charged = float(o.get("amount_charged") or 0)
+    if charged > 0:
+        return charged
+    return float(o.get("amount_total") or 0)
+
+
+def _balance_due(o: dict) -> float:
+    """Money still owed on a deposit-only order: total minus what was taken at
+    checkout. Floored at 0 so a fully-collected order never reports negative."""
+    return max(float(o.get("amount_total") or 0) - _collected_today(o), 0.0)
+
+
+def _settlement_failure(o: dict) -> dict:
+    return {
+        "order_name": o.get("name") or "",
+        "partner_name": o.get("partner_name") or "",
+        "amount_total": float(o.get("amount_total") or 0),
+        "balance_due": _balance_due(o),
+        "attempts": int(o.get("settlement_attempts") or 0),
     }
 
 
@@ -159,6 +222,10 @@ def _build_preorder_entries(orders, today, next_wave_fn, usda_zone_fn) -> list[d
             "order_name": o.get("name") or "",
             "partner_name": o.get("partner_name") or "",
             "amount_total": float(o.get("amount_total") or 0),
+            # Deposit taken at checkout vs balance captured at ship (GOL-2053),
+            # so the merchant sees the money still to collect on each preorder.
+            "amount_charged": _collected_today(o),
+            "balance_due": _balance_due(o),
             "date_order": _order_date(o),
         }
         if wave:
@@ -200,11 +267,22 @@ def render_digest_text(digest: dict) -> str:
     lines = [
         f"Weekly order rollup ({ps} to {pe})",
         "",
-        f"Orders placed:   {digest['orders_placed']}",
-        f"Revenue:         {_fmt_currency(digest['revenue_total'])}",
-        f"Units ordered:   {digest['units_ordered']}",
-        f"Units shipped:   {digest['units_shipped']}",
+        f"Orders placed:      {digest['orders_placed']}",
+        f"Order value booked: {_fmt_currency(digest['booked_total'])}",
+        f"Collected at checkout: {_fmt_currency(digest['collected_total'])}",
+        f"Deposit balance due at ship: {_fmt_currency(digest['deposit_balance_due'])}",
+        f"Units ordered:      {digest['units_ordered']}",
+        f"Units shipped:      {digest['units_shipped']}",
     ]
+
+    failures = digest.get("settlement_failures") or []
+    if failures:
+        lines += ["", f"** Settlement FAILED (shipped, balance not captured) ({len(failures)}): **"]
+        for f in failures:
+            lines.append(
+                f"  {f['order_name']} | {f['partner_name']} | balance {_fmt_currency(f['balance_due'])}"
+                f" | {f['attempts']} attempt(s)"
+            )
 
     preorders = digest["outstanding_preorders"]
     if preorders:
@@ -213,7 +291,9 @@ def render_digest_text(digest: dict) -> str:
             ship_window = _wave_label(p)  # plain text: no HTML escaping
             soon = " [ships soon]" if p.get("ships_soon") else ""
             lines.append(
-                f"  {p['order_name']} | {p['partner_name']} | {_fmt_currency(p['amount_total'])} | {ship_window}{soon}"
+                f"  {p['order_name']} | {p['partner_name']} | deposit {_fmt_currency(p['amount_charged'])}"
+                f" of {_fmt_currency(p['amount_total'])} (balance {_fmt_currency(p['balance_due'])} due at ship)"
+                f" | {ship_window}{soon}"
             )
     else:
         lines += ["", "No outstanding preorders."]
@@ -238,11 +318,26 @@ def render_digest_html(digest: dict) -> str:
         f"<p><em>{ps} to {pe}</em></p>",
         "<table>",
         f"<tr><td><strong>Orders placed</strong></td><td>{digest['orders_placed']}</td></tr>",
-        f"<tr><td><strong>Revenue</strong></td><td>{_fmt_currency(digest['revenue_total'])}</td></tr>",
+        f"<tr><td><strong>Order value booked</strong></td><td>{_fmt_currency(digest['booked_total'])}</td></tr>",
+        f"<tr><td><strong>Collected at checkout</strong></td><td>{_fmt_currency(digest['collected_total'])}</td></tr>",
+        "<tr><td><strong>Deposit balance due at ship</strong></td>"
+        f"<td>{_fmt_currency(digest['deposit_balance_due'])}</td></tr>",
         f"<tr><td><strong>Units ordered</strong></td><td>{digest['units_ordered']}</td></tr>",
         f"<tr><td><strong>Units shipped</strong></td><td>{digest['units_shipped']}</td></tr>",
         "</table>",
     ]
+
+    failures = digest.get("settlement_failures") or []
+    if failures:
+        parts.append(f"<h3>Settlement failed (shipped, balance not captured) ({len(failures)})</h3>")
+        parts.append("<ul>")
+        for f in failures:
+            parts.append(
+                f"<li><strong>{html.escape(str(f['order_name']))}</strong> | "
+                f"{html.escape(str(f['partner_name']))} | balance {_fmt_currency(f['balance_due'])} | "
+                f"{f['attempts']} attempt(s)</li>"
+            )
+        parts.append("</ul>")
 
     preorders = digest["outstanding_preorders"]
     if preorders:
@@ -256,7 +351,9 @@ def render_digest_html(digest: dict) -> str:
             soon_flag = " <strong>(ships soon)</strong>" if p.get("ships_soon") else ""
             parts.append(
                 f"<li><strong>{html.escape(str(p['order_name']))}</strong> | {html.escape(str(p['partner_name']))} | "
-                f"{_fmt_currency(p['amount_total'])} | ship window: {ship_window}{soon_flag}</li>"
+                f"deposit {_fmt_currency(p['amount_charged'])} of {_fmt_currency(p['amount_total'])} "
+                f"(balance {_fmt_currency(p['balance_due'])} due at ship) | "
+                f"ship window: {ship_window}{soon_flag}</li>"
             )
         parts.append("</ul>")
     else:

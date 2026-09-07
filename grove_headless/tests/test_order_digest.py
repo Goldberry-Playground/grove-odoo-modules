@@ -30,11 +30,15 @@ def _order(
     zip_code="26651",
     is_pickup=False,
     units=1,
+    amount_charged=None,
+    settlement_attempts=0,
 ):
     return {
         "name": name,
         "date_order": date_order,
         "amount_total": amount_total,
+        "amount_charged": amount_charged,
+        "settlement_attempts": settlement_attempts,
         "grove_checkout_status": checkout_status,
         "grove_delivery_status": delivery_status,
         "grove_preorder_variant_ids": preorder_ids,
@@ -259,7 +263,8 @@ class TestRenderers(unittest.TestCase):
         text = od.render_digest_text(self._digest())
         self.assertIn("Weekly order rollup", text)
         self.assertIn("Orders placed", text)
-        self.assertIn("Revenue", text)
+        self.assertIn("Order value booked", text)
+        self.assertIn("Collected at checkout", text)
         self.assertIn("Units ordered", text)
         self.assertIn("Units shipped", text)
         self.assertIn("preorder", text.lower())
@@ -354,3 +359,116 @@ class TestHtmlEscaping(unittest.TestCase):
         # Plain-text Discord output stays raw (not entity-encoded).
         text_out = od.render_digest_text(digest)
         self.assertIn("<em>spring</em>", text_out)
+
+
+class TestDepositRevenueSemantics(unittest.TestCase):
+    """GOL-2052/2053: a deposit-only order splits money across a deposit taken
+    at checkout and a balance captured at ship. The digest must not report the
+    full order total as cash collected for the week."""
+
+    def test_full_payment_collected_equals_booked(self):
+        orders = [_order(amount_total=150.00, amount_charged=150.00, checkout_status="paid")]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertAlmostEqual(d["booked_total"], 150.00)
+        self.assertAlmostEqual(d["collected_total"], 150.00)
+        self.assertAlmostEqual(d["deposit_balance_due"], 0.00)
+
+    def test_deposit_order_collected_is_deposit_only(self):
+        # $500 preorder, $50 deposit taken at checkout, $450 due at ship.
+        orders = [
+            _order(
+                amount_total=500.00,
+                amount_charged=50.00,
+                checkout_status="deposit_paid",
+                preorder_ids="42",
+            )
+        ]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertAlmostEqual(d["booked_total"], 500.00)
+        self.assertAlmostEqual(d["collected_total"], 50.00)
+        self.assertAlmostEqual(d["deposit_balance_due"], 450.00)
+
+    def test_revenue_total_alias_is_booked_not_collected(self):
+        # Backward-compat: legacy consumers reading revenue_total get booked.
+        orders = [_order(amount_total=500.00, amount_charged=50.00, checkout_status="deposit_paid")]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertAlmostEqual(d["revenue_total"], d["booked_total"])
+
+    def test_legacy_zero_charge_falls_back_to_booked(self):
+        # Orders predating grove_amount_charged_today record 0.0/None; they were
+        # fully paid, so collected must fall back to amount_total.
+        orders = [
+            _order(amount_total=90.00, amount_charged=0.0, checkout_status="paid"),
+            _order(name="S2", amount_total=60.00, amount_charged=None, checkout_status="paid"),
+        ]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertAlmostEqual(d["collected_total"], 150.00)
+
+    def test_deposit_balance_only_counts_deposit_paid_orders(self):
+        orders = [
+            _order(amount_total=500.00, amount_charged=50.00, checkout_status="deposit_paid"),
+            _order(name="S2", amount_total=200.00, amount_charged=200.00, checkout_status="paid"),
+        ]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertAlmostEqual(d["deposit_balance_due"], 450.00)
+
+    def test_preorder_entry_carries_deposit_and_balance(self):
+        orders = [
+            _order(
+                name="S00010",
+                date_order=date(2026, 6, 1),
+                amount_total=500.00,
+                amount_charged=50.00,
+                checkout_status="deposit_paid",
+                preorder_ids="42",
+            )
+        ]
+        d = od.build_digest(orders, today=TODAY)
+        entry = d["outstanding_preorders"][0]
+        self.assertAlmostEqual(entry["amount_charged"], 50.00)
+        self.assertAlmostEqual(entry["balance_due"], 450.00)
+
+
+class TestSettlementFailures(unittest.TestCase):
+    """GOL-2053: a shipped preorder whose off-session balance charge declined
+    lands in settlement_failed and must surface as its own money-owed section."""
+
+    def _failed(self, name="S00050", attempts=2):
+        return _order(
+            name=name,
+            amount_total=500.00,
+            amount_charged=50.00,
+            checkout_status="settlement_failed",
+            delivery_status="shipped",
+            settlement_attempts=attempts,
+        )
+
+    def test_settlement_failure_surfaced(self):
+        d = od.build_digest([self._failed()], today=TODAY)
+        self.assertEqual(d["settlement_failed_count"], 1)
+        f = d["settlement_failures"][0]
+        self.assertEqual(f["order_name"], "S00050")
+        self.assertAlmostEqual(f["balance_due"], 450.00)
+        self.assertEqual(f["attempts"], 2)
+
+    def test_failed_settlement_not_counted_as_outstanding_preorder(self):
+        # It shipped, so it is NOT an outstanding (unshipped) preorder.
+        d = od.build_digest([self._failed()], today=TODAY)
+        self.assertEqual(d["preorder_count"], 0)
+
+    def test_settlement_failure_rendered_in_both_formats(self):
+        d = od.build_digest([self._failed()], today=TODAY)
+        text = od.render_digest_text(d)
+        html_out = od.render_digest_html(d)
+        self.assertIn("Settlement", text)
+        self.assertIn("S00050", text)
+        self.assertIn("Settlement failed", html_out)
+
+
+class TestSettledPickupAwaiting(unittest.TestCase):
+    def test_settled_pickup_still_awaiting(self):
+        # A pickup order settled but not yet collected must still show as
+        # awaiting (previously dropped when status left deposit_paid/paid).
+        orders = [_order(is_pickup=True, checkout_status="settled", delivery_status=None)]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertEqual(d["pickup_count"], 1)

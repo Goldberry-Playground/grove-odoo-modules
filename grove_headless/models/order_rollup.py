@@ -128,6 +128,11 @@ class SaleOrderRollup(models.AbstractModel):
                     "name": o.name,
                     "date_order": o.date_order.date() if o.date_order else None,
                     "amount_total": o.amount_total,
+                    # Cash actually taken at checkout (deposit slice for a
+                    # preorder, full amount otherwise) so the digest separates
+                    # collected revenue from booked value (GOL-2052/2053).
+                    "amount_charged": o.grove_amount_charged_today,
+                    "settlement_attempts": o.grove_settlement_attempts,
                     "grove_checkout_status": o.grove_checkout_status,
                     "grove_delivery_status": o.grove_delivery_status,
                     "grove_preorder_variant_ids": o.grove_preorder_variant_ids,
