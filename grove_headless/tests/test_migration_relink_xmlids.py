@@ -12,6 +12,7 @@ are unaffected by the xmlid ormcache after an unlink.
 import importlib.util
 import os
 
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 
 
@@ -24,11 +25,57 @@ def _load_premigrate():
 
 
 @tagged("post_install", "-at_install")
-class TestRelinkSeveredXmlids(TransactionCase):
+class TestRelinkSeveredXmlids(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.premigrate = _load_premigrate()
         self.IMD = self.env["ir.model.data"]
+        self._ensure_tax_xmlids()
+
+    def _ensure_tax_xmlids(self):
+        """Build the healthy pre-severance tax state deterministically.
+
+        The chartless install-smoke-test DB cascade-deletes the WV account.tax
+        rows (and, with them, their ir.model.data xmlids) right after "Modules
+        loaded" — see GroveTaxFixtureMixin's docstring — so these tests cannot
+        rely on install having left `grove_headless.tax_wv_state_6` behind.
+        GroveTaxFixtureMixin re-provisions the taxes in-transaction; here we
+        pin them to base.main_company and give BOTH component taxes their
+        data-file xmlids (find-or-create, so a chart-ful DB where the rows
+        survived install is untouched). Both must be linked, not just the one
+        `test_relinks_severed_tax_without_duplicating` severs: the mixin's
+        taxes are otherwise orphans matching the pre-migrate's natural keys,
+        and `test_noop_when_nothing_severed` would see migrate() "helpfully"
+        relink them and fail its no-change assertion.
+        """
+        from odoo.addons.grove_headless.hooks import _ensure_company_wv_taxes
+
+        company = self.env.ref("base.main_company")
+        _ensure_company_wv_taxes(self.env, company)
+        for xmlid_name, tax_name in (
+            ("tax_wv_state_6", "WV State Sales Tax 6%"),
+            ("tax_wv_municipal_1", "WV Municipal Tax 1%"),
+        ):
+            if self._row(xmlid_name):
+                continue
+            tax = self.env["account.tax"].search(
+                [
+                    ("name", "=", tax_name),
+                    ("company_id", "=", company.id),
+                    ("type_tax_use", "=", "sale"),
+                ],
+                limit=1,
+            )
+            self.assertTrue(tax, f"fixture: {tax_name} must exist for base.main_company")
+            self.IMD.create(
+                {
+                    "module": "grove_headless",
+                    "name": xmlid_name,
+                    "model": "account.tax",
+                    "res_id": tax.id,
+                    "noupdate": True,
+                }
+            )
 
     def _row(self, name):
         return self.IMD.search([("module", "=", "grove_headless"), ("name", "=", name)])
