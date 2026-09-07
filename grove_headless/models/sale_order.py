@@ -231,6 +231,15 @@ class SaleOrder(models.Model):
                 self.name,
             )
             return False
+        # Serialise concurrent shipped signals on this exact row (GOL-1980): the
+        # operator Discord button and a racing Shippo transit scan can both call
+        # in at once. The second caller blocks on this FOR UPDATE until the first
+        # commits, then re-reads the committed watermark below and no-ops, so
+        # "double-click ≠ double-send / double-settle" holds under real
+        # concurrency, not just at human speed. Invalidate the stored compute so
+        # the transition check reads the freshly-locked DB value, not ORM cache.
+        self.env.cr.execute("SELECT id FROM sale_order WHERE id = %s FOR UPDATE", (self.id,))
+        self.invalidate_recordset(["grove_fulfillment_state", "grove_fulfillment_stage"])
         return self._grove_advance_state("shipped", source=source, operator=operator)
 
     def action_grove_mark_delivered(self, source="shippo"):
