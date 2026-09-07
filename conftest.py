@@ -44,6 +44,7 @@ collect_ignore_glob = [
     "grove_headless/tests/test_migration_relink_xmlids.py",
     "grove_headless/tests/test_potting_batch.py",
     "grove_headless/tests/test_preorder_cap.py",
+    "grove_headless/tests/test_preorder_label_skip.py",
     "grove_headless/tests/test_product_slug.py",
     "grove_headless/tests/test_pos.py",
     "grove_headless/tests/test_newsletter_subscribe.py",
@@ -52,4 +53,5 @@ collect_ignore_glob = [
     "grove_headless/tests/test_availability_events.py",
     "grove_headless/tests/test_fulfillment_state.py",
     "grove_headless/tests/test_shared_pool_qty.py",
+    "grove_headless/tests/test_mark_shipped.py",
 ]

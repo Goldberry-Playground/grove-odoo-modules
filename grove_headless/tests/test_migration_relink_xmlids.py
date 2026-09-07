@@ -107,6 +107,36 @@ class TestRelinkSeveredXmlids(GroveTaxFixtureMixin, TransactionCase):
             "no duplicate account.tax created",
         )
 
+    def test_relinks_severed_website_despite_normalized_domain(self):
+        # GOL-2192: website.domain is normalized on write (bare
+        # "woodworkingeorge.com" is stored as "https://woodworkingeorge.com"),
+        # so the original domain-exact-match relink never found the orphan and
+        # the loader then tripped website_domain_unique. Reproduce the stored
+        # scheme, sever the xmlid, and assert we relink by company_id instead.
+        Website = self.env["website"].with_context(active_test=False)
+        website = self.env.ref("grove_headless.website_ggg")
+        website.domain = "https://woodworkingeorge.com"
+
+        # Sanity: the *old* strategy (bare-domain exact match) can no longer
+        # find the record — this is the exact failure the fix removes.
+        self.assertFalse(
+            Website.search([("domain", "=", "woodworkingeorge.com")]),
+            "precondition: normalized domain must NOT match the bare value",
+        )
+
+        original = self._sever("website_ggg")
+        self.assertEqual(original, website.id, "fixture: severed the GGG website xmlid")
+        before = Website.search_count([])
+
+        self.premigrate.migrate(self.cr, "19.0.1.29.0")
+
+        row = self._row("website_ggg")
+        self.assertTrue(row, "website xmlid should be relinked")
+        self.assertEqual(row.res_id, original, "relinked to the original website, not a new one")
+        self.assertEqual(row.model, "website")
+        self.assertTrue(row.noupdate, "relinked row must keep noupdate=1 to match the data file")
+        self.assertEqual(Website.search_count([]), before, "no duplicate website created")
+
     def test_relinks_attribute_value_by_attribute(self):
         # 'Bare Root' exists under BOTH Size and Container — the domain must
         # disambiguate by attribute_id or it would link the wrong value.
