@@ -503,12 +503,32 @@ class TestResolveEmailFrom(unittest.TestCase):
             "catchall@send.gatheringatthegrove.com",
         )
 
+    def test_falls_back_to_config_email_from(self):
+        # odoo.conf email_from is the versioned safety net: when every DB source
+        # (mail.default.from, company.email, catchall) is unset it keeps the From
+        # authorized instead of returning "" -> odoobot@example.com.
+        self.assertEqual(
+            od.resolve_email_from(
+                None, None, None, None, "Gathering at the Grove <orders@send.gatheringatthegrove.com>"
+            ),
+            "Gathering at the Grove <orders@send.gatheringatthegrove.com>",
+        )
+        # It is LAST resort: a configured DB source still wins over odoo.conf.
+        self.assertEqual(
+            od.resolve_email_from(
+                "orders@send.gatheringatthegrove.com", None, None, None, "config@send.gatheringatthegrove.com"
+            ),
+            "orders@send.gatheringatthegrove.com",
+        )
+
     def test_returns_empty_when_nothing_configured(self):
         # No configured source -> "" so the caller omits email_from (no crash).
         self.assertEqual(od.resolve_email_from(None, None, None, None), "")
         # Catchall needs BOTH alias and domain; a lone alias/domain is unusable.
         self.assertEqual(od.resolve_email_from("", "", "catchall", ""), "")
         self.assertEqual(od.resolve_email_from("", "", "", "send.gatheringatthegrove.com"), "")
+        # A whitespace-only odoo.conf email_from is also ignored.
+        self.assertEqual(od.resolve_email_from(None, None, None, None, "   "), "")
 
     def test_whitespace_only_values_are_ignored(self):
         self.assertEqual(

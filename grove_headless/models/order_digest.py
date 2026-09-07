@@ -375,7 +375,9 @@ def render_digest_html(digest: dict) -> str:
     return "\n".join(parts)
 
 
-def resolve_email_from(default_from, company_email, catchall_alias, catchall_domain) -> str:
+def resolve_email_from(
+    default_from, company_email, catchall_alias, catchall_domain, config_default_from=""
+) -> str:
     """Pick a from_filter-compliant ``email_from`` for outgoing grove_headless
     mail (GOL-2180).
 
@@ -388,6 +390,16 @@ def resolve_email_from(default_from, company_email, catchall_alias, catchall_dom
       1. ``ir.config_parameter`` ``mail.default.from``
       2. ``company.email``
       3. ``<mail.catchall.alias>@<mail.catchall.domain>``
+      4. ``odoo.conf`` ``email_from`` (``config['email_from']``)
+
+    The odoo.conf ``email_from`` is tried last but is the deployment's
+    *versioned* from_filter-compliant sender (``.env EMAIL_FROM`` ->
+    ``odoo/odoo.conf`` -> ``odoo.tools.config['email_from']``), configured in
+    lockstep with the outgoing server's ``from_filter``.  It is the reliable
+    safety net: the three sources above are live-DB state that can be unset or
+    drift, in which case returning the odoo.conf value (rather than ``""``)
+    keeps the From authorized instead of dropping back to
+    ``odoobot@example.com`` -- the exact GOL-2180 failure.
 
     Pure/stdlib (env-reading lives in ``mail_from.resolve_mail_from``) so it is
     unit-testable without the Odoo runtime.  Returns ``""`` when nothing is
@@ -401,6 +413,9 @@ def resolve_email_from(default_from, company_email, catchall_alias, catchall_dom
     domain = (catchall_domain or "").strip()
     if alias and domain:
         return f"{alias}@{domain}"
+    config_default_from = (config_default_from or "").strip()
+    if config_default_from:
+        return config_default_from
     return ""
 
 
