@@ -554,12 +554,19 @@ class GroveHeadlessAPI(http.Controller):
         )
         total = request.env["product.template"].sudo().with_company(current_company).search_count(domain)
 
+        # Warm the batched preorder-cap compute once for the whole page so the
+        # per-card read below is a cache hit, not an N+1 (GOL-2171). The frontend
+        # renders sold-out identically whether it came from stock or the cap, so
+        # the derived flag must ride every card the grid can show.
+        products.mapped("grove_preorder_cap_reached")
+
         items = []
         for product in products:
             data = _serialize_product(product, PRODUCT_LIST_FIELDS)
             if data:
                 data["image_url"] = _image_url("product.template", product, "image_128")
                 data["slug"] = data.pop("grove_slug", "") or ""
+                data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
                 data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
                 data["categories"] = [
                     {"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids
@@ -630,6 +637,10 @@ class GroveHeadlessAPI(http.Controller):
         data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
         data["categories"] = [{"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids]
         data["images"] = _serialize_images(product)
+        # Preorder-cap sold-out state (GOL-2171) — same derived flag as the grid
+        # so the PDP buy box renders sold-out identically whether it came from
+        # stock or from the cap. The frontend never computes the threshold.
+        data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
 
         return _json_response(data)
 
