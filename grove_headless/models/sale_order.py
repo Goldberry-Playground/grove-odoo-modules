@@ -315,9 +315,7 @@ class SaleOrder(models.Model):
             # wave is still closed; once it is open, this method IS the preorder
             # ship + settle path and must pack them.
             skip_preorder_ids = (
-                set()
-                if order.grove_fulfillment_stage == "wave_assigned"
-                else order._preorder_variant_id_set()
+                set() if order.grove_fulfillment_stage == "wave_assigned" else order._preorder_variant_id_set()
             )
             partner = order.partner_shipping_id
             address = {
@@ -367,7 +365,9 @@ class SaleOrder(models.Model):
                 # "succeed" with zero labels (which would falsely flip
                 # grove_delivery_status). Once the wave opens (wave_assigned) the
                 # preorder lines pack and this branch is not reached.
-                raise UserError(f"{order.name}: no shippable lines — all preorder (wave not open) or pickup, no label is owed.")
+                raise UserError(
+                    f"{order.name}: no shippable lines — all preorder (wave not open) or pickup, no label is owed."
+                )
             reason = unshippable_reason(items)
             if reason:
                 raise UserError(f"{order.name}: {reason}")

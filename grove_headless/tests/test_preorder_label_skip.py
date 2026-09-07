@@ -133,9 +133,7 @@ class TestPreorderLabelSkip(GroveTaxFixtureMixin, TransactionCase):
             patch.dict(os.environ, {"SHIPPO_API_KEY": "test-key"}),
             # Stub the packer so the test is not coupled to the live rate table /
             # ship-window calendar; the gate under test is line inclusion, not packing.
-            patch.object(
-                sale_order_module, "pack_for_state", return_value=[SimpleNamespace(box_id="BR_S", count=1)]
-            ),
+            patch.object(sale_order_module, "pack_for_state", return_value=[SimpleNamespace(box_id="BR_S", count=1)]),
             patch.object(sale_order_module, "unshippable_reason", return_value=None),
             patch.object(shippo_client, "build_shipment_payload", return_value={"box": "BR_S"}),
             patch.object(shippo_client, "buy_cheapest_ground_label", return_value=fake_label) as buy,
