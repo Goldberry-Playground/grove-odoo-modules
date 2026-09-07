@@ -49,16 +49,26 @@ ORIGIN = {
     "zip": "26651",
     "country": "US",
 }
-# One reference residential destination per rate zone = the WORST-CASE
-# (priciest live UPS Ground) destination in that zone's state band, so the
-# published per-zone rate is an upper bound for every customer in the band and
-# no one is ever undercharged (GOL-1495, board-approved 2026-08-14). Because
-# the 5 state-distance bands don't track UPS's own cost ordering, quoting a
-# merely-representative city (e.g. Columbus for all of zone_2) would undercharge
-# the band's far corner (NYC); quoting the far corner over-bills the cheapest
-# in-band destination modestly — the accepted cost of static zone pricing.
-# The worst-case picks were determined by live Shippo probe of each band's
-# corner states (br16 + b32; the ranking is box-invariant, UPS-zone driven).
+# One or more reference residential destinations per rate zone. Each corner is
+# a WORST-CASE (priciest live UPS Ground) destination in that zone's state band;
+# the published per-zone, per-box rate is the MAX across the zone's corners, so
+# it is an upper bound for every customer in the band and no one is ever
+# undercharged (GOL-1495, board-approved 2026-08-14; multi-corner max added
+# GOL-2128). Because the state-distance bands don't track UPS's own cost
+# ordering, quoting a merely-representative city (e.g. Columbus for all of
+# zone_2) would undercharge the band's far corner (NYC); quoting the far
+# corner(s) over-bills the cheapest in-band destination modestly — the accepted
+# cost of static zone pricing. The worst-case picks were determined by live
+# Shippo probe of each band's corner states (br16 + b32; the ranking is
+# box-invariant, UPS-zone driven).
+#
+# zones 1-4 carry a single corner: their bands were derived worst-corner-first
+# and no in-band state ties it. zone_5 was widened past Maine by GOL-2128 to the
+# ratified south/mid tranche {ME,TN,GA,AL,SC,AR,MS,LA,MO,IA}; the 2026-09-06
+# probe put AL/MS/LA's Gulf corners AT the Portland-ME cheapest-ground on the big
+# boxes, so a lone Portland probe is no longer a band-wide upper bound — any
+# downward drift at Portland alone would undercharge the Gulf. We therefore probe
+# every plausibly-maximal corner and publish the per-box max.
 #
 # The city MUST match the ZIP: once a real UPS carrier is connected, UPS
 # validates city against ZIP and HARD-rejects a mismatch ("111539 Invalid
@@ -66,16 +76,18 @@ ORIGIN = {
 # probe. A placeholder city ("n/a") silently passed on Shippo's shared UPS
 # account but breaks on the live account for strictly-validated ZIPs — GOL-1446.
 REFERENCE_ZIPS = {
-    "zone_1": ("Wilmington", "NC", "28401"),  # band {WV,VA,KY,NC,DE}; NC coast
-    "zone_2": ("New York", "NY", "10001"),  # band {MD,PA,OH,IN,NJ,NY}
-    "zone_3": ("Chicago", "IL", "60601"),  # band {IL,MI,CT,RI}
-    # band {WI,MN,MA,VT,NH,TN}. TN joined zone_4 (GOL-2128): a 2026-09-06 probe
-    # put every TN corner (incl. Memphis/Chattanooga, UPS-only) at or below the
-    # Boston cheapest-ground for every box, so Boston remains the worst corner
-    # this ZIP must track. If a future TN corner ever exceeds Boston, this zone
-    # needs a multi-corner max (tracked as a GOL-2128 follow-up).
-    "zone_4": ("Boston", "MA", "02108"),
-    "zone_5": ("Portland", "ME", "04101"),  # band {ME}
+    "zone_1": [("Wilmington", "NC", "28401")],  # band {WV,VA,KY,NC,DE,DC}; NC coast
+    "zone_2": [("New York", "NY", "10001")],  # band {MD,PA,OH,IN,NJ,NY}
+    "zone_3": [("Chicago", "IL", "60601")],  # band {IL,MI,CT,RI}
+    "zone_4": [("Boston", "MA", "02108")],  # band {WI,MN,MA,VT,NH}
+    # band {ME,TN,GA,AL,SC,AR,MS,LA,MO,IA} — max across the Gulf/NE corners that
+    # tied for priciest in the GOL-2128 probe (the others quoted strictly below).
+    "zone_5": [
+        ("Portland", "ME", "04101"),
+        ("Mobile", "AL", "36602"),
+        ("Gulfport", "MS", "39501"),
+        ("Lake Charles", "LA", "70601"),
+    ],
 }
 # Box Engine v2: reference parcels come straight from the box catalog —
 # one quote per box id per zone, at the box's representative billable weight
@@ -164,31 +176,43 @@ def target_rate(quote: float, box_id: str) -> int:
     return math.ceil(quote + PACKAGING[box_id] + BUFFER)
 
 
-def quote_zone_box(api_key: str, zone: str, box_id: str) -> float | None:
-    city, state, zip5 = REFERENCE_ZIPS[zone]
-    payload = {
-        "address_from": ORIGIN,
-        "address_to": {
-            "name": "Rate Probe",
-            "street1": "100 Main St",
-            "city": city,
-            "state": state,
-            "zip": zip5,
-            "country": "US",
-            "is_residential": True,
-        },
-        "parcels": [PARCELS[box_id]],
-        "async": False,
-    }
-    resp = requests.post(
-        "https://api.goshippo.com/shipments/",
-        json=payload,
-        timeout=30,
-        headers={"Authorization": f"ShippoToken {api_key}"},
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return pick_cheapest_ground(data), present_carriers(data)
+def quote_zone_box(api_key: str, zone: str, box_id: str):
+    """Cheapest-ground quote for ``box_id`` at the WORST (max) of the zone's
+    reference corners, plus the union of allowlisted ground carriers seen across
+    them. Publishing the per-box max keeps the single published rate an upper
+    bound for every corner of a multi-state band (GOL-2128). A corner that
+    returns no ground rate is skipped; the quote is ``None`` only when NO corner
+    yields a ground rate (the caller's missing/lapse logic then applies)."""
+    best = None
+    present = set()
+    for city, state, zip5 in REFERENCE_ZIPS[zone]:
+        payload = {
+            "address_from": ORIGIN,
+            "address_to": {
+                "name": "Rate Probe",
+                "street1": "100 Main St",
+                "city": city,
+                "state": state,
+                "zip": zip5,
+                "country": "US",
+                "is_residential": True,
+            },
+            "parcels": [PARCELS[box_id]],
+            "async": False,
+        }
+        resp = requests.post(
+            "https://api.goshippo.com/shipments/",
+            json=payload,
+            timeout=30,
+            headers={"Authorization": f"ShippoToken {api_key}"},
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        present |= present_carriers(data)
+        quote = pick_cheapest_ground(data)
+        if quote is not None:
+            best = quote if best is None else max(best, quote)
+    return best, present
 
 
 def compute_drift(current: dict, proposed: dict) -> list:

@@ -34,11 +34,11 @@ Keys beginning with `_` are ignored (used for comments).
 
 `models/shipping_zones.py` defines two complementary constants:
 
-- **`GREEN_STATES`** (22 states) — the compliance gate: we ship only to these states.
+- **`GREEN_STATES`** (31 states) — the compliance gate: we ship only to these states.
   Any checkout address outside this set returns `None` from `compute_shipping_rate`
   and `compute_order_shipping`, which causes the checkout to add **no** shipping line
   (fail-safe — never a guessed charge).
-- **`ZONE_BY_STATE`** — maps each of the 22 green states to one of five rate zones
+- **`ZONE_BY_STATE`** — maps each of the 31 green states to one of five rate zones
   (`zone_1` … `zone_5`), keyed by ground transit distance from zip 26651 (WV). The
   bands were originally derived from UPS ground transit and are retained as-is:
   under least-cost selection (GOL-1906) UPS remains available for the parcels where

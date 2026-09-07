@@ -9,7 +9,7 @@ Two layers:
   * Contract tests — assert the engine's fail-safe behaviour. These pass at all
     times and guard against regression on the core routing logic.
   * Table-coverage tests — assert the finished table is complete and self-
-    consistent. They automatically enforce full coverage across all 22 green
+    consistent. They automatically enforce full coverage across all 31 green
     states, 5 zones, and every catalog box.
 """
 
@@ -24,33 +24,42 @@ _spec.loader.exec_module(sz)
 
 sb = sz.shipping_boxes
 
-# Independent pin of the 22 green states (deliberately NOT sz.GREEN_STATES:
+# Independent pin of the 31 green states (deliberately NOT sz.GREEN_STATES:
 # the test must catch an accidental edit to the module's set, so it keeps
 # its own copy of the compliance list).
 GREEN = frozenset(
     {
+        "AL",
+        "AR",
         "CT",
+        "DC",
         "DE",
+        "GA",
+        "IA",
         "IL",
         "IN",
         "KY",
-        "ME",
-        "MD",
+        "LA",
         "MA",
+        "MD",
+        "ME",
         "MI",
         "MN",
+        "MO",
+        "MS",
+        "NC",
         "NH",
         "NJ",
         "NY",
-        "NC",
         "OH",
         "PA",
         "RI",
+        "SC",
         "TN",
-        "VT",
         "VA",
-        "WV",
+        "VT",
         "WI",
+        "WV",
     }
 )
 
@@ -155,10 +164,10 @@ class TestShippingZoneEngineContract(unittest.TestCase):
         self.assertIsNone(sz.unshippable_reason([("potted", 20, 0), ("bareroot", 20, 1)]))
 
 
-class TestTwentyOneStateCoverage(unittest.TestCase):
-    """The 22-state green list and its rate coverage."""
+class TestGreenStateCoverage(unittest.TestCase):
+    """The 31-state green list and its rate coverage."""
 
-    def test_exactly_the_22_green_states_are_mapped(self):
+    def test_exactly_the_green_states_are_mapped(self):
         self.assertEqual(set(sz.ZONE_BY_STATE), GREEN)
 
     def test_every_mapped_state_prices_every_catalog_box(self):
@@ -199,7 +208,7 @@ class TestShippingZoneTableCoverage(unittest.TestCase):
 
     def test_full_state_coverage_when_configured(self):
         if not sz.is_configured():
-            self.skipTest("22-state rate table not yet populated")
+            self.skipTest("31-state rate table not yet populated")
         mapped = set(sz.ZONE_BY_STATE)
         self.assertEqual(
             mapped,

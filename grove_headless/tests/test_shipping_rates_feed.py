@@ -149,7 +149,7 @@ class RateFeedTests(unittest.TestCase):
 
     def test_zone_by_state_is_authoritative_green_list(self):
         # The zone->state map IS the compliance gate; it must equal the engine's
-        # map and cover the 22 green states exactly.
+        # map and cover the 31 green states exactly.
         self.assertEqual(self.feed["zone_by_state"], sz.ZONE_BY_STATE)
         self.assertEqual(set(self.feed["zone_by_state"]), set(sz.GREEN_STATES))
         self.assertEqual(self.feed["green_states"], sorted(sz.GREEN_STATES))
