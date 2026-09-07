@@ -633,9 +633,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         # `_bareroot_ships_now` to a deposit before `ship_options` is consulted
         # outside the window, so a leafed run date would never reach the spy —
         # this test is about WHICH zip keys the window, so it must run in-season.
-        with mock.patch.object(grove_main, "ship_options", side_effect=spy), mock.patch.object(
-            grove_main, "_date"
-        ) as md:
+        with (
+            mock.patch.object(grove_main, "ship_options", side_effect=spy),
+            mock.patch.object(grove_main, "_date") as md,
+        ):
             md.today.return_value = date(2027, 1, 15)  # dormant window
             line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
         self.assertEqual(seen["zip"], "26651", "pickup window must key off the FARM ZIP, not the customer's")
@@ -661,9 +662,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
 
         # Dormant date so the nursery-dormancy gate (GOL-1906) lets the window
         # resolution reach `ship_options`; the assertion is about the ZIP key.
-        with mock.patch.object(grove_main, "ship_options", side_effect=spy), mock.patch.object(
-            grove_main, "_date"
-        ) as md:
+        with (
+            mock.patch.object(grove_main, "ship_options", side_effect=spy),
+            mock.patch.object(grove_main, "_date") as md,
+        ):
             md.today.return_value = date(2027, 1, 15)  # dormant window
             grove_main._build_stripe_line_items(order)
         self.assertEqual(seen["zip"], "04101", "shipped window must key off the destination ZIP")
@@ -708,9 +710,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         def spy(zip_code, tier, today):
             return {"usda_zone": 6, "ships_now": True}  # in the zone's dormant ship window
 
-        with mock.patch.object(grove_main, "ship_options", side_effect=spy), mock.patch.object(
-            grove_main, "_date"
-        ) as md:
+        with (
+            mock.patch.object(grove_main, "ship_options", side_effect=spy),
+            mock.patch.object(grove_main, "_date") as md,
+        ):
             md.today.return_value = date(2027, 1, 15)  # dormant window
             line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
         self.assertEqual(preorder_ids, [], "in-window dormant bareroot must charge in full and ship now")
@@ -728,8 +731,9 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         an order is a preorder that ships in the next dormant wave."""
         self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
         order = self._make_order(qty=2)
-        with mock.patch.dict("os.environ", {"SHIPPO_API_KEY": "shippo_test"}, clear=False), mock.patch.object(
-            grove_sale_order, "can_ship_bareroot", return_value=False
+        with (
+            mock.patch.dict("os.environ", {"SHIPPO_API_KEY": "shippo_test"}, clear=False),
+            mock.patch.object(grove_sale_order, "can_ship_bareroot", return_value=False),
         ):
             with self.assertRaisesRegex(UserError, "dormancy window"):
                 order.action_buy_shipping_labels()
