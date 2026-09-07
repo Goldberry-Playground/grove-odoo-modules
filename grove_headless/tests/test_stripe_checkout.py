@@ -208,6 +208,21 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             self.assertEqual(grove_main._tenant_secret_key("nursery"), "")
             self.assertEqual(grove_main._tenant_secret_key(None), "")
 
+    def test_tenant_secret_key_warns_on_deprecated_legacy_name(self):
+        """When only the deprecated ``stripe_test_secret_key`` alias is set the
+        key still resolves (odoocker#613 arms prod under this name today), but a
+        one-time deprecation warning is emitted so ops finishes the rename. The
+        warning fires once per process (module-level guard), not per checkout."""
+        env = {"stripe_test_secret_key": "sk_legacy"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            with mock.patch.object(grove_main, "_LEGACY_SECRET_ENV_WARNED", False):
+                with self.assertLogs(grove_main._logger, level="WARNING") as logs:
+                    self.assertEqual(grove_main._tenant_secret_key("nursery"), "sk_legacy")
+                self.assertTrue(
+                    any("stripe_test_secret_key" in m for m in logs.output),
+                    logs.output,
+                )
+
     def test_tenant_secret_key_prefers_new_fallback_name(self):
         """The non-"test" ``stripe_secret_key`` name is preferred over the
         deprecated ``stripe_test_secret_key`` alias when both are set, so the

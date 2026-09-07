@@ -240,15 +240,37 @@ STRIPE_SECRET_KEY_LEGACY_ENV = "stripe_test_secret_key"  # deprecated alias
 # Inert until Terra wires the var, so pure-legacy/QA behaviour is unchanged.
 STRIPE_LEGACY_KEY_TENANT_ENV = "stripe_legacy_key_tenant"
 
+# One-time guard so the deprecation warning below is logged once per process,
+# not on every checkout, while prod still serves the legacy env var name.
+_LEGACY_SECRET_ENV_WARNED = False
+
 
 def _fallback_secret_key():
     """The single merchant-of-record fallback key.
 
     Reads the non-"test" ``stripe_secret_key`` name first, then the deprecated
     ``stripe_test_secret_key`` alias so the rename can land before Terra's env
-    change without a flag day (GOL-1892 item d).
+    change without a flag day (GOL-1892 item d). odoocker#613 arms prod under the
+    legacy name today, so the alias MUST stay readable until the odoocker env
+    rename ships as its own coordinated PR — never a same-moment flip across two
+    repos on the money path. Emitting a one-time warning when the deprecated name
+    is what resolves gives ops a signal to complete the rename.
     """
-    return os.environ.get(STRIPE_SECRET_KEY_FALLBACK_ENV, "") or os.environ.get(STRIPE_SECRET_KEY_LEGACY_ENV, "")
+    key = os.environ.get(STRIPE_SECRET_KEY_FALLBACK_ENV, "")
+    if key:
+        return key
+    legacy = os.environ.get(STRIPE_SECRET_KEY_LEGACY_ENV, "")
+    if legacy:
+        global _LEGACY_SECRET_ENV_WARNED
+        if not _LEGACY_SECRET_ENV_WARNED:
+            _LEGACY_SECRET_ENV_WARNED = True
+            _logger.warning(
+                "Stripe secret key resolved from deprecated env var %r; "
+                "rename to %r (see GOL-1892; coordinate with the odoocker env rename).",
+                STRIPE_SECRET_KEY_LEGACY_ENV,
+                STRIPE_SECRET_KEY_FALLBACK_ENV,
+            )
+    return legacy
 
 
 def _any_per_tenant_key_configured():
