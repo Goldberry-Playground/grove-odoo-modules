@@ -472,3 +472,48 @@ class TestSettledPickupAwaiting(unittest.TestCase):
         orders = [_order(is_pickup=True, checkout_status="settled", delivery_status=None)]
         d = od.build_digest(orders, today=TODAY)
         self.assertEqual(d["pickup_count"], 1)
+
+
+class TestResolveEmailFrom(unittest.TestCase):
+    """resolve_email_from priority + fallbacks (GOL-2180). Odoo falls back to
+    odoobot@example.com when mail.mail has no email_from, failing the prod
+    from_filter; the resolver picks a from_filter-compliant address."""
+
+    def test_prefers_mail_default_from(self):
+        # mail.default.from wins even when company + catchall are also set.
+        self.assertEqual(
+            od.resolve_email_from(
+                "orders@send.gatheringatthegrove.com",
+                "hello@goldberrygrove.farm",
+                "catchall",
+                "send.gatheringatthegrove.com",
+            ),
+            "orders@send.gatheringatthegrove.com",
+        )
+
+    def test_falls_back_to_company_email(self):
+        self.assertEqual(
+            od.resolve_email_from("", "hello@goldberrygrove.farm", "catchall", "send.gatheringatthegrove.com"),
+            "hello@goldberrygrove.farm",
+        )
+
+    def test_falls_back_to_catchall(self):
+        self.assertEqual(
+            od.resolve_email_from(None, None, "catchall", "send.gatheringatthegrove.com"),
+            "catchall@send.gatheringatthegrove.com",
+        )
+
+    def test_returns_empty_when_nothing_configured(self):
+        # No configured source -> "" so the caller omits email_from (no crash).
+        self.assertEqual(od.resolve_email_from(None, None, None, None), "")
+        # Catchall needs BOTH alias and domain; a lone alias/domain is unusable.
+        self.assertEqual(od.resolve_email_from("", "", "catchall", ""), "")
+        self.assertEqual(od.resolve_email_from("", "", "", "send.gatheringatthegrove.com"), "")
+
+    def test_whitespace_only_values_are_ignored(self):
+        self.assertEqual(
+            od.resolve_email_from("   ", "  ", "catchall", "send.gatheringatthegrove.com"),
+            "catchall@send.gatheringatthegrove.com",
+        )
+        # Surrounding whitespace on a real value is trimmed.
+        self.assertEqual(od.resolve_email_from("  a@b.com ", None, None, None), "a@b.com")

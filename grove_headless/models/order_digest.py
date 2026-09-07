@@ -375,6 +375,35 @@ def render_digest_html(digest: dict) -> str:
     return "\n".join(parts)
 
 
+def resolve_email_from(default_from, company_email, catchall_alias, catchall_domain) -> str:
+    """Pick a from_filter-compliant ``email_from`` for outgoing grove_headless
+    mail (GOL-2180).
+
+    Odoo falls back to the cron/request author identity
+    (``"OdooBot" <odoobot@example.com>``) when a ``mail.mail`` is created with no
+    ``email_from``.  On prod that address fails the outgoing server's
+    ``from_filter`` (``send.gatheringatthegrove.com``), so resolve an explicit
+    From in priority order:
+
+      1. ``ir.config_parameter`` ``mail.default.from``
+      2. ``company.email``
+      3. ``<mail.catchall.alias>@<mail.catchall.domain>``
+
+    Pure/stdlib (env-reading lives in ``mail_from.resolve_mail_from``) so it is
+    unit-testable without the Odoo runtime.  Returns ``""`` when nothing is
+    configured, letting the caller omit ``email_from`` and defer to Odoo.
+    """
+    for candidate in (default_from, company_email):
+        candidate = (candidate or "").strip()
+        if candidate:
+            return candidate
+    alias = (catchall_alias or "").strip()
+    domain = (catchall_domain or "").strip()
+    if alias and domain:
+        return f"{alias}@{domain}"
+    return ""
+
+
 def _wave_label(entry: dict, esc=None) -> str:
     """Human ship-window label. ``esc`` (e.g. ``html.escape``) is applied to the
     untrusted ``ship_season``; dates are machine-formatted and need no escaping."""
