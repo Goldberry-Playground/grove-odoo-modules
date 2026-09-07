@@ -16,6 +16,7 @@ from odoo.http import Response, request
 from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME
 from ..models import stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
+from ..models.mail_from import mail_from_vals
 from ..models.newsletter import newsletter_tag_names
 from ..models.order_alerts import format_merchant_email, format_new_order_discord
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
@@ -2477,6 +2478,7 @@ def _send_dunning_email(env, order, amount_due, pay_url):
             {
                 "subject": f"Payment needed for your shipped order {order.name}",
                 "email_to": email,
+                **mail_from_vals(env, order.company_id),
                 "body_html": body,
                 "auto_delete": True,
             }
@@ -2769,6 +2771,7 @@ def _notify_preorder_deposit(env, order):
             {
                 "subject": f"Your preorder deposit for {order.name}",
                 "email_to": email,
+                **mail_from_vals(env, order.company_id),
                 "body_html": body,
                 "auto_delete": True,
             }
@@ -2796,6 +2799,7 @@ def _notify_customer_apology(env, order, product_names, refunded):
             {
                 "subject": f"About your order {order.name}",
                 "email_to": email,
+                **mail_from_vals(env, order.company_id),
                 "body_html": body,
                 "auto_delete": True,
             }
@@ -2905,6 +2909,7 @@ def _notify_merchant_email(env, order, is_deposit):
             {
                 "subject": subject,
                 "email_to": recipient,
+                **mail_from_vals(env, order.company_id),
                 "body_html": body_html,
                 "auto_delete": True,
             }
@@ -2996,6 +3001,7 @@ def _notify_shipping_status(env, order, status, tracking):
             {
                 "subject": subject,
                 "email_to": order.partner_id.email,
+                **mail_from_vals(env, order.company_id),
                 "reply_to": reply_to,
                 "body_html": body,
                 "auto_delete": True,
