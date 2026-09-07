@@ -14,7 +14,7 @@ checker is active is not safe; they will be dropped on the next rates PR.
 Design is documented in the vault wiki at ``Software/Grove Shipping``.
 
 Fail-safe by design: ``compute_order_shipping`` returns ``None`` for any
-address outside the 21-state green list, any cart containing a potted line,
+address outside the 31-state green list, any cart containing a potted line,
 and any cart the packer cannot plan — the checkout then adds NO shipping line
 (and the checkout endpoint blocks with an explicit message via
 ``unshippable_reason``). We never emit a wrong or guessed charge.
@@ -137,27 +137,37 @@ ZONE_RATES: dict[str, dict] = _load_rates()
 
 GREEN_STATES: frozenset[str] = frozenset(
     {
+        "AL",
+        "AR",
         "CT",
+        "DC",
         "DE",
+        "GA",
+        "IA",
         "IL",
         "IN",
         "KY",
-        "ME",
-        "MD",
+        "LA",
         "MA",
+        "MD",
+        "ME",
         "MI",
         "MN",
+        "MO",
+        "MS",
+        "NC",
         "NH",
         "NJ",
         "NY",
-        "NC",
         "OH",
         "PA",
         "RI",
-        "VT",
+        "SC",
+        "TN",
         "VA",
-        "WV",
+        "VT",
         "WI",
+        "WV",
     }
 )
 
@@ -169,6 +179,7 @@ ZONE_BY_STATE: dict[str, str] = {
     "KY": "zone_1",
     "NC": "zone_1",
     "DE": "zone_1",
+    "DC": "zone_1",  # GOL-2128 probe: DC corner (Washington 20001) <= zone_1 for every box
     # zone_2
     "MD": "zone_2",
     "PA": "zone_2",
@@ -187,7 +198,30 @@ ZONE_BY_STATE: dict[str, str] = {
     "MA": "zone_4",
     "VT": "zone_4",
     "NH": "zone_4",
-    # zone_5 — farthest (UPS ~5)
+    # zone_5 — farthest priced band (originally Maine only). GOL-2128 added the
+    # ratified south/mid-continent tranche here after a live Shippo probe
+    # (2026-09-06, origin 26651, cheapest-of-{UPS Ground, USPS Ground Advantage}
+    # — the SAME selector label purchase uses). For each state we quoted its
+    # worst (farthest) corner for every catalog box and took ceil(quote+pkg+2);
+    # zone_5's published rates dominate that target for every box of every state
+    # below, so none can ever be undercharged (several — AL/MS/LA — sit exactly
+    # at the zone_5 corner). This widens the band well past Maine, so the daily
+    # rate-checker now probes MULTIPLE corners per zone and publishes the max
+    # (see scripts/rate_check REFERENCE_ZIPS) — otherwise a single-corner probe
+    # of Portland ME could drift below a southern corner and undercharge it.
+    # The far/western states whose big-box target EXCEEDS the current 5-zone
+    # table (FL, OK, KS, NE, SD, ND, TX, NM, AZ — up to $102 on b32 vs the $68
+    # cap) are deliberately NOT here: they need new distance zones with real
+    # probed rates (GOL-2128 follow-up), never a guessed zone_5 undercharge.
+    "TN": "zone_5",
+    "GA": "zone_5",
+    "AL": "zone_5",
+    "SC": "zone_5",
+    "AR": "zone_5",
+    "MS": "zone_5",
+    "LA": "zone_5",
+    "MO": "zone_5",
+    "IA": "zone_5",
     "ME": "zone_5",
 }
 
@@ -228,7 +262,7 @@ def rate_feed(calendar_override=None, today=None) -> dict:
 
     ``zones`` mirrors ``data/shipping_rates.json`` (minus the ``_``-prefixed
     keys, already stripped at load). ``zone_by_state`` is the authoritative
-    21-state green list -> zone map — the compliance gate the frontend must
+    31-state green list -> zone map — the compliance gate the frontend must
     stay in lockstep with. ``packing`` carries the box catalog + capacities so
     the frontend can mirror ``pack_order`` exactly. ``calendar`` is the annual,
     admin-editable shipping calendar keyed to USDA hardiness zone (NOT the

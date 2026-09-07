@@ -24,11 +24,13 @@ class TestReferenceAddresses(unittest.TestCase):
         # city ("n/a") makes UPS hard-reject the probe once a real carrier is
         # connected ("111539 Invalid Destination Postal Code and City"),
         # dropping the UPS Ground rate and failing rate-check (GOL-1446).
-        for zone, entry in rc.REFERENCE_ZIPS.items():
-            self.assertEqual(len(entry), 3, f"{zone}: expected (city, state, zip)")
-            city, state, zip5 = entry
-            self.assertTrue(city and city.strip().lower() != "n/a", f"{zone}: bad city {city!r}")
-            self.assertEqual(len(zip5), 5, f"{zone}: bad zip {zip5!r}")
+        for zone, corners in rc.REFERENCE_ZIPS.items():
+            self.assertTrue(corners, f"{zone}: at least one reference corner")
+            for entry in corners:
+                self.assertEqual(len(entry), 3, f"{zone}: expected (city, state, zip)")
+                city, state, zip5 = entry
+                self.assertTrue(city and city.strip().lower() != "n/a", f"{zone}: bad city {city!r}")
+                self.assertEqual(len(zip5), 5, f"{zone}: bad zip {zip5!r}")
 
     def test_probe_sends_the_zone_city_not_a_placeholder(self):
         captured = {}

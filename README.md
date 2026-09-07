@@ -64,7 +64,7 @@ Each React website sends an `X-Grove-Tenant` header. The `grove_headless` module
 **What it does:**
 
 - Exposes 9 JSON API endpoints under `/grove/api/v1/`: health, products list/detail, cart get/add, order create, order detail (token-gated), shipping options (public), shipping webhook (Shippo tracking)
-- Implements a 5-zone × 2-tier (bareroot/potted) shipping rate engine over 21 green states; rates live in `data/shipping_rates.json` (maintained by the daily rate-checker — see `scripts/rate_check/`)
+- Implements a 5-zone × 2-tier (bareroot/potted) shipping rate engine over 31 green states; rates live in `data/shipping_rates.json` (maintained by the daily rate-checker — see `scripts/rate_check/`)
 - Adds `grove_shipping_tier` (selection: bareroot/potted) to `product.template`; order creation applies per-line tier×qty shipping charges via `compute_order_shipping`; fail-safe: no rate → no shipping line (never a guessed charge)
 - ZIP→USDA-zone lookup via vendored PHZM 2023 matrix (`data/zip_usda_zone.csv`) drives wave-schedule and freeze-window calendar logic in `models/shipping_calendar.py`
 - Adds a "Buy Shipping Labels" server action on `sale.order` (one least-cost ground label per tree box via Shippo — UPS Ground vs USPS Ground Advantage, transit-guarded, cheapest wins per box, GOL-1906; two-pass validate-then-buy; partial purchases persisted with status `partial_purchase`); tracks labels, delivery status and the carrier/service actually shipped via `grove_tracking_numbers`, `grove_label_urls`, `grove_shipping_carriers`, `grove_shipping_services`, `grove_delivery_status`
@@ -480,7 +480,7 @@ curl -s 'http://localhost:8069/grove/api/v1/shipping/options?zip=28801&state=NC&
 }
 ```
 
-`ships_now` is `true` only when today falls inside a valid ship window for the destination USDA zone. `next_wave` is `null` for potted-tier requests. `defer_to` is an ISO date string (or `null`) indicating the earliest eligible ship date. `per_tree_rate` is `null` when the destination state is outside the 21 green states (compliance gate).
+`ships_now` is `true` only when today falls inside a valid ship window for the destination USDA zone. `next_wave` is `null` for potted-tier requests. `defer_to` is an ISO date string (or `null`) indicating the earliest eligible ship date. `per_tree_rate` is `null` when the destination state is outside the 31 green states (compliance gate).
 
 ### Shipping Webhook (Shippo tracking updates)
 
@@ -575,7 +575,7 @@ grove-odoo-modules/
 │   │   ├── grove_sequences.xml          # Sequence registry (potting batch refs, etc.)
 │   │   ├── shipping_rates.json          # Zone × tier rates (maintained by rate-checker)
 │   │   ├── shipping_actions.xml         # "Buy Shipping Labels" server action
-│   │   └── zip_usda_zone.csv            # PHZM 2023 ZIP→USDA-zone matrix (~15k rows, 21-state trim)
+│   │   └── zip_usda_zone.csv            # PHZM 2023 ZIP→USDA-zone matrix (~15k rows, 31-state trim)
 │   ├── docs/
 │   │   └── shipping-zones.md    # Live system reference for the shipping engine
 │   ├── security/

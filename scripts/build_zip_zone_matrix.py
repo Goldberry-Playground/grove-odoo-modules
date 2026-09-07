@@ -8,10 +8,11 @@ https://prism.oregonstate.edu/phzm/ and pass it as argv[1].
 The PHZM zipcode file has columns: zipcode, zone (e.g. "6b"), trange,
 zonetitle — no state column.  A secondary ZIP→state reference (from
 github.com/scpike/us-state-county-zip) is fetched to filter down to the
-21 green states.
+31 green states.
+
 
 Output rows: zip,zone (integer zone, half-zone letter stripped),
-trimmed to the 21 green states.
+trimmed to the 31 green states.
 
 Run once per PHZM release: python3 scripts/build_zip_zone_matrix.py
 """
@@ -26,28 +27,40 @@ PRIMARY_URL = "https://prism.oregonstate.edu/phzm/data/2023/phzm_us_zipcode_2023
 ZIP_STATE_URL = (
     "https://raw.githubusercontent.com/scpike/us-state-county-zip/8bd38a600ec137bb0162c0761da4ea3de3eb951f/geo-data.csv"
 )
+# Must mirror shipping_zones.GREEN_STATES (this standalone script keeps its own
+# pinned copy so it needs no addon import — update both together, GOL-2128).
 GREEN = {
+    "AL",
+    "AR",
     "CT",
+    "DC",
     "DE",
+    "GA",
+    "IA",
     "IL",
     "IN",
     "KY",
-    "ME",
-    "MD",
+    "LA",
     "MA",
+    "MD",
+    "ME",
     "MI",
     "MN",
+    "MO",
+    "MS",
+    "NC",
     "NH",
     "NJ",
     "NY",
-    "NC",
     "OH",
     "PA",
     "RI",
-    "VT",
+    "SC",
+    "TN",
     "VA",
-    "WV",
+    "VT",
     "WI",
+    "WV",
 }
 OUT = "grove_headless/data/zip_usda_zone.csv"
 
