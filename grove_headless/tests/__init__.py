@@ -9,6 +9,7 @@ from . import (
     test_availability_events,  # noqa: F401
     test_detail_serialization,  # noqa: F401
     test_effective_shipping_tier,  # noqa: F401
+    test_fulfillment_state,  # noqa: F401
     test_growing_facts,  # noqa: F401
     test_kit_boms,  # noqa: F401
     test_newsletter_subscribe,  # noqa: F401
@@ -17,6 +18,7 @@ from . import (
     test_potting_batch,  # noqa: F401
     test_product_slug,  # noqa: F401
     test_publish_event,  # noqa: F401
+    test_shared_pool_qty,  # noqa: F401
     test_shipping_calendar,  # noqa: F401
     test_shipping_rates_feed,  # noqa: F401
     test_shipping_zones,  # noqa: F401

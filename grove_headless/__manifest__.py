@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.28.0",
+    "version": "19.0.1.30.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -21,6 +21,13 @@
         "account",
         "website_sale",
         "website",
+        # sale_loyalty provides the promo/coupon engine (loyalty.program,
+        # sale.order._try_apply_code, the reward-line fields on
+        # sale.order.line). The headless checkout applies storefront promo
+        # codes (e.g. FLATWOODS) through it — see controllers/main.py
+        # _apply_promo_code (GOL-2088). Already present on prod via
+        # website_sale_loyalty; listed explicitly because we call it directly.
+        "sale_loyalty",
         # mrp provides mrp.bom (Bills of Materials), required for Kit-type
         # BOMs that bundle multiple variants behind one storefront line item,
         # and for the variant→variant transformation in potting-up batches.
@@ -29,10 +36,20 @@
         # Transitive via sale/mrp but listed explicitly because we use it
         # directly (stock.scrap.create, stock.group_stock_user ACLs).
         "stock",
+        # sale_stock provides stock.picking.sale_id, which the fulfilment
+        # mirror (models/stock_picking.py) relates through. It auto-installs
+        # alongside sale+stock, but the explicit dep guarantees load order.
+        "sale_stock",
         # point_of_sale provides pos.config / pos.payment.method, used by the
         # post_init hook to stand up the Farmer's Market + Nursery Counter
         # in-person sales channels (GOL-13). See hooks.setup_pos_configs.
         "point_of_sale",
+        # pos_sale provides pos.config.crm_team_id — the field the POS hook
+        # writes to link each in-person channel to its sales team (GOL-13).
+        # Without this dependency that field is absent on a minimal install and
+        # _setup_company_pos aborts (silently skipping ALL POS wiring), which is
+        # exactly what a chart-less CI DB exposed (GOL-2014).
+        "pos_sale",
     ],
     "data": [
         "security/ir.model.access.csv",
@@ -46,7 +63,9 @@
         "views/product_template_views.xml",
         "views/potting_batch_views.xml",
         "views/grove_publish_event_views.xml",
+        "views/fulfillment_views.xml",
         "data/shipping_actions.xml",
+        "data/settlement_cron.xml",
         "data/order_rollup_cron.xml",
     ],
     "installable": True,

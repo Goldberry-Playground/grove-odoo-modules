@@ -217,3 +217,31 @@ class TestShipFromOrigin(unittest.TestCase):
         payload = sp.build_shipment_payload(TestShippoClient.ADDR, "s20", 4, "leafed")
         self.assertEqual(payload["address_from"]["zip"], "26651")
         self.assertNotIn("SET_AT_DEPLOY", payload["address_from"]["street1"])
+
+    def test_origin_carries_sender_contact_fields(self):
+        """GOL-1906: USPS Ground Advantage rejects a label buy with
+        `sender_info_missing` unless the sender has email AND phone. Both keys
+        must exist on ORIGIN (email defaulted, phone env-supplied in prod)."""
+        self.assertIn("email", sp.ORIGIN)
+        self.assertIn("phone", sp.ORIGIN)
+        self.assertNotEqual(sp.ORIGIN["email"].strip(), "")
+
+    def test_ship_from_email_and_phone_env_overrides_are_wired(self):
+        with mock.patch.dict(
+            os.environ,
+            {"GROVE_SHIP_FROM_EMAIL": "ship@example.com", "GROVE_SHIP_FROM_PHONE": "3045551212"},
+        ):
+            spec = importlib.util.spec_from_file_location("grove_shippo_reload", _MODULE_PATH)
+            reloaded = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(reloaded)
+            self.assertEqual(reloaded.ORIGIN["email"], "ship@example.com")
+            self.assertEqual(reloaded.ORIGIN["phone"], "3045551212")
+
+    def test_payload_carries_sender_contact(self):
+        with mock.patch.dict(os.environ, {"GROVE_SHIP_FROM_PHONE": "3045551212"}):
+            spec = importlib.util.spec_from_file_location("grove_shippo_reload", _MODULE_PATH)
+            reloaded = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(reloaded)
+            payload = reloaded.build_shipment_payload(TestShippoClient.ADDR, "s20", 4, "leafed")
+            self.assertEqual(payload["address_from"]["phone"], "3045551212")
+            self.assertNotEqual(payload["address_from"]["email"].strip(), "")

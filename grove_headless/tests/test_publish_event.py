@@ -16,6 +16,7 @@ import os
 from unittest import mock
 
 from odoo.addons.grove_headless.models import grove_publish
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
 from odoo.tools import mute_logger
@@ -41,7 +42,7 @@ class _FakePost:
 
 
 @tagged("grove_headless", "publish_event", "post_install", "-at_install")
-class TestPublishEvent(TransactionCase):
+class TestPublishEvent(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         # Default company/website is Goldberry (data/grove_companies.xml), so the

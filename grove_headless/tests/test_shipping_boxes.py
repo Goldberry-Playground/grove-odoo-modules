@@ -28,9 +28,11 @@ def plan_summary(plan):
 
 
 class TestCatalog(unittest.TestCase):
-    def test_no_box_triggers_additional_handling(self):
-        for box in sb.BOXES.values():
-            self.assertLessEqual(max(box["length"], box["width"], box["height"]), sb.MAX_BOX_LONGEST_SIDE_IN)
+    def test_every_box_is_usps_mailable(self):
+        # USPS Ground Advantage hard limits: length + girth <= 130", weight <= 70 lb.
+        for box_id, box in sb.BOXES.items():
+            self.assertLessEqual(sb.length_plus_girth_in(box), sb.MAX_LENGTH_PLUS_GIRTH_IN, box_id)
+            self.assertLessEqual(sb.representative_billable_lb(box_id), sb.MAX_SHIP_WEIGHT_LB, box_id)
 
     def test_capacities_are_positive_and_mode_scoped(self):
         for box_id, box in sb.BOXES.items():
@@ -55,9 +57,12 @@ class TestCatalog(unittest.TestCase):
 
 
 class TestWeights(unittest.TestCase):
-    def test_dim_weight_matches_ups_divisor(self):
-        # 20x8x8 = 1280 cu in / 139 = 9.2 lb.
-        self.assertEqual(sb.dim_weight_lb("s20"), 9.2)
+    def test_dim_weight_respects_usps_cubic_foot_threshold(self):
+        # USPS Ground Advantage applies DIM only above 1 cu ft (1728 cu in).
+        # s20 = 20x8x8 = 1280 cu in (<= 1 cu ft) -> no DIM.
+        self.assertEqual(sb.dim_weight_lb("s20"), 0.0)
+        # b32 = 32x12x12 = 4608 cu in (> 1 cu ft) -> 4608 / 139 = 33.2 lb.
+        self.assertEqual(sb.dim_weight_lb("b32"), 33.2)
 
     def test_actual_weight_scales_with_count(self):
         lighter = sb.actual_weight_lb("s20", 1, "dormant")
@@ -65,10 +70,14 @@ class TestWeights(unittest.TestCase):
         self.assertGreater(heavier, lighter)
 
     def test_billable_is_max_of_actual_and_dim(self):
-        # One dormant whip in the s20: actual ~2 lb, DIM 9.2 -> billable 9.2.
-        self.assertEqual(sb.billable_weight_lb("s20", 1, "dormant"), 9.2)
-        # Full dormant b20: actual 2.9 + 50*0.5 = 27.9 > DIM 20.7.
+        # One dormant whip in the s20 (<= 1 cu ft, no USPS DIM): billable is the
+        # actual scale weight, tare 1.6 + 1*0.5 = 2.1 lb.
+        self.assertEqual(sb.billable_weight_lb("s20", 1, "dormant"), 2.1)
+        # Full dormant b20 (> 1 cu ft): actual 2.9 + 50*0.5 = 27.9 > DIM 20.7.
         self.assertEqual(sb.billable_weight_lb("b20", 50, "dormant"), 27.9)
+        # One dormant whip in the b32 (> 1 cu ft): actual 4.1 + 0.5 = 4.6 lb but
+        # DIM 33.2 dominates -> billable 33.2.
+        self.assertEqual(sb.billable_weight_lb("b32", 1, "dormant"), 33.2)
 
     def test_representative_billable_covers_worst_mode(self):
         # The rate-checker must quote the worst typical fill (never undercharge).
@@ -172,6 +181,121 @@ class TestPacking(unittest.TestCase):
         a = plan_summary(sb.pack_order([(46, 2), (32, 9), (20, 30)], "dormant", cost_of))
         b = plan_summary(sb.pack_order([(46, 2), (32, 9), (20, 30)], "dormant", cost_of))
         self.assertEqual(a, b)
+
+
+# ── Potted / peat-and-bagged engine (GOL-2031) ───────────────────────────────
+# Provisional zone_1 potted card; real rates come from rate_check once the
+# potted boxes are in the live Shippo probe list.
+POTTED_COSTS = {"p24x10x4": 20.0, "p24x10x6": 32.0}
+
+
+def potted_cost_of(box_id):
+    return POTTED_COSTS.get(box_id)
+
+
+class TestPottedCatalog(unittest.TestCase):
+    def test_capacities_positive_and_scalar(self):
+        for box_id, box in sb.POTTED_BOXES.items():
+            self.assertIsInstance(box["capacity"], int, box_id)
+            self.assertGreater(box["capacity"], 0, box_id)
+
+    def test_boxes_clear_usps_length_plus_girth(self):
+        for box_id, box in sb.POTTED_BOXES.items():
+            self.assertLessEqual(sb.length_plus_girth_in(box), sb.MAX_LENGTH_PLUS_GIRTH_IN, box_id)
+
+    def test_bench_geometry_matches_josh(self):
+        # Josh's real bench boxes in hand, measured 2026-09-06.
+        def dims(box_id):
+            b = sb.POTTED_BOXES[box_id]
+            return (b["length"], b["width"], b["height"])
+
+        self.assertEqual(dims("p24x10x4"), (24, 10, 4))  # 960 in³
+        self.assertEqual(dims("p24x10x6"), (24, 10, 6))  # 1,440 in³
+        # Both are 24" long (> 22") -> USPS nonstandard-length surcharge applies.
+        for box in sb.POTTED_BOXES.values():
+            self.assertGreater(box["length"], 22)
+        # Both stay under 1 cu ft so USPS bills actual weight (no DIM).
+        for box in sb.POTTED_BOXES.values():
+            self.assertLessEqual(box["length"] * box["width"] * box["height"], 1728)
+
+    def test_potted_is_separate_from_bareroot(self):
+        # No id collision — a mistagged tier can never cross catalogs.
+        self.assertFalse(set(sb.POTTED_BOXES) & set(sb.BOXES))
+
+
+class TestPottedWeights(unittest.TestCase):
+    def test_dim_is_zero_under_one_cubic_foot(self):
+        # p24x10x6 = 24x10x6 = 1,440 cu in (<= 1 cu ft) -> no USPS DIM.
+        self.assertEqual(sb.potted_dim_weight_lb("p24x10x6"), 0.0)
+
+    def test_actual_scales_with_units(self):
+        self.assertGreater(sb.potted_actual_weight_lb("p24x10x6", 10), sb.potted_actual_weight_lb("p24x10x6", 1))
+
+    def test_matches_josh_bench_data(self):
+        # Calibration lock: Josh's 2026-09-06 damp peat-and-bagged weigh-in — ~2 lb
+        # per tree. Full 24x10x6 10-pack = 1.5 tare + 10*2.0 = 21.5 -> ceil 22 lb.
+        self.assertEqual(sb.potted_actual_weight_lb("p24x10x6", 10), 21.5)
+        self.assertEqual(sb.potted_representative_billable_lb("p24x10x6"), 22)
+        # 24x10x4 5-pack = 1.4 tare + 5*2.0 = 11.4 -> ceil 12 lb.
+        self.assertEqual(sb.potted_actual_weight_lb("p24x10x4", 5), 11.4)
+        self.assertEqual(sb.potted_representative_billable_lb("p24x10x4"), 12)
+        # Per-unit increment is the firmed damp 2.0 lb, superseding the 1.3 leafed proxy.
+        self.assertEqual(sb.POTTED_UNIT_LB, 2.0)
+
+    def test_representative_under_seventy_pound_ceiling(self):
+        for box_id in sb.POTTED_BOXES:
+            rep = sb.potted_representative_billable_lb(box_id)
+            self.assertLessEqual(rep, sb.MAX_SHIP_WEIGHT_LB, box_id)
+            self.assertGreaterEqual(
+                rep, sb.potted_billable_weight_lb(box_id, sb.POTTED_BOXES[box_id]["capacity"]), box_id
+            )
+
+
+class TestPottedPacking(unittest.TestCase):
+    def test_empty_packs_empty(self):
+        self.assertEqual(sb.pack_potted(0, potted_cost_of), [])
+
+    def test_single_unit_uses_small_box(self):
+        self.assertEqual(plan_summary(sb.pack_potted(1, potted_cost_of)), [("p24x10x4", 1)])
+
+    def test_five_units_one_small_box(self):
+        self.assertEqual(plan_summary(sb.pack_potted(5, potted_cost_of)), [("p24x10x4", 5)])
+
+    def test_six_units_prefer_one_large_over_two_small(self):
+        # 6 units: one p24x10x6 ($32) beats two p24x10x4 ($40).
+        self.assertEqual(plan_summary(sb.pack_potted(6, potted_cost_of)), [("p24x10x6", 6)])
+
+    def test_ten_units_one_large_box(self):
+        self.assertEqual(plan_summary(sb.pack_potted(10, potted_cost_of)), [("p24x10x6", 10)])
+
+    def test_eleven_units_large_plus_small(self):
+        # 11: p24x10x6 ($32) + p24x10x4 ($20) = $52 beats 2x p24x10x6 ($64).
+        self.assertEqual(plan_summary(sb.pack_potted(11, potted_cost_of)), [("p24x10x4", 1), ("p24x10x6", 10)])
+
+    def test_never_exceeds_capacity(self):
+        for n in (1, 3, 7, 15, 44):
+            plan = sb.pack_potted(n, potted_cost_of)
+            self.assertIsNotNone(plan, n)
+            self.assertEqual(sum(pb.count for pb in plan), n)
+            for pb in plan:
+                self.assertLessEqual(pb.count, sb.POTTED_BOXES[pb.box_id]["capacity"])
+
+    def test_negative_fails_safe(self):
+        self.assertIsNone(sb.pack_potted(-1, potted_cost_of))
+
+    def test_non_integer_fails_safe(self):
+        self.assertIsNone(sb.pack_potted(1.5, potted_cost_of))
+
+    def test_none_count_fails_safe(self):
+        self.assertIsNone(sb.pack_potted(None, potted_cost_of))
+
+    def test_unrated_boxes_fail_safe(self):
+        self.assertIsNone(sb.pack_potted(3, lambda b: None))
+
+    def test_partially_rated_still_packs(self):
+        # Only the small box rated: 7 units -> two p24x10x4 (5 + 2).
+        only_small = lambda b: 20.0 if b == "p24x10x4" else None  # noqa: E731
+        self.assertEqual(plan_summary(sb.pack_potted(7, only_small)), [("p24x10x4", 2), ("p24x10x4", 5)])
 
 
 if __name__ == "__main__":

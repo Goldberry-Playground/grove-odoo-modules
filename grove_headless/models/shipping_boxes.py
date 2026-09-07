@@ -1,9 +1,10 @@
 """Box catalog + per-box packing engine for bareroot-only shipping (v2).
 
 Replaces the one-tree-one-box model: shipping now prices PER PACKED BOX, not
-per tree, because under UPS DIM billing the box drives the cost — 50 dormant
-bareroots and 10 dormant bareroots in the same 32x12x12 bill nearly the same.
-Design: vault wiki/Software/Grove Shipping (Box Engine v2, 2026-07-31).
+per tree, because under carrier dimensional billing the box drives the cost —
+50 dormant bareroots and 10 dormant bareroots in the same 32x12x12 bill nearly
+the same. Design: vault wiki/Software/Grove Shipping (Box Engine v2, 2026-07-31;
+recalibrated off UPS-only billing to the USPS/UPS least-cost race, GOL-1906).
 
 Two packing modes, resolved from the ship date (trees are dormant or leafed
 out at the nursery — it is a property of the season, not the product):
@@ -110,11 +111,61 @@ BOXES: dict[str, dict] = {
     # 3-5 yr stock at ~48 lb DIM. Add here + rates when Josh decides.
 }
 
-# UPS additional-handling fires above 48.0" — every catalog box must clear it.
-MAX_BOX_LONGEST_SIDE_IN = 48.0
-assert all(max(b["length"], b["width"], b["height"]) <= MAX_BOX_LONGEST_SIDE_IN for b in BOXES.values())
+# USPS Ground Advantage hard mailability limits (GOL-1906). Source: Shippo
+# (our broker), "USPS Ground Advantage" service guide — max weight 70 lb, max
+# combined length + girth 130" (girth = 2*width + 2*height). A box that violates
+# either is not mailable at all, so the catalog must clear both; this fails
+# loudly at import if a future box is added over-size. USPS is the binding
+# constraint in the least-cost race: it has the tighter combined-size limit, so
+# a box that clears USPS also clears UPS Ground's own 165" length+girth ceiling.
+#
+# This REPLACES the old UPS additional-handling rule (fired above a 48" longest
+# side). USPS has no single-longest-side cutoff; it prices oversize through
+# nonstandard SURCHARGES, which are cost tiers priced into the live Shippo quote,
+# NOT mailability limits — so they gate cost, not shippability:
+#   * length 22"-30"           -> +$4.50   (nonstandard length)
+#   * length over 30"          -> +$10.00  (nonstandard length; hits s32/s46/b32)
+#   * volume over 2 cu ft      -> +$21.00  (cubic surcharge; hits b32, 4608 cu in)
+# Length and shape surcharges do not stack (higher applies); the >2 cu ft
+# surcharge stacks on top. These are documented so a new box's cost impact is
+# visible; the rate-checker's live probe captures the actual dollar effect.
+MAX_SHIP_WEIGHT_LB = 70.0
+MAX_LENGTH_PLUS_GIRTH_IN = 130.0
 
-DIM_DIVISOR = 139  # UPS daily-rates dimensional divisor (cubic in / lb)
+# Back-compat alias: shipping_zones re-exports this and tests pin it. It now
+# carries the largest single side any catalog box may have while still clearing
+# the 130" length+girth limit at this catalog's cross-sections — an informational
+# ceiling, not a USPS rule. The authoritative gate is MAX_LENGTH_PLUS_GIRTH_IN.
+MAX_BOX_LONGEST_SIDE_IN = 108.0
+
+
+def length_plus_girth_in(box: dict) -> float:
+    """USPS combined length + girth: longest side + 2*(sum of the other two)."""
+    dims = sorted((box["length"], box["width"], box["height"]), reverse=True)
+    return dims[0] + 2 * (dims[1] + dims[2])
+
+
+assert all(length_plus_girth_in(b) <= MAX_LENGTH_PLUS_GIRTH_IN for b in BOXES.values())
+
+# USPS Ground Advantage dimensional-weight rule (GOL-1906). Source: Shippo,
+# "USPS Ground Advantage" service guide. Dimensional weight = L*W*H / divisor,
+# but ONLY for packages over 1 cubic foot (1,728 cu in); at or below 1 cu ft
+# USPS bills on actual scale weight alone. This differs from UPS, which applied
+# DIM to every package regardless of size — so br16 (384 cu in) and s20
+# (1,280 cu in) now take no dimensional penalty.
+#
+# In the two-carrier race this value is the DECLARED probe/label weight, i.e.
+# the USPS billing floor. It never under-declares for UPS: UPS re-derives its own
+# every-package DIM (divisor 139) from the declared box dimensions and floors the
+# rate to it, so a small box quotes USPS on actual weight while UPS still quotes
+# its higher DIM. Declaring the UPS DIM here instead would over-charge every USPS
+# quote below 1 cu ft (the s20 defect this fixes).
+#
+# The divisor is 139 as of 2026-07-12 (it was 166 before that date). It happens
+# to equal the old UPS daily-rates divisor, but the citation and the cubic-foot
+# applicability threshold are USPS's, not UPS's — do not conflate them.
+DIM_DIVISOR = 139
+DIM_APPLIES_ABOVE_CU_IN = 1728  # 1 cubic foot
 
 # Estimated per-tree weight in the box, by mode (root wrap + damp sphagnum;
 # leafed adds soil-free rootball moisture + foliage). Open question flagged
@@ -123,8 +174,18 @@ PER_TREE_LB = {"dormant": 0.5, "leafed": 2.0}
 
 
 def dim_weight_lb(box_id: str) -> float:
+    """USPS dimensional weight, or 0.0 for boxes at/under 1 cu ft.
+
+    USPS Ground Advantage applies dimensional weight only above 1 cubic foot
+    (DIM_APPLIES_ABOVE_CU_IN); smaller boxes bill on actual weight alone. A box
+    at or below the threshold returns 0.0 so ``billable_weight_lb`` falls back to
+    the actual scale weight.
+    """
     b = BOXES[box_id]
-    return round(b["length"] * b["width"] * b["height"] / DIM_DIVISOR, 1)
+    volume = b["length"] * b["width"] * b["height"]
+    if volume <= DIM_APPLIES_ABOVE_CU_IN:
+        return 0.0
+    return round(volume / DIM_DIVISOR, 1)
 
 
 def actual_weight_lb(box_id: str, count: int, mode: str) -> float:
@@ -133,7 +194,7 @@ def actual_weight_lb(box_id: str, count: int, mode: str) -> float:
 
 
 def billable_weight_lb(box_id: str, count: int, mode: str) -> float:
-    """What UPS bills: max(actual, DIM)."""
+    """What USPS bills: max(actual, DIM) — DIM is 0 at/under 1 cu ft."""
     return max(actual_weight_lb(box_id, count, mode), dim_weight_lb(box_id))
 
 
@@ -143,6 +204,11 @@ def representative_billable_lb(box_id: str) -> int:
     b = BOXES[box_id]
     worst = max(billable_weight_lb(box_id, cap, mode) for mode, cap in b["capacity"].items())
     return math.ceil(worst)
+
+
+# No catalog box may exceed the 70 lb USPS Ground Advantage ceiling at its
+# worst-case fill — fails loudly at import if a future box does (GOL-1906).
+assert all(representative_billable_lb(box_id) <= MAX_SHIP_WEIGHT_LB for box_id in BOXES)
 
 
 def usable_boxes(length_class: int, mode: str) -> list[str]:
@@ -169,12 +235,16 @@ class PackedBox:
         return f"PackedBox({self.box_id}, count={self.count})"
 
 
-def _min_cost_combo(n: int, options: list[tuple[str, int, float]]) -> list[str] | None:
+def _min_cost_combo(
+    n: int, options: list[tuple[str, int, float]], catalog: dict[str, dict] = BOXES
+) -> list[str] | None:
     """Cheapest multiset of boxes covering `n` trees.
 
     options: (box_id, capacity, cost). Exact DP (covering knapsack); ties
     break toward fewer boxes, then smaller total volume, then box id — fully
     deterministic. Returns list of box_ids or None when options is empty.
+    ``catalog`` is the box dict the ids resolve against (BOXES for bareroot,
+    POTTED_BOXES for the potted engine) — only used for the volume tie-break.
     """
     if n <= 0:
         return []
@@ -182,7 +252,7 @@ def _min_cost_combo(n: int, options: list[tuple[str, int, float]]) -> list[str] 
         return None
 
     def volume(box_id):
-        b = BOXES[box_id]
+        b = catalog[box_id]
         return b["length"] * b["width"] * b["height"]
 
     # dp[i] = (cost, n_boxes, total_volume, ids_tuple) best way to cover i trees
@@ -265,4 +335,140 @@ def pack_order(items: list[tuple[int, float]], mode: str, cost_of) -> list[Packe
             packed.append(PackedBox(box_id, take))
             n -= take
         assert n <= 0
+    return packed
+
+
+# ── Potted / peat-and-bagged box catalog + packing (GOL-2031) ────────────────
+# Potted (peat-and-bagged) units pack on a DIFFERENT axis than bareroot: by
+# UNIT COUNT and ACTUAL packed weight (soil/rootball moisture dominates; DIM
+# does not bite at these volumes), NOT by season dormancy mode or tree length
+# class. Kept as its own catalog + packer so the bareroot Box Engine v2 above
+# is untouched — a mistagged bareroot can never be priced at potted rates and
+# vice versa. This module only knows how to PACK and WEIGH potted boxes; the
+# shippability flip (SHIPPABLE_TIERS) and the checkout wiring live in
+# shipping_zones and stay gated until go-live (still money-flow / CEO gated).
+#
+# Geometry is Josh's real bench inventory — the boxes physically in hand and
+# measured with leafed-out trees flat-packed (2026-09-06, supersedes the
+# 2026-09-05 pre-measurement estimate of 24x6x4 / 24x9x6):
+#   p24x10x4  24 x 10 x 4 = 960 in³   -> 1-5 seedlings
+#   p24x10x6  24 x 10 x 6 = 1,440 in³ -> 5-10 seedlings
+# Both are 24" long (> 22"), so USPS charges its nonstandard-length surcharge on
+# every potted label. As with the 32"/46" bareroot boxes, that surcharge is NOT
+# modelled here — the rate-checker's live Shippo probe quotes each box at its
+# real dimensions and captures the actual dollar effect, so the surcharge lands
+# in the per-box zone rate. The only requirement is that these boxes reach the
+# probe list with their true 24" length (see scripts/rate_check). Both sit under
+# 1 cu ft (1,728 in³), so USPS bills actual scale weight and DIM never bites.
+#
+# POTTED_UNIT_LB = 2.0 is Josh's FIRMED damp peat-and-bagged per-tree increment
+# (weigh-in 2026-09-06): a damp potted/peat-bagged unit weighs ~2 lb, so a 5-pack
+# runs ~10 lb + tare and a 10-pack ~20 lb + tare — both far under the 70 lb ceiling
+# and (at < 1 cu ft) DIM-irrelevant. This supersedes the earlier 1.3 lb planning
+# proxy, which was the LEAFED flat-pack figure (bench reads of leafed trees dry-
+# packed as a stand-in) and always ran light for the damp root-mass this catalog
+# actually ships. Leafed flat-pack stays ~1.3, but that inventory ships on the
+# bareroot Box Engine above (PER_TREE_LB), not here — this potted catalog is
+# peat-and-bagged only, so 2.0 is the right calibration. representative_billable
+# uses ceil(), so pricing stays on the never-undercharge side. The resulting
+# 12 lb / 22 lb representative points are regression-locked in test_shipping_boxes.py
+# and feed the GOL-1906 rate re-derive once USPS-GA is live on the Shippo token.
+POTTED_UNIT_LB = 2.0  # Josh weigh-in 2026-09-06: firmed damp peat-and-bagged lb/tree
+
+POTTED_BOXES: dict[str, dict] = {
+    "p24x10x4": {
+        "length": 24,
+        "width": 10,
+        "height": 4,  # 960 in³ (< 1 cu ft -> no DIM)
+        "capacity": 5,  # seedlings — single axis, no season mode
+        "packaging_usd": 3.50,
+        # tare 1.4 lb = Josh's measured box-only tare (2026-09-06; independent of dry
+        # vs damp contents). Damp 5-pack -> 1.4 + 5*2.0 = 11.4 lb; ceil -> 12 lb probe.
+        "tare_lb": 1.4,
+    },
+    "p24x10x6": {
+        "length": 24,
+        "width": 10,
+        "height": 6,  # 1,440 in³ (< 1 cu ft -> no DIM)
+        "capacity": 10,
+        "packaging_usd": 4.50,
+        # tare 1.5 lb = box-only tare back-solved from Josh's leafed reads (independent
+        # of contents). Damp full 10-pack -> 1.5 + 10*2.0 = 21.5 lb; ceil -> 22 lb probe.
+        "tare_lb": 1.5,
+    },
+}
+
+# Potted boxes obey the same USPS Ground Advantage envelope gates as bareroot:
+# 130" length+girth and the 70 lb ceiling at worst-case fill. Fail loudly at
+# import if a future potted box or a re-tuned POTTED_UNIT_LB breaks either.
+assert all(length_plus_girth_in(b) <= MAX_LENGTH_PLUS_GIRTH_IN for b in POTTED_BOXES.values())
+
+
+def potted_dim_weight_lb(box_id: str) -> float:
+    """USPS dimensional weight of a potted box, or 0.0 at/under 1 cu ft.
+
+    Same rule as ``dim_weight_lb`` (DIM only above DIM_APPLIES_ABOVE_CU_IN);
+    both catalog boxes sit under 1 cu ft, so this is 0.0 today and actual scale
+    weight governs — kept explicit so a larger future potted box is handled.
+    """
+    b = POTTED_BOXES[box_id]
+    volume = b["length"] * b["width"] * b["height"]
+    if volume <= DIM_APPLIES_ABOVE_CU_IN:
+        return 0.0
+    return round(volume / DIM_DIVISOR, 1)
+
+
+def potted_actual_weight_lb(box_id: str, count: int) -> float:
+    """Estimated scale weight of a packed potted box (what the label declares)."""
+    return round(POTTED_BOXES[box_id]["tare_lb"] + POTTED_UNIT_LB * max(0, count), 1)
+
+
+def potted_billable_weight_lb(box_id: str, count: int) -> float:
+    """What USPS bills: max(actual, DIM) — DIM is 0 at/under 1 cu ft."""
+    return max(potted_actual_weight_lb(box_id, count), potted_dim_weight_lb(box_id))
+
+
+def potted_representative_billable_lb(box_id: str) -> int:
+    """Worst-case billable weight at full capacity — the weight the
+    rate-checker quotes each potted box at (never undercharge)."""
+    return math.ceil(potted_billable_weight_lb(box_id, POTTED_BOXES[box_id]["capacity"]))
+
+
+assert all(potted_representative_billable_lb(box_id) <= MAX_SHIP_WEIGHT_LB for box_id in POTTED_BOXES)
+
+
+def pack_potted(count, cost_of) -> list[PackedBox] | None:
+    """Cheapest combo of potted boxes for ``count`` seedlings.
+
+    ``cost_of(box_id) -> float | None`` supplies the destination-zone rate; a
+    box with no configured rate is unusable. Returns the packed plan, ``[]`` for
+    zero units, or ``None`` when the units cannot be packed (negative/non-integer
+    count, or no rated potted box) — fail-safe like ``pack_order``: None means
+    "add no shipping line", never guess.
+    """
+    if count is None:
+        return None
+    n = int(count)
+    if n != count or n < 0:
+        return None
+    if n == 0:
+        return []
+    options = []
+    for box_id, b in POTTED_BOXES.items():
+        cost = cost_of(box_id)
+        if cost is None:
+            continue
+        options.append((box_id, b["capacity"], float(cost)))
+    combo = _min_cost_combo(n, options, POTTED_BOXES)
+    if combo is None:
+        return None
+    # Distribute into the chosen boxes (largest capacity first so a partial fill
+    # lands in one box), mirroring pack_order's deterministic layout.
+    combo.sort(key=lambda bid: POTTED_BOXES[bid]["capacity"], reverse=True)
+    packed: list[PackedBox] = []
+    for box_id in combo:
+        take = min(n, POTTED_BOXES[box_id]["capacity"])
+        packed.append(PackedBox(box_id, take))
+        n -= take
+    assert n <= 0
     return packed

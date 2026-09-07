@@ -120,6 +120,16 @@ class TestSessionParams(unittest.TestCase):
         self.assertEqual(params["metadata[access_token]"], "tok")
         self.assertEqual(params["customer_email"], "j@x.com")
 
+    def test_discount_coupon_id_adds_discounts(self):
+        params = sg.build_session_params(
+            line_items=self.LINES, success_url="a", cancel_url="b", discount_coupon_id="coupon_9"
+        )
+        self.assertEqual(params["discounts[0][coupon]"], "coupon_9")
+
+    def test_no_discounts_without_coupon(self):
+        params = sg.build_session_params(line_items=self.LINES, success_url="a", cancel_url="b")
+        self.assertNotIn("discounts[0][coupon]", params)
+
 
 class TestCreateSession(unittest.TestCase):
     LINES = [{"name": "Pawpaw", "amount_cents": 2500, "quantity": 1}]
@@ -147,6 +157,71 @@ class TestCreateSession(unittest.TestCase):
             sg.create_checkout_session("sk", line_items=self.LINES, success_url="a", cancel_url="b", post=post)
         self.assertIn("Amount too small", str(ctx.exception))
 
+    # ── promo discount → Stripe coupon (GOL-2088) ────────────────────────────
+    def test_negative_discount_line_becomes_coupon(self):
+        """A negative-amount "discount" line can't be a Stripe line item (Stripe
+        rejects a negative unit_amount). create_checkout_session sums the
+        negatives into a one-time coupon, applies it via `discounts`, and sends
+        only the positive lines as Stripe line items."""
+        lines = [
+            {"name": "Apple 'Grimes'", "amount_cents": 4000, "quantity": 2, "kind": "goods"},
+            {"name": "Discount: FLATWOODS", "amount_cents": -1000, "quantity": 1, "kind": "discount"},
+        ]
+        post = mock.Mock(
+            side_effect=[
+                _ok(200, {"id": "coupon_x", "amount_off": 1000}),
+                _ok(200, {"id": "cs_1", "url": "https://pay/x", "payment_intent": "pi_1"}),
+            ]
+        )
+        out = sg.create_checkout_session("sk", line_items=lines, success_url="a", cancel_url="b", post=post)
+        self.assertEqual(out["id"], "cs_1")
+        # First call creates the coupon for the summed discount magnitude.
+        coupon_call = post.call_args_list[0]
+        self.assertTrue(coupon_call.args[0].endswith("/v1/coupons"))
+        self.assertEqual(coupon_call.kwargs["data"]["amount_off"], 1000)
+        self.assertEqual(coupon_call.kwargs["data"]["currency"], "usd")
+        self.assertEqual(coupon_call.kwargs["data"]["duration"], "once")
+        # Second call is the session: coupon applied via discounts, and NO line
+        # carries a negative unit_amount.
+        session_data = post.call_args_list[1].kwargs["data"]
+        self.assertEqual(session_data["discounts[0][coupon]"], "coupon_x")
+        self.assertEqual(session_data["line_items[0][price_data][unit_amount]"], 4000)
+        self.assertNotIn("line_items[1][price_data][unit_amount]", session_data)
+
+    def test_no_coupon_created_without_discount(self):
+        """The common (no-promo) path never touches /v1/coupons."""
+        post = mock.Mock(return_value=_ok(200, {"id": "cs_1", "url": "https://pay/x"}))
+        sg.create_checkout_session("sk", line_items=self.LINES, success_url="a", cancel_url="b", post=post)
+        self.assertEqual(post.call_count, 1)
+        self.assertNotIn("discounts[0][coupon]", post.call_args.kwargs["data"])
+
+    def test_all_negative_lines_raises(self):
+        """A cart that resolved to only a discount (no positive line) can't be
+        charged — fail loudly rather than post a zero/negative session."""
+        lines = [{"name": "Discount", "amount_cents": -500, "quantity": 1}]
+        with self.assertRaises(sg.StripeError):
+            sg.create_checkout_session("sk", line_items=lines, success_url="a", cancel_url="b", post=mock.Mock())
+
+
+class TestCoupon(unittest.TestCase):
+    def test_create_coupon_posts_amount_off(self):
+        post = mock.Mock(return_value=_ok(200, {"id": "coupon_1", "amount_off": 1000}))
+        out = sg.create_coupon("sk", amount_off_cents=1000, name="Promo discount", post=post)
+        self.assertEqual(out["id"], "coupon_1")
+        self.assertTrue(post.call_args.args[0].endswith("/v1/coupons"))
+        self.assertEqual(post.call_args.kwargs["data"]["amount_off"], 1000)
+        self.assertEqual(post.call_args.kwargs["data"]["name"], "Promo discount")
+
+    def test_create_coupon_nonpositive_raises_before_network(self):
+        post = mock.Mock()
+        with self.assertRaises(sg.StripeError):
+            sg.create_coupon("sk", amount_off_cents=0, post=post)
+        post.assert_not_called()
+
+    def test_create_coupon_missing_key_raises(self):
+        with self.assertRaises(sg.StripeError):
+            sg.create_coupon("", amount_off_cents=100, post=mock.Mock())
+
 
 class TestRefund(unittest.TestCase):
     def test_refund_posts_payment_intent(self):
@@ -159,6 +234,112 @@ class TestRefund(unittest.TestCase):
     def test_refund_requires_payment_intent(self):
         with self.assertRaises(sg.StripeError):
             sg.create_refund("sk", "", post=mock.Mock())
+
+
+class TestPaymentIntent(unittest.TestCase):
+    """GOL-2052: off-session ship-time settlement primitive."""
+
+    def _charge(self, post, **over):
+        kwargs = dict(
+            amount_cents=3120,
+            customer="cus_1",
+            payment_method="pm_1",
+            post=post,
+        )
+        kwargs.update(over)
+        return sg.create_payment_intent("sk_test", **kwargs)
+
+    def test_happy_path_confirms_off_session(self):
+        post = mock.Mock(return_value=_ok(200, {"id": "pi_9", "status": "succeeded"}))
+        out = self._charge(post, idempotency_key="order-42-settle")
+        self.assertEqual(out["id"], "pi_9")
+        data = post.call_args.kwargs["data"]
+        self.assertEqual(data["amount"], 3120)
+        self.assertEqual(data["currency"], "usd")
+        self.assertEqual(data["customer"], "cus_1")
+        self.assertEqual(data["payment_method"], "pm_1")
+        # off_session + confirm are what make the saved card settle without the
+        # shopper present.
+        self.assertEqual(data["off_session"], "true")
+        self.assertEqual(data["confirm"], "true")
+        self.assertEqual(post.call_args.kwargs["auth"], ("sk_test", ""))
+        # Idempotency-Key rides as a header so a retried settlement never
+        # double-charges.
+        self.assertEqual(post.call_args.kwargs["headers"], {"Idempotency-Key": "order-42-settle"})
+
+    def test_missing_key_raises_before_network(self):
+        post = mock.Mock()
+        with self.assertRaises(sg.StripeError):
+            sg.create_payment_intent("", amount_cents=100, customer="c", payment_method="pm", post=post)
+        post.assert_not_called()
+
+    def test_missing_customer_or_pm_raises_before_network(self):
+        post = mock.Mock()
+        with self.assertRaises(sg.StripeError):
+            sg.create_payment_intent("sk", amount_cents=100, customer="", payment_method="pm", post=post)
+        with self.assertRaises(sg.StripeError):
+            sg.create_payment_intent("sk", amount_cents=100, customer="c", payment_method="", post=post)
+        post.assert_not_called()
+
+    def test_nonpositive_amount_raises_before_network(self):
+        post = mock.Mock()
+        with self.assertRaises(sg.StripeError):
+            self._charge(post, amount_cents=0)
+        post.assert_not_called()
+
+    def test_card_decline_raises_card_error_with_detail(self):
+        # Stripe's off-session decline shape: HTTP 402, error.type card_error,
+        # with the failed payment_intent echoed back for the retry path.
+        body = {
+            "error": {
+                "type": "card_error",
+                "code": "card_declined",
+                "decline_code": "insufficient_funds",
+                "message": "Your card has insufficient funds.",
+                "payment_intent": {"id": "pi_dead"},
+            }
+        }
+        post = mock.Mock(return_value=_ok(402, body))
+        with self.assertRaises(sg.StripeCardError) as ctx:
+            self._charge(post)
+        err = ctx.exception
+        self.assertEqual(err.code, "card_declined")
+        self.assertEqual(err.decline_code, "insufficient_funds")
+        self.assertEqual(err.payment_intent, "pi_dead")
+        # A card decline is still a StripeError subclass so blanket handlers catch it.
+        self.assertIsInstance(err, sg.StripeError)
+
+    def test_non_card_error_raises_plain_stripe_error(self):
+        post = mock.Mock(return_value=_ok(400, {"error": {"type": "invalid_request_error", "message": "bad"}}))
+        with self.assertRaises(sg.StripeError) as ctx:
+            self._charge(post)
+        self.assertNotIsInstance(ctx.exception, sg.StripeCardError)
+
+
+class TestRetrievePaymentIntent(unittest.TestCase):
+    """GOL-2053: read the deposit intent back to recover the saved card ids."""
+
+    def test_returns_customer_and_payment_method(self):
+        get = mock.Mock(return_value=_ok(200, {"id": "pi_1", "customer": "cus_9", "payment_method": "pm_9"}))
+        out = sg.retrieve_payment_intent("sk_test", "pi_1", get=get)
+        self.assertEqual(out["customer"], "cus_9")
+        self.assertEqual(out["payment_method"], "pm_9")
+        # GET by id, authed with the secret key.
+        self.assertTrue(get.call_args.args[0].endswith("/v1/payment_intents/pi_1"))
+        self.assertEqual(get.call_args.kwargs["auth"], ("sk_test", ""))
+
+    def test_missing_key_or_id_raises_before_network(self):
+        get = mock.Mock()
+        with self.assertRaises(sg.StripeError):
+            sg.retrieve_payment_intent("", "pi_1", get=get)
+        with self.assertRaises(sg.StripeError):
+            sg.retrieve_payment_intent("sk", "", get=get)
+        get.assert_not_called()
+
+    def test_non_2xx_raises_stripe_error(self):
+        get = mock.Mock(return_value=_ok(404, {"error": {"message": "No such payment_intent"}}))
+        with self.assertRaises(sg.StripeError):
+            sg.retrieve_payment_intent("sk", "pi_missing", get=get)
 
 
 class TestWebhookSignature(unittest.TestCase):

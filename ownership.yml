@@ -16,6 +16,12 @@ partitions:
     owner: engineering-ada
     review: [devops-terra]
     wave: 1
+  - name: module-grove-support
+    paths:
+      - grove_support/**
+    owner: engineering-ada
+    review: [devops-terra]
+    wave: 1
   - name: module-web-dark-mode
     paths:
       - web_dark_mode/**

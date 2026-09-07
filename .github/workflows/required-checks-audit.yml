@@ -8,6 +8,17 @@
 #   static (PR + merge_group + push): parse workflows + .github/required-checks.json
 #     and assert every declared required context is produced by a workflow that
 #     triggers on `merge_group`. No token needed; runs on merge_group itself.
+#
+# The `pull_request` trigger runs on EVERY PR to main (no `paths:` filter). This
+# audit is a *required* branch-protection context, and a required check that is
+# path-filtered on pull_request never starts on a PR that misses the filter — it
+# hangs at "Expected — waiting for status" and the missing-required-check sweep
+# (GOL-1958) mints a spurious "dropped trigger" issue whose close/reopen
+# remediation cannot help (re-firing pull_request skips it again). Running on
+# every PR is GitHub's recommended fix for a path-filtered required check; the
+# static audit is cheap (parses repo files, no PR-code checkout, no token), so
+# there is no cost reason to path-filter it. See GOL-2003. (push/schedule keep
+# their filters — they are not branch-protection gates.)
 #   reconcile (weekly + manual): compare required-checks.json to the live
 #     required contexts (classic branch protection AND rulesets) so the declared
 #     list can't silently drift from reality.
@@ -19,10 +30,6 @@ name: Required-checks audit
 on:
   pull_request:
     branches: [main]
-    paths:
-      - '.github/workflows/**'
-      - '.github/required-checks.json'
-      - '.github/scripts/audit-required-merge-group.py'
   merge_group:
   push:
     branches: [main]

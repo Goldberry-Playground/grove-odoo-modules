@@ -67,11 +67,25 @@ class TestRateMath(unittest.TestCase):
         self.assertEqual(rc.target_rate(14.23, "s20"), 21)
 
     def test_parcels_come_from_box_catalog(self):
-        # One reference parcel per catalog box, quoted at representative
-        # billable weight (never undercharge).
-        self.assertEqual(set(rc.PARCELS), set(rc.shipping_boxes.BOXES))
+        # One reference parcel per catalog box across BOTH catalogs (bareroot
+        # BOXES + potted POTTED_BOXES, GOL-2031), each quoted at its own
+        # representative billable weight (never undercharge).
+        self.assertEqual(set(rc.PARCELS), set(rc.shipping_boxes.BOXES) | set(rc.shipping_boxes.POTTED_BOXES))
         for box_id, parcel in rc.PARCELS.items():
-            self.assertEqual(float(parcel["weight"]), rc.shipping_boxes.representative_billable_lb(box_id))
+            if box_id in rc.shipping_boxes.POTTED_BOXES:
+                expected = rc.shipping_boxes.potted_representative_billable_lb(box_id)
+            else:
+                expected = rc.shipping_boxes.representative_billable_lb(box_id)
+            self.assertEqual(float(parcel["weight"]), expected)
+
+    def test_potted_boxes_probe_at_true_dims_and_calibrated_weight(self):
+        # GOL-2031: potted boxes reach the probe at their real 24" length (so the
+        # USPS nonstandard-length surcharge lands in the quote) and at the firmed
+        # damp weights (Josh 2026-09-06: ~2 lb/tree -> 5-pack = 12 lb, 10-pack = 22 lb).
+        self.assertEqual(rc.PARCELS["p24x10x4"]["length"], "24")
+        self.assertEqual(rc.PARCELS["p24x10x6"]["length"], "24")
+        self.assertEqual(float(rc.PARCELS["p24x10x4"]["weight"]), 12.0)
+        self.assertEqual(float(rc.PARCELS["p24x10x6"]["weight"]), 22.0)
 
     def test_diff_detects_material_drift(self):
         current = {"zone_1": {"bareroot": {"base": 21.0}}}
@@ -83,6 +97,55 @@ class TestRateMath(unittest.TestCase):
         current = {"zone_1": {"bareroot": {"base": 20.4}}}
         drift = rc.compute_drift(current, {"zone_1": {"bareroot": 20}})
         self.assertEqual(drift, [])
+
+
+class TestCarrierVisibility(unittest.TestCase):
+    def test_present_carriers_reports_both_allowlisted_carriers(self):
+        # Fixture carries UPS Ground + USPS Ground Advantage (and a non-ground
+        # UPS 3-Day, which must be ignored). Visibility is independent of who
+        # wins on price (GOL-1906).
+        with open(FIXTURE) as fh:
+            data = json.load(fh)
+        self.assertEqual(
+            rc.present_carriers(data),
+            {("UPS", "ups_ground"), ("USPS", "usps_ground_advantage")},
+        )
+
+    def test_present_carriers_empty_when_no_ground_returned(self):
+        with open(NO_GROUND_FIXTURE) as fh:
+            data = json.load(fh)
+        self.assertEqual(rc.present_carriers(data), set())
+
+    def test_visibility_report_flags_absent_carrier(self):
+        # USPS returned on every probe, UPS on none -> UPS flagged as never
+        # returned. This is the readout that proves whether a carrier reaches
+        # the automation's token (GOL-1906 CEO ruling step (b)).
+        report = rc.visibility_report({("USPS", "usps_ground_advantage"): 5}, 5)
+        self.assertIn("USPS usps_ground_advantage: 5/5", report)
+        self.assertIn("UPS ups_ground: 0/5", report)
+        self.assertIn("NEVER RETURNED", report)
+
+    def test_quote_zone_box_returns_quote_and_present_carriers(self):
+        def fake_post(url, json=None, timeout=None, headers=None):
+            class _R:
+                @staticmethod
+                def raise_for_status():
+                    pass
+
+                @staticmethod
+                def json():
+                    return {
+                        "rates": [
+                            {"provider": "USPS", "servicelevel": {"token": "usps_ground_advantage"}, "amount": "12.74"},
+                        ]
+                    }
+
+            return _R()
+
+        with mock.patch.object(rc.requests, "post", fake_post):
+            quote, present = rc.quote_zone_box("k", "zone_4", next(iter(rc.PARCELS)))
+        self.assertEqual(quote, 12.74)
+        self.assertEqual(present, {("USPS", "usps_ground_advantage")})
 
 
 class TestNoUpsRatesSkips(unittest.TestCase):
