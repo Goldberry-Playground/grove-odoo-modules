@@ -1003,6 +1003,113 @@ class GroveHeadlessAPI(http.Controller):
             }
         )
 
+    @http.route(
+        "/grove/api/v1/orders/<int:order_id>/mark-shipped",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def order_mark_shipped(self, order_id, **_kwargs):
+        """Operator "packed & shipped" signal from the Discord bridge (GOL-1980).
+
+        Bearer-auth'd like /orders (only the scoped bridge service key reaches
+        it, never the public internet). Drives the *canonical* GOL-1981 terminal
+        transition (``action_grove_mark_shipped`` — pickup-guarded, row-locked,
+        idempotent), and on the real move does the two things a ship event now
+        owns:
+
+          1. **Settlement (GOL-2053).** Ship is exactly when a deposit-only
+             preorder's deferred balance (tree prices + ACTUAL shipping +
+             recomputed WV tax) is captured off-session. Fired here so a
+             mark-shipped that never went through the Odoo label flow still
+             settles — a shipped-but-uncaptured deposit order would strand money
+             uncollected (CEO directive 2026-09-07). Idempotent: an order already
+             ``settled`` (labels bought earlier via ``action_buy_shipping_labels``)
+             is a no-op, and the order-scoped Stripe idempotency key means a
+             replay never double-charges. Best-effort by contract — a decline is
+             recorded and dunned, never rolls back the shipped transition.
+          2. **Branded shipment email (GOL-1979).** Routed through the same
+             ``_apply_delivery_status(..., "transit", ...)`` the Shippo webhook
+             uses, so the customer gets exactly ONE "shipped" notice across both
+             signals: the operator button sets the raw substatus to ``transit``,
+             and a later Shippo transit scan then finds no change and re-sends
+             nothing.
+
+        Idempotent overall: a double-click / retry returns 200 with
+        ``already_shipped: true`` and re-runs neither settlement nor email. A
+        missing or foreign-tenant order is 404 (an id from another company never
+        leaks or mutates here); a farm-pickup order is 409 (it collects at the
+        farm and buys no label). The signal fails VISIBLY — a non-2xx on any
+        failure — so the bridge surfaces it as an ephemeral error rather than
+        acking in Discord and silently dropping the write (GOL-1975 guard).
+
+        Body (optional): ``{"actor": "<discord user id>"}`` — stamped into the
+        order chatter for the audit trail.
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        actor = payload.get("actor")
+        actor = actor if isinstance(actor, str) and actor.strip() else None
+
+        current_company = request.website.company_id
+        order = (
+            request.env["sale.order"]
+            .sudo()
+            .with_company(current_company)
+            .search(
+                [("id", "=", order_id), ("company_id", "=", current_company.id)],
+                limit=1,
+            )
+        )
+        if not order:
+            return _json_response({"error": "Order not found"}, status=404)
+        if order.grove_fulfillment == "pickup":
+            # Pickup collects at the farm, buys no label and sends no shipment
+            # email — reject VISIBLY so the operator sees an ephemeral error,
+            # never a silent ack of a transition that will not happen.
+            return _json_response(
+                {"error": "Order is farm pickup and cannot be marked shipped"},
+                status=409,
+            )
+
+        result = _operator_mark_shipped(request.env, order, actor)
+
+        stage = order.grove_fulfillment_stage
+        # action_grove_mark_shipped returns False for BOTH "already shipped"
+        # (idempotent double-click) and "illegal transition" (the order is not in
+        # a shippable state, e.g. awaiting_payment / deposit_paid not yet waved).
+        # Only the former is a safe 200 ack; the latter must fail VISIBLY so the
+        # operator sees an ephemeral error, not a silent "already shipped" for a
+        # write that never happened (GOL-1975 no-silent-ack guard).
+        if not result["newly_shipped"] and stage not in ("shipped", "delivered"):
+            return _json_response(
+                {
+                    "error": f"Order is not in a shippable state (stage: {stage}); not marked shipped",
+                    "grove_fulfillment_stage": stage,
+                },
+                status=409,
+            )
+
+        tracking = order.grove_tracking_numbers
+        carriers = order.grove_shipping_carriers
+        return _json_response(
+            {
+                "id": order.id,
+                "name": order.name,
+                "state": order.state,
+                "grove_fulfillment_stage": stage,
+                "grove_checkout_status": order.grove_checkout_status,
+                "already_shipped": not result["newly_shipped"],
+                "settlement": result["settlement"],
+                "tracking_numbers": tracking.split("\n") if tracking else [],
+                "carriers": carriers.split("\n") if carriers else [],
+            }
+        )
+
     # ── Stripe checkout ──────────────────────────────────────────────────
 
     @http.route(
@@ -2958,6 +3065,43 @@ def _apply_delivery_status(env, order, new_status, tracking):
     order.grove_delivery_status = new_status
     _notify_shipping_status(env, order, new_status, tracking)
     return True
+
+
+def _operator_mark_shipped(env, order, actor=None):
+    """Operator "packed & shipped" orchestration (GOL-1980).
+
+    Shared by the Discord-bridge endpoint (``order_mark_shipped``) and unit-
+    tested directly — the house idiom, since the settlement and shipment-email
+    helpers it composes (``settle_order_at_ship`` / ``_apply_delivery_status``)
+    are module functions taking ``env``, not request-bound. The caller has
+    already resolved + company-scoped ``order`` and rejected farm pickup.
+
+    Drives the canonical GOL-1981 terminal transition and, ONLY on the real
+    move, does the two things a ship event now owns — both idempotent and
+    best-effort so neither can roll back the shipped state:
+
+      1. **Ship-time settlement (GOL-2053).** Ship is exactly when a deposit-only
+         preorder's deferred balance (tree prices + ACTUAL shipping + recomputed
+         WV tax) is captured off-session. Fired here so a mark-shipped that never
+         ran the Odoo label flow still settles — a shipped-but-uncaptured deposit
+         order would strand money uncollected (CEO directive 2026-09-07). An
+         order already ``settled`` (labels bought earlier) is a no-op.
+      2. **Branded shipment email (GOL-1979).** Routed through the same
+         ``_apply_delivery_status(..., "transit", ...)`` the Shippo webhook uses,
+         so the customer gets exactly ONE "shipped" notice across both signals:
+         the button sets the raw substatus to ``transit`` and a later Shippo
+         transit scan then finds no change and re-sends nothing.
+
+    A double-click / retry (``newly_shipped`` False) re-runs neither. Returns a
+    dict for the endpoint's JSON body: ``{"newly_shipped": bool, "settlement":
+    <status str> | None}``.
+    """
+    newly_shipped = order.action_grove_mark_shipped(operator=actor, source="discord")
+    settlement = None
+    if newly_shipped:
+        settlement = order._grove_settle_at_ship()
+        _apply_delivery_status(env, order, "transit", order.grove_tracking_numbers or "")
+    return {"newly_shipped": newly_shipped, "settlement": settlement}
 
 
 def _order_shipments(order, fallback_tracking=None):
