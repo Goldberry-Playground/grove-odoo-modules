@@ -375,9 +375,7 @@ def render_digest_html(digest: dict) -> str:
     return "\n".join(parts)
 
 
-def resolve_email_from(
-    default_from, company_email, catchall_alias, catchall_domain, config_default_from=""
-) -> str:
+def resolve_email_from(default_from, company_email, catchall_alias, catchall_domain, config_default_from="") -> str:
     """Pick a from_filter-compliant ``email_from`` for outgoing grove_headless
     mail (GOL-2180).
 
