@@ -227,6 +227,29 @@ class TestMarkShipped(GroveTaxFixtureMixin, TransactionCase):
         settle.assert_not_called()
         notify.assert_not_called()
 
+    # ── non-shippable state is a rejection, not a false "already shipped" ──
+
+    @mute_logger("odoo.addons.grove_headless.models.sale_order")
+    def test_non_shippable_state_rejects_without_side_effects(self):
+        """An order not yet at a shippable stage (awaiting_payment) is an illegal
+        transition: newly_shipped is False AND the stage stays put (not
+        'shipped'), so the endpoint distinguishes it from an idempotent
+        double-click and returns a 409 error rather than a silent 'already
+        shipped' ack (GOL-1975 no-silent-ack guard). Nothing settles or emails."""
+        order = self._order(grove_fulfillment="ship")  # no payment → awaiting_payment
+        self.assertEqual(order.grove_fulfillment_stage, "awaiting_payment")
+        with (
+            mock.patch.object(grove_main, "settle_order_at_ship") as settle,
+            mock.patch.object(grove_main, "_notify_shipping_status") as notify,
+        ):
+            result = grove_main._operator_mark_shipped(self.env, order, actor="1")
+        self.assertFalse(result["newly_shipped"])
+        self.assertIsNone(result["settlement"])
+        # The distinguishing signal the endpoint keys its 409 on: still not shipped.
+        self.assertNotIn(order.grove_fulfillment_stage, ("shipped", "delivered"))
+        settle.assert_not_called()
+        notify.assert_not_called()
+
     # ── fully-paid ship order has nothing to settle ──────────────────────
 
     def test_fully_paid_order_ships_with_no_settlement_charge(self):

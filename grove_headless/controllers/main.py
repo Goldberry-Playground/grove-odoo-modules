@@ -1013,6 +1013,22 @@ class GroveHeadlessAPI(http.Controller):
 
         result = _operator_mark_shipped(request.env, order, actor)
 
+        stage = order.grove_fulfillment_stage
+        # action_grove_mark_shipped returns False for BOTH "already shipped"
+        # (idempotent double-click) and "illegal transition" (the order is not in
+        # a shippable state, e.g. awaiting_payment / deposit_paid not yet waved).
+        # Only the former is a safe 200 ack; the latter must fail VISIBLY so the
+        # operator sees an ephemeral error, not a silent "already shipped" for a
+        # write that never happened (GOL-1975 no-silent-ack guard).
+        if not result["newly_shipped"] and stage not in ("shipped", "delivered"):
+            return _json_response(
+                {
+                    "error": f"Order is not in a shippable state (stage: {stage}); not marked shipped",
+                    "grove_fulfillment_stage": stage,
+                },
+                status=409,
+            )
+
         tracking = order.grove_tracking_numbers
         carriers = order.grove_shipping_carriers
         return _json_response(
@@ -1020,7 +1036,7 @@ class GroveHeadlessAPI(http.Controller):
                 "id": order.id,
                 "name": order.name,
                 "state": order.state,
-                "grove_fulfillment_stage": order.grove_fulfillment_stage,
+                "grove_fulfillment_stage": stage,
                 "grove_checkout_status": order.grove_checkout_status,
                 "already_shipped": not result["newly_shipped"],
                 "settlement": result["settlement"],
