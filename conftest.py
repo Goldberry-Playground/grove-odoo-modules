@@ -41,6 +41,7 @@ collect_ignore_glob = [
     "grove_headless/tests/test_wv_taxes.py",
     "grove_headless/tests/test_tenant_routing.py",
     "grove_headless/tests/test_kit_boms.py",
+    "grove_headless/tests/test_migration_relink_xmlids.py",
     "grove_headless/tests/test_potting_batch.py",
     "grove_headless/tests/test_product_slug.py",
     "grove_headless/tests/test_pos.py",
