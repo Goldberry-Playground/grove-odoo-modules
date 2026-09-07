@@ -1,104 +1,44 @@
 {
-  "_comment": "Maintained by scripts/rate_check (morning rate-checker). Per-box rates (Box Engine v2): ceil(Shippo least-cost ground [UPS Ground vs USPS Ground Advantage] at the box's representative billable weight + per-box packaging + 2.00 buffer). Design: vault wiki/Software/Grove Shipping.",
+  "_comment": "Maintained by scripts/rate_check (morning rate-checker). Per-box rates (Box Engine v2): ceil(Shippo least-cost ground [UPS Ground vs USPS Ground Advantage] at the box's representative billable weight + per-box packaging + 2.00 buffer). Two-SKU bareroot catalog (small/large, both 24\" long so every quote includes the USPS nonstandard-length surcharge) per CEO directive 2026-09-07 (GOL-1906). Design: vault wiki/Software/Grove Shipping.",
   "_schema": 2,
   "zone_1": {
-    "b20": {
-      "base": 51.0
+    "large": {
+      "base": 36.0
     },
-    "b32": {
-      "base": 60.0
-    },
-    "br16": {
-      "base": 11.0
-    },
-    "s20": {
-      "base": 17.0
-    },
-    "s32": {
-      "base": 31.0
-    },
-    "s46": {
-      "base": 42.0
+    "small": {
+      "base": 22.0
     }
   },
   "zone_2": {
-    "b20": {
-      "base": 51.0
+    "large": {
+      "base": 36.0
     },
-    "b32": {
-      "base": 68.0
-    },
-    "br16": {
-      "base": 11.0
-    },
-    "s20": {
-      "base": 17.0
-    },
-    "s32": {
-      "base": 31.0
-    },
-    "s46": {
-      "base": 42.0
+    "small": {
+      "base": 22.0
     }
   },
   "zone_3": {
-    "b20": {
-      "base": 51.0
+    "large": {
+      "base": 36.0
     },
-    "b32": {
-      "base": 68.0
-    },
-    "br16": {
-      "base": 11.0
-    },
-    "s20": {
-      "base": 17.0
-    },
-    "s32": {
-      "base": 31.0
-    },
-    "s46": {
-      "base": 42.0
+    "small": {
+      "base": 22.0
     }
   },
   "zone_4": {
-    "b20": {
-      "base": 61.0
+    "large": {
+      "base": 54.0
     },
-    "b32": {
-      "base": 68.0
-    },
-    "br16": {
-      "base": 43.0
-    },
-    "s20": {
-      "base": 48.0
-    },
-    "s32": {
-      "base": 50.0
-    },
-    "s46": {
-      "base": 55.0
+    "small": {
+      "base": 47.0
     }
   },
   "zone_5": {
-    "b20": {
-      "base": 61.0
+    "large": {
+      "base": 52.0
     },
-    "b32": {
-      "base": 68.0
-    },
-    "br16": {
-      "base": 35.0
-    },
-    "s20": {
+    "small": {
       "base": 41.0
-    },
-    "s32": {
-      "base": 45.0
-    },
-    "s46": {
-      "base": 53.0
     }
   }
 }

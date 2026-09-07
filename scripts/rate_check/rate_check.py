@@ -59,8 +59,8 @@ ORIGIN = {
 # zone_2) would undercharge the band's far corner (NYC); quoting the far
 # corner(s) over-bills the cheapest in-band destination modestly — the accepted
 # cost of static zone pricing. The worst-case picks were determined by live
-# Shippo probe of each band's corner states (br16 + b32; the ranking is
-# box-invariant, UPS-zone driven).
+# Shippo probe of each band's corner states (small + large; the ranking is
+# box-invariant, distance-zone driven).
 #
 # zones 1-4 carry a single corner: their bands were derived worst-corner-first
 # and no in-band state ties it. zone_5 was widened past Maine by GOL-2128 to the

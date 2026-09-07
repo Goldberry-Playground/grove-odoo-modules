@@ -11,8 +11,7 @@ splitting into more/heavier boxes. This module is the guard against that.
 It enforces two properties on the table, reading the table exactly as the
 checkout prices it (source of truth = the zone engine's ``rate_feed()``):
 
-1. **Coverage** — every one of the 6 catalog boxes has a rate in every one of
-   the 5 zones.
+1. **Coverage** — every catalog box has a rate in every one of the 5 zones.
 2. **Box monotonicity** — within a zone, a heavier box (by representative
    billable weight, the same ordering the engine's own test asserts) is never
    cheaper than a lighter one.

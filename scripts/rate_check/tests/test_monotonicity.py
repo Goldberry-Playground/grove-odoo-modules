@@ -13,16 +13,16 @@ sz = importlib.util.module_from_spec(_szspec)
 _szspec.loader.exec_module(sz)
 sb = sz.shipping_boxes
 
-# A minimal 2-box x 2-zone sound table (br16 lighter than s20; zone_1 nearer
+# A minimal 2-box x 2-zone sound table (small lighter than large; zone_1 nearer
 # than zone_2). Enough to exercise both monotonicity axes.
-BOXES = ["br16", "s20"]
+BOXES = ["small", "large"]
 ZONES = ["zone_1", "zone_2"]
 
 
 def _table(z1_light, z1_heavy, z2_light, z2_heavy):
     return {
-        "zone_1": {"br16": {"base": z1_light}, "s20": {"base": z1_heavy}},
-        "zone_2": {"br16": {"base": z2_light}, "s20": {"base": z2_heavy}},
+        "zone_1": {"small": {"base": z1_light}, "large": {"base": z1_heavy}},
+        "zone_2": {"small": {"base": z2_light}, "large": {"base": z2_heavy}},
     }
 
 
@@ -31,7 +31,7 @@ class TestFindViolations(unittest.TestCase):
         self.assertEqual(mono.find_violations(_table(18, 22, 19, 23), BOXES, ZONES), [])
 
     def test_heavier_box_cheaper_flagged(self):
-        # s20 (heavier) costs less than br16 in zone_1.
+        # large (heavier) costs less than small in zone_1.
         v = mono.find_violations(_table(22, 18, 23, 24), BOXES, ZONES)
         self.assertTrue(any("box order" in x and "zone_1" in x for x in v), v)
 
@@ -39,15 +39,15 @@ class TestFindViolations(unittest.TestCase):
         # Cross-zone monotonicity is intentionally NOT enforced (GOL-1495):
         # real UPS Ground doesn't order our state bands by cost, and worst-case
         # reference ZIPs guarantee no undercharge. A "farther" zone quoting
-        # cheaper (here br16 costs less in zone_2 than zone_1) is not a
+        # cheaper (here small costs less in zone_2 than zone_1) is not a
         # violation, as long as box monotonicity holds within each zone.
         self.assertEqual(mono.find_violations(_table(20, 22, 18, 23), BOXES, ZONES), [])
 
     def test_missing_cell_is_a_coverage_violation(self):
         table = _table(18, 22, 19, 23)
-        del table["zone_2"]["s20"]
+        del table["zone_2"]["large"]
         v = mono.find_violations(table, BOXES, ZONES)
-        self.assertTrue(any("coverage" in x and "s20" in x for x in v), v)
+        self.assertTrue(any("coverage" in x and "large" in x for x in v), v)
         # A coverage gap is not also double-reported as a "cheaper" finding.
         self.assertFalse(any("order" in x for x in v), v)
 
@@ -57,7 +57,7 @@ class TestFindViolations(unittest.TestCase):
 
     def test_accepts_bare_number_cells(self):
         # rate_check builds its proposed table as {zone: {box: int}}.
-        table = {"zone_1": {"br16": 18, "s20": 22}, "zone_2": {"br16": 19, "s20": 23}}
+        table = {"zone_1": {"small": 18, "large": 22}, "zone_2": {"small": 19, "large": 23}}
         self.assertEqual(mono.find_violations(table, BOXES, ZONES), [])
 
 
@@ -78,8 +78,8 @@ class TestLiveTable(unittest.TestCase):
         table = feed["zones"]
         zones = [z for z in sz.RATE_ZONE_IDS if z in table]
         boxes = mono.ordered_boxes(sb.BOXES, sb.representative_billable_lb)
-        # 6 boxes x 5 zones, exactly what the acceptance criteria names.
-        self.assertEqual(len(boxes), 6)
+        # 2 boxes x 5 zones — the descoped bareroot catalog (CEO 2026-09-07).
+        self.assertEqual(len(boxes), 2)
         self.assertEqual(len(zones), 5)
         self.assertEqual(mono.find_violations(table, boxes, zones), [])
 

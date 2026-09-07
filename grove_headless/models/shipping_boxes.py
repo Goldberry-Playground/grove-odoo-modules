@@ -2,23 +2,29 @@
 
 Replaces the one-tree-one-box model: shipping now prices PER PACKED BOX, not
 per tree, because under carrier dimensional billing the box drives the cost —
-50 dormant bareroots and 10 dormant bareroots in the same 32x12x12 bill nearly
-the same. Design: vault wiki/Software/Grove Shipping (Box Engine v2, 2026-07-31;
-recalibrated off UPS-only billing to the USPS/UPS least-cost race, GOL-1906).
+5 dormant bareroots and 1 dormant bareroot in the same box bill nearly the
+same. Design: vault wiki/Software/Grove Shipping (Box Engine v2, 2026-07-31;
+recalibrated off UPS-only billing to the USPS/UPS least-cost race, GOL-1906;
+catalog descoped to two SKUs by CEO directive 2026-09-07).
+
+**Two-SKU catalog (CEO directive, 2026-09-07).** The bulk 12x12 boxes and the
+graduated 8x8 length ladder are retired; the near-term catalog is exactly two
+boxes, both 24" long, selected by tree COUNT (contiguous, non-overlapping
+ranges) rather than by tree height:
+
+* ``small`` — 24x6x4, holds 1-5 trees.
+* ``large`` — 24x9x6, holds 6-10 trees.
+
+Because both boxes share one length (24"), the packer no longer walks a length
+ladder for a box tall enough; it pools the whole cart and picks the cheapest
+box combination for the total tree count. A tree taller than the box (> 24")
+has no box in this catalog and fails safe (no shipping line).
 
 Two packing modes, resolved from the ship date (trees are dormant or leafed
-out at the nursery — it is a property of the season, not the product):
-
-* ``dormant`` — bare crowns pack dense: 50+ per 12x12-cross-section box,
-  ~15 per 8x8, or a single whip in the 16x6x4.
-* ``leafed`` — canopy needs room: up to 4 per 8x8 box (conservative end of
-  Josh's 4-8), 12x12 bulk boxes and the whip box are not used.
-
-Every product variant carries a tree length class (the box length in inches
-its height requires — 16/20/32/46); a tree may ride in any box at least that
-long. Packing is exact min-cost per destination zone (small DP), with a
-top-up pass so short trees fill spare capacity in boxes already opened for
-tall ones.
+out at the nursery — it is a property of the season, not the product). The mode
+does not change how many trees fit the descoped boxes (Josh's 1-5 / 6-10 ranges
+are season-independent); it only changes the estimated packed WEIGHT the rate
+probe declares (leafed foliage is heavier), via ``PER_TREE_LB``.
 
 Pure Python, no Odoo imports — same testability contract as
 ``shipping_zones.py`` (see ``tests/test_shipping_boxes.py``).
@@ -47,68 +53,37 @@ def packing_mode(today: date) -> str:
 # ── Tree length classes ─────────────────────────────────────────────────────
 # The minimum box length (inches) a tree's height requires. Variant field
 # grove_tree_length holds one of these as a string; default "20" fits the
-# current 1-2 yr inventory. "46" = the 3-5 yr stock (flowering dogwoods,
-# jujubes). A tree of class C may ride in any box with length >= C.
-LENGTH_CLASSES: tuple[int, ...] = (16, 20, 32, 46)
+# current 1-2 yr inventory. Both catalog boxes are 24" long, so every class here
+# fits both boxes — length is now only a fit GATE (a tree over 24" has no box),
+# never a box-selection key. The tall 3-5 yr classes (32/46) left the near-term
+# catalog with their boxes (CEO directive 2026-09-07); a tree still tagged over
+# 24" fails safe at packing until a longer box is restocked.
+LENGTH_CLASSES: tuple[int, ...] = (16, 20)
 DEFAULT_LENGTH = 20
 
 # ── Box catalog ─────────────────────────────────────────────────────────────
-# capacity: trees per box, by mode. Conservative ends of the observed ranges
-# (12x12 fits 50-100 dormant -> 50; 8x8 fits 4-8 leafed -> 4). packaging_usd:
-# wholesale box + consumables (biodegradable bag, packing paper, corrugate,
-# rubber bands, tape, sticker, care card, thank-you note) — replaces the old
-# flat $3.50/tree. tare_lb: empty box + packing material weight.
+# Two SKUs, selected by tree COUNT (CEO directive 2026-09-07). capacity: trees
+# per box, by mode — Josh's 1-5 / 6-10 ranges are season-independent, so both
+# modes carry the same count. packaging_usd: wholesale box + consumables
+# (biodegradable bag, packing paper, corrugate, rubber bands, tape, sticker,
+# care card, thank-you note). tare_lb: empty box + packing material weight.
 BOXES: dict[str, dict] = {
-    "br16": {
-        "length": 16,
+    "small": {
+        "length": 24,
         "width": 6,
         "height": 4,
-        "capacity": {"dormant": 1},  # single small whip; no leafed use
-        "packaging_usd": 3.00,
-        "tare_lb": 0.7,
+        "capacity": {"dormant": 5, "leafed": 5},  # holds 1-5 trees
+        "packaging_usd": 3.50,
+        "tare_lb": 0.9,
     },
-    "s20": {
-        "length": 20,
-        "width": 8,
-        "height": 8,
-        "capacity": {"dormant": 15, "leafed": 4},
+    "large": {
+        "length": 24,
+        "width": 9,
+        "height": 6,
+        "capacity": {"dormant": 10, "leafed": 10},  # holds 6-10 trees
         "packaging_usd": 4.50,
-        "tare_lb": 1.6,
+        "tare_lb": 1.4,
     },
-    "s32": {
-        "length": 32,
-        "width": 8,
-        "height": 8,
-        "capacity": {"dormant": 15, "leafed": 4},
-        "packaging_usd": 5.00,
-        "tare_lb": 2.2,
-    },
-    "s46": {
-        "length": 46,
-        "width": 8,
-        "height": 8,
-        "capacity": {"dormant": 15, "leafed": 4},
-        "packaging_usd": 5.50,
-        "tare_lb": 2.9,
-    },
-    "b20": {
-        "length": 20,
-        "width": 12,
-        "height": 12,
-        "capacity": {"dormant": 50},  # bulk box — dormant only
-        "packaging_usd": 6.00,
-        "tare_lb": 2.9,
-    },
-    "b32": {
-        "length": 32,
-        "width": 12,
-        "height": 12,
-        "capacity": {"dormant": 50},
-        "packaging_usd": 6.50,
-        "tare_lb": 4.1,
-    },
-    # "b46": 46x12x12 deliberately NOT stocked yet — it would carry bulk
-    # 3-5 yr stock at ~48 lb DIM. Add here + rates when Josh decides.
 }
 
 # USPS Ground Advantage hard mailability limits (GOL-1906). Source: Shippo
@@ -118,17 +93,23 @@ BOXES: dict[str, dict] = {
 # loudly at import if a future box is added over-size. USPS is the binding
 # constraint in the least-cost race: it has the tighter combined-size limit, so
 # a box that clears USPS also clears UPS Ground's own 165" length+girth ceiling.
+# Both descoped boxes clear it with room: small = 24 + 2*(6+4) = 44"; large =
+# 24 + 2*(9+6) = 54".
 #
-# This REPLACES the old UPS additional-handling rule (fired above a 48" longest
-# side). USPS has no single-longest-side cutoff; it prices oversize through
-# nonstandard SURCHARGES, which are cost tiers priced into the live Shippo quote,
-# NOT mailability limits — so they gate cost, not shippability:
-#   * length 22"-30"           -> +$4.50   (nonstandard length)
-#   * length over 30"          -> +$10.00  (nonstandard length; hits s32/s46/b32)
-#   * volume over 2 cu ft      -> +$21.00  (cubic surcharge; hits b32, 4608 cu in)
+# NOTE — nonstandard-LENGTH surcharge applies to BOTH boxes. USPS surcharges any
+# parcel over 22" on its longest side; both catalog boxes are 24" long, so EVERY
+# shipment carries the nonstandard-length fee (~$5-7/parcel at time of writing).
+# That is a COST tier priced into the live Shippo quote, not a mailability limit
+# — so it gates cost, not shippability, and the rate-checker's live probe
+# captures the actual dollar effect. USPS oversize/cost tiers:
+#   * length 22"-30"           -> nonstandard length (hits BOTH boxes)
+#   * length over 30"          -> higher nonstandard length (no catalog box)
+#   * volume over 2 cu ft      -> cubic surcharge (no catalog box; the largest,
+#                                 large at 24x9x6 = 1,296 cu in, is under 2 cu ft)
 # Length and shape surcharges do not stack (higher applies); the >2 cu ft
-# surcharge stacks on top. These are documented so a new box's cost impact is
-# visible; the rate-checker's live probe captures the actual dollar effect.
+# surcharge would stack on top. Because both boxes cross the 22" line, the rate
+# table MUST be regenerated from a live probe that includes the fee — carrying
+# forward a pre-descope box's numbers would under-quote every order.
 MAX_SHIP_WEIGHT_LB = 70.0
 MAX_LENGTH_PLUS_GIRTH_IN = 130.0
 
@@ -150,16 +131,16 @@ assert all(length_plus_girth_in(b) <= MAX_LENGTH_PLUS_GIRTH_IN for b in BOXES.va
 # USPS Ground Advantage dimensional-weight rule (GOL-1906). Source: Shippo,
 # "USPS Ground Advantage" service guide. Dimensional weight = L*W*H / divisor,
 # but ONLY for packages over 1 cubic foot (1,728 cu in); at or below 1 cu ft
-# USPS bills on actual scale weight alone. This differs from UPS, which applied
-# DIM to every package regardless of size — so br16 (384 cu in) and s20
-# (1,280 cu in) now take no dimensional penalty.
+# USPS bills on actual scale weight alone. Both descoped boxes are under 1 cu ft
+# (small = 576 cu in, large = 1,296 cu in), so NEITHER takes a dimensional
+# penalty — they bill on actual scale weight. (This differs from UPS, which
+# applied DIM to every package regardless of size.)
 #
 # In the two-carrier race this value is the DECLARED probe/label weight, i.e.
 # the USPS billing floor. It never under-declares for UPS: UPS re-derives its own
 # every-package DIM (divisor 139) from the declared box dimensions and floors the
 # rate to it, so a small box quotes USPS on actual weight while UPS still quotes
-# its higher DIM. Declaring the UPS DIM here instead would over-charge every USPS
-# quote below 1 cu ft (the s20 defect this fixes).
+# its higher DIM.
 #
 # The divisor is 139 as of 2026-07-12 (it was 166 before that date). It happens
 # to equal the old UPS daily-rates divisor, but the citation and the cubic-foot
@@ -284,57 +265,60 @@ def pack_order(items: list[tuple[int, float]], mode: str, cost_of) -> list[Packe
 
     ``cost_of(box_id) -> float | None`` supplies the destination-zone rate
     for each box; a box with no configured rate is unusable. Returns the
-    packed plan or None when any tree cannot be packed (unknown class, no
-    usable/rated box, non-positive catalog data) — fail-safe like the rest
-    of the engine: None means "add no shipping line", never guess.
+    packed plan or None when the cart cannot be packed (a tree taller than any
+    box, no usable/rated box, non-positive catalog data) — fail-safe like the
+    rest of the engine: None means "add no shipping line", never guess.
 
-    Tall classes pack first; shorter trees then top up spare capacity in the
-    already-opened longer boxes before any new box is considered.
+    Selection is a straight cost-optimal search over the TOTAL tree count (CEO
+    directive 2026-09-07): both catalog boxes share one length (24"), so there
+    is no length ladder to walk. The whole cart pools into one count and the DP
+    picks the cheapest box combination — which, for a sane monotone rate table,
+    is the small box for 1-5 trees and the large box for 6-10, then the cheapest
+    mix above 10. The only role length class still plays is the fit gate: every
+    box used must be at least as long as the tallest tree in the cart.
     """
     if mode not in MODES:
         return None
-    totals: dict[int, int] = {}
+    total = 0
+    max_length_class = 0
     for length_class, qty in items:
-        if length_class not in LENGTH_CLASSES:
-            return None
         q = int(qty)
         if q != qty or q < 0:
             return None
         if q:
-            totals[length_class] = totals.get(length_class, 0) + q
-    if not totals:
+            total += q
+            max_length_class = max(max_length_class, int(length_class))
+    if total == 0:
         return []
 
+    # Boxes that can hold the tallest tree in the cart, are used in this mode,
+    # and have a configured rate. If none qualifies (e.g. a tree over 24" with
+    # no box that long), _min_cost_combo returns None and we fail safe.
+    options = []
+    for box_id, b in BOXES.items():
+        if b["length"] < max_length_class:
+            continue
+        if mode not in b["capacity"]:
+            continue
+        cost = cost_of(box_id)
+        if cost is None:
+            continue
+        options.append((box_id, b["capacity"][mode], float(cost)))
+
+    combo = _min_cost_combo(total, options)
+    if combo is None:
+        return None
+
+    # Distribute the trees into the chosen boxes (largest capacity first so a
+    # partial fill lands in one box, leaving clean spare).
+    combo.sort(key=lambda bid: BOXES[bid]["capacity"][mode], reverse=True)
     packed: list[PackedBox] = []
-    for cls in sorted(LENGTH_CLASSES, reverse=True):
-        n = totals.get(cls, 0)
-        if not n:
-            continue
-        # Top-up: boxes already opened for taller classes have length >= cls.
-        for pb in packed:
-            take = min(n, pb.spare(mode))
-            if take > 0:
-                pb.count += take
-                n -= take
-        if n <= 0:
-            continue
-        options = []
-        for box_id in usable_boxes(cls, mode):
-            cost = cost_of(box_id)
-            if cost is None:
-                continue
-            options.append((box_id, BOXES[box_id]["capacity"][mode], float(cost)))
-        combo = _min_cost_combo(n, options)
-        if combo is None:
-            return None
-        # Distribute this class's trees into the chosen boxes (largest first
-        # so partial fill lands in one box, leaving clean spare for top-up).
-        combo.sort(key=lambda bid: BOXES[bid]["capacity"][mode], reverse=True)
-        for box_id in combo:
-            take = min(n, BOXES[box_id]["capacity"][mode])
-            packed.append(PackedBox(box_id, take))
-            n -= take
-        assert n <= 0
+    n = total
+    for box_id in combo:
+        take = min(n, BOXES[box_id]["capacity"][mode])
+        packed.append(PackedBox(box_id, take))
+        n -= take
+    assert n <= 0
     return packed
 
 

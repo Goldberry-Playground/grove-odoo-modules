@@ -164,10 +164,10 @@ class RateFeedTests(unittest.TestCase):
 
     def test_returned_dict_is_decoupled_copy(self):
         # Mutating the feed must never corrupt the engine's live tables.
-        self.feed["zones"]["zone_1"]["s20"]["base"] = 9999
+        self.feed["zones"]["zone_1"]["small"]["base"] = 9999
         self.feed["zone_by_state"]["WV"] = "zone_5"
         fresh = sz.rate_feed()
-        self.assertNotEqual(fresh["zones"]["zone_1"]["s20"]["base"], 9999)
+        self.assertNotEqual(fresh["zones"]["zone_1"]["small"]["base"], 9999)
         self.assertEqual(fresh["zone_by_state"]["WV"], "zone_1")
 
 
