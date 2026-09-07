@@ -21,7 +21,7 @@ from ..models.newsletter import newsletter_tag_names
 from ..models.order_alerts import format_merchant_email, format_new_order_discord
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
 from ..models.shipment_email import NOTIFY_STATUSES, shipment_notice_copy
-from ..models.shipping_boxes import can_ship_bareroot, packing_mode
+from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from ..models.shipping_calendar import (
     MODE_PREORDER,
     merge_calendar_override,
@@ -825,7 +825,7 @@ class GroveHeadlessAPI(http.Controller):
         # Box Engine v2: per_tree_rate = cheapest single-tree shipment in the
         # season's packing mode. Potted (pickup-only) and farm pickup pay no
         # shipping, so no per-tree ship rate is quoted for either.
-        mode = packing_mode(today)
+        mode = packing_mode(today, dormancy_window(request.env))
         result["packing_mode"] = mode
         quotes_ship = tier == "bareroot" and not is_pickup
         result["per_tree_rate"] = single_tree_rate(state, length_class, mode) if quotes_ship else None
@@ -1590,7 +1590,7 @@ def _apply_shipping_line(env, order, shipping, company):
     ]
     if not items:
         return None
-    charge = compute_order_shipping(state, items, packing_mode(_date.today()))
+    charge = compute_order_shipping(state, items, packing_mode(_date.today(), dormancy_window(env)))
     if charge is None:
         # A destination outside the 31-state green list legitimately gets no
         # shipping line. But a *green* state that still can't be priced means a
@@ -2020,9 +2020,13 @@ def _bareroot_tier(product) -> bool:
     return tier == "bareroot"
 
 
-def _bareroot_ships_now(window_zip, tier, today):
+def _bareroot_ships_now(window_zip, tier, today, window=None):
     """``ships_now`` for a bareroot line on the CHARGING path (GOL-1666 §2),
     with the unknown-zone money-path fallback (GOL-2145).
+
+    ``window`` is the resolved dormancy window (``dormancy_window(env)``); the
+    caller holds ``env`` and passes it so this gate tracks the Odoo-editable
+    dates. ``None`` falls back to the seed default for pure/legacy callers.
 
     ``ship_options`` is conservative on a ZIP absent from the PHZM matrix
     (``ships_now`` False) — the right default for the display feed, but on the
@@ -2047,7 +2051,7 @@ def _bareroot_ships_now(window_zip, tier, today):
     CLOSED to the preorder deposit path — the order is NOT rejected, it ships in
     the next dormant wave and settles shipping at actual cost then (GOL-2053).
     This gate is first because the origin constraint is absolute."""
-    if not can_ship_bareroot(today):
+    if not can_ship_bareroot(today, window):
         return False
     opts = ship_options(window_zip, tier, today)
     ships_now = opts.get("ships_now", True)
@@ -2123,6 +2127,7 @@ def _cart_has_preorder(env, order, payload):
     """
     calendar_preorder_ids = _calendar_preorder_variant_ids(env, order, payload)
     today = _date.today()
+    window = dormancy_window(env)  # Odoo-editable dormancy dates (GOL-1906)
     is_ship_order = any(
         ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE for ol in order.order_line
     )
@@ -2140,7 +2145,7 @@ def _cart_has_preorder(env, order, payload):
         line_ships_now = True
         if tier == "bareroot":
             window_zip = dest_zip if is_ship_order else farm_zip
-            line_ships_now = _bareroot_ships_now(window_zip, tier, today)
+            line_ships_now = _bareroot_ships_now(window_zip, tier, today, window)
         for _amount, _qty, is_preorder in stripe_gateway.line_charge(
             line.price_unit, line.product_uom_qty, free_qty, ships_now=line_ships_now
         ):
@@ -2191,6 +2196,7 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
     # a warm-zone buyer collecting here is bound by when we can lift on the farm,
     # not by their home zone's later window.
     today = _date.today()
+    window = dormancy_window(order.env)  # Odoo-editable dormancy dates (GOL-1906)
     is_ship_order = any(
         ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE for ol in order.order_line
     )
@@ -2245,7 +2251,7 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
             # orders from the farm's own zone (GOL-1669). An unknown destination
             # zone falls back to the global season, not a blanket deposit (GOL-2145).
             window_zip = dest_zip if is_ship_order else farm_zip
-            line_ships_now = _bareroot_ships_now(window_zip, tier, today)
+            line_ships_now = _bareroot_ships_now(window_zip, tier, today, window)
         for amount, qty, is_preorder in stripe_gateway.line_charge(
             line.price_unit, ordered_qty, free_qty, ships_now=line_ships_now
         ):

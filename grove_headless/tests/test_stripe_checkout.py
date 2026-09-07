@@ -16,6 +16,7 @@ from unittest import mock
 from odoo.addons.grove_headless.controllers import main as grove_main
 from odoo.addons.grove_headless.models import sale_order as grove_sale_order
 from odoo.addons.grove_headless.models import stripe_gateway
+from odoo.addons.grove_headless.models.shipping_boxes import dormancy_window
 from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
@@ -1564,3 +1565,35 @@ class TestStripeWebhookRedelivery(GroveTaxFixtureMixin, HttpCase):
         # The order reconciled to paid (proves delivery 1 actually processed,
         # not just that both deliveries were treated as duplicates).
         self.assertEqual(order.grove_checkout_status, "paid")
+
+
+@tagged("post_install", "-at_install")
+class TestDormancyWindowConfig(TransactionCase):
+    """The dormancy window is Odoo-editable via ir.config_parameter (GOL-1906,
+    Josh 2026-09-07: "we should be able to toggle these dates in odoo"). The env
+    boundary reads the two MM-DD params and FAILS CLOSED on a malformed value —
+    never a silent fallback to the seed, which is how a wrong window would ship
+    underpriced labels unnoticed."""
+
+    def test_reads_configured_non_default_window(self):
+        icp = self.env["ir.config_parameter"].sudo()
+        icp.set_param("grove_headless.dormancy_start", "12-15")
+        icp.set_param("grove_headless.dormancy_end", "03-31")
+        self.assertEqual(dormancy_window(self.env), ((12, 15), (3, 31)))
+
+    def test_unset_params_use_seeded_default(self):
+        # Clearing the rows leaves get_param to return the seeded default string,
+        # so the resolved window is the ratified Nov 1 – Apr 15.
+        icp = self.env["ir.config_parameter"].sudo()
+        icp.set_param("grove_headless.dormancy_start", False)
+        icp.set_param("grove_headless.dormancy_end", False)
+        self.assertEqual(dormancy_window(self.env), ((11, 1), (4, 15)))
+
+    def test_malformed_value_fails_closed(self):
+        icp = self.env["ir.config_parameter"].sudo()
+        # A year-bearing value would break the year-wrap logic — must raise, not
+        # revert to the seed.
+        icp.set_param("grove_headless.dormancy_start", "2026-11-01")
+        icp.set_param("grove_headless.dormancy_end", "04-15")
+        with self.assertRaises(ValueError):
+            dormancy_window(self.env)

@@ -27,11 +27,20 @@ are season-independent); it only changes the estimated packed WEIGHT the rate
 probe declares (leafed foliage is heavier), via ``PER_TREE_LB``.
 
 Pure Python, no Odoo imports — same testability contract as
-``shipping_zones.py`` (see ``tests/test_shipping_boxes.py``).
+``shipping_zones.py`` (see ``tests/test_shipping_boxes.py``). The one function
+that touches config, ``dormancy_window(env)``, still imports no Odoo — it takes
+``env`` as an argument (the single env boundary for the Odoo-editable dormancy
+dates); the packing/window CORE stays argument-driven and DB-free so its tests
+run with no database.
 """
 
 import math
 from datetime import date
+
+# (month, day) inclusive endpoints of the dormancy window: ((start_m, start_d),
+# (end_m, end_d)). Wraps the year end when start > end (the real config does:
+# Nov 1 -> Apr 15).
+Window = tuple[tuple[int, int], tuple[int, int]]
 
 # ── Packing modes ───────────────────────────────────────────────────────────
 MODES: tuple[str, ...] = ("dormant", "leafed")
@@ -52,22 +61,100 @@ MODES: tuple[str, ...] = ("dormant", "leafed")
 QUOTABLE_MODES: tuple[str, ...] = ("dormant",)
 
 # Nursery dormancy window (month, day) inclusive — bareroot stock can only be
-# lifted and shipped as dormant bareroot INSIDE it. Josh ratified Nov 1 – Apr 15
-# as the real operating window on 2026-09-07 ("do you ship bareroot outside
-# Nov 1 – Apr 15? — no, never"), so these two constants now gate REVENUE, not
-# just the packed weight: outside them a bareroot LABEL cannot be bought and a
-# bareroot line cannot ship now (it becomes a preorder — see
+# lifted and shipped as dormant bareroot INSIDE it. These constants are the
+# SEED DEFAULT ONLY, not the source of truth: the live window is Odoo-editable
+# per Josh 2026-09-07 ("we should be able to toggle these dates in odoo") —
+# stored in ``ir.config_parameter`` (``grove_headless.dormancy_start`` /
+# ``.dormancy_end``, seeded from these, format ``MM-DD``), read at the env
+# boundary by ``dormancy_window`` and INJECTED into ``packing_mode`` /
+# ``can_ship_bareroot``. Do NOT read these constants as authoritative in new
+# code — resolve the window from config and pass it in, so a shifted season is
+# an Odoo edit, not a PR + deploy.
+#
+# Josh ratified Nov 1 – Apr 15 as the real operating window on 2026-09-07 ("do
+# you ship bareroot outside Nov 1 – Apr 15? — no, never"). The window now gates
+# REVENUE, not just packed weight: outside it a bareroot LABEL cannot be bought
+# and a bareroot line cannot ship now (it becomes a preorder — see
 # ``can_ship_bareroot`` and its callers in sale_order / controllers). A date
 # wrong by a week either blocks a saleable shipment or lets an underpriced one
-# through, so these are owned by Josh + the nursery manager and edited only by
-# PR (tests assert shape only). Nursery-manager sign-off on the exact dates is
-# the remaining ratification gate before this ships (GOL-1906 / GOL-2173).
-DORMANT_START = (11, 1)
-DORMANT_END = (4, 15)
+# through, so a malformed config param must FAIL CLOSED loudly (``parse_window``
+# raises) — never silently fall back to these seeds and never to a leafed label.
+DEFAULT_DORMANT_START = (11, 1)
+DEFAULT_DORMANT_END = (4, 15)
+DEFAULT_WINDOW: Window = (DEFAULT_DORMANT_START, DEFAULT_DORMANT_END)
+
+# System-parameter keys + their seeded MM-DD strings (mirrored in
+# data/grove_dormancy_params.xml, noupdate so admin edits survive upgrade).
+DORMANCY_START_PARAM = "grove_headless.dormancy_start"
+DORMANCY_END_PARAM = "grove_headless.dormancy_end"
+_DEFAULT_START_STR = "11-01"
+_DEFAULT_END_STR = "04-15"
 
 
-def packing_mode(today: date) -> str:
+def _parse_md(raw) -> tuple[int, int]:
+    """Parse a ``MM-DD`` config value into a ``(month, day)`` tuple, or raise.
+
+    Deliberately strict — these dates gate revenue, so a typo must surface, not
+    degrade silently. Rejects a year (``2026-11-01`` -> 3 parts), non-integer
+    parts, and impossible calendar dates. A leap year (2000) validates the
+    day-of-month so ``02-29`` is accepted."""
+    s = "" if raw is None else str(raw).strip()
+    parts = s.split("-")
+    if len(parts) != 2:
+        raise ValueError(f"dormancy date {raw!r} must be 'MM-DD' (month-day, no year)")
+    try:
+        month, day = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise ValueError(f"dormancy date {raw!r} must be 'MM-DD' with integer month and day") from None
+    try:
+        date(2000, month, day)  # leap year -> allows 02-29
+    except ValueError:
+        raise ValueError(f"dormancy date {raw!r} is not a real calendar date") from None
+    return (month, day)
+
+
+def parse_window(start_raw, end_raw) -> Window:
+    """Validate two ``MM-DD`` strings into a dormancy ``Window``, or raise.
+
+    Because ``packing_mode`` wraps the year (``t >= start or t <= end``), a
+    start AFTER the end is the NORMAL wrapping window (Nov -> Apr) — not an
+    error. The one degenerate shape is start == end, which the wrap turns into
+    "every day is dormant" (the leafed gate silently disabled, undercharging all
+    year) — that is the "inverted / zero-length" case Josh flagged, so reject it.
+    Never returns a default on bad input: the caller must fail closed."""
+    start = _parse_md(start_raw)
+    end = _parse_md(end_raw)
+    if start == end:
+        raise ValueError(
+            f"dormancy window start and end are identical ({start_raw!r}); that "
+            "makes every day dormant (leafed gate disabled) — set distinct dates"
+        )
+    return (start, end)
+
+
+def dormancy_window(env) -> Window:
+    """The live dormancy ``Window`` from ``ir.config_parameter`` (env boundary).
+
+    The ONLY place that reads the two system parameters; everything else takes
+    the resolved window as an argument so the pure engine (``packing_mode`` /
+    ``can_ship_bareroot`` and their no-DB tests) stays Odoo-free. Fails CLOSED:
+    a missing row uses the seeded default string, but a PRESENT-but-malformed
+    value raises out of ``parse_window`` rather than reverting to the seed — a
+    silent revert is exactly how a wrong window would ship underpriced labels."""
+    icp = env["ir.config_parameter"].sudo()
+    return parse_window(
+        icp.get_param(DORMANCY_START_PARAM, _DEFAULT_START_STR),
+        icp.get_param(DORMANCY_END_PARAM, _DEFAULT_END_STR),
+    )
+
+
+def packing_mode(today: date, window: "Window | None" = None) -> str:
     """ "dormant" inside the nursery dormancy window (wraps year end), else "leafed".
+
+    ``window`` is the ``(start, end)`` (month, day) pair; ``None`` falls back to
+    ``DEFAULT_WINDOW`` so pure callers/tests need no config. Production callers
+    that hold an ``env`` pass ``dormancy_window(env)`` so the Odoo-editable dates
+    drive the result — the module constants are only a seed.
 
     "leafed" is honored for the frontend season label and (for the potted
     engine) the declared weight — but for BAREROOT it is not a shippable mode:
@@ -77,21 +164,33 @@ def packing_mode(today: date) -> str:
     parcel MUST gate on ``can_ship_bareroot`` first, or they would create a
     leafed bareroot label this module treats as impossible.
     """
+    start, end = DEFAULT_WINDOW if window is None else window
     t = (today.month, today.day)
-    return "dormant" if (t >= DORMANT_START or t <= DORMANT_END) else "leafed"
+    # A window with start > end wraps the year end (the default Nov 1 -> Apr 15):
+    # dormant is t in [start, Dec 31] ∪ [Jan 1, end]. A non-wrapping window
+    # (start <= end, e.g. an injected summer window) is the contiguous
+    # [start, end]. parse_window forbids start == end, so the two branches cover
+    # every valid window unambiguously.
+    if start > end:
+        in_window = t >= start or t <= end
+    else:
+        in_window = start <= t <= end
+    return "dormant" if in_window else "leafed"
 
 
-def can_ship_bareroot(today: date) -> bool:
+def can_ship_bareroot(today: date, window: "Window | None" = None) -> bool:
     """True when the nursery may lift + ship dormant bareroot on ``today``.
 
     The single authority for the seasonal gate (GOL-1906, Josh 2026-09-07):
     bareroot only gets a shipping label, and only ships now, inside the dormancy
     window (``packing_mode`` in ``QUOTABLE_MODES``). Outside it the same order is
     a preorder that ships in the next dormant wave — so this must fail CLOSED for
-    a leafed date, never fall back to a leafed label. Kept here beside
-    ``packing_mode`` so the window definition and the ship/no-ship decision can
-    never drift across the module boundary."""
-    return packing_mode(today) in QUOTABLE_MODES
+    a leafed date, never fall back to a leafed label. ``window`` mirrors
+    ``packing_mode`` (``None`` -> ``DEFAULT_WINDOW``); pass ``dormancy_window(env)``
+    in production so the ship/no-ship decision tracks the Odoo-editable dates.
+    Kept here beside ``packing_mode`` so the window definition and the
+    ship/no-ship decision can never drift across the module boundary."""
+    return packing_mode(today, window) in QUOTABLE_MODES
 
 
 # ── Tree length classes ─────────────────────────────────────────────────────

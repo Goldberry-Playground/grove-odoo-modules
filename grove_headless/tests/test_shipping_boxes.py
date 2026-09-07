@@ -141,6 +141,84 @@ class TestBarerootSeasonGate(unittest.TestCase):
             self.assertEqual(sb.can_ship_bareroot(d), sb.packing_mode(d) in sb.QUOTABLE_MODES, d)
 
 
+class TestInjectedDormancyWindow(unittest.TestCase):
+    """The dormancy window is Odoo-editable (GOL-1906, Josh 2026-09-07): the
+    constants are only a seed, and callers inject the live window. These use a
+    NON-DEFAULT window so they prove the injection path drives the result rather
+    than re-testing the module constants."""
+
+    # A non-default window that also wraps the year end (Dec 15 -> Mar 31), so
+    # the wrap is exercised on injected values, not just the default.
+    WRAP = ((12, 15), (3, 31))
+
+    def test_injected_wrap_window_in_and_out(self):
+        # Inside the injected wrap window -> dormant; outside -> leafed.
+        self.assertEqual(sb.packing_mode(date(2026, 1, 15), self.WRAP), "dormant")
+        self.assertEqual(sb.packing_mode(date(2026, 6, 1), self.WRAP), "leafed")
+
+    def test_injection_overrides_the_constants(self):
+        # Nov 1 is DORMANT under the default (11-01..04-15) but LEAFED under the
+        # injected Dec 15..Mar 31 — the only way this passes is if the argument,
+        # not the module constant, decided. This is the core injection proof.
+        self.assertEqual(sb.packing_mode(date(2026, 11, 1)), "dormant")  # default
+        self.assertEqual(sb.packing_mode(date(2026, 11, 1), self.WRAP), "leafed")  # injected
+        self.assertFalse(sb.can_ship_bareroot(date(2026, 11, 1), self.WRAP))
+        self.assertTrue(sb.can_ship_bareroot(date(2026, 1, 15), self.WRAP))
+
+    def test_non_wrapping_injected_window(self):
+        # A summer, non-wrapping window (Jun 1 -> Sep 15) still works: dormant in,
+        # leafed out — including the default-dormant Jan date now reading leafed.
+        summer = ((6, 1), (9, 15))
+        self.assertEqual(sb.packing_mode(date(2026, 7, 1), summer), "dormant")
+        self.assertEqual(sb.packing_mode(date(2026, 1, 15), summer), "leafed")
+
+    def test_none_window_falls_back_to_default(self):
+        # Explicit None (the pure-caller default) matches DEFAULT_WINDOW exactly.
+        for d in (date(2026, 1, 15), date(2026, 7, 1), date(2026, 11, 1)):
+            self.assertEqual(sb.packing_mode(d, None), sb.packing_mode(d, sb.DEFAULT_WINDOW), d)
+
+
+class TestParseWindow(unittest.TestCase):
+    """`parse_window` validates the two MM-DD config values and FAILS CLOSED —
+    a malformed date must raise, never silently fall back to the seed (GOL-1906,
+    Josh 2026-09-07): a silent fallback is how a wrong window ships underpriced
+    labels unnoticed."""
+
+    def test_valid_padded_and_unpadded(self):
+        self.assertEqual(sb.parse_window("11-01", "04-15"), ((11, 1), (4, 15)))
+        self.assertEqual(sb.parse_window("3-1", "9-15"), ((3, 1), (9, 15)))
+
+    def test_leap_day_allowed(self):
+        self.assertEqual(sb.parse_window("02-29", "03-01"), ((2, 29), (3, 1)))
+
+    def test_year_bearing_value_rejected(self):
+        # A full date with a year would break the year-wrap logic — reject it.
+        with self.assertRaises(ValueError):
+            sb.parse_window("2026-11-01", "04-15")
+
+    def test_impossible_dates_rejected(self):
+        for bad in ("13-01", "00-10", "02-30", "11-31"):
+            with self.assertRaises(ValueError):
+                sb.parse_window(bad, "04-15")
+
+    def test_non_integer_and_empty_rejected(self):
+        for bad in ("nov-01", "", "11", "11-", "-15"):
+            with self.assertRaises(ValueError):
+                sb.parse_window(bad, "04-15")
+        with self.assertRaises(ValueError):
+            sb.parse_window(None, "04-15")
+
+    def test_equal_endpoints_rejected(self):
+        # start == end -> the wrap makes EVERY day dormant (leafed gate disabled),
+        # the "inverted / zero-length" case that would undercharge all year.
+        with self.assertRaises(ValueError):
+            sb.parse_window("05-01", "05-01")
+
+    def test_start_after_end_is_valid_wrap(self):
+        # start > end is the NORMAL wrapping window (Nov -> Apr), not an error.
+        self.assertEqual(sb.parse_window("11-01", "04-15"), ((11, 1), (4, 15)))
+
+
 class TestPacking(unittest.TestCase):
     def test_empty_cart_packs_empty(self):
         self.assertEqual(sb.pack_order([], "leafed", cost_of), [])

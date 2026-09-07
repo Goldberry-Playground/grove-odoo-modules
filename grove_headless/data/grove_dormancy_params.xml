@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo noupdate="1">
+
+    <!-- Nursery bareroot dormancy window (GOL-1906, Josh 2026-09-07: "we should
+         be able to toggle these dates in odoo").
+
+         Bareroot ships ONLY inside this window: outside it a bareroot line
+         cannot buy a shipping label and becomes a preorder deposit (see
+         shipping_boxes.can_ship_bareroot and its callers). Because the window
+         now gates REVENUE, the dates must be a nursery-manager knob, not a code
+         constant + deploy — a season that opens a week early is an Odoo edit.
+
+         Format is MM-DD (month-day, NO year): the window wraps the year end
+         (Nov 1 -> Apr 15), which packing_mode handles as `t >= start or t <= end`;
+         a year would break the wrap. shipping_boxes.parse_window validates these
+         on read and FAILS CLOSED (raises) on a malformed / year-bearing / equal
+         (empty) value — it never silently falls back to the seed, so a typo can
+         never ship an underpriced label off a wrong window.
+
+         Seeded from the ratified Nov 1 – Apr 15 default; noupdate="1" so a
+         nursery-manager edit in Odoo (Settings > Technical > System Parameters)
+         survives module upgrades. Mirrors the noupdate handling of
+         grove_headless.preorder_cap_default (GOL-2171). Kept in its own seed
+         file (not grove_config_params.xml) so this PR and the preorder-cap PR
+         seed their params without a shared-file merge conflict; consolidating
+         the two files is a trivial follow-up once both have landed. -->
+    <record id="dormancy_start_param" model="ir.config_parameter">
+        <field name="key">grove_headless.dormancy_start</field>
+        <field name="value">11-01</field>
+    </record>
+    <record id="dormancy_end_param" model="ir.config_parameter">
+        <field name="key">grove_headless.dormancy_end</field>
+        <field name="value">04-15</field>
+    </record>
+
+</odoo>

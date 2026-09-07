@@ -5,7 +5,7 @@ from odoo import api, fields, models
 from odoo.exceptions import UserError
 
 from . import shippo_client
-from .shipping_boxes import can_ship_bareroot, packing_mode
+from .shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from .shipping_zones import pack_for_state, unshippable_reason
 
 _logger = logging.getLogger(__name__)
@@ -321,6 +321,12 @@ class SaleOrder(models.Model):
             if reason:
                 raise UserError(f"{order.name}: {reason}")
             today = fields.Date.context_today(order)
+            # Dormancy window is Odoo-editable (GOL-1906, Josh 2026-09-07) — read
+            # it from config here and inject, so the label gate tracks the same
+            # dates the storefront quotes. A malformed param raises out of
+            # `dormancy_window`, failing the purchase closed rather than buying an
+            # underpriced label off a bad window.
+            window = dormancy_window(order.env)
             # Seasonal gate (GOL-1906, Josh 2026-09-07): bareroot ships ONLY in
             # the nursery dormancy window. `unshippable_reason` above already
             # cleared any pickup-only (potted) line, so every remaining line here
@@ -331,14 +337,13 @@ class SaleOrder(models.Model):
             # preorder that ships in the next dormant wave (the deposit path routed
             # it there at checkout), so a leafed-season label attempt is an
             # operator/timing error, not a valid purchase.
-            if not can_ship_bareroot(today):
+            if not can_ship_bareroot(today, window):
                 raise UserError(
                     f"{order.name}: bareroot shipping labels can only be bought inside "
-                    "the nursery dormancy window (Nov 1 – Apr 15). This order is a "
-                    "preorder and ships in the next dormant wave — assign it to that "
-                    "wave and buy the label then."
+                    "the nursery dormancy window. This order is a preorder and ships in "
+                    "the next dormant wave — assign it to that wave and buy the label then."
                 )
-            mode = packing_mode(today)
+            mode = packing_mode(today, window)
             plan = pack_for_state(address["state"], items, mode)
             if plan is None:
                 raise UserError(
