@@ -14,6 +14,7 @@ import requests
 from odoo import api, fields, models
 
 from . import order_digest as od
+from .mail_from import resolve_mail_from
 from .shipping_calendar import _next_wave, usda_zone_for_zip
 
 _logger = logging.getLogger(__name__)
@@ -206,15 +207,19 @@ class SaleOrderRollup(models.AbstractModel):
         if not merchant_email:
             _logger.warning("grove.order.rollup: company %s has no email — skipping mail", company.name)
             return
+        values = {
+            "subject": subject,
+            "email_to": merchant_email,
+            "body_html": html_body,
+            "auto_delete": True,
+        }
+        # Set email_from explicitly so it matches the outgoing server's
+        # from_filter; without it Odoo falls back to odoobot@example.com (GOL-2180).
+        email_from = resolve_mail_from(self.env, company)
+        if email_from:
+            values["email_from"] = email_from
         try:
-            self.env["mail.mail"].sudo().create(
-                {
-                    "subject": subject,
-                    "email_to": merchant_email,
-                    "body_html": html_body,
-                    "auto_delete": True,
-                }
-            ).send()
+            self.env["mail.mail"].sudo().create(values).send()
         except Exception:
             _logger.warning("grove.order.rollup: mail failed for %s", company.name, exc_info=True)
 
