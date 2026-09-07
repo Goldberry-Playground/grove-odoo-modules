@@ -58,6 +58,18 @@ class TestFulfillmentState(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_fulfillment_stage, "reserved")
         self.assertTrue(order.grove_is_outstanding)
 
+    def test_derived_stage_settled_stays_on_ship_path(self):
+        # GOL-2053 x GOL-1981 merge: settled / settlement_failed are
+        # post-payment statuses — with the watermark unset they must derive
+        # onto the ship path, never back to awaiting_payment.
+        for status in ("settled", "settlement_failed"):
+            order = self._order(
+                grove_fulfillment="ship",
+                grove_checkout_status=status,
+                grove_delivery_status="label_purchased",
+            )
+            self.assertEqual(order.grove_fulfillment_stage, "label_purchased")
+
     def test_derived_stage_preorder_deposit_paid(self):
         order = self._order(grove_fulfillment="ship", grove_checkout_status="deposit_paid")
         self.assertEqual(order.grove_fulfillment_stage, "deposit_paid")

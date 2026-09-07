@@ -51,6 +51,8 @@ class SaleOrder(models.Model):
             ("pending", "Awaiting payment"),
             ("paid", "Paid"),
             ("deposit_paid", "Deposit paid (balance due at ship)"),
+            ("settled", "Settled (balance charged at ship)"),
+            ("settlement_failed", "Shipped — settlement failed"),
             ("expired", "Checkout expired"),
             ("refunded_oversell", "Refunded (oversold)"),
         ],
@@ -58,6 +60,29 @@ class SaleOrder(models.Model):
         copy=False,
     )
 
+    # Ship-time settlement linkage (GOL-2053). A deposit-only preorder charges
+    # ONLY grove_amount_charged_today at checkout; the balance (tree prices +
+    # ACTUAL shipping + recomputed WV tax) is captured off-session at ship.
+    #
+    # grove_amount_charged_today  — dollars actually taken by the checkout
+    #   session (persisted at session creation) so settlement charges exactly
+    #   order.amount_total − this, never a re-derived guess.
+    # grove_actual_shipping_cost  — summed cost of the labels actually bought
+    #   (Shippo `amount` per box), so settlement bills the REAL packed cost, not
+    #   the stale quoted rate table.
+    # grove_stripe_customer / grove_stripe_payment_method — the saved card the
+    #   off-session charge runs against (customer from the checkout session, the
+    #   method resolved from the deposit intent at settlement).
+    # grove_settlement_payment_intent — the off-session balance charge, for audit
+    #   and so a re-trigger references the same object.
+    # grove_settlement_attempts — settlement tries so far; the retry cron stops
+    #   auto-charging a declined card after grove_headless.settlement_max_retries.
+    grove_amount_charged_today = fields.Monetary(readonly=True, copy=False)
+    grove_actual_shipping_cost = fields.Monetary(readonly=True, copy=False)
+    grove_stripe_customer = fields.Char(readonly=True, copy=False)
+    grove_stripe_payment_method = fields.Char(readonly=True, copy=False)
+    grove_settlement_payment_intent = fields.Char(readonly=True, copy=False)
+    grove_settlement_attempts = fields.Integer(readonly=True, copy=False, default=0)
     # ── Terminal fulfilment state machine (GOL-1981) ────────────────────────
     # Odoo is the system of record for "what is outstanding". Payment
     # (grove_checkout_status) and raw label substatus (grove_delivery_status)
@@ -149,7 +174,12 @@ class SaleOrder(models.Model):
             return "cancelled"
         if checkout == "deposit_paid":
             return "deposit_paid"
-        if checkout == "paid":
+        # settled / settlement_failed (GOL-2053) are post-payment ship-path
+        # statuses: settlement runs after every label is bought, so the
+        # watermark is normally already set — but if it is unset (legacy row,
+        # partial write) a shipped order must not derive back to
+        # "awaiting_payment".
+        if checkout in ("paid", "settled", "settlement_failed"):
             if self.grove_fulfillment == "pickup":
                 return "reserved"
             if self.grove_delivery_status == "label_purchased":
@@ -308,6 +338,7 @@ class SaleOrder(models.Model):
             # after purchase, so money spent at Shippo is recorded even if a
             # subsequent label fails and the request transaction rolls back.
             tracking, labels, carriers, services = [], [], [], []
+            actual_cost = 0.0  # summed Shippo label `amount` — the REAL shipping cost
             try:
                 for payload, _box_id in purchase_plan:
                     result = shippo_client.buy_cheapest_ground_label(api_key, payload)
@@ -315,12 +346,24 @@ class SaleOrder(models.Model):
                     labels.append(result["label_url"])
                     carriers.append(result.get("carrier") or "")
                     services.append(result.get("servicelevel") or "")
+                    # Shippo returns `amount` as a decimal string; treat a
+                    # missing/garbage amount as 0 rather than crash a purchased
+                    # label — settlement under-bills, never fails, on bad data.
+                    try:
+                        actual_cost += float(result.get("amount") or 0.0)
+                    except (TypeError, ValueError):
+                        _logger.warning(
+                            "Shippo label on %s returned unparseable amount %r; treating as 0",
+                            order.name,
+                            result.get("amount"),
+                        )
                     order._persist_label_result(
                         {
                             "grove_tracking_numbers": "\n".join(tracking),
                             "grove_label_urls": "\n".join(labels),
                             "grove_shipping_carriers": "\n".join(carriers),
                             "grove_shipping_services": "\n".join(services),
+                            "grove_actual_shipping_cost": actual_cost,
                             "grove_delivery_status": "label_purchased",
                         }
                     )
@@ -340,6 +383,7 @@ class SaleOrder(models.Model):
                             "grove_label_urls": "\n".join(labels),
                             "grove_shipping_carriers": "\n".join(carriers),
                             "grove_shipping_services": "\n".join(services),
+                            "grove_actual_shipping_cost": actual_cost,
                             "grove_delivery_status": "partial_purchase",
                         }
                     )
@@ -356,4 +400,43 @@ class SaleOrder(models.Model):
             # from either awaiting_label or wave_assigned.
             order._grove_advance_state("label_purchased", source="shippo")
 
+            # Every box is bought and the ACTUAL shipping cost is known, so the
+            # deferred balance (tree prices + real shipping + recomputed WV tax)
+            # can settle off-session now (GOL-2053). Best-effort by contract: a
+            # decline or gateway error must NEVER roll back the labels we just
+            # paid Shippo for — settle_order_at_ship swallows its own failures
+            # into grove_checkout_status + a dunning path.
+            order._grove_settle_at_ship()
+
         return True
+
+    def _grove_settle_at_ship(self):
+        """Capture the deferred preorder balance off-session at ship time.
+
+        Thin model entry point over the controller's settlement engine (which
+        owns the Stripe/tenant/tax/notify helpers). Deferred import breaks the
+        controller→models load cycle. Never raises: the caller has already
+        shipped, so a settlement failure is recorded, not fatal."""
+        self.ensure_one()
+        from ..controllers.main import settle_order_at_ship
+
+        try:
+            return settle_order_at_ship(self.env, self)
+        except Exception:  # noqa: BLE001 — settlement must never fail the ship
+            _logger.exception("Ship-time settlement crashed for %s", self.name)
+            return "settlement_error"
+
+    def _cron_retry_settlements(self):
+        """Re-attempt every shipped-but-unsettled order whose card can still be
+        auto-charged (GOL-2053 retry policy). Orders that have exhausted
+        grove_headless.settlement_max_retries are left for manual re-trigger and
+        stay in the ops queue via their Discord escalation."""
+        max_retries = int(self.env["ir.config_parameter"].sudo().get_param("grove_headless.settlement_max_retries", 3))
+        stuck = self.sudo().search(
+            [
+                ("grove_checkout_status", "=", "settlement_failed"),
+                ("grove_settlement_attempts", "<", max_retries),
+            ]
+        )
+        for order in stuck:
+            order._grove_settle_at_ship()
