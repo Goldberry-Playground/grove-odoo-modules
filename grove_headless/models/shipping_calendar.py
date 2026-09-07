@@ -159,6 +159,31 @@ def ship_options(zip_code, tier: str, today: date) -> dict:
     return result
 
 
+def unknown_zone_ships_now(today: date) -> bool:
+    """Ships-now default for a bareroot line whose destination USDA zone is
+    UNKNOWN (ZIP absent from the PHZM matrix).
+
+    ``ship_options`` is deliberately conservative on an unrecognized ZIP
+    (``ships_now`` False) — correct for the ``/shipping/options`` *display*
+    feed, but WRONG on the money path: during the leafed / peat-and-bagged
+    season an in-stock tree bound for a valid US ZIP that merely isn't in the
+    table was mispriced as a $10 deposit instead of full price (GOL-2145). Fall
+    back to the calendar's current GLOBAL season instead of a blanket deposit:
+    ships now unless EVERY configured USDA zone is itself frozen/dormant today.
+
+    Since the matrix spans zones 2-10, any real US ZIP resolves to one of those
+    zones — so if all of them ship now, the unknown ZIP does too. When some
+    zones are still frozen (a shoulder/dormant window) we stay conservative and
+    return False (deposit), preserving the never-undercharge-out-of-window
+    stance for a zone we cannot place. Keyed off the same freeze model
+    ``ship_options`` uses (``NO_SHIP_MONTHS`` / ``FREEZE_WINDOWS``), so the
+    fallback can never disagree with a resolvable zone in the same season.
+    """
+    if today.month in NO_SHIP_MONTHS:
+        return False
+    return not any(_in_md_window(today, *window) for window in FREEZE_WINDOWS.values())
+
+
 def serialize_ship_options(result: dict) -> dict:
     """Convert ship_options result dict dates to ISO strings for JSON serialization."""
     out = dict(result)

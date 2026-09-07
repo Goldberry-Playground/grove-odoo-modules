@@ -574,7 +574,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
 
         def spy(zip_code, tier, today):
             seen["zip"] = zip_code
-            return {"ships_now": False}
+            # 26651 is a KNOWN zone (6) that is simply out of window — usda_zone
+            # is present so the GOL-2145 unknown-zone fallback is NOT engaged and
+            # ships_now False stands (deposit).
+            return {"usda_zone": 6, "ships_now": False}
 
         with mock.patch.object(grove_main, "ship_options", side_effect=spy):
             line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
@@ -602,6 +605,50 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         with mock.patch.object(grove_main, "ship_options", side_effect=spy):
             grove_main._build_stripe_line_items(order)
         self.assertEqual(seen["zip"], "04101", "shipped window must key off the destination ZIP")
+
+    # ── unknown destination zone: global-season fallback, not deposit (GOL-2145) ──
+
+    def test_unknown_zone_bareroot_in_leafed_season_charges_full(self):
+        """GOL-2145: an IN-STOCK bareroot line shipped to a valid US ZIP that is
+        absent from the PHZM matrix must charge in FULL during the leafed /
+        peat-and-bagged (ships-now) season — not the $10 preorder deposit the old
+        'conservative on unknowns -> ships_now False' default forced. The ZIP is
+        real (99999 stands in for any untabulated ZIP like Cleveland 44101 /
+        Roanoke 24011); the fallback keys off the calendar's current global
+        season via the real ``unknown_zone_ships_now``."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        self._set_stock(self.product, 10)
+        self.partner.zip = "99999"  # valid-shaped ZIP absent from the matrix
+        order = self._make_order(qty=2)
+        self._add_shipping_line(order)  # → is_ship_order, keys off destination ZIP
+        with mock.patch.object(grove_main, "_date") as md:
+            md.today.return_value = date(2026, 9, 7)  # leafed season (prod repro date)
+            line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        self.assertEqual(preorder_ids, [], "in-stock leafed-season tree must not become a preorder")
+        goods = next(li for li in line_items if li["name"] == self.product.display_name)
+        self.assertEqual(goods["kind"], "goods")
+        self.assertEqual(goods["quantity"], 2)
+        self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(25.0))
+        self.assertFalse([li for li in line_items if li["kind"] == "deposit"])
+
+    def test_unknown_zone_bareroot_in_dormant_season_still_deposits(self):
+        """Guardrail: the unknown-zone fallback only relaxes to full charge when
+        the store is globally in a ships-now season. In deep winter (all zones
+        frozen) an untabulated ZIP still deposits — the never-undercharge-out-of-
+        window stance is preserved (GOL-2145)."""
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+        self._set_stock(self.product, 10)
+        self.partner.zip = "99999"
+        order = self._make_order(qty=2)
+        self._add_shipping_line(order)
+        with mock.patch.object(grove_main, "_date") as md:
+            md.today.return_value = date(2027, 1, 10)  # global no-ship floor
+            line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        self.assertEqual(preorder_ids, [self.product.id])
+        deposit = next(li for li in line_items if li["kind"] == "deposit")
+        self.assertEqual(deposit["quantity"], 2)
+        self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+        self.assertFalse([li for li in line_items if li["kind"] == "goods"])
 
     # ── ship-to gate: state / potted / $0-shipping breaker (GOL-1036) ─────
 

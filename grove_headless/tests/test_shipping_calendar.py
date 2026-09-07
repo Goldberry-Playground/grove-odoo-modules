@@ -100,6 +100,43 @@ class TestShipOptions(unittest.TestCase):
                 self.assertLessEqual(w["order_by"], w["ship_end"])
 
 
+class TestUnknownZoneShipsNow(unittest.TestCase):
+    """GOL-2145: the money-path fallback for a bareroot line whose destination
+    USDA zone is unknown (ZIP absent from the PHZM matrix). Unlike ``ship_options``
+    (conservative -> ships_now False), this falls back to the global season so an
+    in-stock leafed-season tree bound for an untabulated valid US ZIP is charged
+    in full, not forced to a $10 deposit."""
+
+    def test_leafed_season_unknown_zone_ships_now(self):
+        # Sep 7 (the prod repro date): no zone frozen -> ships now (charge full).
+        self.assertTrue(sc.unknown_zone_ships_now(date(2026, 9, 7)))
+
+    def test_summer_unknown_zone_ships_now(self):
+        self.assertTrue(sc.unknown_zone_ships_now(date(2026, 7, 15)))
+
+    def test_deep_winter_unknown_zone_defers(self):
+        # Jan/Feb is the global no-ship floor for every zone -> deposit (safe).
+        self.assertFalse(sc.unknown_zone_ships_now(date(2027, 1, 10)))
+        self.assertFalse(sc.unknown_zone_ships_now(date(2027, 2, 20)))
+
+    def test_shoulder_with_any_zone_frozen_is_conservative(self):
+        # Dec 5: cold zones (2-5) freeze starts Dec 1, warm zones ship until Jan 1.
+        # With at least one zone frozen we stay conservative (deposit) rather than
+        # undercharge a zone we cannot place.
+        self.assertFalse(sc.unknown_zone_ships_now(date(2026, 12, 5)))
+
+    def test_matches_resolvable_zone_in_same_season(self):
+        # The fallback must never disagree with a resolvable zone in the same
+        # season: on any leafed-season day every known ZIP ships now, and so does
+        # the unknown default; on a global-frozen day neither does.
+        leafed = date(2026, 9, 7)
+        self.assertTrue(sc.ship_options("26651", "bareroot", leafed)["ships_now"])
+        self.assertTrue(sc.unknown_zone_ships_now(leafed))
+        frozen = date(2027, 1, 10)
+        self.assertFalse(sc.ship_options("26651", "bareroot", frozen)["ships_now"])
+        self.assertFalse(sc.unknown_zone_ships_now(frozen))
+
+
 class TestFreezeBoundary(unittest.TestCase):
     """Freeze-window boundary conditions for zone-6 ZIP (26651 — Summersville WV)."""
 
