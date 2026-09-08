@@ -27,7 +27,16 @@ class RateFeedTests(unittest.TestCase):
     def test_top_level_shape(self):
         self.assertEqual(
             set(self.feed),
-            {"schema", "zones", "zone_by_state", "green_states", "packing", "calendar", "compliance"},
+            {
+                "schema",
+                "zones",
+                "zone_by_state",
+                "green_states",
+                "packing",
+                "calendar",
+                "compliance",
+                "bundle_substitution",
+            },
         )
         self.assertEqual(self.feed["schema"], 2)
 
@@ -38,6 +47,14 @@ class RateFeedTests(unittest.TestCase):
         self.assertEqual(compliance["schema"], 1)
         self.assertIn("castanea", compliance["carve_outs"])
         self.assertIn("regulated_states", compliance)
+
+    def test_bundle_substitution_block_present(self):
+        # Per-state bundle substitute map (GOL-2237) rides the same feed so the
+        # PDP computes the effective bundle composition from one source of truth.
+        substitution = self.feed["bundle_substitution"]
+        self.assertEqual(substitution["schema"], 1)
+        self.assertEqual(substitution["substitutes"]["castanea"]["botanical"], "Carya ovata")
+        self.assertFalse(substitution["substitutes"]["prunus"]["native"])
 
     def test_zones_mirror_engine_table(self):
         # The feed must serve exactly what compute_shipping_rate prices with.
