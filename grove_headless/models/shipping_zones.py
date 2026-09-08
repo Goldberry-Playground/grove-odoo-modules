@@ -110,11 +110,21 @@ US_STATES: tuple[str, ...] = (
 
 RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 6))
 
-# Product tiers survive v2 as the shippability gate: bareroot ships, potted is
-# farm pickup only. DEFAULT_TIER stays potted so a mistagged product can never
-# ship undercharged — it simply cannot ship until it is tagged bareroot.
+# Product tiers survive v2 as the shippability gate. GOL-2199 potted go-live
+# (CEO directive 2026-09-08): potted / peat-and-bagged now SHIPS on its own
+# engine (POTTED_BOXES, packed by unit count via pack_potted — GOL-2031),
+# alongside bareroot (packed by length class via pack_order). DEFAULT_TIER
+# stays potted: a mistagged product now ships at POTTED rates, the pricier
+# catalog at every weight point (12/22 lb potted vs 7/14 lb dormant bareroot),
+# so the never-undercharge property is preserved.
+# Fail-safe until the rate feed carries potted rows: pack_potted returns None
+# when no potted box has a zone rate, compute_order_shipping propagates the
+# None, and the checkout's $0-shipping circuit breaker (GOL-1036) blocks the
+# order with the friendly retry message — potted ship-to carts cannot be
+# under-billed in the window between this flip and the rate-checker's first
+# potted-inclusive table.
 TIERS: tuple[str, ...] = ("bareroot", "potted")
-SHIPPABLE_TIERS: frozenset[str] = frozenset({"bareroot"})
+SHIPPABLE_TIERS: frozenset[str] = frozenset({"bareroot", "potted"})
 DEFAULT_TIER = "potted"
 
 # Box-geometry authority lives in shipping_boxes; re-exported for callers
@@ -451,6 +461,17 @@ def single_tree_rate(
     return round(sum(r for r in (box_rate(state, pb.box_id) for pb in plan)), 2)
 
 
+def single_potted_rate(state: str) -> float | None:
+    """Cheapest way to ship exactly one potted / peat-and-bagged unit — the
+    product-card "shipping from $X" estimate for the potted catalog
+    (GOL-2199 go-live). None when unpriceable, including the window before the
+    rate-checker's first potted-inclusive table publishes."""
+    plan = shipping_boxes.pack_potted(1, lambda b: box_rate(state, b))
+    if not plan:
+        return None
+    return round(sum(box_rate(state, pb.box_id) for pb in plan), 2)
+
+
 def unshippable_reason(items: list[tuple[str, int, float]]) -> str | None:
     """Explicit human-readable reason a cart cannot ship, or None if it can
 
@@ -459,14 +480,18 @@ def unshippable_reason(items: list[tuple[str, int, float]]) -> str | None:
     creating an un-shipped order (2026-07-20 decision, extended to potted).
     items: (tier, length_class, qty).
     """
+    # GOL-2199: every current tier is shippable (bareroot dormant-window, potted
+    # peat-and-bagged), so this loop only fires for a FUTURE tier added to TIERS
+    # without joining SHIPPABLE_TIERS — kept as the fail-closed seam the checkout
+    # block message rides on, exactly as it gated potted pre-go-live.
     for tier, _length, qty in items:
         if float(qty) <= 0:
             continue
         tier_key = tier if tier in TIERS else DEFAULT_TIER
         if tier_key not in SHIPPABLE_TIERS:
             return (
-                "Potted trees are available for farm pickup only — remove them "
-                "from the cart to ship, or choose pickup for the whole order."
+                f"{tier_key.capitalize()} trees are available for farm pickup only — "
+                "remove them from the cart to ship, or choose pickup for the whole order."
             )
     return None
 
@@ -482,8 +507,38 @@ def pack_for_state(state: str, items: list[tuple[str, int, float]], mode: str):
         return None
     if unshippable_reason(items) is not None:
         return None
-    pack_items = [(int(length), qty) for _tier, length, qty in items if float(qty) > 0]
-    return shipping_boxes.pack_order(pack_items, mode, lambda b: box_rate(state, b))
+
+    def cost_of(box_id):
+        return box_rate(state, box_id)
+
+    # GOL-2199: split the cart across the two independent packing engines.
+    # Bareroot packs by tree-length class + season mode (Box Engine v2);
+    # potted / peat-and-bagged packs by unit count (GOL-2031). Each side is
+    # fail-safe on its own (None when it cannot pack AND price), and either
+    # side failing fails the whole plan — a half-priced order must never add
+    # a shipping line, same contract as before the split.
+    bareroot_items: list[tuple[int, float]] = []
+    potted_units = 0.0
+    for tier, length, qty in items:
+        if float(qty) <= 0:
+            continue
+        tier_key = tier if tier in TIERS else DEFAULT_TIER
+        if tier_key == "potted":
+            potted_units += qty
+        else:
+            bareroot_items.append((int(length), qty))
+    plan: list = []
+    if bareroot_items:
+        bareroot_plan = shipping_boxes.pack_order(bareroot_items, mode, cost_of)
+        if bareroot_plan is None:
+            return None
+        plan.extend(bareroot_plan)
+    if potted_units:
+        potted_plan = shipping_boxes.pack_potted(potted_units, cost_of)
+        if potted_plan is None:
+            return None
+        plan.extend(potted_plan)
+    return plan
 
 
 def compute_order_shipping(state: str, items: list[tuple[str, int, float]], mode: str) -> float | None:

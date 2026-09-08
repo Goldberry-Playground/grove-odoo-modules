@@ -121,18 +121,19 @@ _scspec.loader.exec_module(shippo_client)
 #
 # GOL-2199: the published table is loaded verbatim into the LIVE served rate feed
 # (shipping_zones.ZONE_RATES -> rate_feed() -> /grove/api/v1/shipping/rates ->
-# checkout). It must therefore carry ONLY tiers that are actually go-live
-# shippable — today that is shipping_zones.SHIPPABLE_TIERS == {"bareroot"}. The
-# potted/peat-and-bagged catalog (POTTED_BOXES, GOL-2031) is PICKUP-ONLY and stays
-# money-flow / CEO gated: publishing its probed rates leaked pre-go-live potted
-# prices into the served feed and broke the bareroot-only shape contract
-# (test_shipping_zones / test_shipping_rates_feed assert every served box_id is in
-# BOXES; representative_billable_lb KeyErrors on a potted id). When potted goes
-# live (CEO adds "potted" to SHIPPABLE_TIERS), re-add
-#   (shipping_boxes.POTTED_BOXES, shipping_boxes.potted_representative_billable_lb)
-# here and broaden those shape tests + the monotonicity walk to treat the two
-# catalogs as the independent pricing axes they are.
-_CATALOGS = ((shipping_boxes.BOXES, shipping_boxes.representative_billable_lb),)
+# checkout), so it carries exactly the go-live-shippable tiers
+# (shipping_zones.SHIPPABLE_TIERS). Potted go-live (CEO directive 2026-09-08):
+# both catalogs now publish — bareroot (BOXES) at representative_billable_lb and
+# potted/peat-and-bagged (POTTED_BOXES, GOL-2031) at
+# potted_representative_billable_lb (12/22 lb damp, Josh weigh-in 2026-09-06).
+# The monotonicity walk below already treats the catalogs as independent pricing
+# axes (checked per catalog, never interleaved). Until this checker's first
+# potted-inclusive table merges, the served feed simply lacks potted rows and
+# potted ship-to carts fail safe at the checkout $0-shipping breaker.
+_CATALOGS = (
+    (shipping_boxes.BOXES, shipping_boxes.representative_billable_lb),
+    (shipping_boxes.POTTED_BOXES, shipping_boxes.potted_representative_billable_lb),
+)
 PARCELS = {
     box_id: {
         "length": str(box["length"]),
@@ -379,7 +380,9 @@ def main() -> int:
         "_comment": "Maintained by scripts/rate_check (morning rate-checker). "
         "Per-box rates (Box Engine v2): ceil(Shippo least-cost ground [UPS "
         "Ground vs USPS Ground Advantage] at the box's representative billable "
-        "weight + per-box packaging + 2.00 buffer). "
+        "weight + per-box packaging + 2.00 buffer). Carries BOTH shippable "
+        "catalogs (GOL-2199 potted go-live 2026-09-08): bareroot small/large "
+        "and potted/peat-and-bagged p24x10x4/p24x10x6. "
         "Design: vault wiki/Software/Grove Shipping.",
         "_schema": 2,
     }
