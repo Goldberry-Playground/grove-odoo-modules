@@ -547,8 +547,17 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         )
         self.assertEqual(forced, frozenset())
         # Same ships_now pin as above — full charge asserted on the calendar
-        # axis alone, independent of the test-run date's wave window.
-        with mock.patch.object(grove_main, "ship_options", return_value={"ships_now": True}):
+        # axis alone, independent of the test-run date's wave window. The
+        # GOL-1906 nursery-dormancy gate inside _build_stripe_line_items reads
+        # the REAL clock (`_date.today()`) before ship_options is consulted, so a
+        # leafed-season test run (e.g. September) would force this line to a
+        # deposit regardless of the pins above. Pin a dormant date the same way
+        # the seasonal-gate tests in this class do.
+        with (
+            mock.patch.object(grove_main, "ship_options", return_value={"ships_now": True}),
+            mock.patch.object(grove_main, "_date") as md,
+        ):
+            md.today.return_value = date(2027, 1, 15)  # dormant window
             line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, forced)
         self.assertEqual(preorder_ids, [])
         goods = next(li for li in line_items if li["name"] == self.product.display_name)

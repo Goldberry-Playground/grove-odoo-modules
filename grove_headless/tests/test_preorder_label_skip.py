@@ -135,6 +135,12 @@ class TestPreorderLabelSkip(GroveTaxFixtureMixin, TransactionCase):
             # ship-window calendar; the gate under test is line inclusion, not packing.
             patch.object(sale_order_module, "pack_for_state", return_value=[SimpleNamespace(box_id="BR_S", count=1)]),
             patch.object(sale_order_module, "unshippable_reason", return_value=None),
+            # The GOL-1906 nursery-dormancy gate (#190) runs BEFORE packing and
+            # reads the real clock: outside Nov 1 - Apr 15 it refuses every
+            # bareroot label. This test isolates the wave gate, not the season,
+            # so pin the seasonal gate open (its closed branch is covered by
+            # test_stripe_checkout.test_label_purchase_blocked_outside_dormancy).
+            patch.object(sale_order_module, "can_ship_bareroot", return_value=True),
             patch.object(shippo_client, "build_shipment_payload", return_value={"box": "BR_S"}),
             patch.object(shippo_client, "buy_cheapest_ground_label", return_value=fake_label) as buy,
             # Ship-time settlement (GOL-2053) runs after labels and reaches Stripe;
