@@ -132,9 +132,7 @@ _scspec.loader.exec_module(shippo_client)
 #   (shipping_boxes.POTTED_BOXES, shipping_boxes.potted_representative_billable_lb)
 # here and broaden those shape tests + the monotonicity walk to treat the two
 # catalogs as the independent pricing axes they are.
-_CATALOGS = (
-    (shipping_boxes.BOXES, shipping_boxes.representative_billable_lb),
-)
+_CATALOGS = ((shipping_boxes.BOXES, shipping_boxes.representative_billable_lb),)
 PARCELS = {
     box_id: {
         "length": str(box["length"]),
