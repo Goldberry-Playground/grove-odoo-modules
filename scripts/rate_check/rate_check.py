@@ -116,17 +116,23 @@ _scspec = _ilu.spec_from_file_location("grove_shippo_client", _SC_PATH)
 shippo_client = _ilu.module_from_spec(_scspec)
 _scspec.loader.exec_module(shippo_client)
 
-# Probe every catalog at its own representative billable weight. Bareroot boxes
-# (BOXES) use representative_billable_lb; potted/peat-and-bagged boxes
-# (POTTED_BOXES, GOL-2031) pack on the separate unit-count/actual-weight axis and
-# use potted_representative_billable_lb. Both go through the same live Shippo probe
-# at their true dimensions, so the 24" nonstandard-length surcharge on the potted
-# boxes lands in the quoted rate exactly as the 32"/46" bareroot boxes do. The two
-# catalogs share no ids (asserted in shipping_boxes), so one flat probe map is safe.
-_CATALOGS = (
-    (shipping_boxes.BOXES, shipping_boxes.representative_billable_lb),
-    (shipping_boxes.POTTED_BOXES, shipping_boxes.potted_representative_billable_lb),
-)
+# Probe every GO-LIVE-SHIPPABLE catalog at its own representative billable weight.
+# Bareroot boxes (BOXES) use representative_billable_lb.
+#
+# GOL-2199: the published table is loaded verbatim into the LIVE served rate feed
+# (shipping_zones.ZONE_RATES -> rate_feed() -> /grove/api/v1/shipping/rates ->
+# checkout). It must therefore carry ONLY tiers that are actually go-live
+# shippable — today that is shipping_zones.SHIPPABLE_TIERS == {"bareroot"}. The
+# potted/peat-and-bagged catalog (POTTED_BOXES, GOL-2031) is PICKUP-ONLY and stays
+# money-flow / CEO gated: publishing its probed rates leaked pre-go-live potted
+# prices into the served feed and broke the bareroot-only shape contract
+# (test_shipping_zones / test_shipping_rates_feed assert every served box_id is in
+# BOXES; representative_billable_lb KeyErrors on a potted id). When potted goes
+# live (CEO adds "potted" to SHIPPABLE_TIERS), re-add
+#   (shipping_boxes.POTTED_BOXES, shipping_boxes.potted_representative_billable_lb)
+# here and broaden those shape tests + the monotonicity walk to treat the two
+# catalogs as the independent pricing axes they are.
+_CATALOGS = ((shipping_boxes.BOXES, shipping_boxes.representative_billable_lb),)
 PARCELS = {
     box_id: {
         "length": str(box["length"]),
