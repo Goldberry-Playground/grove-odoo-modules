@@ -24,6 +24,18 @@
                         <group string="Storefront">
                             <field name="grove_featured" />
                         </group>
+                        <group string="Preorder Cap (GOL-2171)">
+                            <field name="grove_preorder_cap" />
+                            <field name="grove_preorder_count" />
+                            <field name="grove_preorder_cap_effective" />
+                            <field name="grove_preorder_cap_reached" />
+                            <div class="text-muted" colspan="2">
+                                Sells out once <b>Preorders</b> exceeds the
+                                <b>Effective Cap</b>. Leave the override at 0 to
+                                inherit the global default (System Parameter
+                                <code>grove_headless.preorder_cap_default</code>).
+                            </div>
+                        </group>
                         <group string="SEO">
                             <field name="grove_seo_description" />
                         </group>

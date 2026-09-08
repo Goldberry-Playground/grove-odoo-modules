@@ -60,6 +60,7 @@
         "data/grove_taxes.xml",
         "data/grove_sequences.xml",
         "data/grove_farm_pickup.xml",
+        "data/grove_config_params.xml",
         "views/product_template_views.xml",
         "views/potting_batch_views.xml",
         "views/grove_publish_event_views.xml",
