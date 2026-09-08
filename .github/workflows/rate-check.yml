@@ -81,6 +81,17 @@ jobs:
             --body-file scripts/rate_check/out/summary.md \
             --base main --head chore/rate-check 2>/dev/null \
             || gh pr edit chore/rate-check --body-file scripts/rate_check/out/summary.md
+          # Disarm auto-merge left armed by a PREVIOUS day's auto-approve run.
+          # GitHub auto-merge survives the force-push above, so yesterday's
+          # arming would merge TODAY's untested rates the moment the (minimal)
+          # required contexts go green — before "Pure-Python unit tests" or the
+          # Odoo install smoke test report. That is exactly how the 2026-09-08
+          # run (#194) landed a broken shipping_rates.json on main (#204).
+          # auto-approve.yml re-arms only after the FULL CI suite is green on
+          # this new head SHA. Disarming is NOT the GOL-1658 branch-delete trap:
+          # it only clears the flag, never closes the PR.
+          gh pr merge chore/rate-check --disable-auto 2>/dev/null \
+            || echo "::notice::auto-merge was not armed on chore/rate-check (nothing to disarm)"
       - name: Discord alert
         if: steps.guard.outputs.skip == 'false' && steps.check.outputs.code == '3'
         env:

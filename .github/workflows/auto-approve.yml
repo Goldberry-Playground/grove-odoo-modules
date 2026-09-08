@@ -51,8 +51,16 @@
 #   - Auto-approves only (a) the agent App bot's PRs and (b) an explicit
 #     human-maintainer allowlist (MAINTAINERS). All other human/external PRs
 #     still keep the normal human-review requirement.
-#   - Only fires AFTER CI (all required status checks) SUCCEEDED
-#     -> not a blanket rubber-stamp; functional gates still hold.
+#   - Only approves/arms auto-merge AFTER the FULL "CI" workflow run is green
+#     on the current head SHA (explicit poll gate below). The workflow_run
+#     entrypoint implies this, but the GOL-1938 check_run and
+#     pull_request_review entrypoints do NOT — and the live REQUIRED contexts
+#     are only the three lint/validate jobs while the GOL-1953 promotion is
+#     parked, so an armed auto-merge fires the moment those go green even if
+#     "Pure-Python unit tests" is red. That is how the 2026-09-08 morning
+#     rate-check PR (#194) landed a broken shipping_rates.json on main
+#     (fallout: #204). The explicit gate makes every entrypoint wait for the
+#     whole suite, not just the required subset.
 #   - Only resolves github-code-quality threads, never human threads.
 #   - Agent PRs get approve + auto-merge; maintainer PRs get approve ONLY
 #     (no auto-merge) so the human decides when to merge.
@@ -253,6 +261,43 @@ jobs:
             exit 0
           fi
           echo "agent-review/* is success on $HEAD_SHA; proceeding."
+
+          # ── Full-CI green gate (2026-09-08 rate-check incident: #194 → #204) ──
+          # Require the ENTIRE "CI" workflow run on the CURRENT head SHA to
+          # conclude success before approving/arming auto-merge. Without this,
+          # the check_run entrypoint (agent-review/* flipping success) could arm
+          # auto-merge mid-CI, and the merge then only waited for the three
+          # REQUIRED contexts — "Pure-Python unit tests" (~10s) and the Odoo
+          # install smoke test are NOT required while GOL-1953 is parked, so a
+          # red suite merged anyway.
+          #
+          # No deadlock when CI queues are slow: if this poll times out we exit
+          # WITHOUT approving, and the workflow_run("CI" success) entrypoint
+          # re-fires this whole workflow the moment CI eventually completes
+          # green. A red or cancelled run exits immediately (the next push
+          # re-triggers everything). A run stuck at action_required (the
+          # GOL-2114 default-token wedge) also exits — same human-remediation
+          # path as before, surfaced by the missing-checks sweep.
+          CI_STATE=missing
+          for i in $(seq 1 30); do   # up to ~15 min (30 × 30s)
+            CI_STATE=$(gh api "repos/$REPO/actions/runs?head_sha=$HEAD_SHA&per_page=50" \
+              -q '[.workflow_runs[] | select(.name=="CI")] | sort_by(.created_at) | last
+                  | if . == null then "missing"
+                    elif .status != "completed" then "running"
+                    else .conclusion end')
+            case "$CI_STATE" in
+              success) break ;;
+              missing|running) : ;;   # not started / in flight — keep polling
+              *) break ;;             # failure/cancelled/timed_out/action_required — stop now
+            esac
+            echo "CI workflow run on $HEAD_SHA: $CI_STATE (poll $i/30)…"
+            sleep 30
+          done
+          if [ "$CI_STATE" != "success" ]; then
+            echo "PR #$PR full-CI gate not satisfied on $HEAD_SHA (state: $CI_STATE); not approving or arming auto-merge. If CI is merely slow, the workflow_run entrypoint re-runs this workflow when it completes green."
+            exit 0
+          fi
+          echo "Full CI suite is green on $HEAD_SHA; proceeding."
           fi
 
           OWNER="${REPO%/*}"
