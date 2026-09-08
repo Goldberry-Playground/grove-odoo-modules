@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo noupdate="1">
+
+    <!-- Global default preorder cap (GOL-2171). A product sells out once its
+         preorder count exceeds its cap; this is the default cap for any product
+         without a per-template override (product.template.grove_preorder_cap).
+
+         Seed = 50, ratified by Josh 2026-09-07 ("default for any new product is
+         50"). noupdate="1" so an admin can adjust the number in Odoo
+         (Settings > Technical > System Parameters) and the edit survives module
+         upgrades — that adjustability is the explicit requirement, so 50 must
+         never be a code constant. A per-product override on the product form
+         beats this global; leaving the override at 0 inherits this value. -->
+    <record id="preorder_cap_default_param" model="ir.config_parameter">
+        <field name="key">grove_headless.preorder_cap_default</field>
+        <field name="value">50</field>
+    </record>
+
+</odoo>

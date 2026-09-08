@@ -37,7 +37,8 @@ class RateFeedTests(unittest.TestCase):
         for zone, boxes in self.feed["zones"].items():
             self.assertIn(zone, sz.RATE_ZONE_IDS)
             for box_id, rule in boxes.items():
-                self.assertIn(box_id, sz.shipping_boxes.BOXES)
+                # Zone rows span BOTH catalogs (bareroot + potted, GOL-2031).
+                self.assertIn(box_id, sz.shipping_boxes.known_box_ids())
                 self.assertIsInstance(rule.get("base"), (int, float))
 
     def test_packing_metadata_mirrors_box_catalog(self):
