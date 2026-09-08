@@ -80,13 +80,25 @@ REFERENCE_ZIPS = {
     "zone_2": [("New York", "NY", "10001")],  # band {MD,PA,OH,IN,NJ,NY}
     "zone_3": [("Chicago", "IL", "60601")],  # band {IL,MI,CT,RI}
     "zone_4": [("Boston", "MA", "02108")],  # band {WI,MN,MA,VT,NH}
-    # band {ME,TN,GA,AL,SC,AR,MS,LA,MO,IA} — max across the Gulf/NE corners that
-    # tied for priciest in the GOL-2128 probe (the others quoted strictly below).
+    # band {ME,GA,SC,AL,MS,LA} — max across the Gulf/NE corners that tied for
+    # priciest in the probe (GA/SC quote just below). GOL-2238 moved TN/AR/MO/IA
+    # out of this band into their own real distance zones below.
     "zone_5": [
         ("Portland", "ME", "04101"),
         ("Mobile", "AL", "36602"),
         ("Gulfport", "MS", "39501"),
         ("Lake Charles", "LA", "70601"),
+    ],
+    # band {AR,MO,IA} — GOL-2238 mid-continent band; all three co-maximal at
+    # 23/28 (small/large) in the two-SKU re-probe, so all three are corners.
+    "zone_6": [
+        ("Texarkana", "AR", "71854"),
+        ("Joplin", "MO", "64801"),
+        ("Sioux City", "IA", "51101"),
+    ],
+    # band {TN} — GOL-2238 near-plains band; Memphis is TN's worst corner (29/32).
+    "zone_7": [
+        ("Memphis", "TN", "38103"),
     ],
 }
 # Box Engine v2: reference parcels come straight from the box catalog —

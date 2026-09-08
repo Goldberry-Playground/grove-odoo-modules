@@ -78,9 +78,10 @@ class TestLiveTable(unittest.TestCase):
         table = feed["zones"]
         zones = [z for z in sz.RATE_ZONE_IDS if z in table]
         boxes = mono.ordered_boxes(sb.BOXES, sb.representative_billable_lb)
-        # 2 boxes x 5 zones — the descoped bareroot catalog (CEO 2026-09-07).
+        # 2 boxes x 7 zones — descoped bareroot catalog (CEO 2026-09-07) across
+        # zone_1..5 + GOL-2238 real probe-derived zone_6 / zone_7.
         self.assertEqual(len(boxes), 2)
-        self.assertEqual(len(zones), 5)
+        self.assertEqual(len(zones), 7)
         self.assertEqual(mono.find_violations(table, boxes, zones), [])
 
 

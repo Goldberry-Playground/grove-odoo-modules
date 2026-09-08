@@ -1,5 +1,5 @@
 {
-  "_comment": "Maintained by scripts/rate_check (morning rate-checker). Per-box rates (Box Engine v2): ceil(Shippo least-cost ground [UPS Ground vs USPS Ground Advantage] at the box's representative billable weight + per-box packaging + 2.00 buffer). Carries BOTH shippable catalogs (GOL-2199 potted go-live 2026-09-08): bareroot small/large and potted/peat-and-bagged p24x10x4/p24x10x6. Design: vault wiki/Software/Grove Shipping.",
+  "_comment": "Maintained by scripts/rate_check (morning rate-checker). Per-box rates (Box Engine v2): ceil(Shippo least-cost ground [UPS Ground vs USPS Ground Advantage] at the box's representative billable weight + per-box packaging + 2.00 buffer). Carries BOTH shippable catalogs (GOL-2199 potted go-live 2026-09-08): bareroot small/large and potted/peat-and-bagged p24x10x4/p24x10x6. GOL-2238: zone_6 (bareroot 23/28) and zone_7 (bareroot 29/32) are real probe-derived mid/near-plains bands that replace GOL-2128's blanket zone_5 bareroot rate for TN/AR/MO/IA (see shipping_zones.ZONE_BY_STATE). Their potted rows carry the zone_5 (farthest-band) values (41/52) as an interim status-quo ceiling — these four states already sat in zone_5, so potted charges are UNCHANGED and never undercharged; the morning rate-checker re-probes their corners (now in REFERENCE_ZIPS) and lowers potted to real quotes on its next run. Design: vault wiki/Software/Grove Shipping.",
   "_schema": 2,
   "zone_1": {
     "large": {
@@ -69,6 +69,34 @@
     },
     "small": {
       "base": 39.0
+    }
+  },
+  "zone_6": {
+    "large": {
+      "base": 28.0
+    },
+    "p24x10x4": {
+      "base": 41.0
+    },
+    "p24x10x6": {
+      "base": 52.0
+    },
+    "small": {
+      "base": 23.0
+    }
+  },
+  "zone_7": {
+    "large": {
+      "base": 32.0
+    },
+    "p24x10x4": {
+      "base": 41.0
+    },
+    "p24x10x6": {
+      "base": 52.0
+    },
+    "small": {
+      "base": 29.0
     }
   }
 }
