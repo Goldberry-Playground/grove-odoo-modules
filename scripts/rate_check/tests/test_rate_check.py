@@ -69,25 +69,34 @@ class TestRateMath(unittest.TestCase):
         self.assertEqual(rc.target_rate(14.23, "small"), 20)
 
     def test_parcels_come_from_box_catalog(self):
-        # One reference parcel per catalog box across BOTH catalogs (bareroot
-        # BOXES + potted POTTED_BOXES, GOL-2031), each quoted at its own
-        # representative billable weight (never undercharge).
-        self.assertEqual(set(rc.PARCELS), set(rc.shipping_boxes.BOXES) | set(rc.shipping_boxes.POTTED_BOXES))
+        # GOL-2199: the probe publishes ONLY go-live-shippable tiers, since the
+        # table it writes is served verbatim to checkout (shipping_zones.ZONE_RATES
+        # -> rate_feed). Today that is the bareroot BOXES catalog; potted
+        # (POTTED_BOXES, GOL-2031) is pickup-only / money-flow gated and must not
+        # leak pre-go-live prices into the served feed, so it is NOT probed here.
+        # One reference parcel per published box, quoted at its own representative
+        # billable weight (never undercharge). When potted goes live (CEO adds
+        # "potted" to SHIPPABLE_TIERS), re-add POTTED_BOXES to rc._CATALOGS and
+        # restore the potted arm here.
+        self.assertEqual(set(rc.PARCELS), set(rc.shipping_boxes.BOXES))
+        self.assertFalse(set(rc.PARCELS) & set(rc.shipping_boxes.POTTED_BOXES))
         for box_id, parcel in rc.PARCELS.items():
-            if box_id in rc.shipping_boxes.POTTED_BOXES:
-                expected = rc.shipping_boxes.potted_representative_billable_lb(box_id)
-            else:
-                expected = rc.shipping_boxes.representative_billable_lb(box_id)
+            expected = rc.shipping_boxes.representative_billable_lb(box_id)
             self.assertEqual(float(parcel["weight"]), expected)
 
-    def test_potted_boxes_probe_at_true_dims_and_calibrated_weight(self):
-        # GOL-2031: potted boxes reach the probe at their real 24" length (so the
-        # USPS nonstandard-length surcharge lands in the quote) and at the firmed
-        # damp weights (Josh 2026-09-06: ~2 lb/tree -> 5-pack = 12 lb, 10-pack = 22 lb).
-        self.assertEqual(rc.PARCELS["p24x10x4"]["length"], "24")
-        self.assertEqual(rc.PARCELS["p24x10x6"]["length"], "24")
-        self.assertEqual(float(rc.PARCELS["p24x10x4"]["weight"]), 12.0)
-        self.assertEqual(float(rc.PARCELS["p24x10x6"]["weight"]), 22.0)
+    def test_potted_box_geometry_stays_probe_ready(self):
+        # GOL-2031 regression-lock kept live for potted go-live even though the
+        # potted catalog is NOT currently published (GOL-2199): the boxes must
+        # reach a probe at their real 24" length (so the USPS nonstandard-length
+        # surcharge lands in the quote) and at the firmed damp weights (Josh
+        # 2026-09-06: ~2 lb/tree -> 5-pack = 12 lb, 10-pack = 22 lb). Asserted
+        # against the catalog + weigher directly, so it holds regardless of what
+        # _CATALOGS currently probes.
+        pb = rc.shipping_boxes.POTTED_BOXES
+        self.assertEqual(pb["p24x10x4"]["length"], 24)
+        self.assertEqual(pb["p24x10x6"]["length"], 24)
+        self.assertEqual(rc.shipping_boxes.potted_representative_billable_lb("p24x10x4"), 12)
+        self.assertEqual(rc.shipping_boxes.potted_representative_billable_lb("p24x10x6"), 22)
 
     def test_diff_detects_material_drift(self):
         current = {"zone_1": {"bareroot": {"base": 21.0}}}
