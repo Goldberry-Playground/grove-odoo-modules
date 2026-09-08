@@ -37,7 +37,13 @@ class RateFeedTests(unittest.TestCase):
         for zone, boxes in self.feed["zones"].items():
             self.assertIn(zone, sz.RATE_ZONE_IDS)
             for box_id, rule in boxes.items():
-                self.assertIn(box_id, sz.shipping_boxes.BOXES)
+                # Both catalogs are priced in the table — bareroot Box Engine
+                # and the potted peat-and-bagged catalog (see the same
+                # assertion in test_shipping_zones.py).
+                self.assertIn(
+                    box_id,
+                    {**sz.shipping_boxes.BOXES, **sz.shipping_boxes.POTTED_BOXES},
+                )
                 self.assertIsInstance(rule.get("base"), (int, float))
 
     def test_packing_metadata_mirrors_box_catalog(self):

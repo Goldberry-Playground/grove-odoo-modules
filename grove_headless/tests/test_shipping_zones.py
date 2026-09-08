@@ -130,7 +130,11 @@ class TestShippingZoneEngineContract(unittest.TestCase):
         for zone, boxes in sz.ZONE_RATES.items():
             self.assertIn(zone, sz.RATE_ZONE_IDS)
             for box_id, rule in boxes.items():
-                self.assertIn(box_id, sb.BOXES)
+                # The rate table covers BOTH catalogs: the bareroot Box Engine
+                # (sb.BOXES) and the peat-and-bagged potted catalog
+                # (sb.POTTED_BOXES, ids prefixed "p"). The rate-checker probes
+                # both, so a box id is valid if it appears in either.
+                self.assertIn(box_id, {**sb.BOXES, **sb.POTTED_BOXES})
                 self.assertGreaterEqual(float(rule["base"]), 0.0)
 
     def test_state_lookup_is_case_and_space_insensitive(self):
@@ -188,14 +192,28 @@ class TestGreenStateCoverage(unittest.TestCase):
         # Rates monotone in representative billable weight keep the packer's
         # "fewer, bigger boxes for bulk" outcomes intuitive; a violation means
         # the table (or a checker PR) needs a second look.
+        # Monotonicity holds WITHIN a catalog, never across them. Bareroot and
+        # potted price different products on different weight models
+        # (PER_TREE_LB dormant 0.5 lb/tree vs POTTED_UNIT_LB 2.0 lb/unit), so a
+        # potted box can legitimately cost more than a physically larger
+        # bareroot one. Comparing them would fail on a correct table — and
+        # sorting them together crashes outright, since
+        # representative_billable_lb only knows sb.BOXES.
+        catalogs = (
+            ("bareroot", sb.BOXES, sb.representative_billable_lb),
+            ("potted", sb.POTTED_BOXES, sb.potted_representative_billable_lb),
+        )
         for zone, boxes in sz.ZONE_RATES.items():
-            ordered = sorted(boxes, key=sb.representative_billable_lb)
-            for lighter, heavier in zip(ordered, ordered[1:]):
-                self.assertLessEqual(
-                    boxes[lighter]["base"],
-                    boxes[heavier]["base"],
-                    f"{zone}: {lighter} costs more than heavier {heavier}",
+            for label, catalog, weight_of in catalogs:
+                ordered = sorted(
+                    (b for b in boxes if b in catalog), key=weight_of
                 )
+                for lighter, heavier in zip(ordered, ordered[1:]):
+                    self.assertLessEqual(
+                        boxes[lighter]["base"],
+                        boxes[heavier]["base"],
+                        f"{zone} ({label}): {lighter} costs more than heavier {heavier}",
+                    )
 
 
 class TestShippingZoneTableCoverage(unittest.TestCase):
