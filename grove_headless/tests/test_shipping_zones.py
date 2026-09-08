@@ -126,7 +126,8 @@ class TestShippingZoneEngineContract(unittest.TestCase):
         for zone, boxes in sz.ZONE_RATES.items():
             self.assertIn(zone, sz.RATE_ZONE_IDS)
             for box_id, rule in boxes.items():
-                self.assertIn(box_id, sb.BOXES)
+                # Zone rows span BOTH catalogs (bareroot + potted, GOL-2031).
+                self.assertIn(box_id, sb.known_box_ids())
                 self.assertGreaterEqual(float(rule["base"]), 0.0)
 
     def test_state_lookup_is_case_and_space_insensitive(self):
@@ -183,15 +184,24 @@ class TestGreenStateCoverage(unittest.TestCase):
     def test_heavier_box_never_cheaper_within_a_zone(self):
         # Rates monotone in representative billable weight keep the packer's
         # "fewer, bigger boxes for bulk" outcomes intuitive; a violation means
-        # the table (or a checker PR) needs a second look.
+        # the table (or a checker PR) needs a second look. Asserted PER CATALOG
+        # FAMILY: zone rows carry both bareroot and potted boxes (GOL-2031) and
+        # each family has its own representative-weight function; cross-family
+        # ordering is not a claim the packers rely on (they never mix families
+        # in one plan).
+        families = (
+            (sb.BOXES, sb.representative_billable_lb),
+            (sb.POTTED_BOXES, sb.potted_representative_billable_lb),
+        )
         for zone, boxes in sz.ZONE_RATES.items():
-            ordered = sorted(boxes, key=sb.representative_billable_lb)
-            for lighter, heavier in zip(ordered, ordered[1:]):
-                self.assertLessEqual(
-                    boxes[lighter]["base"],
-                    boxes[heavier]["base"],
-                    f"{zone}: {lighter} costs more than heavier {heavier}",
-                )
+            for catalog, weigh in families:
+                ordered = sorted((b for b in boxes if b in catalog), key=weigh)
+                for lighter, heavier in zip(ordered, ordered[1:]):
+                    self.assertLessEqual(
+                        boxes[lighter]["base"],
+                        boxes[heavier]["base"],
+                        f"{zone}: {lighter} costs more than heavier {heavier}",
+                    )
 
 
 class TestShippingZoneTableCoverage(unittest.TestCase):

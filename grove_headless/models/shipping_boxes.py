@@ -530,6 +530,19 @@ def pack_order(items: list[tuple[int, float]], mode: str, cost_of) -> list[Packe
 # and feed the GOL-1906 rate re-derive once USPS-GA is live on the Shippo token.
 POTTED_UNIT_LB = 2.0  # Josh weigh-in 2026-09-06: firmed damp peat-and-bagged lb/tree
 
+
+def known_box_ids() -> set[str]:
+    """Every rateable box id across BOTH engines (bareroot BOXES + POTTED_BOXES).
+
+    The zone rate table carries rows for both catalogs (the morning rate-check
+    probes potted boxes too, GOL-2031/GOL-1906) — a rate-table membership check
+    against ``BOXES`` alone false-fails the moment a regen lands, which is
+    exactly how the 2026-09-08 rate-check turned main red after #190 descoped
+    ``BOXES`` to the two bareroot SKUs.
+    """
+    return set(BOXES) | set(POTTED_BOXES)
+
+
 POTTED_BOXES: dict[str, dict] = {
     "p24x10x4": {
         "length": 24,
