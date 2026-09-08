@@ -40,5 +40,13 @@
     "small": {
       "base": 39.0
     }
+  },
+  "zone_6": {
+    "large": {
+      "base": 28.0
+    },
+    "small": {
+      "base": 23.0
+    }
   }
 }

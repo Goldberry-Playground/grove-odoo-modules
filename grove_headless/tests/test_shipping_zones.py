@@ -9,8 +9,8 @@ Two layers:
   * Contract tests — assert the engine's fail-safe behaviour. These pass at all
     times and guard against regression on the core routing logic.
   * Table-coverage tests — assert the finished table is complete and self-
-    consistent. They automatically enforce full coverage across all 31 green
-    states, 5 zones, and every catalog box.
+    consistent. They automatically enforce full coverage across all 32 green
+    states, 6 zones, and every catalog box.
 """
 
 import importlib.util
@@ -24,7 +24,7 @@ _spec.loader.exec_module(sz)
 
 sb = sz.shipping_boxes
 
-# Independent pin of the 31 green states (deliberately NOT sz.GREEN_STATES:
+# Independent pin of the 32 green states (deliberately NOT sz.GREEN_STATES:
 # the test must catch an accidental edit to the module's set, so it keeps
 # its own copy of the compliance list).
 GREEN = frozenset(
@@ -34,6 +34,7 @@ GREEN = frozenset(
         "CT",
         "DC",
         "DE",
+        "FL",
         "GA",
         "IA",
         "IL",
@@ -117,8 +118,8 @@ class TestShippingZoneEngineContract(unittest.TestCase):
         self.assertIsNone(sz.box_rate("", "small"))
         self.assertIsNone(sz.box_rate(None, "small"))
 
-    def test_there_are_exactly_five_rate_zones(self):
-        self.assertEqual(len(sz.RATE_ZONE_IDS), 5)
+    def test_there_are_exactly_six_rate_zones(self):
+        self.assertEqual(len(sz.RATE_ZONE_IDS), 6)
 
     def test_rate_is_box_scoped(self):
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
@@ -182,7 +183,7 @@ class TestShippingZoneEngineContract(unittest.TestCase):
 
 
 class TestGreenStateCoverage(unittest.TestCase):
-    """The 31-state green list and its rate coverage."""
+    """The 32-state green list and its rate coverage."""
 
     def test_exactly_the_green_states_are_mapped(self):
         self.assertEqual(set(sz.ZONE_BY_STATE), GREEN)
@@ -246,11 +247,11 @@ class TestShippingZoneTableCoverage(unittest.TestCase):
     def test_every_mapped_zone_has_a_rate(self):
         for state, zone in sz.ZONE_BY_STATE.items():
             self.assertIn(zone, sz.ZONE_RATES, f"state {state} maps to {zone} with no rate rule")
-            self.assertIn(zone, sz.RATE_ZONE_IDS, f"{zone} is not one of the 5 zone ids")
+            self.assertIn(zone, sz.RATE_ZONE_IDS, f"{zone} is not one of the 6 zone ids")
 
     def test_full_state_coverage_when_configured(self):
         if not sz.is_configured():
-            self.skipTest("31-state rate table not yet populated")
+            self.skipTest("32-state rate table not yet populated")
         mapped = set(sz.ZONE_BY_STATE)
         self.assertEqual(
             mapped,

@@ -14,7 +14,7 @@ checker is active is not safe; they will be dropped on the next rates PR.
 Design is documented in the vault wiki at ``Software/Grove Shipping``.
 
 Fail-safe by design: ``compute_order_shipping`` returns ``None`` for any
-address outside the 31-state green list, any cart containing a potted line,
+address outside the 32-state green list, any cart containing a potted line,
 and any cart the packer cannot plan — the checkout then adds NO shipping line
 (and the checkout endpoint blocks with an explicit message via
 ``unshippable_reason``). We never emit a wrong or guessed charge.
@@ -108,7 +108,7 @@ US_STATES: tuple[str, ...] = (
     "MP",
 )
 
-RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 6))
+RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 7))
 
 # Product tiers survive v2 as the shippability gate. GOL-2199 potted go-live
 # (CEO directive 2026-09-08): potted / peat-and-bagged now SHIPS on its own
@@ -152,6 +152,7 @@ GREEN_STATES: frozenset[str] = frozenset(
         "CT",
         "DC",
         "DE",
+        "FL",
         "GA",
         "IA",
         "IL",
@@ -219,10 +220,10 @@ ZONE_BY_STATE: dict[str, str] = {
     # rate-checker now probes MULTIPLE corners per zone and publishes the max
     # (see scripts/rate_check REFERENCE_ZIPS) — otherwise a single-corner probe
     # of Portland ME could drift below a southern corner and undercharge it.
-    # The far/western states whose large-box target EXCEEDS the current 5-zone
-    # table (FL, OK, KS, NE, SD, ND, TX, NM, AZ) are deliberately NOT here: they
-    # need new distance zones with real probed rates (GOL-2128 follow-up), never
-    # a guessed zone_5 undercharge. (The original dollar figures were probed on
+    # The remaining far/western states whose large-box target EXCEEDS the
+    # current table (OK, KS, NE, SD, ND, TX, NM, AZ) are deliberately NOT here:
+    # they need new distance zones with real probed rates (GOL-2128 follow-up),
+    # never a guessed undercharge. (The original dollar figures were probed on
     # the retired bulk boxes; re-probe against the two-SKU catalog before adding
     # any of these states.)
     "TN": "zone_5",
@@ -235,6 +236,21 @@ ZONE_BY_STATE: dict[str, str] = {
     "MO": "zone_5",
     "IA": "zone_5",
     "ME": "zone_5",
+    # zone_6 — Florida (GOL-2235). Contrary to the bulk-box-era assumption that
+    # FL "exceeds the 5-zone table", a fresh two-SKU probe (2026-09-08, origin
+    # 26651, same cheapest-of-{UPS Ground, USPS Ground Advantage} selector label
+    # purchase uses; read-only rate quotes, prod Shippo key) puts FL's worst
+    # corners (Miami 33101, Key West 33040 — both tied) at only small=$16.84 /
+    # large=$21.37, so ceil(quote+pkg+2) targets small=$23 / large=$28. That is
+    # BELOW every existing zone (zone_1's small=$20 already undercharges, and
+    # zone_1's large=$24 undercharges FL's large=$28), so FL fits no existing
+    # zone at its true cost. zone_5 (39/43) would dominate it but over-bills
+    # ~$15/box; instead FL gets its own bucket priced at the probed target.
+    # Zones are cost buckets, not distance rings (zone_4 > zone_5 already), so a
+    # "farther" zone_6 that is CHEAPER than 4/5 is consistent — the only invariant
+    # is never-undercharge, and $23/$28 >= FL's target. The daily rate-checker
+    # maintains this bucket from REFERENCE_ZIPS["zone_6"] (Miami + Key West).
+    "FL": "zone_6",
 }
 
 assert set(ZONE_BY_STATE) == GREEN_STATES
@@ -274,7 +290,7 @@ def rate_feed(calendar_override=None, today=None) -> dict:
 
     ``zones`` mirrors ``data/shipping_rates.json`` (minus the ``_``-prefixed
     keys, already stripped at load). ``zone_by_state`` is the authoritative
-    31-state green list -> zone map — the compliance gate the frontend must
+    32-state green list -> zone map — the compliance gate the frontend must
     stay in lockstep with. ``packing`` carries the box catalog + capacities so
     the frontend can mirror ``pack_order`` exactly. ``calendar`` is the annual,
     admin-editable shipping calendar keyed to USDA hardiness zone (NOT the

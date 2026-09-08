@@ -78,9 +78,10 @@ class TestLiveTable(unittest.TestCase):
         table = feed["zones"]
         zones = [z for z in sz.RATE_ZONE_IDS if z in table]
         boxes = mono.ordered_boxes(sb.BOXES, sb.representative_billable_lb)
-        # 2 boxes x 5 zones — the descoped bareroot catalog (CEO 2026-09-07).
+        # 2 boxes x 6 zones — the descoped bareroot catalog (CEO 2026-09-07),
+        # zone_6 = Florida (GOL-2235).
         self.assertEqual(len(boxes), 2)
-        self.assertEqual(len(zones), 5)
+        self.assertEqual(len(zones), 6)
         self.assertEqual(mono.find_violations(table, boxes, zones), [])
 
 
