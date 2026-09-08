@@ -21,7 +21,7 @@ from ..models.newsletter import newsletter_tag_names
 from ..models.order_alerts import format_merchant_email, format_new_order_discord
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
 from ..models.shipment_email import NOTIFY_STATUSES, shipment_notice_copy
-from ..models.shipping_boxes import packing_mode
+from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from ..models.shipping_calendar import (
     MODE_PREORDER,
     merge_calendar_override,
@@ -555,12 +555,19 @@ class GroveHeadlessAPI(http.Controller):
         )
         total = request.env["product.template"].sudo().with_company(current_company).search_count(domain)
 
+        # Warm the batched preorder-cap compute once for the whole page so the
+        # per-card read below is a cache hit, not an N+1 (GOL-2171). The frontend
+        # renders sold-out identically whether it came from stock or the cap, so
+        # the derived flag must ride every card the grid can show.
+        products.mapped("grove_preorder_cap_reached")
+
         items = []
         for product in products:
             data = _serialize_product(product, PRODUCT_LIST_FIELDS)
             if data:
                 data["image_url"] = _image_url("product.template", product, "image_128")
                 data["slug"] = data.pop("grove_slug", "") or ""
+                data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
                 data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
                 data["categories"] = [
                     {"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids
@@ -631,6 +638,10 @@ class GroveHeadlessAPI(http.Controller):
         data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
         data["categories"] = [{"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids]
         data["images"] = _serialize_images(product)
+        # Preorder-cap sold-out state (GOL-2171) — same derived flag as the grid
+        # so the PDP buy box renders sold-out identically whether it came from
+        # stock or from the cap. The frontend never computes the threshold.
+        data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
 
         return _json_response(data)
 
@@ -825,7 +836,7 @@ class GroveHeadlessAPI(http.Controller):
         # Box Engine v2: per_tree_rate = cheapest single-tree shipment in the
         # season's packing mode. Potted (pickup-only) and farm pickup pay no
         # shipping, so no per-tree ship rate is quoted for either.
-        mode = packing_mode(today)
+        mode = packing_mode(today, dormancy_window(request.env))
         result["packing_mode"] = mode
         quotes_ship = tier == "bareroot" and not is_pickup
         result["per_tree_rate"] = single_tree_rate(state, length_class, mode) if quotes_ship else None
@@ -1000,6 +1011,113 @@ class GroveHeadlessAPI(http.Controller):
                     "id": order.currency_id.id,
                     "name": order.currency_id.name,
                 },
+            }
+        )
+
+    @http.route(
+        "/grove/api/v1/orders/<int:order_id>/mark-shipped",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def order_mark_shipped(self, order_id, **_kwargs):
+        """Operator "packed & shipped" signal from the Discord bridge (GOL-1980).
+
+        Bearer-auth'd like /orders (only the scoped bridge service key reaches
+        it, never the public internet). Drives the *canonical* GOL-1981 terminal
+        transition (``action_grove_mark_shipped`` — pickup-guarded, row-locked,
+        idempotent), and on the real move does the two things a ship event now
+        owns:
+
+          1. **Settlement (GOL-2053).** Ship is exactly when a deposit-only
+             preorder's deferred balance (tree prices + ACTUAL shipping +
+             recomputed WV tax) is captured off-session. Fired here so a
+             mark-shipped that never went through the Odoo label flow still
+             settles — a shipped-but-uncaptured deposit order would strand money
+             uncollected (CEO directive 2026-09-07). Idempotent: an order already
+             ``settled`` (labels bought earlier via ``action_buy_shipping_labels``)
+             is a no-op, and the order-scoped Stripe idempotency key means a
+             replay never double-charges. Best-effort by contract — a decline is
+             recorded and dunned, never rolls back the shipped transition.
+          2. **Branded shipment email (GOL-1979).** Routed through the same
+             ``_apply_delivery_status(..., "transit", ...)`` the Shippo webhook
+             uses, so the customer gets exactly ONE "shipped" notice across both
+             signals: the operator button sets the raw substatus to ``transit``,
+             and a later Shippo transit scan then finds no change and re-sends
+             nothing.
+
+        Idempotent overall: a double-click / retry returns 200 with
+        ``already_shipped: true`` and re-runs neither settlement nor email. A
+        missing or foreign-tenant order is 404 (an id from another company never
+        leaks or mutates here); a farm-pickup order is 409 (it collects at the
+        farm and buys no label). The signal fails VISIBLY — a non-2xx on any
+        failure — so the bridge surfaces it as an ephemeral error rather than
+        acking in Discord and silently dropping the write (GOL-1975 guard).
+
+        Body (optional): ``{"actor": "<discord user id>"}`` — stamped into the
+        order chatter for the audit trail.
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        actor = payload.get("actor")
+        actor = actor if isinstance(actor, str) and actor.strip() else None
+
+        current_company = request.website.company_id
+        order = (
+            request.env["sale.order"]
+            .sudo()
+            .with_company(current_company)
+            .search(
+                [("id", "=", order_id), ("company_id", "=", current_company.id)],
+                limit=1,
+            )
+        )
+        if not order:
+            return _json_response({"error": "Order not found"}, status=404)
+        if order.grove_fulfillment == "pickup":
+            # Pickup collects at the farm, buys no label and sends no shipment
+            # email — reject VISIBLY so the operator sees an ephemeral error,
+            # never a silent ack of a transition that will not happen.
+            return _json_response(
+                {"error": "Order is farm pickup and cannot be marked shipped"},
+                status=409,
+            )
+
+        result = _operator_mark_shipped(request.env, order, actor)
+
+        stage = order.grove_fulfillment_stage
+        # action_grove_mark_shipped returns False for BOTH "already shipped"
+        # (idempotent double-click) and "illegal transition" (the order is not in
+        # a shippable state, e.g. awaiting_payment / deposit_paid not yet waved).
+        # Only the former is a safe 200 ack; the latter must fail VISIBLY so the
+        # operator sees an ephemeral error, not a silent "already shipped" for a
+        # write that never happened (GOL-1975 no-silent-ack guard).
+        if not result["newly_shipped"] and stage not in ("shipped", "delivered"):
+            return _json_response(
+                {
+                    "error": f"Order is not in a shippable state (stage: {stage}); not marked shipped",
+                    "grove_fulfillment_stage": stage,
+                },
+                status=409,
+            )
+
+        tracking = order.grove_tracking_numbers
+        carriers = order.grove_shipping_carriers
+        return _json_response(
+            {
+                "id": order.id,
+                "name": order.name,
+                "state": order.state,
+                "grove_fulfillment_stage": stage,
+                "grove_checkout_status": order.grove_checkout_status,
+                "already_shipped": not result["newly_shipped"],
+                "settlement": result["settlement"],
+                "tracking_numbers": tracking.split("\n") if tracking else [],
+                "carriers": carriers.split("\n") if carriers else [],
             }
         )
 
@@ -1590,7 +1708,7 @@ def _apply_shipping_line(env, order, shipping, company):
     ]
     if not items:
         return None
-    charge = compute_order_shipping(state, items, packing_mode(_date.today()))
+    charge = compute_order_shipping(state, items, packing_mode(_date.today(), dormancy_window(env)))
     if charge is None:
         # A destination outside the 31-state green list legitimately gets no
         # shipping line. But a *green* state that still can't be priced means a
@@ -2020,9 +2138,13 @@ def _bareroot_tier(product) -> bool:
     return tier == "bareroot"
 
 
-def _bareroot_ships_now(window_zip, tier, today):
+def _bareroot_ships_now(window_zip, tier, today, window=None):
     """``ships_now`` for a bareroot line on the CHARGING path (GOL-1666 §2),
     with the unknown-zone money-path fallback (GOL-2145).
+
+    ``window`` is the resolved dormancy window (``dormancy_window(env)``); the
+    caller holds ``env`` and passes it so this gate tracks the Odoo-editable
+    dates. ``None`` falls back to the seed default for pure/legacy callers.
 
     ``ship_options`` is conservative on a ZIP absent from the PHZM matrix
     (``ships_now`` False) — the right default for the display feed, but on the
@@ -2035,7 +2157,20 @@ def _bareroot_ships_now(window_zip, tier, today):
     verbatim, so a genuine dormant-window bareroot still deposits.
 
     Kept as one helper so ``_build_stripe_line_items`` and ``_cart_has_preorder``
-    stay in lockstep on the ships-now axis."""
+    stay in lockstep on the ships-now axis.
+
+    Nursery-dormancy override (GOL-1906, Josh 2026-09-07): bareroot NEVER ships
+    outside the nursery dormancy window, whatever the destination zone's Arbor
+    Day window says — the default per-zone spring windows run to Jun 6, well past
+    the Apr 15 dormancy end, so a naive in-window read would ship a leafed
+    (~2x heavier) parcel now and buy a leafed label against the dormant-priced
+    rate table (a systematic undercharge, and the label path now refuses it
+    outright). So when the nursery cannot ship bareroot today, the line fails
+    CLOSED to the preorder deposit path — the order is NOT rejected, it ships in
+    the next dormant wave and settles shipping at actual cost then (GOL-2053).
+    This gate is first because the origin constraint is absolute."""
+    if not can_ship_bareroot(today, window):
+        return False
     opts = ship_options(window_zip, tier, today)
     ships_now = opts.get("ships_now", True)
     if not ships_now and opts.get("usda_zone") is None:
@@ -2110,6 +2245,7 @@ def _cart_has_preorder(env, order, payload):
     """
     calendar_preorder_ids = _calendar_preorder_variant_ids(env, order, payload)
     today = _date.today()
+    window = dormancy_window(env)  # Odoo-editable dormancy dates (GOL-1906)
     is_ship_order = any(
         ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE for ol in order.order_line
     )
@@ -2127,7 +2263,7 @@ def _cart_has_preorder(env, order, payload):
         line_ships_now = True
         if tier == "bareroot":
             window_zip = dest_zip if is_ship_order else farm_zip
-            line_ships_now = _bareroot_ships_now(window_zip, tier, today)
+            line_ships_now = _bareroot_ships_now(window_zip, tier, today, window)
         for _amount, _qty, is_preorder in stripe_gateway.line_charge(
             line.price_unit, line.product_uom_qty, free_qty, ships_now=line_ships_now
         ):
@@ -2178,6 +2314,7 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
     # a warm-zone buyer collecting here is bound by when we can lift on the farm,
     # not by their home zone's later window.
     today = _date.today()
+    window = dormancy_window(order.env)  # Odoo-editable dormancy dates (GOL-1906)
     is_ship_order = any(
         ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE for ol in order.order_line
     )
@@ -2232,7 +2369,7 @@ def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
             # orders from the farm's own zone (GOL-1669). An unknown destination
             # zone falls back to the global season, not a blanket deposit (GOL-2145).
             window_zip = dest_zip if is_ship_order else farm_zip
-            line_ships_now = _bareroot_ships_now(window_zip, tier, today)
+            line_ships_now = _bareroot_ships_now(window_zip, tier, today, window)
         for amount, qty, is_preorder in stripe_gateway.line_charge(
             line.price_unit, ordered_qty, free_qty, ships_now=line_ships_now
         ):
@@ -2939,6 +3076,43 @@ def _apply_delivery_status(env, order, new_status, tracking):
     order.grove_delivery_status = new_status
     _notify_shipping_status(env, order, new_status, tracking)
     return True
+
+
+def _operator_mark_shipped(env, order, actor=None):
+    """Operator "packed & shipped" orchestration (GOL-1980).
+
+    Shared by the Discord-bridge endpoint (``order_mark_shipped``) and unit-
+    tested directly — the house idiom, since the settlement and shipment-email
+    helpers it composes (``settle_order_at_ship`` / ``_apply_delivery_status``)
+    are module functions taking ``env``, not request-bound. The caller has
+    already resolved + company-scoped ``order`` and rejected farm pickup.
+
+    Drives the canonical GOL-1981 terminal transition and, ONLY on the real
+    move, does the two things a ship event now owns — both idempotent and
+    best-effort so neither can roll back the shipped state:
+
+      1. **Ship-time settlement (GOL-2053).** Ship is exactly when a deposit-only
+         preorder's deferred balance (tree prices + ACTUAL shipping + recomputed
+         WV tax) is captured off-session. Fired here so a mark-shipped that never
+         ran the Odoo label flow still settles — a shipped-but-uncaptured deposit
+         order would strand money uncollected (CEO directive 2026-09-07). An
+         order already ``settled`` (labels bought earlier) is a no-op.
+      2. **Branded shipment email (GOL-1979).** Routed through the same
+         ``_apply_delivery_status(..., "transit", ...)`` the Shippo webhook uses,
+         so the customer gets exactly ONE "shipped" notice across both signals:
+         the button sets the raw substatus to ``transit`` and a later Shippo
+         transit scan then finds no change and re-sends nothing.
+
+    A double-click / retry (``newly_shipped`` False) re-runs neither. Returns a
+    dict for the endpoint's JSON body: ``{"newly_shipped": bool, "settlement":
+    <status str> | None}``.
+    """
+    newly_shipped = order.action_grove_mark_shipped(operator=actor, source="discord")
+    settlement = None
+    if newly_shipped:
+        settlement = order._grove_settle_at_ship()
+        _apply_delivery_status(env, order, "transit", order.grove_tracking_numbers or "")
+    return {"newly_shipped": newly_shipped, "settlement": settlement}
 
 
 def _order_shipments(order, fallback_tracking=None):

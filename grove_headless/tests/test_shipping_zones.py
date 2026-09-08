@@ -63,15 +63,11 @@ GREEN = frozenset(
     }
 )
 
-# A complete single-zone box rate table for contract tests (mirrors the
-# provisional zone_1 card).
+# A complete single-zone box rate table for contract tests (two-SKU catalog:
+# small 1-5 trees, large 6-10; large < 2*small so 6-10 picks one large box).
 BOX_RATES_Z1 = {
-    "br16": {"base": 18.0},
-    "s20": {"base": 22.0},
-    "s32": {"base": 24.0},
-    "s46": {"base": 26.0},
-    "b20": {"base": 28.0},
-    "b32": {"base": 30.0},
+    "small": {"base": 12.0},
+    "large": {"base": 18.0},
 }
 
 
@@ -105,24 +101,24 @@ class TestShippingZoneEngineContract(unittest.TestCase):
 
     def test_unmapped_state_returns_none(self):
         # None (not 0.0) => "no shipping configured, add no line".
-        self.assertIsNone(sz.box_rate("ZZ", "s20"))
+        self.assertIsNone(sz.box_rate("ZZ", "small"))
         self.assertIsNone(sz.compute_order_shipping("ZZ", [("bareroot", 20, 1)], "leafed"))
 
     def test_empty_or_missing_state_returns_none(self):
-        self.assertIsNone(sz.box_rate("", "s20"))
-        self.assertIsNone(sz.box_rate(None, "s20"))
+        self.assertIsNone(sz.box_rate("", "small"))
+        self.assertIsNone(sz.box_rate(None, "small"))
 
     def test_there_are_exactly_five_rate_zones(self):
         self.assertEqual(len(sz.RATE_ZONE_IDS), 5)
 
     def test_rate_is_box_scoped(self):
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
-            self.assertEqual(sz.box_rate("WV", "s20"), 22.0)
-            self.assertEqual(sz.box_rate("WV", "b32"), 30.0)
+            self.assertEqual(sz.box_rate("WV", "small"), 12.0)
+            self.assertEqual(sz.box_rate("WV", "large"), 18.0)
 
     def test_missing_box_rule_returns_none(self):
-        with _temp_table({"WV": "zone_1"}, {"zone_1": {"s20": {"base": 22.0}}}):
-            self.assertIsNone(sz.box_rate("WV", "b32"))
+        with _temp_table({"WV": "zone_1"}, {"zone_1": {"small": {"base": 12.0}}}):
+            self.assertIsNone(sz.box_rate("WV", "large"))
 
     def test_rates_load_from_json_file(self):
         # The shipped data file parses and, if non-empty, only contains known
@@ -244,44 +240,40 @@ class TestOrderShipping(unittest.TestCase):
 
     TABLE = {"zone_1": BOX_RATES_Z1}
 
-    def test_single_leafed_tree_prices_one_s20(self):
+    def test_single_tree_prices_one_small_box(self):
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 1)], "leafed"), 22.0)
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 1)], "leafed"), 12.0)
 
-    def test_five_leafed_trees_take_two_boxes(self):
-        # cap 4/box leafed -> 4 + 1 = two s20 boxes.
+    def test_five_trees_fit_one_small_box(self):
+        # Small holds 1-5 -> one box ($12), not five.
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 5)], "leafed"), 44.0)
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 5)], "leafed"), 12.0)
 
-    def test_bulk_dormant_order_uses_bulk_box(self):
-        # 50 dormant -> one b20 ($28), NOT 4 x s20 ($88).
+    def test_six_trees_use_one_large_box(self):
+        # 6-10 -> one large box ($18), NOT two smalls ($24).
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 50)], "dormant"), 28.0)
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 6)], "dormant"), 18.0)
 
-    def test_sixty_dormant_split_bulk_plus_small(self):
-        # 60 -> b20 (50) + s20 (10) = 28 + 22 = 50.
+    def test_eleven_trees_split_large_plus_small(self):
+        # 11 -> large (10) + small (1) = 18 + 12 = 30.
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 60)], "dormant"), 50.0)
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 11)], "dormant"), 30.0)
 
-    def test_short_trees_top_up_tall_box(self):
-        # 1 x 46" + 14 x 20" dormant all fit the one s46 (cap 15) = 26.0.
+    def test_mixed_length_classes_pool_by_count(self):
+        # 3 whip-class + 3 standard-class = 6 trees -> one large box ($18).
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            items = [("bareroot", 46, 1), ("bareroot", 20, 14)]
-            self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 26.0)
-
-    def test_single_dormant_whip_uses_whip_box(self):
-        with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 16, 1)], "dormant"), 18.0)
+            items = [("bareroot", 16, 3), ("bareroot", 20, 3)]
+            self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 18.0)
 
     def test_any_potted_item_fails_whole_order(self):
         with _temp_table({"WV": "zone_1"}, self.TABLE):
             items = [("bareroot", 20, 2), ("potted", 20, 1)]
             self.assertIsNone(sz.compute_order_shipping("WV", items, "leafed"))
 
-    def test_missing_box_rate_fails_whole_order(self):
-        # Only s20 priced: a 46" tree has no usable rated box -> None.
-        with _temp_table({"WV": "zone_1"}, {"zone_1": {"s20": {"base": 22.0}}}):
-            self.assertIsNone(sz.compute_order_shipping("WV", [("bareroot", 46, 1)], "leafed"))
+    def test_tree_taller_than_any_box_fails_whole_order(self):
+        # No box is longer than 24" -> a 30" tree can't be packed -> None.
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            self.assertIsNone(sz.compute_order_shipping("WV", [("bareroot", 30, 1)], "leafed"))
 
     def test_unmapped_state_returns_none(self):
         with _temp_table({"WV": "zone_1"}, self.TABLE):
@@ -290,7 +282,7 @@ class TestOrderShipping(unittest.TestCase):
     def test_zero_and_negative_qty_ignored(self):
         with _temp_table({"WV": "zone_1"}, self.TABLE):
             items = [("bareroot", 20, 0), ("bareroot", 20, 1)]
-            self.assertEqual(sz.compute_order_shipping("WV", items, "leafed"), 22.0)
+            self.assertEqual(sz.compute_order_shipping("WV", items, "leafed"), 12.0)
             self.assertIsNone(sz.compute_order_shipping("WV", [("bareroot", 20, 0)], "leafed"))
 
     def test_empty_cart_returns_none(self):
@@ -303,13 +295,13 @@ class TestSingleTreeRate(unittest.TestCase):
 
     TABLE = {"zone_1": BOX_RATES_Z1}
 
-    def test_leafed_single_is_smallest_leafed_box(self):
+    def test_single_tree_is_the_small_box(self):
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.single_tree_rate("WV", 20, "leafed"), 22.0)
+            self.assertEqual(sz.single_tree_rate("WV", 20, "leafed"), 12.0)
 
-    def test_dormant_whip_single_is_whip_box(self):
+    def test_single_whip_class_is_also_the_small_box(self):
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.single_tree_rate("WV", 16, "dormant"), 18.0)
+            self.assertEqual(sz.single_tree_rate("WV", 16, "dormant"), 12.0)
 
     def test_unmapped_state_returns_none(self):
         with _temp_table({"WV": "zone_1"}, self.TABLE):
@@ -359,7 +351,7 @@ class TestFullNameShippingRouting(unittest.TestCase):
             by_code = sz.compute_order_shipping("WV", [("bareroot", 20, 1)], "leafed")
             by_name = sz.compute_order_shipping("West Virginia", [("bareroot", 20, 1)], "leafed")
             self.assertEqual(by_name, by_code)
-            self.assertEqual(by_name, 22.0)
+            self.assertEqual(by_name, 12.0)
 
     def test_full_name_non_green_state_still_drops(self):
         # "Ohio" canonicalizes to OH, but OH is not in this temp green table,

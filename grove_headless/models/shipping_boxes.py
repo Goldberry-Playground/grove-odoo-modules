@@ -2,113 +2,246 @@
 
 Replaces the one-tree-one-box model: shipping now prices PER PACKED BOX, not
 per tree, because under carrier dimensional billing the box drives the cost —
-50 dormant bareroots and 10 dormant bareroots in the same 32x12x12 bill nearly
-the same. Design: vault wiki/Software/Grove Shipping (Box Engine v2, 2026-07-31;
-recalibrated off UPS-only billing to the USPS/UPS least-cost race, GOL-1906).
+5 dormant bareroots and 1 dormant bareroot in the same box bill nearly the
+same. Design: vault wiki/Software/Grove Shipping (Box Engine v2, 2026-07-31;
+recalibrated off UPS-only billing to the USPS/UPS least-cost race, GOL-1906;
+catalog descoped to two SKUs by CEO directive 2026-09-07).
+
+**Two-SKU catalog (CEO directive, 2026-09-07).** The bulk 12x12 boxes and the
+graduated 8x8 length ladder are retired; the near-term catalog is exactly two
+boxes, both 24" long, selected by tree COUNT (contiguous, non-overlapping
+ranges) rather than by tree height:
+
+* ``small`` — 24x6x4, holds 1-5 trees.
+* ``large`` — 24x9x6, holds 6-10 trees.
+
+Because both boxes share one length (24"), the packer no longer walks a length
+ladder for a box tall enough; it pools the whole cart and picks the cheapest
+box combination for the total tree count. A tree taller than the box (> 24")
+has no box in this catalog and fails safe (no shipping line).
 
 Two packing modes, resolved from the ship date (trees are dormant or leafed
-out at the nursery — it is a property of the season, not the product):
-
-* ``dormant`` — bare crowns pack dense: 50+ per 12x12-cross-section box,
-  ~15 per 8x8, or a single whip in the 16x6x4.
-* ``leafed`` — canopy needs room: up to 4 per 8x8 box (conservative end of
-  Josh's 4-8), 12x12 bulk boxes and the whip box are not used.
-
-Every product variant carries a tree length class (the box length in inches
-its height requires — 16/20/32/46); a tree may ride in any box at least that
-long. Packing is exact min-cost per destination zone (small DP), with a
-top-up pass so short trees fill spare capacity in boxes already opened for
-tall ones.
+out at the nursery — it is a property of the season, not the product). The mode
+does not change how many trees fit the descoped boxes (Josh's 1-5 / 6-10 ranges
+are season-independent); it only changes the estimated packed WEIGHT the rate
+probe declares (leafed foliage is heavier), via ``PER_TREE_LB``.
 
 Pure Python, no Odoo imports — same testability contract as
-``shipping_zones.py`` (see ``tests/test_shipping_boxes.py``).
+``shipping_zones.py`` (see ``tests/test_shipping_boxes.py``). The one function
+that touches config, ``dormancy_window(env)``, still imports no Odoo — it takes
+``env`` as an argument (the single env boundary for the Odoo-editable dormancy
+dates); the packing/window CORE stays argument-driven and DB-free so its tests
+run with no database.
 """
 
 import math
 from datetime import date
 
+# (month, day) inclusive endpoints of the dormancy window: ((start_m, start_d),
+# (end_m, end_d)). Wraps the year end when start > end (the real config does:
+# Nov 1 -> Apr 15).
+Window = tuple[tuple[int, int], tuple[int, int]]
+
 # ── Packing modes ───────────────────────────────────────────────────────────
 MODES: tuple[str, ...] = ("dormant", "leafed")
 
-# Nursery dormancy window (month, day) inclusive — trees ship as dormant
-# bareroot inside it, leafed-out bareroot outside it. Conservative default
-# for the Summersville (z6) nursery; Josh + nursery manager own these dates
-# (edit via PR, tests assert shape only).
-DORMANT_START = (11, 1)
-DORMANT_END = (4, 15)
+# Modes the published rate table is allowed to quote at (GOL-1906, Josh
+# 2026-09-07). A "mode" (dormant/leafed) is NOT the same axis as a shippability
+# "tier" (bareroot/potted, see shipping_zones.SHIPPABLE_TIERS): both modes are
+# bareroot. But a bareroot tree only ever gets a SHIPPING LABEL in its dormant
+# window — outside it the same stock resolves to peat-and-bagged (potted-
+# equivalent) and is farm-pickup only, so no leafed-weight parcel is ever bought.
+# ``representative_billable_lb`` must therefore quote the DORMANT parcel only;
+# taking max() across all modes let the heavier leafed weight (PER_TREE_LB 2.0)
+# drive the table, inflating small to 11 lb / large to 22 lb against a real
+# dormant 7 lb / 14 lb — a systematic OVERCHARGE off a parcel that can't be
+# ordered. (Josh phrased this as "capacity keys ∩ SHIPPABLE_TIERS"; because
+# modes and tiers are different axes that literal intersection is empty, so this
+# constant encodes the intent — the shippable/quotable modes — directly.)
+QUOTABLE_MODES: tuple[str, ...] = ("dormant",)
+
+# Nursery dormancy window (month, day) inclusive — bareroot stock can only be
+# lifted and shipped as dormant bareroot INSIDE it. These constants are the
+# SEED DEFAULT ONLY, not the source of truth: the live window is Odoo-editable
+# per Josh 2026-09-07 ("we should be able to toggle these dates in odoo") —
+# stored in ``ir.config_parameter`` (``grove_headless.dormancy_start`` /
+# ``.dormancy_end``, seeded from these, format ``MM-DD``), read at the env
+# boundary by ``dormancy_window`` and INJECTED into ``packing_mode`` /
+# ``can_ship_bareroot``. Do NOT read these constants as authoritative in new
+# code — resolve the window from config and pass it in, so a shifted season is
+# an Odoo edit, not a PR + deploy.
+#
+# Josh ratified Nov 1 – Apr 15 as the real operating window on 2026-09-07 ("do
+# you ship bareroot outside Nov 1 – Apr 15? — no, never"). The window now gates
+# REVENUE, not just packed weight: outside it a bareroot LABEL cannot be bought
+# and a bareroot line cannot ship now (it becomes a preorder — see
+# ``can_ship_bareroot`` and its callers in sale_order / controllers). A date
+# wrong by a week either blocks a saleable shipment or lets an underpriced one
+# through, so a malformed config param must FAIL CLOSED loudly (``parse_window``
+# raises) — never silently fall back to these seeds and never to a leafed label.
+DEFAULT_DORMANT_START = (11, 1)
+DEFAULT_DORMANT_END = (4, 15)
+DEFAULT_WINDOW: Window = (DEFAULT_DORMANT_START, DEFAULT_DORMANT_END)
+
+# System-parameter keys + their seeded MM-DD strings (mirrored in
+# data/grove_dormancy_params.xml, noupdate so admin edits survive upgrade).
+DORMANCY_START_PARAM = "grove_headless.dormancy_start"
+DORMANCY_END_PARAM = "grove_headless.dormancy_end"
+_DEFAULT_START_STR = "11-01"
+_DEFAULT_END_STR = "04-15"
 
 
-def packing_mode(today: date) -> str:
-    """ "dormant" inside the nursery dormancy window (wraps year end), else "leafed"."""
+def _parse_md(raw) -> tuple[int, int]:
+    """Parse a ``MM-DD`` config value into a ``(month, day)`` tuple, or raise.
+
+    Deliberately strict — these dates gate revenue, so a typo must surface, not
+    degrade silently. Rejects a year (``2026-11-01`` -> 3 parts), non-integer
+    parts, and impossible calendar dates. A leap year (2000) validates the
+    day-of-month so ``02-29`` is accepted."""
+    s = "" if raw is None else str(raw).strip()
+    parts = s.split("-")
+    if len(parts) != 2:
+        raise ValueError(f"dormancy date {raw!r} must be 'MM-DD' (month-day, no year)")
+    try:
+        month, day = int(parts[0]), int(parts[1])
+    except ValueError:
+        raise ValueError(f"dormancy date {raw!r} must be 'MM-DD' with integer month and day") from None
+    try:
+        date(2000, month, day)  # leap year -> allows 02-29
+    except ValueError:
+        raise ValueError(f"dormancy date {raw!r} is not a real calendar date") from None
+    return (month, day)
+
+
+def parse_window(start_raw, end_raw) -> Window:
+    """Validate two ``MM-DD`` strings into a dormancy ``Window``, or raise.
+
+    Because ``packing_mode`` wraps the year (``t >= start or t <= end``), a
+    start AFTER the end is the NORMAL wrapping window (Nov -> Apr) — not an
+    error. The one degenerate shape is start == end, which the wrap turns into
+    "every day is dormant" (the leafed gate silently disabled, undercharging all
+    year) — that is the "inverted / zero-length" case Josh flagged, so reject it.
+    Never returns a default on bad input: the caller must fail closed."""
+    start = _parse_md(start_raw)
+    end = _parse_md(end_raw)
+    if start == end:
+        raise ValueError(
+            f"dormancy window start and end are identical ({start_raw!r}); that "
+            "makes every day dormant (leafed gate disabled) — set distinct dates"
+        )
+    return (start, end)
+
+
+def dormancy_window(env) -> Window:
+    """The live dormancy ``Window`` from ``ir.config_parameter`` (env boundary).
+
+    The ONLY place that reads the two system parameters; everything else takes
+    the resolved window as an argument so the pure engine (``packing_mode`` /
+    ``can_ship_bareroot`` and their no-DB tests) stays Odoo-free. Fails CLOSED:
+    a missing row uses the seeded default string, but a PRESENT-but-malformed
+    value raises out of ``parse_window`` rather than reverting to the seed — a
+    silent revert is exactly how a wrong window would ship underpriced labels."""
+    icp = env["ir.config_parameter"].sudo()
+    return parse_window(
+        icp.get_param(DORMANCY_START_PARAM, _DEFAULT_START_STR),
+        icp.get_param(DORMANCY_END_PARAM, _DEFAULT_END_STR),
+    )
+
+
+def packing_mode(today: date, window: "Window | None" = None) -> str:
+    """ "dormant" inside the nursery dormancy window (wraps year end), else "leafed".
+
+    ``window`` is the ``(start, end)`` (month, day) pair; ``None`` falls back to
+    ``DEFAULT_WINDOW`` so pure callers/tests need no config. Production callers
+    that hold an ``env`` pass ``dormancy_window(env)`` so the Odoo-editable dates
+    drive the result — the module constants are only a seed.
+
+    "leafed" is honored for the frontend season label and (for the potted
+    engine) the declared weight — but for BAREROOT it is not a shippable mode:
+    a bareroot label is only ever bought in a dormant window (see
+    ``QUOTABLE_MODES`` / ``can_ship_bareroot``), and outside it the order is a
+    preorder for the next dormant wave. Callers that turn a mode into a bareroot
+    parcel MUST gate on ``can_ship_bareroot`` first, or they would create a
+    leafed bareroot label this module treats as impossible.
+    """
+    start, end = DEFAULT_WINDOW if window is None else window
     t = (today.month, today.day)
-    return "dormant" if (t >= DORMANT_START or t <= DORMANT_END) else "leafed"
+    # A window with start > end wraps the year end (the default Nov 1 -> Apr 15):
+    # dormant is t in [start, Dec 31] ∪ [Jan 1, end]. A non-wrapping window
+    # (start <= end, e.g. an injected summer window) is the contiguous
+    # [start, end]. parse_window forbids start == end, so the two branches cover
+    # every valid window unambiguously.
+    if start > end:
+        in_window = t >= start or t <= end
+    else:
+        in_window = start <= t <= end
+    return "dormant" if in_window else "leafed"
+
+
+def can_ship_bareroot(today: date, window: "Window | None" = None) -> bool:
+    """True when the nursery may lift + ship dormant bareroot on ``today``.
+
+    The single authority for the seasonal gate (GOL-1906, Josh 2026-09-07):
+    bareroot only gets a shipping label, and only ships now, inside the dormancy
+    window (``packing_mode`` in ``QUOTABLE_MODES``). Outside it the same order is
+    a preorder that ships in the next dormant wave — so this must fail CLOSED for
+    a leafed date, never fall back to a leafed label. ``window`` mirrors
+    ``packing_mode`` (``None`` -> ``DEFAULT_WINDOW``); pass ``dormancy_window(env)``
+    in production so the ship/no-ship decision tracks the Odoo-editable dates.
+    Kept here beside ``packing_mode`` so the window definition and the
+    ship/no-ship decision can never drift across the module boundary."""
+    return packing_mode(today, window) in QUOTABLE_MODES
 
 
 # ── Tree length classes ─────────────────────────────────────────────────────
 # The minimum box length (inches) a tree's height requires. Variant field
 # grove_tree_length holds one of these as a string; default "20" fits the
-# current 1-2 yr inventory. "46" = the 3-5 yr stock (flowering dogwoods,
-# jujubes). A tree of class C may ride in any box with length >= C.
-LENGTH_CLASSES: tuple[int, ...] = (16, 20, 32, 46)
+# current 1-2 yr inventory. Both catalog boxes are 24" long, so every class here
+# fits both boxes — length is now only a fit GATE (a tree over 24" has no box),
+# never a box-selection key. The tall 3-5 yr classes (32/46) left the near-term
+# catalog with their boxes (CEO directive 2026-09-07); a tree still tagged over
+# 24" fails safe at packing until a longer box is restocked.
+LENGTH_CLASSES: tuple[int, ...] = (16, 20)
 DEFAULT_LENGTH = 20
 
 # ── Box catalog ─────────────────────────────────────────────────────────────
-# capacity: trees per box, by mode. Conservative ends of the observed ranges
-# (12x12 fits 50-100 dormant -> 50; 8x8 fits 4-8 leafed -> 4). packaging_usd:
-# wholesale box + consumables (biodegradable bag, packing paper, corrugate,
-# rubber bands, tape, sticker, care card, thank-you note) — replaces the old
-# flat $3.50/tree. tare_lb: empty box + packing material weight.
+# Two SKUs, selected by tree COUNT (CEO directive 2026-09-07). capacity: trees
+# per box, by mode — Josh's 1-5 / 6-10 ranges are season-independent, so both
+# modes carry the same count. packaging_usd: wholesale box + consumables
+# (biodegradable bag, packing paper, corrugate, rubber bands, tape, sticker,
+# care card, thank-you note).
+#
+# Packed weight is modelled as three explicit terms (Josh bench-measurement,
+# 2026-09-07): ``tare_lb`` = the empty CARTON alone; ``paper_lb`` = the void-fill
+# packing paper (a real, non-trivial term — a full small box carries ~2.5 lb of
+# paper, more than the trees themselves); and ``PER_TREE_LB[mode] * count`` for
+# the stock. Keeping paper as its own field rather than burying it in tare makes
+# the estimate auditable and each box tunable independently as boxes are weighed.
+#   small: carton 2.0 + paper 2.5 + 5*0.5 dormant trees = 7.0 lb (Josh measured
+#          the small box full at ~7 lb: 2.5 lb seedlings + 2.0 lb carton + paper).
+#   large: carton 3.1 + paper 5.0 + 10*0.5 dormant trees = 13.1 lb -> quoted 14.
+#          DERIVED by physical scaling from the small box (surface area for the
+#          carton, void volume for the paper), NOT yet measured — Josh to weigh a
+#          full large box to confirm; over-quote is the safe side (GOL-1906).
 BOXES: dict[str, dict] = {
-    "br16": {
-        "length": 16,
+    "small": {
+        "length": 24,
         "width": 6,
         "height": 4,
-        "capacity": {"dormant": 1},  # single small whip; no leafed use
-        "packaging_usd": 3.00,
-        "tare_lb": 0.7,
+        "capacity": {"dormant": 5, "leafed": 5},  # holds 1-5 trees
+        "packaging_usd": 3.50,
+        "tare_lb": 2.0,  # empty carton, measured (Josh 2026-09-07)
+        "paper_lb": 2.5,  # void-fill packing paper, measured
     },
-    "s20": {
-        "length": 20,
-        "width": 8,
-        "height": 8,
-        "capacity": {"dormant": 15, "leafed": 4},
+    "large": {
+        "length": 24,
+        "width": 9,
+        "height": 6,
+        "capacity": {"dormant": 10, "leafed": 10},  # holds 6-10 trees
         "packaging_usd": 4.50,
-        "tare_lb": 1.6,
+        "tare_lb": 3.1,  # empty carton, DERIVED (scaled by surface area) — weigh to confirm
+        "paper_lb": 5.0,  # void-fill packing paper, DERIVED (scaled by void volume)
     },
-    "s32": {
-        "length": 32,
-        "width": 8,
-        "height": 8,
-        "capacity": {"dormant": 15, "leafed": 4},
-        "packaging_usd": 5.00,
-        "tare_lb": 2.2,
-    },
-    "s46": {
-        "length": 46,
-        "width": 8,
-        "height": 8,
-        "capacity": {"dormant": 15, "leafed": 4},
-        "packaging_usd": 5.50,
-        "tare_lb": 2.9,
-    },
-    "b20": {
-        "length": 20,
-        "width": 12,
-        "height": 12,
-        "capacity": {"dormant": 50},  # bulk box — dormant only
-        "packaging_usd": 6.00,
-        "tare_lb": 2.9,
-    },
-    "b32": {
-        "length": 32,
-        "width": 12,
-        "height": 12,
-        "capacity": {"dormant": 50},
-        "packaging_usd": 6.50,
-        "tare_lb": 4.1,
-    },
-    # "b46": 46x12x12 deliberately NOT stocked yet — it would carry bulk
-    # 3-5 yr stock at ~48 lb DIM. Add here + rates when Josh decides.
 }
 
 # USPS Ground Advantage hard mailability limits (GOL-1906). Source: Shippo
@@ -118,17 +251,23 @@ BOXES: dict[str, dict] = {
 # loudly at import if a future box is added over-size. USPS is the binding
 # constraint in the least-cost race: it has the tighter combined-size limit, so
 # a box that clears USPS also clears UPS Ground's own 165" length+girth ceiling.
+# Both descoped boxes clear it with room: small = 24 + 2*(6+4) = 44"; large =
+# 24 + 2*(9+6) = 54".
 #
-# This REPLACES the old UPS additional-handling rule (fired above a 48" longest
-# side). USPS has no single-longest-side cutoff; it prices oversize through
-# nonstandard SURCHARGES, which are cost tiers priced into the live Shippo quote,
-# NOT mailability limits — so they gate cost, not shippability:
-#   * length 22"-30"           -> +$4.50   (nonstandard length)
-#   * length over 30"          -> +$10.00  (nonstandard length; hits s32/s46/b32)
-#   * volume over 2 cu ft      -> +$21.00  (cubic surcharge; hits b32, 4608 cu in)
+# NOTE — nonstandard-LENGTH surcharge applies to BOTH boxes. USPS surcharges any
+# parcel over 22" on its longest side; both catalog boxes are 24" long, so EVERY
+# shipment carries the nonstandard-length fee (~$5-7/parcel at time of writing).
+# That is a COST tier priced into the live Shippo quote, not a mailability limit
+# — so it gates cost, not shippability, and the rate-checker's live probe
+# captures the actual dollar effect. USPS oversize/cost tiers:
+#   * length 22"-30"           -> nonstandard length (hits BOTH boxes)
+#   * length over 30"          -> higher nonstandard length (no catalog box)
+#   * volume over 2 cu ft      -> cubic surcharge (no catalog box; the largest,
+#                                 large at 24x9x6 = 1,296 cu in, is under 2 cu ft)
 # Length and shape surcharges do not stack (higher applies); the >2 cu ft
-# surcharge stacks on top. These are documented so a new box's cost impact is
-# visible; the rate-checker's live probe captures the actual dollar effect.
+# surcharge would stack on top. Because both boxes cross the 22" line, the rate
+# table MUST be regenerated from a live probe that includes the fee — carrying
+# forward a pre-descope box's numbers would under-quote every order.
 MAX_SHIP_WEIGHT_LB = 70.0
 MAX_LENGTH_PLUS_GIRTH_IN = 130.0
 
@@ -150,16 +289,16 @@ assert all(length_plus_girth_in(b) <= MAX_LENGTH_PLUS_GIRTH_IN for b in BOXES.va
 # USPS Ground Advantage dimensional-weight rule (GOL-1906). Source: Shippo,
 # "USPS Ground Advantage" service guide. Dimensional weight = L*W*H / divisor,
 # but ONLY for packages over 1 cubic foot (1,728 cu in); at or below 1 cu ft
-# USPS bills on actual scale weight alone. This differs from UPS, which applied
-# DIM to every package regardless of size — so br16 (384 cu in) and s20
-# (1,280 cu in) now take no dimensional penalty.
+# USPS bills on actual scale weight alone. Both descoped boxes are under 1 cu ft
+# (small = 576 cu in, large = 1,296 cu in), so NEITHER takes a dimensional
+# penalty — they bill on actual scale weight. (This differs from UPS, which
+# applied DIM to every package regardless of size.)
 #
 # In the two-carrier race this value is the DECLARED probe/label weight, i.e.
 # the USPS billing floor. It never under-declares for UPS: UPS re-derives its own
 # every-package DIM (divisor 139) from the declared box dimensions and floors the
 # rate to it, so a small box quotes USPS on actual weight while UPS still quotes
-# its higher DIM. Declaring the UPS DIM here instead would over-charge every USPS
-# quote below 1 cu ft (the s20 defect this fixes).
+# its higher DIM.
 #
 # The divisor is 139 as of 2026-07-12 (it was 166 before that date). It happens
 # to equal the old UPS daily-rates divisor, but the citation and the cubic-foot
@@ -189,8 +328,14 @@ def dim_weight_lb(box_id: str) -> float:
 
 
 def actual_weight_lb(box_id: str, count: int, mode: str) -> float:
-    """Estimated scale weight of a packed box (what the label declares)."""
-    return round(BOXES[box_id]["tare_lb"] + PER_TREE_LB[mode] * max(0, count), 1)
+    """Estimated scale weight of a packed box (what the label declares).
+
+    Three terms: empty carton (``tare_lb``) + void-fill packing paper
+    (``paper_lb``) + stock (``PER_TREE_LB[mode] * count``). Paper is a real,
+    measured component — ~2.5 lb in a full small box — not rolled into tare.
+    """
+    b = BOXES[box_id]
+    return round(b["tare_lb"] + b["paper_lb"] + PER_TREE_LB[mode] * max(0, count), 1)
 
 
 def billable_weight_lb(box_id: str, count: int, mode: str) -> float:
@@ -199,10 +344,17 @@ def billable_weight_lb(box_id: str, count: int, mode: str) -> float:
 
 
 def representative_billable_lb(box_id: str) -> int:
-    """Worst typical billable weight across modes at full capacity — the
-    weight the rate-checker quotes each box at (never undercharge)."""
+    """Worst typical billable weight at full capacity across the QUOTABLE modes
+    — the weight the rate-checker declares for each box (never undercharge).
+
+    Only ``QUOTABLE_MODES`` (dormant) count: a bareroot parcel only ships in its
+    dormant window, so the leafed weight prices a parcel that is never bought
+    (see ``QUOTABLE_MODES``). Falls back to the box's own modes if a future box
+    declares none of the quotable modes, so this never silently returns 0.
+    """
     b = BOXES[box_id]
-    worst = max(billable_weight_lb(box_id, cap, mode) for mode, cap in b["capacity"].items())
+    modes = [m for m in QUOTABLE_MODES if m in b["capacity"]] or list(b["capacity"])
+    worst = max(billable_weight_lb(box_id, b["capacity"][mode], mode) for mode in modes)
     return math.ceil(worst)
 
 
@@ -284,57 +436,60 @@ def pack_order(items: list[tuple[int, float]], mode: str, cost_of) -> list[Packe
 
     ``cost_of(box_id) -> float | None`` supplies the destination-zone rate
     for each box; a box with no configured rate is unusable. Returns the
-    packed plan or None when any tree cannot be packed (unknown class, no
-    usable/rated box, non-positive catalog data) — fail-safe like the rest
-    of the engine: None means "add no shipping line", never guess.
+    packed plan or None when the cart cannot be packed (a tree taller than any
+    box, no usable/rated box, non-positive catalog data) — fail-safe like the
+    rest of the engine: None means "add no shipping line", never guess.
 
-    Tall classes pack first; shorter trees then top up spare capacity in the
-    already-opened longer boxes before any new box is considered.
+    Selection is a straight cost-optimal search over the TOTAL tree count (CEO
+    directive 2026-09-07): both catalog boxes share one length (24"), so there
+    is no length ladder to walk. The whole cart pools into one count and the DP
+    picks the cheapest box combination — which, for a sane monotone rate table,
+    is the small box for 1-5 trees and the large box for 6-10, then the cheapest
+    mix above 10. The only role length class still plays is the fit gate: every
+    box used must be at least as long as the tallest tree in the cart.
     """
     if mode not in MODES:
         return None
-    totals: dict[int, int] = {}
+    total = 0
+    max_length_class = 0
     for length_class, qty in items:
-        if length_class not in LENGTH_CLASSES:
-            return None
         q = int(qty)
         if q != qty or q < 0:
             return None
         if q:
-            totals[length_class] = totals.get(length_class, 0) + q
-    if not totals:
+            total += q
+            max_length_class = max(max_length_class, int(length_class))
+    if total == 0:
         return []
 
+    # Boxes that can hold the tallest tree in the cart, are used in this mode,
+    # and have a configured rate. If none qualifies (e.g. a tree over 24" with
+    # no box that long), _min_cost_combo returns None and we fail safe.
+    options = []
+    for box_id, b in BOXES.items():
+        if b["length"] < max_length_class:
+            continue
+        if mode not in b["capacity"]:
+            continue
+        cost = cost_of(box_id)
+        if cost is None:
+            continue
+        options.append((box_id, b["capacity"][mode], float(cost)))
+
+    combo = _min_cost_combo(total, options)
+    if combo is None:
+        return None
+
+    # Distribute the trees into the chosen boxes (largest capacity first so a
+    # partial fill lands in one box, leaving clean spare).
+    combo.sort(key=lambda bid: BOXES[bid]["capacity"][mode], reverse=True)
     packed: list[PackedBox] = []
-    for cls in sorted(LENGTH_CLASSES, reverse=True):
-        n = totals.get(cls, 0)
-        if not n:
-            continue
-        # Top-up: boxes already opened for taller classes have length >= cls.
-        for pb in packed:
-            take = min(n, pb.spare(mode))
-            if take > 0:
-                pb.count += take
-                n -= take
-        if n <= 0:
-            continue
-        options = []
-        for box_id in usable_boxes(cls, mode):
-            cost = cost_of(box_id)
-            if cost is None:
-                continue
-            options.append((box_id, BOXES[box_id]["capacity"][mode], float(cost)))
-        combo = _min_cost_combo(n, options)
-        if combo is None:
-            return None
-        # Distribute this class's trees into the chosen boxes (largest first
-        # so partial fill lands in one box, leaving clean spare for top-up).
-        combo.sort(key=lambda bid: BOXES[bid]["capacity"][mode], reverse=True)
-        for box_id in combo:
-            take = min(n, BOXES[box_id]["capacity"][mode])
-            packed.append(PackedBox(box_id, take))
-            n -= take
-        assert n <= 0
+    n = total
+    for box_id in combo:
+        take = min(n, BOXES[box_id]["capacity"][mode])
+        packed.append(PackedBox(box_id, take))
+        n -= take
+    assert n <= 0
     return packed
 
 

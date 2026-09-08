@@ -120,8 +120,23 @@ def migrate(cr, version):
     # grove_headless port, so only the grove-owned records need relinking.
     link("company_ggg", "res.company", [("name", "=", "George George George Woodworking")])
     link("company_nursery", "res.company", [("name", "=", "At The Grove Nursery")])
-    link("website_ggg", "website", [("domain", "=", "woodworkingeorge.com")])
-    link("website_nursery", "website", [("domain", "=", "atthegrovenursery.com")])
+    # Websites: DO NOT match on `domain`. Odoo normalizes website.domain on write
+    # (the data-file's bare "woodworkingeorge.com" is stored as
+    # "https://woodworkingeorge.com"), so an exact-match on the bare value never
+    # finds the orphan -> the loader then tries to create a fresh website and
+    # trips website_domain_unique, and the whole upgrade aborts (GOL-2192).
+    # Relink by the owning company instead: each grove company owns exactly one
+    # website (data/grove_companies.xml), so company_id is a unique, stable
+    # natural key -- and one we just re-linked immediately above, so env.ref
+    # resolves it even when the company xmlid was itself severed.
+    for website_xmlid, company_xmlid in (("website_ggg", "company_ggg"), ("website_nursery", "company_nursery")):
+        company = env.ref(f"{MODULE}.{company_xmlid}", raise_if_not_found=False)
+        if company:
+            link(website_xmlid, "website", [("company_id", "=", company.id)])
+        else:
+            # Company xmlid genuinely absent -> fresh DB; the website is fresh
+            # too, so leave both for the normal loader to create.
+            results[website_xmlid] = "absent"
 
     # ── Product categories ──────────────────────────────────────────────────
     # data/grove_product_categories.xml -- link parents first so sub-category

@@ -209,10 +209,12 @@ ZONE_BY_STATE: dict[str, str] = {
     # rate-checker now probes MULTIPLE corners per zone and publishes the max
     # (see scripts/rate_check REFERENCE_ZIPS) — otherwise a single-corner probe
     # of Portland ME could drift below a southern corner and undercharge it.
-    # The far/western states whose big-box target EXCEEDS the current 5-zone
-    # table (FL, OK, KS, NE, SD, ND, TX, NM, AZ — up to $102 on b32 vs the $68
-    # cap) are deliberately NOT here: they need new distance zones with real
-    # probed rates (GOL-2128 follow-up), never a guessed zone_5 undercharge.
+    # The far/western states whose large-box target EXCEEDS the current 5-zone
+    # table (FL, OK, KS, NE, SD, ND, TX, NM, AZ) are deliberately NOT here: they
+    # need new distance zones with real probed rates (GOL-2128 follow-up), never
+    # a guessed zone_5 undercharge. (The original dollar figures were probed on
+    # the retired bulk boxes; re-probe against the two-SKU catalog before adding
+    # any of these states.)
     "TN": "zone_5",
     "GA": "zone_5",
     "AL": "zone_5",
@@ -238,13 +240,13 @@ def rate_feed(calendar_override=None, today=None) -> dict:
 
         {
           "schema": 2,
-          "zones": {"zone_1": {"br16": {"base": 18.0}, "s20": {...}, ...}, ...},
+          "zones": {"zone_1": {"small": {"base": 22.0}, "large": {...}}, ...},
           "zone_by_state": {"WV": "zone_1", ...},
           "green_states": ["CT", "DE", ...],
           "packing": {
-            "boxes": {"s20": {"length": 20, "width": 8, "height": 8,
-                              "capacity": {"dormant": 15, "leafed": 4}}, ...},
-            "length_classes": [16, 20, 32, 46],
+            "boxes": {"small": {"length": 24, "width": 6, "height": 4,
+                                "capacity": {"dormant": 5, "leafed": 5}}, ...},
+            "length_classes": [16, 20],
             "modes": ["dormant", "leafed"],
           },
           "calendar": {   # GOL-1172: per-USDA-zone twice-yearly ship calendar
