@@ -538,7 +538,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
 
     def test_calendar_in_window_keeps_full_charge(self):
         """Inside the shopper's active spring ship window the in-stock tree ships
-        now → full price, no calendar deposit forcing."""
+        now → full price, no calendar deposit forcing. The window date (Apr 15)
+        is also the last day of the nursery dormancy window, so both the calendar
+        axis and the GOL-1906 dormancy gate agree the tree ships now — the
+        reconciled full-charge case."""
         self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
         self._set_stock(self.product, 5)
         order = self._make_order(qty=1)
@@ -546,9 +549,17 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             self.env, order, self._ship_payload("10001"), today=date(2027, 4, 15)
         )
         self.assertEqual(forced, frozenset())
-        # Same ships_now pin as above — full charge asserted on the calendar
-        # axis alone, independent of the test-run date's wave window.
-        with mock.patch.object(grove_main, "ship_options", return_value={"ships_now": True}):
+        # Pin BOTH axes to Apr 15: ship_options gives the calendar/wave axis, and
+        # the _date pin gives the nursery-dormancy axis (GOL-1906) that
+        # _build_stripe_line_items reads via _date.today(). Apr 15 is the last
+        # dormant day, so can_ship_bareroot is True and the full charge is
+        # asserted independent of the test-run date. Without the _date pin the
+        # dormancy gate short-circuits to a deposit outside Nov 1–Apr 15.
+        with (
+            mock.patch.object(grove_main, "ship_options", return_value={"ships_now": True}),
+            mock.patch.object(grove_main, "_date") as md,
+        ):
+            md.today.return_value = date(2027, 4, 15)
             line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, forced)
         self.assertEqual(preorder_ids, [])
         goods = next(li for li in line_items if li["name"] == self.product.display_name)
