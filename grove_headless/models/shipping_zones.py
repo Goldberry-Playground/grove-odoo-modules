@@ -29,7 +29,7 @@ import os
 from datetime import date as _date
 
 try:
-    from . import shipping_boxes, shipping_calendar
+    from . import plant_compliance, shipping_boxes, shipping_calendar
 except ImportError:  # loaded standalone (tests import by file path)
     import importlib.util as _ilu
 
@@ -42,6 +42,7 @@ except ImportError:  # loaded standalone (tests import by file path)
 
     shipping_boxes = _load_sibling("shipping_boxes")
     shipping_calendar = _load_sibling("shipping_calendar")
+    plant_compliance = _load_sibling("plant_compliance")
 
 # ── Destination universe ────────────────────────────────────────────────────
 # Every US destination we expect to quote. Used by the test to assert that the
@@ -312,6 +313,10 @@ def rate_feed(calendar_override=None, today=None) -> dict:
             "modes": list(shipping_boxes.MODES),
         },
         "calendar": calendar_block,
+        # Per-product genus/species carve-outs (GOL-2132). The storefront reads
+        # this to render the PDP compliance notice from the same map the
+        # checkout blocks with, so the two can never drift.
+        "compliance": plant_compliance.carve_out_feed(),
     }
 
 
