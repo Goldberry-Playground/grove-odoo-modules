@@ -36,6 +36,7 @@ from ..models.shipping_zones import (
     canonical_state_code,
     compute_order_shipping,
     rate_feed,
+    single_potted_rate,
     single_tree_rate,
     unshippable_reason,
     zone_for_state,
@@ -833,13 +834,20 @@ class GroveHeadlessAPI(http.Controller):
         # blanks the pickup window. Ship (or unspecified) keeps the customer ZIP.
         window_zip = _farm_pickup_zip(request.env, request.website.company_id) if is_pickup else zip_code
         result = serialize_ship_options(ship_options(window_zip, tier, today))
-        # Box Engine v2: per_tree_rate = cheapest single-tree shipment in the
-        # season's packing mode. Potted (pickup-only) and farm pickup pay no
-        # shipping, so no per-tree ship rate is quoted for either.
+        # Box Engine v2: per_tree_rate = cheapest single-unit shipment. Bareroot
+        # quotes in the season's packing mode; potted / peat-and-bagged quotes
+        # off its own box catalog (GOL-2199 go-live — was pickup-only). Farm
+        # pickup pays no shipping, so no rate is quoted there; a potted quote is
+        # None until the rate table carries potted rows (fail-safe, the
+        # checkout breaker blocks unpriceable potted ship orders the same way).
         mode = packing_mode(today, dormancy_window(request.env))
         result["packing_mode"] = mode
-        quotes_ship = tier == "bareroot" and not is_pickup
-        result["per_tree_rate"] = single_tree_rate(state, length_class, mode) if quotes_ship else None
+        if is_pickup:
+            result["per_tree_rate"] = None
+        elif tier == "bareroot":
+            result["per_tree_rate"] = single_tree_rate(state, length_class, mode)
+        else:
+            result["per_tree_rate"] = single_potted_rate(state)
         # GOL-1172: per-USDA-zone fulfillment mode for the three-mode frontend
         # (bareroot-preorder | bareroot-in-window | peat-and-bagged), computed
         # server-side from the same annual calendar the feed serves. Bareroot

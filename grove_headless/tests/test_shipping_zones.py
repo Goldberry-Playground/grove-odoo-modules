@@ -70,6 +70,15 @@ BOX_RATES_Z1 = {
     "large": {"base": 18.0},
 }
 
+# GOL-2199 potted go-live: a zone row carrying BOTH catalogs — bareroot
+# small/large plus the potted/peat-and-bagged boxes (GOL-2031).
+BOX_RATES_Z1_BOTH = {
+    "small": {"base": 12.0},
+    "large": {"base": 18.0},
+    "p24x10x4": {"base": 16.0},
+    "p24x10x6": {"base": 24.0},
+}
+
 
 class _temp_table:
     """Context manager: temporarily install a zone table for one assertion."""
@@ -141,18 +150,29 @@ class TestShippingZoneEngineContract(unittest.TestCase):
             sz.ZONE_BY_STATE.clear()
             sz.ZONE_BY_STATE.update(saved_state)
 
-    def test_potted_is_never_shippable(self):
-        # Potted = farm pickup only: reason for the checkout BLOCK message,
-        # None from the pricing path — even with a fully populated table.
+    def test_potted_is_shippable_at_potted_rates(self):
+        # GOL-2199 potted go-live: potted / peat-and-bagged ships on its own
+        # engine — no block message, priced from the potted boxes (never the
+        # bareroot ones).
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+            self.assertIsNone(sz.unshippable_reason([("potted", 20, 1)]))
+            self.assertEqual(sz.compute_order_shipping("WV", [("potted", 20, 1)], "leafed"), 16.0)
+
+    def test_potted_without_potted_rates_fails_safe(self):
+        # The flip landed before the rate-checker's first potted-inclusive
+        # table: a zone row with only bareroot rates must price a potted cart
+        # as None (no shipping line -> checkout $0-shipping breaker blocks),
+        # never fall back to a bareroot box price.
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
-            self.assertIsNotNone(sz.unshippable_reason([("potted", 20, 1)]))
+            self.assertIsNone(sz.unshippable_reason([("potted", 20, 1)]))
             self.assertIsNone(sz.compute_order_shipping("WV", [("potted", 20, 1)], "leafed"))
 
     def test_unknown_tier_treated_as_potted(self):
-        # A mistagged product can never ship undercharged — it cannot ship.
-        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
-            self.assertIsNotNone(sz.unshippable_reason([("mystery", 20, 1)]))
-            self.assertIsNone(sz.compute_order_shipping("WV", [("mystery", 20, 1)], "leafed"))
+        # A mistagged product prices as potted — the pricier catalog at every
+        # weight point — so it can never ship undercharged (GOL-2199).
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+            self.assertIsNone(sz.unshippable_reason([("mystery", 20, 1)]))
+            self.assertEqual(sz.compute_order_shipping("WV", [("mystery", 20, 1)], "leafed"), 16.0)
 
     def test_bareroot_has_no_unshippable_reason(self):
         self.assertIsNone(sz.unshippable_reason([("bareroot", 20, 3)]))
@@ -172,6 +192,22 @@ class TestGreenStateCoverage(unittest.TestCase):
             for box_id in sb.BOXES:
                 rate = sz.box_rate(state, box_id)
                 self.assertIsNotNone(rate, f"{state}/{box_id} has no rate")
+                self.assertGreater(rate, 0.0)
+
+    def test_potted_coverage_is_all_or_nothing(self):
+        # GOL-2199: until the rate-checker's first potted-inclusive table
+        # merges, zone rows legitimately carry no potted boxes (potted ship-to
+        # carts fail safe at the checkout breaker). But once ANY zone prices a
+        # potted box, EVERY green state must price EVERY potted box — partial
+        # coverage would make potted shippability vary by destination in a way
+        # the checkout cannot explain to the shopper.
+        any_potted = any(b in sb.POTTED_BOXES for boxes in sz.ZONE_RATES.values() for b in boxes)
+        if not any_potted:
+            self.skipTest("potted rates not yet published (GOL-2199 pre-first-table)")
+        for state in GREEN:
+            for box_id in sb.POTTED_BOXES:
+                rate = sz.box_rate(state, box_id)
+                self.assertIsNotNone(rate, f"{state}/{box_id} has no potted rate")
                 self.assertGreater(rate, 0.0)
 
     def test_every_excluded_destination_returns_none(self):
@@ -257,8 +293,25 @@ class TestOrderShipping(unittest.TestCase):
             items = [("bareroot", 16, 3), ("bareroot", 20, 3)]
             self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 18.0)
 
-    def test_any_potted_item_fails_whole_order(self):
-        with _temp_table({"WV": "zone_1"}, self.TABLE):
+    def test_mixed_cart_prices_both_engines(self):
+        # GOL-2199: 2 bareroot -> one small bareroot box ($12); 3 potted -> one
+        # p24x10x4 ($16). Split plans, summed: $28.
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+            items = [("bareroot", 20, 2), ("potted", 20, 3)]
+            self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 28.0)
+
+    def test_potted_units_pool_across_lines_into_boxes(self):
+        # 4 + 3 = 7 potted units -> one p24x10x6 10-pack ($24), not two 5-packs
+        # ($32) — pack_potted picks the cheapest combo, pooled across lines.
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+            items = [("potted", 20, 4), ("potted", 16, 3)]
+            self.assertEqual(sz.compute_order_shipping("WV", items, "leafed"), 24.0)
+
+    def test_mixed_cart_with_unpriceable_potted_side_fails_whole_order(self):
+        # Either engine failing to pack-and-price fails the WHOLE plan — a
+        # half-priced order must never add a shipping line (fail-safe kept
+        # from the pre-split contract).
+        with _temp_table({"WV": "zone_1"}, self.TABLE):  # bareroot rates only
             items = [("bareroot", 20, 2), ("potted", 20, 1)]
             self.assertIsNone(sz.compute_order_shipping("WV", items, "leafed"))
 
@@ -298,6 +351,24 @@ class TestSingleTreeRate(unittest.TestCase):
     def test_unmapped_state_returns_none(self):
         with _temp_table({"WV": "zone_1"}, self.TABLE):
             self.assertIsNone(sz.single_tree_rate("GA", 20, "leafed"))
+
+
+class TestSinglePottedRate(unittest.TestCase):
+    """single_potted_rate: the potted PDP "shipping from $X" estimate (GOL-2199)."""
+
+    def test_single_potted_unit_is_the_small_potted_box(self):
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+            self.assertEqual(sz.single_potted_rate("WV"), 16.0)
+
+    def test_no_potted_rates_returns_none(self):
+        # Pre-first-potted-table window: bareroot-only rows quote nothing for
+        # potted — never a bareroot-box fallback.
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
+            self.assertIsNone(sz.single_potted_rate("WV"))
+
+    def test_unmapped_state_returns_none(self):
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+            self.assertIsNone(sz.single_potted_rate("GA"))
 
 
 class TestCanonicalStateCode(unittest.TestCase):

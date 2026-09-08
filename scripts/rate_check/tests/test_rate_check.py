@@ -71,17 +71,19 @@ class TestRateMath(unittest.TestCase):
     def test_parcels_come_from_box_catalog(self):
         # GOL-2199: the probe publishes ONLY go-live-shippable tiers, since the
         # table it writes is served verbatim to checkout (shipping_zones.ZONE_RATES
-        # -> rate_feed). Today that is the bareroot BOXES catalog; potted
-        # (POTTED_BOXES, GOL-2031) is pickup-only / money-flow gated and must not
-        # leak pre-go-live prices into the served feed, so it is NOT probed here.
-        # One reference parcel per published box, quoted at its own representative
-        # billable weight (never undercharge). When potted goes live (CEO adds
-        # "potted" to SHIPPABLE_TIERS), re-add POTTED_BOXES to rc._CATALOGS and
-        # restore the potted arm here.
-        self.assertEqual(set(rc.PARCELS), set(rc.shipping_boxes.BOXES))
-        self.assertFalse(set(rc.PARCELS) & set(rc.shipping_boxes.POTTED_BOXES))
+        # -> rate_feed). Potted go-live (CEO directive 2026-09-08): BOTH catalogs
+        # publish — bareroot (BOXES) and potted/peat-and-bagged (POTTED_BOXES,
+        # GOL-2031). One reference parcel per published box, quoted at its own
+        # catalog's representative billable weight (never undercharge).
+        self.assertEqual(
+            set(rc.PARCELS),
+            set(rc.shipping_boxes.BOXES) | set(rc.shipping_boxes.POTTED_BOXES),
+        )
         for box_id, parcel in rc.PARCELS.items():
-            expected = rc.shipping_boxes.representative_billable_lb(box_id)
+            if box_id in rc.shipping_boxes.POTTED_BOXES:
+                expected = rc.shipping_boxes.potted_representative_billable_lb(box_id)
+            else:
+                expected = rc.shipping_boxes.representative_billable_lb(box_id)
             self.assertEqual(float(parcel["weight"]), expected)
 
     def test_potted_box_geometry_stays_probe_ready(self):
