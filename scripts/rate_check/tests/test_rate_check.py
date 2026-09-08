@@ -188,7 +188,7 @@ class TestNoUpsRatesSkips(unittest.TestCase):
             doc = json.load(fh)
         self.assertNotIn("_provisional", doc)
         zones = sorted(k for k in doc if not k.startswith("_"))
-        self.assertEqual(zones, ["zone_1", "zone_2", "zone_3", "zone_4", "zone_5"])
+        self.assertEqual(zones, ["zone_1", "zone_2", "zone_3", "zone_4", "zone_5", "zone_6"])
         for zone in zones:
             self.assertTrue(doc[zone], f"{zone}: expected per-box rates")
 

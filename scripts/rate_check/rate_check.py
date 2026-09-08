@@ -88,6 +88,14 @@ REFERENCE_ZIPS = {
         ("Gulfport", "MS", "39501"),
         ("Lake Charles", "LA", "70601"),
     ],
+    # band {FL} — GOL-2235. FL's southern-tip corners tie for its worst rate
+    # (Miami + Key West both quoted small=$16.84 / large=$21.37 in the 2026-09-08
+    # two-SKU probe); probe both and publish the per-box max so no in-state
+    # destination is ever undercharged.
+    "zone_6": [
+        ("Miami", "FL", "33101"),
+        ("Key West", "FL", "33040"),
+    ],
 }
 # Box Engine v2: reference parcels come straight from the box catalog —
 # one quote per box id per zone, at the box's representative billable weight

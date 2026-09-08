@@ -1718,7 +1718,7 @@ def _apply_shipping_line(env, order, shipping, company):
         return None
     charge = compute_order_shipping(state, items, packing_mode(_date.today(), dormancy_window(env)))
     if charge is None:
-        # A destination outside the 31-state green list legitimately gets no
+        # A destination outside the 32-state green list legitimately gets no
         # shipping line. But a *green* state that still can't be priced means a
         # rate-table gap is silently under-billing a customer we do ship to —
         # surface that rather than swallow it. The caller's circuit breaker
@@ -1983,7 +1983,7 @@ def _create_draft_order(website, env, payload):
     # ── Ship-to gate (GOL-1036 defects 1 & 2) ────────────────────────────────
     # A cart with a ship-to state must clear three server-side gates before it
     # can reach payment, or a compliance/revenue defect leaks to Stripe:
-    #   (1) state gate — the destination must be on the 31-state green list.
+    #   (1) state gate — the destination must be on the 32-state green list.
     #       Everything else (FL, and every living-tree-cert / quarantine state)
     #       is rejected here, not just discouraged by product-page copy.
     #   (2) potted gate — potted trees are farm pickup only (Box Engine v2).
@@ -2051,7 +2051,7 @@ def _create_draft_order(website, env, payload):
             order.unlink()
             return None, _json_response({"error": reason}, status=400)
 
-    # Apply the per-box 31-state shipping charge (Box Engine v2). Rates load
+    # Apply the per-box 32-state shipping charge (Box Engine v2). Rates load
     # from data/shipping_rates.json (models/shipping_zones.py) and are
     # maintained by the daily rate-checker. Fail-safe: no rate → no line added.
     # Farm pickup never gets a shipping line even if the buyer left an address on
