@@ -173,8 +173,6 @@ def carve_out_feed() -> dict:
     """
     return {
         "schema": 1,
-        "carve_outs": {
-            taxon: {"kind": kind, "states": sorted(states)} for taxon, (kind, states) in CARVE_OUTS.items()
-        },
+        "carve_outs": {taxon: {"kind": kind, "states": sorted(states)} for taxon, (kind, states) in CARVE_OUTS.items()},
         "regulated_states": sorted(REGULATED_STATES),
     }
