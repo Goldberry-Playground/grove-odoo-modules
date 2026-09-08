@@ -1,7 +1,13 @@
 name: rate-check
 on:
-  schedule:
-    - cron: "0 11 * * *"   # 07:00 ET daily (design: vault Grove Shipping)
+  # PAUSED 2026-09-08 (GOL-2198): the daily probe emits POTTED_BOXES rates
+  # (GOL-2031) into shipping_rates.json, but grove_headless deliberately rejects
+  # potted from that table (GOL-1906 / test_potted_is_never_shippable), so every
+  # morning's PR merges red and breaks main. Re-enable by un-commenting the cron
+  # once the potted-in-rate-table design contradiction is resolved (owner:
+  # Engineering - Alice). workflow_dispatch stays live for manual/dry-run probes.
+  # schedule:
+  #   - cron: "0 11 * * *"   # 07:00 ET daily (design: vault Grove Shipping)
   workflow_dispatch:
     inputs:
       dry_run:
