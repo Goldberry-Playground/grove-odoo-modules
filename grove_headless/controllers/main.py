@@ -19,6 +19,7 @@ from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.mail_from import mail_from_vals
 from ..models.newsletter import newsletter_tag_names
 from ..models.order_alerts import format_merchant_email, format_new_order_discord
+from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
 from ..models.shipment_email import NOTIFY_STATUSES, shipment_notice_copy
 from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
@@ -2051,6 +2052,40 @@ def _create_draft_order(website, env, payload):
         if reason:
             order.unlink()
             return None, _json_response({"error": reason}, status=400)
+
+        # (2b) Per-product genus/species compliance carve-out (GOL-2132). Even on
+        # a green-list destination, specific taxa are restricted into specific
+        # states (NPB Oct-2025). Evaluate every standalone line against the
+        # destination and hard-reject with a plain-English message (the same 400
+        # pattern as the potted gate) rather than silently dropping a line.
+        # Bundles (phantom-BOM kits, e.g. Remembrance Grove) are exempt — they
+        # ship everywhere via per-state component substitution — so we skip any
+        # line whose product resolves to a phantom BOM. Fail-safe: an empty or
+        # unparseable botanical name can't be cleared into a regulated state and
+        # is logged loudly (never guessed, never a silent drop).
+        bom_model = env["mrp.bom"] if "mrp.bom" in env.registry else None
+        for line in order.order_line:
+            if line.display_type or not line.product_id:
+                continue
+            variant = line.product_id
+            if variant.product_tmpl_id.type == "service" or float(line.product_uom_qty or 0) <= 0:
+                continue
+            if bom_model is not None and bom_model._bom_find(variant, bom_type="phantom").get(variant):
+                continue  # bundle — ships everywhere, handled by substitution
+            botanical = variant.product_tmpl_id.grove_botanical_name or ""
+            block_msg, is_failsafe = compliance_evaluate_line(botanical, dest, ship_state)
+            if block_msg:
+                if is_failsafe:
+                    _logger.warning(
+                        "GOL-2132 compliance fail-safe: blocked variant %s (%s) — empty/unparseable "
+                        "botanical name %r into regulated state %s",
+                        variant.id,
+                        variant.display_name,
+                        botanical,
+                        dest,
+                    )
+                order.unlink()
+                return None, _json_response({"error": block_msg}, status=400)
 
     # Apply the per-box 31-state shipping charge (Box Engine v2). Rates load
     # from data/shipping_rates.json (models/shipping_zones.py) and are
