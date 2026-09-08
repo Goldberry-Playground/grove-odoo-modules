@@ -1179,12 +1179,13 @@ class GroveHeadlessAPI(http.Controller):
             return error
 
         access_token = order._portal_ensure_token()
-        # GOL-1309: re-resolve the destination's shipping-calendar mode and force
-        # bareroot lines whose ship wave has not opened onto the deposit path, so
-        # a dormant winter order is never charged in full for a tree that cannot
-        # ship until spring/fall (mirrors the frontend's pre-checkout resolution).
-        calendar_preorder_ids = _calendar_preorder_variant_ids(request.env, order, payload)
-        line_items, preorder_ids, charged_cents = _build_stripe_line_items(order, calendar_preorder_ids)
+        # GOL-2233: an order takes a single flat $10 deposit when it is sold-out
+        # bareroot or placed after the season cutover (default Oct 15); otherwise
+        # it ships now and charges in full today. The deposit trigger is decided
+        # inside _build_stripe_line_items (stock + date), decoupled from the
+        # dormancy ship-window gate (GOL-1906), which still governs WHEN bareroot
+        # actually leaves the nursery.
+        line_items, preorder_ids, charged_cents = _build_stripe_line_items(order)
         if not line_items:
             order.unlink()
             return _json_response({"error": "Cart produced no chargeable line items"}, status=400)
@@ -2147,8 +2148,14 @@ def _bareroot_tier(product) -> bool:
 
 
 def _bareroot_ships_now(window_zip, tier, today, window=None):
-    """``ships_now`` for a bareroot line on the CHARGING path (GOL-1666 §2),
-    with the unknown-zone money-path fallback (GOL-2145).
+    """``ships_now`` for a bareroot line (GOL-1666 §2), with the unknown-zone
+    fallback (GOL-2145).
+
+    NOTE (GOL-2233): no longer drives the CHARGE decision — the flat-per-order
+    deposit rule (``_order_takes_deposit``) uses sold-out stock + the season
+    cutover, not the ship window. Retained as the ship-window predicate and for
+    the /shipping/options display; slated for removal with
+    ``_calendar_preorder_variant_ids`` once the display path is reconfirmed.
 
     ``window`` is the resolved dormancy window (``dormancy_window(env)``); the
     caller holds ``env`` and passes it so this gate tracks the Odoo-editable
@@ -2187,8 +2194,12 @@ def _bareroot_ships_now(window_zip, tier, today, window=None):
 
 
 def _calendar_preorder_variant_ids(env, order, payload, today=None):
-    """Variant ids whose bareroot ship wave has not opened yet — force them to
-    the preorder deposit path regardless of stock (GOL-1309).
+    """Variant ids whose bareroot ship wave has not opened yet (GOL-1309).
+
+    NOTE (GOL-2233): no longer wired into checkout charging — the flat-per-order
+    deposit rule replaced calendar-window charge-forcing with the sold-out /
+    cutover triggers. Kept for now (and its unit tests) pending a cleanup pass;
+    the ship-window gate it modeled lives on in the fulfillment path.
 
     The checkout path had zero shipping-calendar awareness: an in-stock bareroot
     tree ordered in the shopper's dormant winter (its ship wave months away) was
@@ -2240,198 +2251,201 @@ def _calendar_preorder_variant_ids(env, order, payload, today=None):
     )
 
 
-def _cart_has_preorder(env, order, payload):
-    """True when any product line in ``order`` would charge as a preorder deposit.
+DEPOSIT_CUTOVER_PARAM = "grove_headless.deposit_cutover_md"
+DEFAULT_DEPOSIT_CUTOVER_MD = (10, 15)  # Oct 15 — the ratified season cutover (GOL-2233)
 
-    Mirrors the per-line preorder determination in ``_build_stripe_line_items``
-    (calendar-window forcing + short/unknown free stock + the bareroot ship
-    window) but computes only the boolean — no line items, no writes. Used at
-    promo-apply time to reject a promo code on a deposit cart (GOL-2088 CEO
-    directive 2026-09-06). Kept next to ``_build_stripe_line_items`` and reusing
-    the same primitives (``_calendar_preorder_variant_ids``, ``free_qty``,
-    ``ship_options``, ``stripe_gateway.line_charge``) so the two stay in lockstep.
-    """
-    calendar_preorder_ids = _calendar_preorder_variant_ids(env, order, payload)
-    today = _date.today()
-    window = dormancy_window(env)  # Odoo-editable dormancy dates (GOL-1906)
-    is_ship_order = any(
-        ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE for ol in order.order_line
-    )
-    dest_partner = order.partner_shipping_id or order.partner_id
-    dest_zip = dest_partner.zip if dest_partner else None
-    farm_zip = _farm_pickup_zip(order.env, order.company_id)
+
+def _deposit_cutover_md(env):
+    """The season cutover ``(month, day)`` after which every order takes the flat
+    deposit (GOL-2233). Configurable like the dormancy window via
+    ir.config_parameter ``grove_headless.deposit_cutover_md`` as ``MM-DD``; falls
+    back to Oct 15 on an absent or malformed value."""
+    raw = (env["ir.config_parameter"].sudo().get_param(DEPOSIT_CUTOVER_PARAM) or "").strip()
+    if raw:
+        try:
+            month, day = (int(p) for p in raw.split("-", 1))
+            if 1 <= month <= 12 and 1 <= day <= 31:
+                return (month, day)
+        except (ValueError, TypeError):
+            _logger.warning("Malformed %s=%r; using Oct 15 default", DEPOSIT_CUTOVER_PARAM, raw)
+    return DEFAULT_DEPOSIT_CUTOVER_MD
+
+
+def _after_deposit_cutover(env, today):
+    """True when ``today`` is strictly after the season cutover (default Oct 15).
+
+    GOL-2233: after the cutover EVERY order — bareroot, potted or pickup — takes
+    the flat $10 deposit, its balance settled off-session at ship (the trees ship
+    in the next dormant wave). The comparison is annual ``(month, day)`` so it
+    fires for the tail of the calendar year (Oct 16 – Dec 31); winter/early-spring
+    orders are governed by the sold-out-bareroot trigger and the ship-window gate,
+    not this cutover. (Potted/pickup scope and the spring reset are the two
+    GOL-2233 asks still pending Josh's confirmation.)"""
+    return (today.month, today.day) > _deposit_cutover_md(env)
+
+
+def _sold_out_bareroot(order):
+    """True when any bareroot line in ``order`` cannot be fully filled from free
+    (shared-pool) stock — the "sold out of the tree" deposit trigger (GOL-2233).
+
+    Free stock is the shared pool (GOL-2031: bareroot draws on the potted pool).
+    A shortfall (``free < ordered qty``), unknown, or negative free stock all
+    count as sold out and route the WHOLE order to the flat deposit. Potted lines
+    never trigger this — potted is pickup-only and full-charge unless the cutover
+    fired."""
     for line in order.order_line:
         if line.display_type or not line.product_id or line.reward_id:
             continue
         product = line.product_id
         if product.default_code == SHIPPING_PRODUCT_CODE:
             continue
-        free_qty = 0 if product.id in calendar_preorder_ids else product.free_qty
-        tier = product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier or "potted"
-        line_ships_now = True
-        if tier == "bareroot":
-            window_zip = dest_zip if is_ship_order else farm_zip
-            line_ships_now = _bareroot_ships_now(window_zip, tier, today, window)
-        for _amount, _qty, is_preorder in stripe_gateway.line_charge(
-            line.price_unit, line.product_uom_qty, free_qty, ships_now=line_ships_now
-        ):
-            if is_preorder:
-                return True
+        if not _bareroot_tier(product):
+            continue
+        free = product.grove_shared_pool_qty("free_qty")
+        if free is None or free < line.product_uom_qty:
+            return True
     return False
 
 
-def _build_stripe_line_items(order, calendar_preorder_ids=frozenset()):
+def _order_takes_deposit(order, today=None):
+    """Does this order take the flat $10 deposit (GOL-2233)?
+
+    True when EITHER trigger fires:
+      * sold-out bareroot — a bareroot line short on free stock, OR
+      * the order is placed after the season cutover (default Oct 15).
+
+    Either one makes the WHOLE order a single flat $10 deposit regardless of cart
+    contents (see ``_build_stripe_line_items``); the balance settles at ship.
+    Kept as the one predicate both the line-item builder and the promo gate
+    (``_cart_has_preorder``) call, so they never diverge. Ship timing is a
+    separate axis: the dormancy ship-window gate (GOL-1906) still decides WHEN
+    bareroot leaves the nursery, but no longer forces an in-stock, pre-cutover
+    tree onto the deposit path."""
+    if today is None:
+        today = _date.today()
+    return _after_deposit_cutover(order.env, today) or _sold_out_bareroot(order)
+
+
+def _cart_has_preorder(env, order, payload=None, today=None):
+    """True when ``order`` charges as a deposit (GOL-2233) — the boolean the promo
+    gate uses to reject a discount code on a deposit cart (GOL-2088, CEO directive
+    2026-09-06): the flat $10 deposit defers all goods/shipping/tax, so a discount
+    cannot ride it. Delegates to ``_order_takes_deposit`` to stay in lockstep with
+    the line-item builder. ``payload`` is accepted for call-site compatibility;
+    the deposit decision is stock + date only, no destination zone. ``today`` is
+    injectable for tests (defaults to ``_date.today()``)."""
+    return _order_takes_deposit(order, today)
+
+
+def _build_stripe_line_items(order, today=None):
     """Turn a draft order's lines into Stripe Checkout line items.
 
-    Returns (line_items, preorder_variant_ids, charged_cents). Applies the
-    charging matrix per product line (in-stock units = full price; short-stock
-    units = a per-unit flat deposit).
+    Returns (line_items, preorder_variant_ids, charged_cents). ``today`` is
+    injectable for tests (defaults to ``_date.today()``) so the season-cutover
+    branch is deterministic regardless of the wall clock.
 
-    GOL-2052 (CEO directive 2026-09-03): when an order contains ANY preorder
-    unit, ONLY the per-unit deposit(s) — and any in-stock goods that bill in
-    full — are charged today; SHIPPING and TAX are deferred and collected
-    off-session at ship time, at *actual* cost (see ``_settle_at_ship``). A
-    stale quoted rate can then never be the charge, and tax is recomputed on the
-    settled total (WV tax applies to the shipping line, whose real amount is not
-    known until the box is packed). A fully-in-stock / farm-pickup order has no
-    preorder unit, ships now, and is unchanged: shipping + WV tax ride the
-    today-charge as one explicit line each (Stripe Tax OFF).
+    GOL-2233 (ratified by Josh, 2026-09-07 release-train session): an order that
+    triggers a deposit — sold-out bareroot OR placed after the season cutover
+    (default Oct 15) — is charged ONE flat $10 deposit for the WHOLE order, no
+    matter what is in the cart (100 trees = $10 for the same order). Every product
+    variant is recorded as a preorder so the oversell guard never refunds a
+    deferred line and the ship-time settlement (GOL-2053) collects the entire
+    balance (goods + real shipping + recomputed tax = ``amount_total − $10``)
+    off-session, with ``setup_future_usage=off_session`` saved at checkout.
 
-    ``calendar_preorder_ids`` (GOL-1309): variant ids whose bareroot ship wave
-    is not yet open per the shipping calendar (see
-    _calendar_preorder_variant_ids). Those lines charge entirely as deposits
-    regardless of on-hand stock — an in-stock dormant tree cannot ship until its
-    wave, so it is a preorder even though the shelf shows it available. Modeled
-    by treating free stock as zero for the line so line_charge routes every unit
-    to the deposit side.
+    A non-deposit order (in-stock bareroot before the cutover, potted, pickup)
+    ships now and is charged in full today, exactly as a fully-in-stock order
+    always was: every good at full price, plus the shipping line, WV tax, and any
+    loyalty discount (Stripe Tax OFF — tax rides as its own explicit line).
+
+    Ship timing is decoupled from this charge decision (GOL-2233 ask): the
+    dormancy ship-window gate (GOL-1906) still governs WHEN bareroot leaves the
+    nursery, but it no longer forces an in-stock, pre-cutover tree onto the
+    deposit path.
     """
+    product_lines = [
+        line
+        for line in order.order_line
+        if not line.display_type
+        and line.product_id
+        and not line.reward_id
+        and line.product_id.default_code != SHIPPING_PRODUCT_CODE
+    ]
+
+    if _order_takes_deposit(order, today):
+        # One flat deposit for the entire cart, regardless of contents/quantity.
+        line_items = [
+            {
+                "name": "Deposit",
+                "kind": "deposit",
+                "amount_cents": stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT),
+                "quantity": 1,
+            }
+        ]
+        # Record EVERY product variant as a preorder: none was charged in full
+        # today, so the oversell guard must skip them all and the ship-time
+        # settlement must collect their whole balance.
+        preorder_variant_ids = [line.product_id.id for line in product_lines]
+        charged_cents = stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT)
+        return line_items, preorder_variant_ids, charged_cents
+
+    # Ships-now full-charge path: every good at full price + shipping + WV tax +
+    # any loyalty discount, all collected today.
     line_items = []
-    preorder_variant_ids = []
     tax_today = 0.0
-    # Shipping is captured here and only committed to the today-charge AFTER the
-    # loop, once we know whether the cart contains a preorder — a preorder defers
-    # shipping (and all tax) to the ship-time settlement (GOL-2052).
-    shipping_item = None
-    shipping_tax = 0.0
-    # Calendar-window preorders (GOL-1666) apply to bareroot regardless of
-    # fulfillment: a bareroot line that can't be filled now charges the flat
-    # deposit even when in stock, matching the product page. The zone that keys
-    # that window depends on WHERE the trees are handed over — a shipped order
-    # (carries a GROVE-SHIP line) resolves from the DESTINATION ZIP; a farm-pickup
-    # order (no shipping line) resolves from the FARM's own ZIP (GOL-1669), since
-    # a warm-zone buyer collecting here is bound by when we can lift on the farm,
-    # not by their home zone's later window.
-    today = _date.today()
-    window = dormancy_window(order.env)  # Odoo-editable dormancy dates (GOL-1906)
-    is_ship_order = any(
-        ol.product_id and ol.product_id.default_code == SHIPPING_PRODUCT_CODE for ol in order.order_line
-    )
-    dest_partner = order.partner_shipping_id or order.partner_id
-    dest_zip = dest_partner.zip if dest_partner else None
-    farm_zip = _farm_pickup_zip(order.env, order.company_id)
+    for line in product_lines:
+        line_items.append(
+            {
+                "name": line.product_id.display_name,
+                "kind": "goods",
+                "amount_cents": stripe_gateway.to_cents(line.price_unit),
+                "quantity": int(line.product_uom_qty),
+            }
+        )
+        tax_today += line.price_tax
     for line in order.order_line:
         if line.display_type or not line.product_id:
             continue
-        # sale_loyalty reward (discount) lines carry a real product but a
-        # negative amount — they are not goods to route through the deposit
-        # matrix. Handled after the loop so the discount nets against today's
-        # charge (and its negative tax against the WV tax line), or defers to
-        # ship on a preorder cart (GOL-2088).
-        if line.reward_id:
+        if line.product_id.default_code != SHIPPING_PRODUCT_CODE:
             continue
-        product = line.product_id
-        name = product.display_name
-        if product.default_code == SHIPPING_PRODUCT_CODE:
-            amount = stripe_gateway.to_cents(line.price_unit)
-            if amount <= 0:
-                continue
-            # Held, not appended: whether this rides today or defers to ship is
-            # decided after the loop from has_preorder (GOL-2052).
-            shipping_item = {"name": name, "kind": "shipping", "amount_cents": amount, "quantity": 1}
-            shipping_tax = line.price_tax
+        amount = stripe_gateway.to_cents(line.price_unit)
+        if amount <= 0:
             continue
-        # free_qty (on-hand minus reserved), not qty_available: a unit another
-        # order already reserved is not sellable now and must fall to preorder
-        # (GOL-1036 defect 4), or the same tree is billed to two customers.
-        # GOL-1309: a variant whose ship wave is not yet open is a preorder even
-        # if in stock — treat its free stock as zero so every unit deposits.
-        ordered_qty = line.product_uom_qty
-        # Two independent deposit-forcing signals; either one moves the line to
-        # the deposit path (deposit is the safe direction — never a full charge
-        # for a tree that cannot ship):
-        #   * calendar_preorder_ids (GOL-1309): destination-zone calendar MODE is
-        #     bareroot-preorder (rev-2 resolver, UTC basis) — free stock counts 0.
-        #   * ships_now (GOL-1666 §2 / GOL-1669): the wave window from
-        #     ship_options, keyed off the destination ZIP for shipped orders and
-        #     the FARM's ZIP for pickup.
-        # Shared pool (GOL-2031): bareroot sells the potted stock too, so the
-        # full-charge vs deposit split must count the whole pool or an in-stock
-        # peat-and-bagged tree wrongly falls to the preorder deposit path.
-        free_qty = 0 if product.id in calendar_preorder_ids else product.grove_shared_pool_qty("free_qty")
-        # Only bareroot honors the mailing-window calendar; potted is pickup-only
-        # and its sold-out handling is the GOL-1666 §2 bareroot steer, not here.
-        tier = product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier or "potted"
-        line_ships_now = True
-        if tier == "bareroot":
-            # Ship orders resolve the window from the customer's zone; farm-pickup
-            # orders from the farm's own zone (GOL-1669). An unknown destination
-            # zone falls back to the global season, not a blanket deposit (GOL-2145).
-            window_zip = dest_zip if is_ship_order else farm_zip
-            line_ships_now = _bareroot_ships_now(window_zip, tier, today, window)
-        for amount, qty, is_preorder in stripe_gateway.line_charge(
-            line.price_unit, ordered_qty, free_qty, ships_now=line_ships_now
-        ):
-            if is_preorder:
-                preorder_variant_ids.append(product.id)
-                line_items.append(
-                    {"name": f"Deposit — {name}", "kind": "deposit", "amount_cents": amount, "quantity": qty}
-                )
-            else:
-                line_items.append({"name": name, "kind": "goods", "amount_cents": amount, "quantity": qty})
-                # Prorate the line's tax to the units billed today.
-                tax_today += line.price_tax * (qty / ordered_qty) if ordered_qty else 0.0
-    # GOL-2052: a cart with any preorder unit collects ONLY deposits (+ any
-    # in-stock goods) today; its shipping and ALL tax are settled off-session at
-    # ship on actual cost, so neither the quoted shipping line nor a tax line is
-    # charged now. A non-preorder cart ships now and keeps the prior behaviour:
-    # shipping + WV tax ride today's charge.
-    has_preorder = bool(preorder_variant_ids)
-    if not has_preorder:
-        if shipping_item is not None:
-            line_items.append(shipping_item)
-            tax_today += shipping_tax
-        # Loyalty reward discount(s) (GOL-2088): a negative line that reduces
-        # today's charge, plus its negative tax that reduces the WV tax line.
-        # Netted BEFORE the tax line is emitted so an out-of-state (untaxed)
-        # cart doesn't sprout a spurious tax line, and a WV cart's tax reflects
-        # the discounted base. A preorder cart never reaches here with a reward:
-        # _create_draft_order rejects a promo code on a deposit cart upstream
-        # (CEO directive 2026-09-06), so this discount emission is scoped to the
-        # ships-now (non-preorder) branch and never leaks a discount onto a
-        # deposit-only charge.
-        discount_items = []
-        for line in order.order_line:
-            if not line.reward_id or line.display_type:
-                continue
-            cents = stripe_gateway.to_cents(line.price_subtotal)  # negative
-            if cents == 0:
-                continue
-            discount_items.append(
-                {"name": line.name or "Discount", "kind": "discount", "amount_cents": cents, "quantity": 1}
-            )
-            tax_today += line.price_tax  # negative → reduces tax owed today
-        if tax_today > 0:
-            line_items.append(
-                {
-                    "name": "Sales tax (WV)",
-                    "kind": "tax",
-                    "amount_cents": stripe_gateway.to_cents(tax_today),
-                    "quantity": 1,
-                }
-            )
-        line_items.extend(discount_items)
+        line_items.append(
+            {"name": line.product_id.display_name, "kind": "shipping", "amount_cents": amount, "quantity": 1}
+        )
+        tax_today += line.price_tax
+    # Loyalty reward discount(s) (GOL-2088): a negative line that reduces today's
+    # charge, plus its negative tax that reduces the WV tax line. Netted BEFORE
+    # the tax line is emitted so an out-of-state (untaxed) cart doesn't sprout a
+    # spurious tax line, and a WV cart's tax reflects the discounted base. A
+    # deposit cart never reaches here: _create_draft_order rejects a promo code on
+    # a deposit cart upstream (CEO directive 2026-09-06), and the deposit branch
+    # above ignores reward lines entirely, so no discount ever leaks onto a
+    # flat-deposit charge.
+    discount_items = []
+    for line in order.order_line:
+        if not line.reward_id or line.display_type:
+            continue
+        cents = stripe_gateway.to_cents(line.price_subtotal)  # negative
+        if cents == 0:
+            continue
+        discount_items.append(
+            {"name": line.name or "Discount", "kind": "discount", "amount_cents": cents, "quantity": 1}
+        )
+        tax_today += line.price_tax  # negative → reduces tax owed today
+    if tax_today > 0:
+        line_items.append(
+            {
+                "name": "Sales tax (WV)",
+                "kind": "tax",
+                "amount_cents": stripe_gateway.to_cents(tax_today),
+                "quantity": 1,
+            }
+        )
+    line_items.extend(discount_items)
     charged_cents = sum(li["amount_cents"] * li["quantity"] for li in line_items)
-    return line_items, preorder_variant_ids, charged_cents
+    return line_items, [], charged_cents
 
 
 def _find_order_for_session(env, session):

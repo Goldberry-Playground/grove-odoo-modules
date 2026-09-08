@@ -24,10 +24,15 @@ STRIPE_API_BASE = "https://api.stripe.com"
 CURRENCY = "usd"
 DEFAULT_TIMEOUT = 30
 
-# Charging matrix (issue GOL-642): a line that cannot be filled from on-hand
-# stock is a preorder and is charged a flat deposit now; the balance is taken
-# off-session at ship time (setup_future_usage=off_session on the session).
-PREORDER_DEPOSIT = 10.00  # USD, flat, per preorder line
+# Deposit rule (GOL-2233, ratified by Josh in the 2026-09-07 release-train
+# session): an order that triggers a deposit — sold-out bareroot OR any order
+# placed after the season cutover (default Oct 15) — is charged ONE flat $10
+# deposit for the WHOLE order, regardless of cart contents or quantity (100
+# trees = $10 for the same order). The balance (goods + real shipping +
+# recomputed tax) settles off-session at ship time
+# (setup_future_usage=off_session on the session). Supersedes the earlier
+# per-line / per-unit deposit split (GOL-642 / GOL-1036 / GOL-1666).
+PREORDER_DEPOSIT = 10.00  # USD, flat, per ORDER (not per line / per unit)
 
 # Reject webhook events whose signed timestamp is more than this many seconds
 # from now — Stripe's recommended default, blunts replay of a captured payload.
