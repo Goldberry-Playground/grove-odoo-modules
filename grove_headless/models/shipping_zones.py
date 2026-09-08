@@ -29,7 +29,7 @@ import os
 from datetime import date as _date
 
 try:
-    from . import plant_compliance, shipping_boxes, shipping_calendar
+    from . import bundle_substitution, plant_compliance, shipping_boxes, shipping_calendar
 except ImportError:  # loaded standalone (tests import by file path)
     import importlib.util as _ilu
 
@@ -43,6 +43,7 @@ except ImportError:  # loaded standalone (tests import by file path)
     shipping_boxes = _load_sibling("shipping_boxes")
     shipping_calendar = _load_sibling("shipping_calendar")
     plant_compliance = _load_sibling("plant_compliance")
+    bundle_substitution = _load_sibling("bundle_substitution")
 
 # ── Destination universe ────────────────────────────────────────────────────
 # Every US destination we expect to quote. Used by the test to assert that the
@@ -317,6 +318,11 @@ def rate_feed(calendar_override=None, today=None) -> dict:
         # this to render the PDP compliance notice from the same map the
         # checkout blocks with, so the two can never drift.
         "compliance": plant_compliance.carve_out_feed(),
+        # Per-state bundle component substitution (GOL-2237). Bundles ship
+        # everywhere; where a component is restricted the storefront swaps it for
+        # the substitute here — computed from the same carve-out map as the
+        # checkout, so the PDP notice can never drift from what actually ships.
+        "bundle_substitution": bundle_substitution.substitution_feed(),
     }
 
 

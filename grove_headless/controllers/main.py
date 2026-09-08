@@ -14,7 +14,7 @@ from odoo import http
 from odoo.http import Response, request
 
 from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME
-from ..models import stripe_gateway
+from ..models import bundle_substitution, stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.mail_from import mail_from_vals
 from ..models.newsletter import newsletter_tag_names
@@ -1824,6 +1824,41 @@ def _apply_promo_code(order, code):
     return None
 
 
+def _stamp_bundle_substitution(kit_line, kit_bom, variant, dest, state_label):
+    """Record the per-state component substitution signal for one bundle line.
+
+    Explodes the phantom BOM, works out which components must be swapped to ship
+    the bundle into ``dest`` (canonical 2-letter state code), and — when any
+    must — records it both as an order chatter note and as a printed
+    ``line_note`` under the kit line, so whoever packs the bundle ships the
+    substituted components rather than the defaults (GOL-2237). No-op when the
+    destination needs no substitution. Raises on a substitute-less data gap; the
+    caller treats the whole signal as best-effort and logs.
+    """
+    _boms, exploded = kit_bom.explode(variant, kit_line.product_uom_qty or 1)
+    components = [
+        (
+            bom_line.product_id.product_tmpl_id.grove_botanical_name or "",
+            bom_line.product_id.display_name,
+        )
+        for bom_line, _line_data in exploded
+    ]
+    swaps = bundle_substitution.swaps_for_state(components, dest)
+    if not swaps:
+        return
+    note = bundle_substitution.packing_slip_note(swaps, state_label)
+    order = kit_line.order_id
+    order.message_post(body="<b>📦 Packing substitution</b><br/>" + html.escape(note).replace("\n", "<br/>"))
+    order.order_line.create(
+        {
+            "order_id": order.id,
+            "display_type": "line_note",
+            "name": note,
+            "sequence": (kit_line.sequence or 10) + 1,
+        }
+    )
+
+
 def _create_draft_order(website, env, payload):
     """Build a draft sale.order from a posted cart payload.
 
@@ -2055,14 +2090,20 @@ def _create_draft_order(website, env, payload):
         # unparseable botanical name can't be cleared into a regulated state and
         # is logged loudly (never guessed, never a silent drop).
         bom_model = env["mrp.bom"] if "mrp.bom" in env.registry else None
+        bundle_lines = []  # (line, kit_bom, variant) — stamped after the loop
         for line in order.order_line:
             if line.display_type or not line.product_id:
                 continue
             variant = line.product_id
             if variant.product_tmpl_id.type == "service" or float(line.product_uom_qty or 0) <= 0:
                 continue
-            if bom_model is not None and bom_model._bom_find(variant, bom_type="phantom").get(variant):
-                continue  # bundle — ships everywhere, handled by substitution
+            kit_bom = bom_model._bom_find(variant, bom_type="phantom").get(variant) if bom_model is not None else None
+            if kit_bom:
+                # Bundle — ships everywhere, exempt from the block gate. Defer the
+                # per-state substitution signal to after this loop so we never
+                # mutate order.order_line while iterating it (GOL-2237).
+                bundle_lines.append((line, kit_bom, variant))
+                continue
             botanical = variant.product_tmpl_id.grove_botanical_name or ""
             block_msg, is_failsafe = compliance_evaluate_line(botanical, dest, ship_state)
             if block_msg:
@@ -2077,6 +2118,24 @@ def _create_draft_order(website, env, payload):
                     )
                 order.unlink()
                 return None, _json_response({"error": block_msg}, status=400)
+
+        # (2c) Bundle per-state component substitution (GOL-2237). Bundles never
+        # block; where a component's taxon is restricted into the destination we
+        # ship a compliant substitute instead and stamp a packing-slip signal so
+        # whoever packs the bundle ships the substituted components. Best-effort:
+        # a data gap or explode hiccup must never break checkout, so it logs and
+        # moves on (the order still ships — worst case with the default parts).
+        for kit_line, kit_bom, variant in bundle_lines:
+            try:
+                _stamp_bundle_substitution(kit_line, kit_bom, variant, dest, ship_state)
+            except Exception:  # noqa: BLE001 — packing signal is best-effort
+                _logger.warning(
+                    "GOL-2237 bundle substitution signal failed for variant %s (%s) into %s",
+                    variant.id,
+                    variant.display_name,
+                    dest,
+                    exc_info=True,
+                )
 
     # Apply the per-box 31-state shipping charge (Box Engine v2). Rates load
     # from data/shipping_rates.json (models/shipping_zones.py) and are
