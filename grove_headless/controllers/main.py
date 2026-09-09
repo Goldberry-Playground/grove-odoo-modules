@@ -2274,14 +2274,29 @@ def _deposit_cutover_md(env):
 def _after_deposit_cutover(env, today):
     """True when ``today`` is strictly after the season cutover (default Oct 15).
 
-    GOL-2233: after the cutover EVERY order — bareroot, potted or pickup — takes
-    the flat $10 deposit, its balance settled off-session at ship (the trees ship
-    in the next dormant wave). The comparison is annual ``(month, day)`` so it
-    fires for the tail of the calendar year (Oct 16 – Dec 31); winter/early-spring
-    orders are governed by the sold-out-bareroot trigger and the ship-window gate,
-    not this cutover. (Potted/pickup scope and the spring reset are the two
-    GOL-2233 asks still pending Josh's confirmation.)"""
+    GOL-2233 (scope ratified 2026-09-09): after the cutover a SHIPPED order
+    containing bareroot takes the flat $10 deposit, its balance settled
+    off-session at ship (the trees ship in the next dormant wave) — see
+    ``_order_takes_deposit`` for the fulfillment/tier gate. Potted-only and
+    farm-pickup orders keep charging in full year-round. The comparison is
+    annual ``(month, day)`` so it fires for the tail of the calendar year
+    (Oct 16 – Dec 31); winter/early-spring orders are governed by the
+    sold-out-bareroot trigger and the ship-window gate, not this cutover."""
     return (today.month, today.day) > _deposit_cutover_md(env)
+
+
+def _has_bareroot_line(order):
+    """True when ``order`` carries at least one real bareroot product line
+    (same line filter as ``_sold_out_bareroot``, without the stock check)."""
+    for line in order.order_line:
+        if line.display_type or not line.product_id or line.reward_id:
+            continue
+        product = line.product_id
+        if product.default_code == SHIPPING_PRODUCT_CODE:
+            continue
+        if _bareroot_tier(product):
+            return True
+    return False
 
 
 def _sold_out_bareroot(order):
@@ -2311,8 +2326,13 @@ def _order_takes_deposit(order, today=None):
     """Does this order take the flat $10 deposit (GOL-2233)?
 
     True when EITHER trigger fires:
-      * sold-out bareroot — a bareroot line short on free stock, OR
-      * the order is placed after the season cutover (default Oct 15).
+      * sold-out bareroot — a bareroot line short on free stock (any
+        fulfillment, any date), OR
+      * the order is placed after the season cutover (default Oct 15) AND is a
+        SHIPPED order carrying at least one bareroot line (CEO scope ruling
+        2026-09-09: potted-only and farm-pickup orders charge in full
+        year-round; an unset fulfillment counts as ship, mirroring the
+        GOL-1906 label gate's skip-pickup idiom).
 
     Either one makes the WHOLE order a single flat $10 deposit regardless of cart
     contents (see ``_build_stripe_line_items``); the balance settles at ship.
@@ -2323,7 +2343,13 @@ def _order_takes_deposit(order, today=None):
     tree onto the deposit path."""
     if today is None:
         today = _date.today()
-    return _after_deposit_cutover(order.env, today) or _sold_out_bareroot(order)
+    if _sold_out_bareroot(order):
+        return True
+    if not _after_deposit_cutover(order.env, today):
+        return False
+    if order.grove_fulfillment == "pickup":
+        return False
+    return _has_bareroot_line(order)
 
 
 def _cart_has_preorder(env, order, payload=None, today=None):

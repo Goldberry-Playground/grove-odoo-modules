@@ -280,7 +280,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
     # the CI wall clock.
 
     BEFORE_CUTOVER = date(2026, 9, 8)  # pre-Oct-15: only the sold-out trigger fires
-    AFTER_CUTOVER = date(2026, 11, 1)  # post-Oct-15: every order is a deposit
+    AFTER_CUTOVER = date(2026, 11, 1)  # post-Oct-15: shipped-bareroot orders deposit
 
     def _make_bareroot(self):
         self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
@@ -332,8 +332,9 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(preorder_ids, [self.product.id])
 
     def test_after_cutover_in_stock_order_is_flat_ten_dollar_deposit(self):
-        """After the Oct-15 cutover, even a fully IN-STOCK order takes the flat
-        $10 deposit — the cutover trigger fires regardless of stock (GOL-2233)."""
+        """After the Oct-15 cutover, even a fully IN-STOCK shipped bareroot
+        order takes the flat $10 deposit — the cutover trigger fires
+        regardless of stock (GOL-2233)."""
         self._make_bareroot()
         self._set_stock(self.product, 50)
         order = self._make_order(qty=3)
@@ -342,6 +343,30 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(line_items[0]["quantity"], 1)
         self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
         self.assertEqual(preorder_ids, [self.product.id])
+
+    def test_after_cutover_potted_only_order_charges_full(self):
+        """CEO scope ruling 2026-09-09: the cutover deposits only shipped
+        BAREROOT orders — a potted-only cart after Oct 15 charges in full."""
+        self.product.product_tmpl_id.grove_shipping_tier = "potted"
+        self._set_stock(self.product, 50)
+        order = self._make_order(qty=2)
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, today=self.AFTER_CUTOVER)
+        self.assertEqual(preorder_ids, [])
+        self.assertTrue([li for li in line_items if li["kind"] == "goods"])
+        self.assertFalse([li for li in line_items if li["kind"] == "deposit"])
+
+    def test_after_cutover_pickup_bareroot_order_charges_full(self):
+        """CEO scope ruling 2026-09-09: a farm-pickup order never takes the
+        cutover deposit, bareroot or not — pickup charges in full year-round.
+        (Sold-out bareroot still deposits regardless of fulfillment.)"""
+        self._make_bareroot()
+        self._set_stock(self.product, 50)
+        order = self._make_order(qty=2)
+        order.sudo().write({"grove_fulfillment": "pickup"})
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, today=self.AFTER_CUTOVER)
+        self.assertEqual(preorder_ids, [])
+        self.assertTrue([li for li in line_items if li["kind"] == "goods"])
+        self.assertFalse([li for li in line_items if li["kind"] == "deposit"])
 
     def test_potted_sold_out_before_cutover_is_full_charge(self):
         """Only bareroot triggers the sold-out deposit; a potted line at zero
