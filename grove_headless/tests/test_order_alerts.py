@@ -160,9 +160,7 @@ class OrderCardPayloadTests(unittest.TestCase):
         }
 
     def test_reshapes_context_into_bridge_body(self):
-        p = oa.build_order_card_payload(
-            order_id=42, company_id=1, is_deposit=False, context=self._ctx()
-        )
+        p = oa.build_order_card_payload(order_id=42, company_id=1, is_deposit=False, context=self._ctx())
         self.assertEqual(p["orderId"], 42)
         self.assertEqual(p["companyId"], 1)
         self.assertEqual(p["orderRef"], "S00042")
@@ -179,9 +177,7 @@ class OrderCardPayloadTests(unittest.TestCase):
         )
 
     def test_carries_deposit_flag(self):
-        p = oa.build_order_card_payload(
-            order_id=7, company_id=2, is_deposit=True, context=self._ctx()
-        )
+        p = oa.build_order_card_payload(order_id=7, company_id=2, is_deposit=True, context=self._ctx())
         self.assertIs(p["isDeposit"], True)
         self.assertEqual(p["companyId"], 2)
 
