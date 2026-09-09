@@ -16,6 +16,7 @@ from . import (
     test_migration_relink_xmlids,  # noqa: F401
     test_newsletter_subscribe,  # noqa: F401
     test_order_digest,  # noqa: F401
+    test_plant_compliance,  # noqa: F401
     test_pos,  # noqa: F401
     test_potting_batch,  # noqa: F401
     test_preorder_cap,  # noqa: F401
