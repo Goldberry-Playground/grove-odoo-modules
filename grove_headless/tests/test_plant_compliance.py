@@ -15,6 +15,7 @@ clean) and the empty-botanical fail-safe (blocks only into regulated states).
 import importlib.util
 import os
 import unittest
+from unittest import mock
 
 _MODULE_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "plant_compliance.py")
 _spec = importlib.util.spec_from_file_location("grove_plant_compliance", _MODULE_PATH)
@@ -72,10 +73,20 @@ class TestTaxonBlocked(unittest.TestCase):
         # A bare "morus" with no species must NOT match the alba-only rule.
         self.assertFalse(pc.is_taxon_blocked("morus", None, "IN"))
 
-    def test_diospyros_allow_only_ca(self):
-        self.assertFalse(pc.is_taxon_blocked("diospyros", "virginiana", "CA"))
+    def test_diospyros_blocks_ca_only(self):
+        # CA is the only persimmon restriction; it is not a green state, so this
+        # carve-out has no green-state impact today (spec: "CA only").
+        self.assertTrue(pc.is_taxon_blocked("diospyros", "virginiana", "CA"))
         for state in ("GA", "TN", "FL", "OH"):
-            self.assertTrue(pc.is_taxon_blocked("diospyros", "virginiana", state), state)
+            self.assertFalse(pc.is_taxon_blocked("diospyros", "virginiana", state), state)
+
+    def test_allow_kind_ships_only_to_listed_states(self):
+        # No live rule uses the "allow" kind today, but the resolver supports it
+        # (ship ONLY to the listed states, blocked everywhere else). Cover the
+        # branch with a synthetic rule so the documented extension point stays honest.
+        with mock.patch.dict(pc.CARVE_OUTS, {"testus": ("allow", frozenset({"GA"}))}, clear=False):
+            self.assertFalse(pc.is_taxon_blocked("testus", None, "GA"))
+            self.assertTrue(pc.is_taxon_blocked("testus", None, "TN"))
 
     def test_unrestricted_genus_never_blocks(self):
         self.assertFalse(pc.is_taxon_blocked("malus", "domestica", "FL"))
@@ -130,7 +141,7 @@ class TestCarveOutFeed(unittest.TestCase):
         feed = pc.carve_out_feed()
         self.assertEqual(feed["schema"], 1)
         self.assertEqual(feed["carve_outs"]["castanea"], {"kind": "block", "states": ["FL", "OR", "WA"]})
-        self.assertEqual(feed["carve_outs"]["diospyros"]["kind"], "allow")
+        self.assertEqual(feed["carve_outs"]["diospyros"]["kind"], "block")
         self.assertEqual(feed["regulated_states"], sorted(pc.REGULATED_STATES))
 
     def test_feed_is_json_serializable(self):

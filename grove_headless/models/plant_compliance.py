@@ -54,8 +54,9 @@ CARVE_OUTS: dict[str, tuple[str, frozenset[str]]] = {
     # Morus alba — white mulberry ('Maple Leaf', hybrids). Species-level: the WI
     # male-only exemption does not apply (ours fruit). Morus rubra stays clean.
     "morus alba": ("block", frozenset({"IN", "OH", "WI"})),
-    # Diospyros — persimmon. Allowed into CA only (no green-state impact today).
-    "diospyros": ("allow", frozenset({"CA"})),
+    # Diospyros — persimmon. CA restricts persimmon; block that one destination.
+    # CA is not on the green list, so this is latent (no green-state impact today).
+    "diospyros": ("block", frozenset({"CA"})),
 }
 
 # Every state that appears in any carve-out rule (block target or allow target).
