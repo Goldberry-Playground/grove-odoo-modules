@@ -270,58 +270,122 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         with mock.patch.dict("os.environ", env, clear=True):
             self.assertEqual(grove_main._tenant_secret_key("ggg"), "sk_legacy")
 
-    # ── line-item builder / charging matrix ──────────────────────────────
+    # ── line-item builder / flat-per-order deposit rule (GOL-2233) ────────
+    #
+    # An order takes ONE flat $10 deposit for the WHOLE cart when EITHER
+    # trigger fires: (a) sold-out bareroot — a bareroot line short on free
+    # stock — or (b) the order is placed after the season cutover (default
+    # Oct 15). Otherwise it ships now and charges in full today. `today` is
+    # pinned on either side of the cutover so the date branch never depends on
+    # the CI wall clock.
 
-    def test_in_stock_line_charges_full_price(self):
+    BEFORE_CUTOVER = date(2026, 9, 8)  # pre-Oct-15: only the sold-out trigger fires
+    AFTER_CUTOVER = date(2026, 11, 1)  # post-Oct-15: every order is a deposit
+
+    def _make_bareroot(self):
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+
+    def test_in_stock_bareroot_before_cutover_charges_full_price(self):
+        """In-stock bareroot, before the cutover → normal full charge, no
+        deposit. This is the case the old dormancy-window forcing wrongly
+        deposited; GOL-2233 decouples the charge from the ship window."""
+        self._make_bareroot()
         self._set_stock(self.product, 5)
         order = self._make_order(qty=2)
-        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order)
-        product_line = next(li for li in line_items if li["name"] == self.product.display_name)
-        self.assertEqual(product_line["amount_cents"], stripe_gateway.to_cents(25.0))
-        self.assertEqual(product_line["quantity"], 2)
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        goods = next(li for li in line_items if li["name"] == self.product.display_name)
+        self.assertEqual(goods["kind"], "goods")
+        self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(25.0))
+        self.assertEqual(goods["quantity"], 2)
         self.assertEqual(preorder_ids, [])
-        self.assertGreater(charged, 0)
+        # Full-charge path bills goods + the WV tax line today (the fixture's
+        # company default tax, GroveTaxFixtureMixin) — no deposit, no deferral.
+        tax = next(li for li in line_items if li["kind"] == "tax")
+        self.assertEqual(charged, stripe_gateway.to_cents(50.0) + tax["amount_cents"])
 
-    def test_short_stock_line_is_deposit(self):
+    def test_sold_out_bareroot_is_one_flat_ten_dollar_deposit(self):
+        """Sold-out (zero free) bareroot → ONE flat $10 deposit for the order,
+        regardless of quantity (GOL-2233: 100 trees = $10 for the same order)."""
+        self._make_bareroot()
         self._set_stock(self.product, 0)
-        order = self._make_order(qty=1)
-        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
-        deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
+        order = self._make_order(qty=4)
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        self.assertEqual([li["kind"] for li in line_items], ["deposit"])
+        deposit = line_items[0]
+        self.assertEqual(deposit["quantity"], 1)  # flat per ORDER, not per unit
         self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
-        self.assertEqual(deposit["quantity"], 1)
+        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
         self.assertEqual(preorder_ids, [self.product.id])
-        # No tax line: nothing chargeable-today is taxed on a pure-deposit cart.
-        self.assertFalse([li for li in line_items if li["name"] == "Sales tax (WV)"])
 
-    def test_partial_stock_line_splits_in_stock_and_deposit(self):
-        """GOL-1036 defect 3: a line with SOME free stock splits — the in-stock
-        units bill at full price and each short unit is a per-unit deposit,
-        never one flat qty-1 deposit that under-reserves the shortfall."""
+    def test_short_stock_bareroot_collapses_whole_order_to_flat_deposit(self):
+        """A partially-filled bareroot line (2 free, 5 ordered) is 'sold out' for
+        GOL-2233 — the WHOLE order collapses to the single $10 deposit; there is
+        NO per-unit split and no in-stock goods line billed today (reverses the
+        old GOL-1036 split)."""
+        self._make_bareroot()
         self._set_stock(self.product, 2)
         order = self._make_order(qty=5)
-        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
-        full = next(li for li in line_items if li["name"] == self.product.display_name)
-        self.assertEqual(full["quantity"], 2)
-        self.assertEqual(full["amount_cents"], stripe_gateway.to_cents(25.0))
-        deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
-        self.assertEqual(deposit["quantity"], 3)  # per unit of shortfall, not 1
-        self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        self.assertEqual([li["kind"] for li in line_items], ["deposit"])
+        self.assertEqual(line_items[0]["quantity"], 1)
+        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
         self.assertEqual(preorder_ids, [self.product.id])
+
+    def test_after_cutover_in_stock_order_is_flat_ten_dollar_deposit(self):
+        """After the Oct-15 cutover, even a fully IN-STOCK order takes the flat
+        $10 deposit — the cutover trigger fires regardless of stock (GOL-2233)."""
+        self._make_bareroot()
+        self._set_stock(self.product, 50)
+        order = self._make_order(qty=3)
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.AFTER_CUTOVER)
+        self.assertEqual([li["kind"] for li in line_items], ["deposit"])
+        self.assertEqual(line_items[0]["quantity"], 1)
+        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+        self.assertEqual(preorder_ids, [self.product.id])
+
+    def test_potted_sold_out_before_cutover_is_full_charge(self):
+        """Only bareroot triggers the sold-out deposit; a potted line at zero
+        stock still charges in full before the cutover (the oversell webhook
+        guard is the safety net if it truly cannot be fulfilled)."""
+        self.product.product_tmpl_id.grove_shipping_tier = "potted"
+        self._set_stock(self.product, 0)
+        order = self._make_order(qty=2)
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        self.assertEqual(preorder_ids, [])
+        self.assertTrue([li for li in line_items if li["kind"] == "goods"])
+        self.assertFalse([li for li in line_items if li["kind"] == "deposit"])
 
     def test_line_items_carry_kind_for_review_badges(self):
         """GOL-1057: every charged-today line is tagged with a `kind` so the
-        review page badges goods vs deposit (vs shipping / tax) without parsing
-        the display name — the review renders this exact array, so its math is
-        byte-identical to what Stripe charges."""
-        self._set_stock(self.product, 2)
-        order = self._make_order(qty=5)  # 2 in stock + 3 short → goods + deposit
-        line_items, _ids, _charged = grove_main._build_stripe_line_items(order)
-        goods = next(li for li in line_items if li["name"] == self.product.display_name)
-        self.assertEqual(goods["kind"], "goods")
-        deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
-        self.assertEqual(deposit["kind"], "deposit")
+        review page badges goods vs deposit without parsing the display name.
+        A full-charge order carries `goods`; a deposit order carries `deposit`."""
+        self._make_bareroot()
+        self._set_stock(self.product, 5)
+        full = self._make_order(qty=2)
+        full_items, _fids, _fc = grove_main._build_stripe_line_items(full, today=self.BEFORE_CUTOVER)
+        self.assertEqual(next(li for li in full_items if li["name"] == self.product.display_name)["kind"], "goods")
+        # Stock is still 5 (_set_stock(…, 0) is a no-op); ordering MORE than the
+        # free pool makes the bareroot line sold-out → the GOL-2233 deposit path.
+        dep = self._make_order(qty=6)
+        dep_items, _dids, _dc = grove_main._build_stripe_line_items(dep, today=self.BEFORE_CUTOVER)
+        self.assertEqual([li["kind"] for li in dep_items], ["deposit"])
 
-    # ── GOL-2052: preorder defers shipping + tax to ship-time settlement ──
+    def test_deposit_cutover_param_is_configurable_and_fails_safe(self):
+        """The season cutover is Odoo-editable (grove_headless.deposit_cutover_md,
+        MM-DD): an absent value defaults to Oct 15, a configured value moves the
+        boundary, and a malformed value fails SAFE to Oct 15 rather than raising
+        on the money path."""
+        icp = self.env["ir.config_parameter"].sudo()
+        icp.set_param("grove_headless.deposit_cutover_md", "")  # unset → Oct 15
+        self.assertFalse(grove_main._after_deposit_cutover(self.env, date(2026, 10, 15)))
+        self.assertTrue(grove_main._after_deposit_cutover(self.env, date(2026, 10, 16)))
+        icp.set_param("grove_headless.deposit_cutover_md", "09-01")  # earlier cutover
+        self.assertTrue(grove_main._after_deposit_cutover(self.env, date(2026, 9, 2)))
+        icp.set_param("grove_headless.deposit_cutover_md", "not-a-date")  # malformed
+        self.assertFalse(grove_main._after_deposit_cutover(self.env, date(2026, 10, 1)))
+        self.assertTrue(grove_main._after_deposit_cutover(self.env, date(2026, 11, 1)))
+
+    # ── GOL-2233 / GOL-2052: a deposit order defers shipping + tax to ship ──
 
     def _seed_wv_tax(self):
         """Put the WV group tax on the product so a today-charge would tax."""
@@ -332,64 +396,56 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.product.product_tmpl_id.taxes_id = [(6, 0, wv_group.ids)]
         return wv_group
 
-    def test_preorder_charges_deposit_only_no_shipping_no_tax(self):
-        """Acceptance 1: a preorder cart charges exactly $10 x preorder units
-        today — the quoted shipping line and WV tax are BOTH deferred to the
-        off-session settlement at ship, never charged now."""
+    def test_deposit_order_charges_deposit_only_no_shipping_no_tax(self):
+        """A deposit cart charges exactly $10 today — the quoted shipping line
+        and WV tax are BOTH deferred to the off-session settlement at ship."""
+        self._make_bareroot()
         self._seed_wv_tax()
-        self._set_stock(self.product, 0)  # short stock → preorder
+        self._set_stock(self.product, 0)  # sold-out bareroot → deposit
         order = self._make_order(qty=2)
         self._add_shipping_line(order)  # a real ship order carries GROVE-SHIP
-        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order)
-        # preorder_variant_ids is per-variant (one id per deferred line), not
-        # per-unit — the 2-unit count rides the deposit line's `quantity`, and
-        # the downstream settlement keys off `product.id in preorder_ids` as a
-        # set membership (see GOL-1057 sibling test, line_charge splitting).
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
         self.assertEqual(preorder_ids, [self.product.id])
-        # Only the deposit is charged today.
-        deposit = next(li for li in line_items if li["kind"] == "deposit")
-        self.assertEqual(deposit["quantity"], 2)  # both preorder units deferred
-        kinds = {li["kind"] for li in line_items}
-        self.assertEqual(kinds, {"deposit"})
-        self.assertFalse([li for li in line_items if li["kind"] == "shipping"])
-        self.assertFalse([li for li in line_items if li["kind"] == "tax"])
-        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT) * 2)
+        self.assertEqual({li["kind"] for li in line_items}, {"deposit"})
+        self.assertFalse([li for li in line_items if li["kind"] in ("shipping", "tax")])
+        # Flat per ORDER, not per unit: $10 for the whole cart (was $10 × qty).
+        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
 
-    def test_mixed_order_defers_shipping_and_tax_but_bills_in_stock_goods(self):
-        """A cart with both in-stock and preorder units bills the in-stock goods
-        today (they still ship with the wave) but defers shipping + all tax —
-        the split is per-cart on has_preorder, not per-line."""
+    def test_after_cutover_deposit_defers_shipping_and_tax_and_in_stock_goods(self):
+        """After the cutover an IN-STOCK ship order still collapses to the flat
+        $10 deposit — the in-stock goods, shipping and tax all defer to ship
+        (GOL-2233 whole-order collapse, replacing the old mixed-cart split)."""
+        self._make_bareroot()
         self._seed_wv_tax()
-        self._set_stock(self.product, 2)  # 2 in stock, 3 short
+        self._set_stock(self.product, 10)
         order = self._make_order(qty=5)
         self._add_shipping_line(order)
-        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.AFTER_CUTOVER)
         self.assertEqual(preorder_ids, [self.product.id])
-        goods = next(li for li in line_items if li["kind"] == "goods")
-        self.assertEqual(goods["quantity"], 2)
-        self.assertTrue([li for li in line_items if li["kind"] == "deposit"])
-        # Shipping + tax deferred even though in-stock goods are billed today.
-        self.assertFalse([li for li in line_items if li["kind"] == "shipping"])
-        self.assertFalse([li for li in line_items if li["kind"] == "tax"])
+        self.assertEqual({li["kind"] for li in line_items}, {"deposit"})
+        self.assertFalse([li for li in line_items if li["kind"] in ("goods", "shipping", "tax")])
+        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
 
     def test_in_stock_order_still_charges_shipping_and_tax_today(self):
-        """Acceptance 5: a fully-in-stock (non-preorder) order ships now and is
-        UNCHANGED — shipping and WV tax ride the today-charge as before."""
+        """A fully-in-stock (non-deposit) order before the cutover ships now and
+        is UNCHANGED — shipping and WV tax ride the today-charge as before."""
+        self._make_bareroot()
         self._seed_wv_tax()
         self._set_stock(self.product, 5)
         order = self._make_order(qty=2)
         self._add_shipping_line(order)
-        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
         self.assertEqual(preorder_ids, [])
         self.assertTrue([li for li in line_items if li["kind"] == "shipping"])
         self.assertTrue([li for li in line_items if li["kind"] == "tax"])
 
-    def test_pickup_preorder_has_no_shipping_line_to_defer(self):
-        """Acceptance 5 (pickup): a farm-pickup preorder never had a shipping
-        line; deferral leaves the deposit-only charge intact and adds nothing."""
+    def test_pickup_deposit_has_no_shipping_line_to_defer(self):
+        """A farm-pickup deposit order never had a shipping line; the flat $10
+        deposit stands alone."""
+        self._make_bareroot()
         self._set_stock(self.product, 0)
         order = self._make_order(qty=1)  # no GROVE-SHIP line → pickup
-        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order)
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
         self.assertEqual(preorder_ids, [self.product.id])
         self.assertFalse([li for li in line_items if li["kind"] in ("shipping", "tax")])
         self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
@@ -439,11 +495,11 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
         self._set_stock(self.product, 5)
         plain = self._make_order(qty=2)
-        _, _, full_charged = grove_main._build_stripe_line_items(plain)
+        _, _, full_charged = grove_main._build_stripe_line_items(plain, today=self.BEFORE_CUTOVER)
 
         order = self._make_order(qty=2)
         self.assertIsNone(grove_main._apply_promo_code(order, "TESTPROMO"))
-        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order)
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
 
         discount = next(li for li in line_items if li["kind"] == "discount")
         self.assertLess(discount["amount_cents"], 0)  # negative (untaxed portion)
@@ -465,7 +521,8 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         ship. Even an otherwise-eligible code (min_qty met) is refused because the
         cart charges deposits today; no order and no reward line persist."""
         self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
-        self._set_stock(self.product, 0)  # zero stock → every unit is a deposit
+        self._make_bareroot()
+        self._set_stock(self.product, 0)  # sold-out bareroot → deposit cart
         payload = self._cart_payload("WV", fulfillment="pickup", promo_code="TESTPROMO")
         payload["items"] = [{"variant_id": self.product.id, "quantity": 2}]  # meets min_qty
         order, error = grove_main._create_draft_order(self._website(), self.env, payload)
@@ -480,22 +537,23 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         same way the charging path (_build_stripe_line_items) does — a deposit
         cart is a preorder for both; a fully-in-stock cart is a preorder for
         neither — so the reject can never diverge from what actually charges."""
+        self._make_bareroot()
         pickup = self._cart_payload("WV", fulfillment="pickup")
         pickup["items"] = [{"variant_id": self.product.id, "quantity": 2}]
-        # Deposit cart (zero stock) → preorder for both.
+        # Deposit cart (sold-out bareroot) → preorder for both.
         self._set_stock(self.product, 0)
         order, error = grove_main._create_draft_order(self._website(), self.env, pickup)
         self.assertIsNone(error)
-        _, preorder_ids, _ = grove_main._build_stripe_line_items(order)
+        _, preorder_ids, _ = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
         self.assertTrue(preorder_ids)
-        self.assertTrue(grove_main._cart_has_preorder(self.env, order, pickup))
-        # In-stock cart → preorder for neither.
+        self.assertTrue(grove_main._cart_has_preorder(self.env, order, pickup, today=self.BEFORE_CUTOVER))
+        # In-stock bareroot, before the cutover → preorder for neither.
         self._set_stock(self.product, 5)
         order2, error2 = grove_main._create_draft_order(self._website(), self.env, pickup)
         self.assertIsNone(error2)
-        _, preorder_ids2, _ = grove_main._build_stripe_line_items(order2)
+        _, preorder_ids2, _ = grove_main._build_stripe_line_items(order2, today=self.BEFORE_CUTOVER)
         self.assertFalse(preorder_ids2)
-        self.assertFalse(grove_main._cart_has_preorder(self.env, order2, pickup))
+        self.assertFalse(grove_main._cart_has_preorder(self.env, order2, pickup, today=self.BEFORE_CUTOVER))
 
     # ── shipping-calendar preorder gate (GOL-1309) ───────────────────────
 
@@ -510,58 +568,33 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         payload.update(extra)
         return payload
 
-    def test_calendar_preorder_forces_deposit_for_in_stock_bareroot(self):
-        """GOL-1309 P0: an IN-STOCK bareroot tree ordered in its dormant preorder
-        season (zone 7, mid-January) is charged as a per-unit deposit, not in
-        full — it physically cannot ship until the spring wave, so a full 'ships
-        now' charge would be wrong. Before this gate the shelf stock (5 on hand)
-        billed both units at full price in any month."""
-        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
+    def test_calendar_charge_forcing_is_decoupled_from_ship_window(self):
+        """GOL-2233 decoupling: the ship-calendar mode no longer changes the
+        checkout charge. An in-stock bareroot ordered in September (outside the
+        Nov–Apr dormancy ship window, so it cannot leave the nursery yet) still
+        charges in FULL today, not a deposit — the ship-window gate (GOL-1906)
+        governs only WHEN it ships. The old GOL-1309 forcing that deposited such
+        an order is reverted; the sold-out and cutover triggers are the only
+        deposit paths now."""
+        self._make_bareroot()
         self._set_stock(self.product, 5)
         order = self._make_order(qty=2)
+        # The retained ship-window helper still reports the closed wave...
         forced = grove_main._calendar_preorder_variant_ids(
             self.env, order, self._ship_payload("10001"), today=date(2027, 1, 15)
         )
         self.assertEqual(forced, frozenset({self.product.id}))
-        # Pin the ships_now axis (GOL-1666 §2) open so this test isolates the
-        # calendar-mode forcing axis — otherwise the real ship_options call
-        # makes the assertion seasonal.
-        with mock.patch.object(grove_main, "ship_options", return_value={"ships_now": True}):
-            line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, forced)
-        self.assertEqual(preorder_ids, [self.product.id])
-        deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
-        self.assertEqual(deposit["quantity"], 2)  # both in-stock units become deposits
-        self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
-        # No full-price goods line and no tax today — nothing settles until ship.
-        self.assertFalse([li for li in line_items if li["name"] == self.product.display_name])
-        self.assertFalse([li for li in line_items if li["name"] == "Sales tax (WV)"])
-
-    def test_calendar_in_window_keeps_full_charge(self):
-        """Inside the shopper's active spring ship window the in-stock tree ships
-        now → full price, no calendar deposit forcing."""
-        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
-        self._set_stock(self.product, 5)
-        order = self._make_order(qty=1)
-        forced = grove_main._calendar_preorder_variant_ids(
-            self.env, order, self._ship_payload("10001"), today=date(2027, 4, 15)
-        )
-        self.assertEqual(forced, frozenset())
-        # Same ships_now pin as above — full charge asserted on the calendar
-        # axis alone, independent of the test-run date's wave window. The
-        # GOL-1906 nursery-dormancy gate inside _build_stripe_line_items reads
-        # the REAL clock (`_date.today()`) before ship_options is consulted, so a
-        # leafed-season test run (e.g. September) would force this line to a
-        # deposit regardless of the pins above. Pin a dormant date the same way
-        # the seasonal-gate tests in this class do.
-        with (
-            mock.patch.object(grove_main, "ship_options", return_value={"ships_now": True}),
-            mock.patch.object(grove_main, "_date") as md,
-        ):
-            md.today.return_value = date(2027, 1, 15)  # dormant window
-            line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, forced)
+        # ...but it no longer feeds the charge: an in-stock, pre-cutover order is
+        # a full charge regardless of the ship calendar.
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
         self.assertEqual(preorder_ids, [])
         goods = next(li for li in line_items if li["name"] == self.product.display_name)
         self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(25.0))
+        self.assertEqual(goods["quantity"], 2)
+        # Goods + the WV tax line ride today's charge (company default tax from
+        # GroveTaxFixtureMixin); nothing is deferred on a full-charge order.
+        tax = next(li for li in line_items if li["kind"] == "tax")
+        self.assertEqual(charged, stripe_gateway.to_cents(50.0) + tax["amount_cents"])
 
     def test_calendar_gate_skips_pickup(self):
         """Farm pickup transfers at the WV farm, off the ship calendar — a
@@ -620,92 +653,24 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.warehouse.partner_id.zip = "24551"
         self.assertEqual(grove_main._farm_pickup_zip(self.env, self.company), "24551")
 
-    def test_pickup_bareroot_out_of_window_deposits_from_farm_zone(self):
-        """GOL-1669: a farm-pickup bareroot line resolves its mailing window from
-        the FARM's ZIP, not the customer's — a warm-zone buyer collecting here is
-        bound by when we can lift on the farm. Out of the farm window it charges
-        the flat deposit despite full stock, exactly like the shipped path."""
-        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
-        self._set_stock(self.product, 10)  # in stock — any deposit is window-driven
-        self.warehouse.partner_id.zip = "26651"
-        self.partner.zip = "33101"  # a warm-zone customer whose home window is later
-        order = self._make_order(qty=2)  # no shipping line → farm pickup
-        seen = {}
-
-        def spy(zip_code, tier, today):
-            seen["zip"] = zip_code
-            # 26651 is a KNOWN zone (6) that is simply out of window — usda_zone
-            # is present so the GOL-2145 unknown-zone fallback is NOT engaged and
-            # ships_now False stands (deposit).
-            return {"usda_zone": 6, "ships_now": False}
-
-        # Pin a DORMANT date: the GOL-1906 nursery-dormancy gate short-circuits
-        # `_bareroot_ships_now` to a deposit before `ship_options` is consulted
-        # outside the window, so a leafed run date would never reach the spy —
-        # this test is about WHICH zip keys the window, so it must run in-season.
-        with (
-            mock.patch.object(grove_main, "ship_options", side_effect=spy),
-            mock.patch.object(grove_main, "_date") as md,
-        ):
-            md.today.return_value = date(2027, 1, 15)  # dormant window
-            line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
-        self.assertEqual(seen["zip"], "26651", "pickup window must key off the FARM ZIP, not the customer's")
-        deposit = next(li for li in line_items if li["name"].startswith("Deposit"))
-        self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
-        self.assertEqual(deposit["quantity"], 2)
-        self.assertEqual(preorder_ids, [self.product.id])
-
-    def test_ship_bareroot_window_still_keys_off_customer_zip(self):
-        """Regression: a SHIPPED bareroot line keeps resolving its window from the
-        destination ZIP (GOL-1666 §1), unaffected by the farm-pickup path."""
-        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
-        self._set_stock(self.product, 10)
-        self.warehouse.partner_id.zip = "26651"
-        self.partner.zip = "04101"  # Portland ME destination
-        order = self._make_order(qty=1)
-        self._add_shipping_line(order)  # → is_ship_order
-        seen = {}
-
-        def spy(zip_code, tier, today):
-            seen["zip"] = zip_code
-            return {"ships_now": True}
-
-        # Dormant date so the nursery-dormancy gate (GOL-1906) lets the window
-        # resolution reach `ship_options`; the assertion is about the ZIP key.
-        with (
-            mock.patch.object(grove_main, "ship_options", side_effect=spy),
-            mock.patch.object(grove_main, "_date") as md,
-        ):
-            md.today.return_value = date(2027, 1, 15)  # dormant window
-            grove_main._build_stripe_line_items(order)
-        self.assertEqual(seen["zip"], "04101", "shipped window must key off the destination ZIP")
-
-    # ── unknown destination zone: global-season fallback, not deposit (GOL-2145) ──
-
-    def test_leafed_season_bareroot_forced_to_preorder(self):
-        """GOL-1906 seasonal gate (Josh 2026-09-07, REVERSES the GOL-2145 leafed
-        path for bareroot): bareroot ships ONLY inside the nursery dormancy window
-        (Nov 1 – Apr 15). An in-stock bareroot line ordered in leafed season — the
-        exact case GOL-2145 previously charged in FULL and shipped now as
-        peat-and-bagged — is now a PREORDER deposit that ships in the next dormant
-        wave, because a leafed bareroot label is impossible (the rate table is
-        dormant-priced; a leafed parcel is ~2x heavier and would be undercharged).
-        The order is NOT rejected — the deposit path routes it forward. The
-        unknown-zone fallback still governs the DORMANT season (see the companion
-        test); this only removes leafed-season shipping for bareroot."""
-        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
-        self._set_stock(self.product, 10)  # in stock — the deposit is season-driven
-        self.partner.zip = "10001"  # a KNOWN zone, so this is the gate, not the fallback
+    def test_leafed_season_in_stock_bareroot_now_charges_full(self):
+        """GOL-2233 headline reversal (of #190 / GOL-1906 / GOL-1309): the ship
+        window no longer forces the CHARGE. An IN-STOCK bareroot ordered in leafed
+        season (Sep 7, before the Oct-15 cutover) — the exact case the dormancy
+        gate previously deposited — now charges in FULL today. The tree still only
+        SHIPS in the next dormant wave (the ship-window/label gate is unchanged),
+        but that timing is decoupled from whether we take a deposit."""
+        self._make_bareroot()
+        self._set_stock(self.product, 10)  # in stock
+        self.partner.zip = "10001"
         order = self._make_order(qty=2)
         self._add_shipping_line(order)  # → is_ship_order
-        with mock.patch.object(grove_main, "_date") as md:
-            md.today.return_value = date(2026, 9, 7)  # leafed season
-            line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
-        self.assertEqual(preorder_ids, [self.product.id], "leafed-season bareroot must defer to preorder")
-        deposit = next(li for li in line_items if li["kind"] == "deposit")
-        self.assertEqual(deposit["quantity"], 2)
-        self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
-        self.assertFalse([li for li in line_items if li["kind"] == "goods"], "no full charge outside the window")
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, today=date(2026, 9, 7))
+        self.assertEqual(preorder_ids, [], "leafed-season in-stock bareroot now charges full, not a deposit")
+        goods = next(li for li in line_items if li["name"] == self.product.display_name)
+        self.assertEqual(goods["kind"], "goods")
+        self.assertEqual(goods["quantity"], 2)
+        self.assertFalse([li for li in line_items if li["kind"] == "deposit"])
 
     def test_dormant_season_bareroot_in_window_ships_now(self):
         """Companion to the seasonal gate: inside the dormancy window an in-stock
@@ -747,25 +712,6 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         ):
             with self.assertRaisesRegex(UserError, "dormancy window"):
                 order.action_buy_shipping_labels()
-
-    def test_unknown_zone_bareroot_in_dormant_season_still_deposits(self):
-        """Guardrail: the unknown-zone fallback only relaxes to full charge when
-        the store is globally in a ships-now season. In deep winter (all zones
-        frozen) an untabulated ZIP still deposits — the never-undercharge-out-of-
-        window stance is preserved (GOL-2145)."""
-        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
-        self._set_stock(self.product, 10)
-        self.partner.zip = "99999"
-        order = self._make_order(qty=2)
-        self._add_shipping_line(order)
-        with mock.patch.object(grove_main, "_date") as md:
-            md.today.return_value = date(2027, 1, 10)  # global no-ship floor
-            line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order)
-        self.assertEqual(preorder_ids, [self.product.id])
-        deposit = next(li for li in line_items if li["kind"] == "deposit")
-        self.assertEqual(deposit["quantity"], 2)
-        self.assertEqual(deposit["amount_cents"], stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
-        self.assertFalse([li for li in line_items if li["kind"] == "goods"])
 
     # ── ship-to gate: state / potted / $0-shipping breaker (GOL-1036) ─────
 
