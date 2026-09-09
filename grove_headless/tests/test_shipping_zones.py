@@ -117,8 +117,9 @@ class TestShippingZoneEngineContract(unittest.TestCase):
         self.assertIsNone(sz.box_rate("", "small"))
         self.assertIsNone(sz.box_rate(None, "small"))
 
-    def test_there_are_exactly_five_rate_zones(self):
-        self.assertEqual(len(sz.RATE_ZONE_IDS), 5)
+    def test_there_are_exactly_seven_rate_zones(self):
+        # zone_1..5 + GOL-2238 real probe-derived zone_6 (mid-continent) / zone_7 (near-plains).
+        self.assertEqual(len(sz.RATE_ZONE_IDS), 7)
 
     def test_rate_is_box_scoped(self):
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
