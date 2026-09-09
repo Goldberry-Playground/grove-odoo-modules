@@ -61,6 +61,37 @@ jobs:
           set -e
           echo "code=$code" >> "$GITHUB_OUTPUT"
           if [ "$code" != "0" ] && [ "$code" != "3" ]; then exit "$code"; fi
+      - name: Validate regenerated rate table (self-gate before proposing a merge)
+        # GOL-2212: the bot regenerates shipping_rates.json from a live Shippo probe,
+        # so its output is NEW data every morning and can trip a rate-table invariant
+        # (a new box id, a monotonicity edge, a shape change). The merge queue only
+        # *requires* Lint Python / Validate Module Manifests / Validate Tenant Slug
+        # Map — NOT the rate-table invariants, which live in the "Pure-Python unit
+        # tests" job that is board-PARKED for required-promotion (GOL-1953 / GOL-2015,
+        # paused 2026-09-01). Because those invariants are non-required, a rate-check
+        # PR could be approved + enqueued before/regardless of them and merge RED rate
+        # data to the live-pricing money path — exactly what reddened main via #194.
+        # Run that SAME pure-python suite here so the bot gates its OWN output: a pass
+        # opens a mergeable (ready) PR that still merges unattended; a failure opens/
+        # keeps the PR as a DRAFT — GitHub blocks merging a draft, so no automated
+        # approver and no merge-queue entry can push bad rates to main. Odoo-level
+        # invariants ("Install + test module against Odoo 19") still run as PR CI;
+        # this covers the pure-python invariants the bot can reproduce standalone.
+        if: steps.guard.outputs.skip == 'false' && steps.check.outputs.code == '3'
+        id: invariants
+        run: |
+          pip install --quiet pytest requests
+          set +e
+          python3 -m pytest grove_headless/tests/ scripts/rate_check/tests/ -q
+          rc=$?
+          set -e
+          if [ "$rc" = "0" ]; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::rate-table invariants PASS — PR will be opened ready to merge"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::rate-table invariants FAIL (pytest exit $rc) — PR will be held as a DRAFT for human review, never auto-merged"
+          fi
       - name: Open / refresh rates PR
         if: steps.guard.outputs.skip == 'false' && steps.check.outputs.code == '3'
         env:
@@ -70,6 +101,8 @@ jobs:
           # so push + PR-create both come from the bot identity. Falls back to the
           # default token when unset (current behaviour — checks stay wedged).
           GH_TOKEN: ${{ secrets.RATE_CHECK_PR_TOKEN || secrets.GITHUB_TOKEN }}
+          # GOL-2212: "false" when the regenerated table failed the invariants above.
+          INVARIANTS_OK: ${{ steps.invariants.outputs.ok }}
         run: |
           git config user.name "grove-rate-check[bot]"
           git config user.email "noreply@goldberrygrove.farm"
@@ -77,10 +110,31 @@ jobs:
           git add grove_headless/data/shipping_rates.json
           git commit -m "chore(rates): morning rate-check $(date -u +%F) — Shippo-derived zone rates"
           git push -f origin chore/rate-check
-          gh pr create --title "Rate check: shipping zone rates drifted >= \$1" \
-            --body-file scripts/rate_check/out/summary.md \
-            --base main --head chore/rate-check 2>/dev/null \
-            || gh pr edit chore/rate-check --body-file scripts/rate_check/out/summary.md
+          # GOL-2212: red invariants => open/keep the PR as a DRAFT so it can never be
+          # merged unattended; green => (mark) ready so the daily cadence still merges.
+          if [ "$INVARIANTS_OK" = "false" ]; then DRAFT_FLAG="--draft"; else DRAFT_FLAG=""; fi
+          if gh pr create --title "Rate check: shipping zone rates drifted >= \$1" \
+                --body-file scripts/rate_check/out/summary.md \
+                --base main --head chore/rate-check $DRAFT_FLAG 2>/dev/null; then
+            echo "::notice::opened rate-check PR (draft=${INVARIANTS_OK:+$([ "$INVARIANTS_OK" = false ] && echo true || echo false)})"
+          else
+            # PR already exists on chore/rate-check: refresh its body and re-assert the
+            # correct draft/ready state for today's regenerated data.
+            gh pr edit chore/rate-check --body-file scripts/rate_check/out/summary.md
+            if [ "$INVARIANTS_OK" = "false" ]; then
+              gh pr ready chore/rate-check --undo || true
+            else
+              gh pr ready chore/rate-check || true
+            fi
+          fi
+          # ── Second layer, from #209 (GOL-2212) — keep BOTH ──────────────────
+          # These close different holes and neither subsumes the other:
+          #   this branch  = fail-closed at PR CREATION (draft-on-red), so bad
+          #                  rates cannot be merged even by a path that ignores
+          #                  the non-required pure-python invariants;
+          #   #209 (below) = fix the auto-merge ARMING lifecycle, so yesterday's
+          #                  arming cannot merge today's force-pushed head.
+          # Runs after the create/edit above because it needs the PR to exist.
           # Disarm auto-merge left armed by a PREVIOUS day's auto-approve run.
           # GitHub auto-merge survives the force-push above, so yesterday's
           # arming would merge TODAY's untested rates the moment the (minimal)
@@ -96,10 +150,19 @@ jobs:
         if: steps.guard.outputs.skip == 'false' && steps.check.outputs.code == '3'
         env:
           WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK_URL }}
+          # GOL-2212: surface when the PR was held as a draft (invariants red) so ops
+          # knows a human must look — a held PR will NOT merge on its own.
+          INVARIANTS_OK: ${{ steps.invariants.outputs.ok }}
         run: |
           [ -z "$WEBHOOK" ] && { echo "::notice::no Discord webhook configured"; exit 0; }
           body=$(head -c 1800 scripts/rate_check/out/summary.md)
-          payload=$(python3 -c "import json,sys;print(json.dumps({'content':'📦 **Shipping rates drifted ≥ \$1** — review the rate-check PR\n'+sys.argv[1]}))" "$body")
+          # NB: \$1 is a literal dollar amount (double quotes → escaped $ stays literal); keep it escaped so shellcheck (SC2016) stays clean.
+          if [ "$INVARIANTS_OK" = "false" ]; then
+            header="⚠️ **Shipping rates drifted ≥ \$1 but the regenerated table FAILED its invariants** — PR held as a DRAFT (will NOT auto-merge); a human must review before it can ship"
+          else
+            header="📦 **Shipping rates drifted ≥ \$1** — review the rate-check PR"
+          fi
+          payload=$(python3 -c "import json,sys;print(json.dumps({'content':sys.argv[1]+'\n'+sys.argv[2]}))" "$header" "$body")
           curl -sS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK"
       - name: Discord failure alert
         if: failure()

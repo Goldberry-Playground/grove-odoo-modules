@@ -25,8 +25,19 @@ class RateFeedTests(unittest.TestCase):
         self.feed = sz.rate_feed()
 
     def test_top_level_shape(self):
-        self.assertEqual(set(self.feed), {"schema", "zones", "zone_by_state", "green_states", "packing", "calendar"})
+        self.assertEqual(
+            set(self.feed),
+            {"schema", "zones", "zone_by_state", "green_states", "packing", "calendar", "compliance"},
+        )
         self.assertEqual(self.feed["schema"], 2)
+
+    def test_compliance_block_present(self):
+        # Per-product carve-out map (GOL-2132) rides the same feed as the green
+        # list so the storefront PDP notice reads one source of truth.
+        compliance = self.feed["compliance"]
+        self.assertEqual(compliance["schema"], 1)
+        self.assertIn("castanea", compliance["carve_outs"])
+        self.assertIn("regulated_states", compliance)
 
     def test_zones_mirror_engine_table(self):
         # The feed must serve exactly what compute_shipping_rate prices with.
