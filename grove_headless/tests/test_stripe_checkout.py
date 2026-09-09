@@ -776,12 +776,16 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
 
     def test_potted_ship_order_clears_gate_and_fails_safe_without_rates(self):
         """GOL-2199 potted go-live: a potted SHIP order is no longer 400-blocked
-        at the unshippable gate. Until the rate-checker's first potted-inclusive
-        table merges, the live table has no potted rows, so the order trips the
-        $0-shipping breaker (409) instead — fail-safe, never under-billed."""
+        at the unshippable gate. When no potted shipping charge can be resolved
+        (rate-table gap for the destination zone / box), the order trips the
+        $0-shipping breaker (409) instead — fail-safe, never under-billed. The
+        live table now carries potted rows (morning rate-check), so the gap is
+        modeled explicitly by patching the shipping line to None, not by
+        relying on the data file."""
         self.product.product_tmpl_id.grove_shipping_tier = "potted"
         payload = self._cart_payload("WV", fulfillment="ship")
-        order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        with mock.patch.object(grove_main, "_apply_shipping_line", return_value=None):
+            order, error = grove_main._create_draft_order(self._website(), self.env, payload)
         self.assertIsNone(order)
         self.assertEqual(error.status_code, 409, "expected the breaker, not the old potted 400 gate")
         self.assertIn("couldn't calculate shipping", error.data.decode().lower())
