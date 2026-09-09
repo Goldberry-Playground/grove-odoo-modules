@@ -156,10 +156,11 @@ jobs:
         run: |
           [ -z "$WEBHOOK" ] && { echo "::notice::no Discord webhook configured"; exit 0; }
           body=$(head -c 1800 scripts/rate_check/out/summary.md)
+          # NB: \$1 is a literal dollar amount (double quotes → escaped $ stays literal); keep it escaped so shellcheck (SC2016) stays clean.
           if [ "$INVARIANTS_OK" = "false" ]; then
-            header='⚠️ **Shipping rates drifted ≥ \$1 but the regenerated table FAILED its invariants** — PR held as a DRAFT (will NOT auto-merge); a human must review before it can ship'
+            header="⚠️ **Shipping rates drifted ≥ \$1 but the regenerated table FAILED its invariants** — PR held as a DRAFT (will NOT auto-merge); a human must review before it can ship"
           else
-            header='📦 **Shipping rates drifted ≥ \$1** — review the rate-check PR'
+            header="📦 **Shipping rates drifted ≥ \$1** — review the rate-check PR"
           fi
           payload=$(python3 -c "import json,sys;print(json.dumps({'content':sys.argv[1]+'\n'+sys.argv[2]}))" "$header" "$body")
           curl -sS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK"
