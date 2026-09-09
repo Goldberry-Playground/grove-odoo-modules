@@ -20,7 +20,7 @@ from ..models.mail_from import mail_from_vals
 from ..models.newsletter import newsletter_tag_names
 from ..models.order_alerts import format_merchant_email, format_new_order_discord
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
-from ..models.shipment_email import NOTIFY_STATUSES, shipment_notice_copy
+from ..models.shipment_email import NOTIFY_STATUSES, delivery_status_from_webhook, shipment_notice_copy
 from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from ..models.shipping_calendar import (
     MODE_PREORDER,
@@ -1526,13 +1526,15 @@ class GroveHeadlessAPI(http.Controller):
 
         data = payload.get("data") or {}
         tracking = data.get("tracking_number")
-        status = (data.get("tracking_status") or {}).get("status")
-        if not (tracking and status):
+        # Substatus-aware (Josh 2026-09-09): Shippo keeps status=TRANSIT while
+        # substatus.code goes out_for_delivery; the helper promotes it so the
+        # out-for-delivery notice can actually fire.
+        new_status = delivery_status_from_webhook(data.get("tracking_status"))
+        if not (tracking and new_status):
             return _json_response({"ok": True, "matched": 0})
         if not is_valid_tracking(tracking):
             return _json_response({"ok": True, "matched": 0})
         orders = request.env["sale.order"].sudo().search([("grove_tracking_numbers", "like", tracking)])
-        new_status = status.lower()
         for order in orders:
             _apply_delivery_status(request.env, order, new_status, tracking)
         return _json_response({"ok": True, "matched": len(orders)})
