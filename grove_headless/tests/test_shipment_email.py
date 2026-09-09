@@ -99,6 +99,34 @@ class ShipmentNoticeCopyTests(unittest.TestCase):
         self.assertEqual(subject, "Your order S00042 has been delivered")
         self.assertIn("has been delivered", body)
 
+    def test_out_for_delivery_subject_and_lead(self):
+        subject, body = se.shipment_notice_copy(
+            status="out_for_delivery",
+            order_name="S00042",
+            customer_name="Dana",
+            shipments=[("UPS", "1Z9")],
+        )
+        self.assertEqual(subject, "Your order S00042 is out for delivery")
+        self.assertIn("out for delivery", body)
+        self.assertIn("unbox your trees", body)
+
+    def test_out_for_delivery_is_notify_worthy(self):
+        self.assertIn("out_for_delivery", se.NOTIFY_STATUSES)
+
+    def test_webhook_status_promotes_out_for_delivery_substatus(self):
+        # Shippo keeps status=TRANSIT while substatus carries out_for_delivery;
+        # the helper must promote it or the notice can never fire.
+        self.assertEqual(
+            se.delivery_status_from_webhook({"status": "TRANSIT", "substatus": {"code": "out_for_delivery"}}),
+            "out_for_delivery",
+        )
+
+    def test_webhook_status_plain_and_missing(self):
+        self.assertEqual(se.delivery_status_from_webhook({"status": "DELIVERED"}), "delivered")
+        self.assertEqual(se.delivery_status_from_webhook({"status": "TRANSIT", "substatus": None}), "transit")
+        self.assertIsNone(se.delivery_status_from_webhook({}))
+        self.assertIsNone(se.delivery_status_from_webhook(None))
+
     def test_unknown_carrier_shows_plain_number_no_link(self):
         _, body = se.shipment_notice_copy(
             status="transit",

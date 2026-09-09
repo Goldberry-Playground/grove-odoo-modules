@@ -99,14 +99,19 @@ GROUND_SERVICE_ALLOWLIST = frozenset(
     }
 )
 
-# Transit guard for live plants (GOL-1906 constraint (a)). Pure least-cost will
-# sometimes buy a slower service to save a small amount, on a product that is a
-# living tree in a box. Never select a cheaper rate whose estimated transit
-# exceeds the fastest allowlisted option by more than this many days. Starting
-# tolerance = 1 day; Josh tunes this (horticultural call, not engineering). A
-# rate that omits estimated_days is NOT excluded (unknown transit != slow) so a
-# missing ETA can never drop the only purchasable rate.
-GROUND_TRANSIT_TOLERANCE_DAYS = 1
+# Transit guard for live plants (GOL-1906 constraint (a)), v2: ABSOLUTE
+# per-mode ceilings, ratified by Josh 2026-09-09, replacing the old relative
+# "within 1 day of the fastest quote" rule. The relative rule bought UPS Ground
+# $28.57 over USPS GA $8.36 on S00241 purely because UPS quoted 1 day to a
+# nearby zone — but the horticultural constraint was never "close to the
+# fastest", it is "the tree survives the ride":
+#   * leafed (peat & bagged): 1-3 days transit at best -> ceiling 3
+#   * dormant (fully bareroot): 5-7 days is fine       -> ceiling 7
+# A rate that omits estimated_days is NOT excluded (unknown transit != slow) so
+# a missing ETA can never drop the only purchasable rate. If NO allowlisted
+# rate fits the ceiling, fall back to the FASTEST known rather than fail — a
+# slow-carrier week must not strand orders unshippable (ties break cheapest).
+MAX_TRANSIT_DAYS = {"leafed": 3, "dormant": 7}
 
 
 def _allowlisted_ground_rates(rates: list) -> list:
@@ -124,8 +129,8 @@ def _rate_eta(rate: dict):
     return days if isinstance(days, (int, float)) else None
 
 
-def select_cheapest_ground(rates: list, tolerance_days: int = GROUND_TRANSIT_TOLERANCE_DAYS) -> dict | None:
-    """Pick the cheapest allowlisted ground rate, subject to the transit guard.
+def select_cheapest_ground(rates: list, mode: str = "dormant") -> dict | None:
+    """Pick the cheapest allowlisted ground rate within the mode's transit ceiling.
 
     Returns the chosen rate dict, or None when no allowlisted rate is present —
     the caller decides whether that is a soft single-carrier condition or a hard
@@ -133,29 +138,31 @@ def select_cheapest_ground(rates: list, tolerance_days: int = GROUND_TRANSIT_TOL
     (a whole-carrier outage stops being an order-blocking failure). Shared by
     the rate-table builder (scripts/rate_check) and label purchase below so the
     charge and the label are computed by identical rules.
+
+    ``mode`` is the packing mode ("leafed" / "dormant"); the ceiling comes from
+    MAX_TRANSIT_DAYS (unknown mode uses the strict leafed ceiling — the safe
+    direction for a living tree). No rate within the ceiling -> fastest known
+    wins (ties break cheapest) so orders never strand on a slow-carrier week.
     """
     candidates = _allowlisted_ground_rates(rates)
     if not candidates:
         return None
-    etas = [_rate_eta(r) for r in candidates]
-    known = [e for e in etas if e is not None]
-    if known:
-        limit = min(known) + tolerance_days
-        guarded = [r for r in candidates if _rate_eta(r) is None or _rate_eta(r) <= limit]
-    else:
-        guarded = candidates
-    return min(guarded, key=lambda r: float(r["amount"]))
+    ceiling = MAX_TRANSIT_DAYS.get(mode, MAX_TRANSIT_DAYS["leafed"])
+    within = [r for r in candidates if _rate_eta(r) is None or _rate_eta(r) <= ceiling]
+    if within:
+        return min(within, key=lambda r: float(r["amount"]))
+    return min(candidates, key=lambda r: (_rate_eta(r), float(r["amount"])))
 
 
-def buy_cheapest_ground_label(api_key: str, payload: dict, post=requests.post) -> dict:
+def buy_cheapest_ground_label(api_key: str, payload: dict, post=requests.post, mode: str = "dormant") -> dict:
     """Buy the cheapest allowlisted ground label (UPS Ground vs USPS Ground
-    Advantage) for one packed box, transit-guarded. Persists which carrier and
-    service actually shipped so fulfilment and cost reconciliation can audit the
-    charge against the label (GOL-1906)."""
+    Advantage) for one packed box, transit-ceiling-guarded per packing ``mode``.
+    Persists which carrier and service actually shipped so fulfilment and cost
+    reconciliation can audit the charge against the label (GOL-1906)."""
     headers = {"Authorization": f"ShippoToken {api_key}"}
     resp = post(f"{API}/shipments/", json=payload, headers=headers, timeout=30)
     resp.raise_for_status()
-    rate = select_cheapest_ground(resp.json().get("rates", []))
+    rate = select_cheapest_ground(resp.json().get("rates", []), mode=mode)
     if rate is None:
         raise ShippoError("no allowlisted ground rate (UPS Ground / USPS Ground Advantage) returned for shipment")
     resp2 = post(

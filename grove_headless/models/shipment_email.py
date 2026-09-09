@@ -23,14 +23,37 @@ BRAND = "Goldberry Grove Nursery"
 # status is a silent status update.
 _SUBJECT = {
     "transit": "Your order {order} has shipped",
+    "out_for_delivery": "Your order {order} is out for delivery",
     "delivered": "Your order {order} has been delivered",
 }
 _LEAD = {
     "transit": "Good news, your order is on its way.",
+    "out_for_delivery": "Your order is out for delivery and should arrive today. "
+    "Please unbox your trees the day they arrive.",
     "delivered": "Your order has been delivered. We hope you love it.",
 }
 
 NOTIFY_STATUSES = frozenset(_SUBJECT)
+
+
+def delivery_status_from_webhook(tracking_status) -> str | None:
+    """Normalize a Shippo ``tracking_status`` block to our delivery status.
+
+    Shippo's top-level status enum has no out-for-delivery state — that detail
+    rides in ``substatus.code`` while ``status`` stays TRANSIT — so reading the
+    status alone can never fire the out-for-delivery notice (Josh 2026-09-09).
+    Returns the lowercased status, promoted to ``out_for_delivery`` when the
+    substatus says so; None when the block carries no status at all.
+    """
+    ts = tracking_status or {}
+    status = ts.get("status")
+    if not status:
+        return None
+    sub = ((ts.get("substatus") or {}).get("code") or "").lower()
+    if sub == "out_for_delivery":
+        return "out_for_delivery"
+    return str(status).lower()
+
 
 # Per-carrier public tracking deep link. The tracking number is URL-encoded so a
 # stray space or slash can never break the link. Keys are matched case-folded

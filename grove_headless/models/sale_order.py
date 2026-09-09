@@ -426,7 +426,9 @@ class SaleOrder(models.Model):
             actual_cost = 0.0  # summed Shippo label `amount` — the REAL shipping cost
             try:
                 for payload, _box_id in purchase_plan:
-                    result = shippo_client.buy_cheapest_ground_label(api_key, payload)
+                    # mode-aware transit ceiling (Josh 2026-09-09): leafed trees
+                    # tolerate <=3 transit days, dormant <=7 — see MAX_TRANSIT_DAYS.
+                    result = shippo_client.buy_cheapest_ground_label(api_key, payload, mode=mode)
                     tracking.append(result["tracking_number"])
                     labels.append(result["label_url"])
                     carriers.append(result.get("carrier") or "")

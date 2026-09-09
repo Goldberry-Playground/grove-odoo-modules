@@ -141,20 +141,37 @@ class TestCheapestGroundSelector(unittest.TestCase):
         rates = [self._r("FedEx", "fedex_ground", 1.00), self._r("UPS", "ups_ground", 20.00)]
         self.assertEqual(sp.select_cheapest_ground(rates)["provider"], "UPS")
 
-    def test_cheapest_wins_within_transit_tolerance(self):
-        rates = [self._r("UPS", "ups_ground", 29.70, days=2), self._r("USPS", "usps_ground_advantage", 10.08, days=3)]
-        # tolerance 1 day: 3 <= fastest(2)+1 -> USPS allowed and cheaper.
-        self.assertEqual(sp.select_cheapest_ground(rates)["provider"], "USPS")
+    def test_leafed_ceiling_allows_3_day_usps(self):
+        # The S00241 regression (Josh 2026-09-09): 1-day UPS $28.57 vs 3-day
+        # USPS $8.36 — the old relative guard bought UPS; the leafed ceiling
+        # (3 days) admits USPS and least-cost wins.
+        rates = [self._r("UPS", "ups_ground", 28.57, days=1), self._r("USPS", "usps_ground_advantage", 8.36, days=3)]
+        self.assertEqual(sp.select_cheapest_ground(rates, mode="leafed")["provider"], "USPS")
 
-    def test_transit_guard_excludes_too_slow_cheaper_rate(self):
-        # USPS is cheaper but 3 days slower than fastest -> guard drops it.
+    def test_leafed_ceiling_excludes_slow_rate(self):
+        # 5-day transit kills a leafed tree -> excluded even though cheaper.
         rates = [self._r("UPS", "ups_ground", 29.70, days=2), self._r("USPS", "usps_ground_advantage", 10.08, days=5)]
-        self.assertEqual(sp.select_cheapest_ground(rates, tolerance_days=1)["provider"], "UPS")
+        self.assertEqual(sp.select_cheapest_ground(rates, mode="leafed")["provider"], "UPS")
+
+    def test_dormant_ceiling_allows_up_to_7_days(self):
+        # Fully bareroot rides 5-7 days fine (Josh 2026-09-09).
+        rates = [self._r("UPS", "ups_ground", 29.70, days=2), self._r("USPS", "usps_ground_advantage", 10.08, days=6)]
+        self.assertEqual(sp.select_cheapest_ground(rates, mode="dormant")["provider"], "USPS")
+
+    def test_unknown_mode_uses_strict_leafed_ceiling(self):
+        rates = [self._r("UPS", "ups_ground", 29.70, days=2), self._r("USPS", "usps_ground_advantage", 10.08, days=6)]
+        self.assertEqual(sp.select_cheapest_ground(rates, mode="mystery")["provider"], "UPS")
+
+    def test_no_rate_within_ceiling_falls_back_to_fastest(self):
+        # Slow-carrier week: nothing fits the leafed ceiling -> fastest known
+        # wins (never strand the order), ties break cheapest.
+        rates = [self._r("UPS", "ups_ground", 29.70, days=5), self._r("USPS", "usps_ground_advantage", 10.08, days=6)]
+        self.assertEqual(sp.select_cheapest_ground(rates, mode="leafed")["provider"], "UPS")
 
     def test_missing_eta_not_excluded(self):
-        # No estimated_days anywhere -> guard is a no-op, cheapest still wins.
+        # No estimated_days anywhere -> ceiling is a no-op, cheapest still wins.
         rates = [self._r("UPS", "ups_ground", 29.70), self._r("USPS", "usps_ground_advantage", 10.08)]
-        self.assertEqual(sp.select_cheapest_ground(rates)["provider"], "USPS")
+        self.assertEqual(sp.select_cheapest_ground(rates, mode="leafed")["provider"], "USPS")
 
 
 class TestTrackingValidation(unittest.TestCase):
