@@ -298,7 +298,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(25.0))
         self.assertEqual(goods["quantity"], 2)
         self.assertEqual(preorder_ids, [])
-        self.assertEqual(charged, stripe_gateway.to_cents(50.0))
+        # Full-charge path bills goods + the WV tax line today (the fixture's
+        # company default tax, GroveTaxFixtureMixin) — no deposit, no deferral.
+        tax = next(li for li in line_items if li["kind"] == "tax")
+        self.assertEqual(charged, stripe_gateway.to_cents(50.0) + tax["amount_cents"])
 
     def test_sold_out_bareroot_is_one_flat_ten_dollar_deposit(self):
         """Sold-out (zero free) bareroot → ONE flat $10 deposit for the order,
@@ -361,8 +364,9 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         full = self._make_order(qty=2)
         full_items, _fids, _fc = grove_main._build_stripe_line_items(full, today=self.BEFORE_CUTOVER)
         self.assertEqual(next(li for li in full_items if li["name"] == self.product.display_name)["kind"], "goods")
-        self._set_stock(self.product, 0)
-        dep = self._make_order(qty=2)
+        # Stock is still 5 (_set_stock(…, 0) is a no-op); ordering MORE than the
+        # free pool makes the bareroot line sold-out → the GOL-2233 deposit path.
+        dep = self._make_order(qty=6)
         dep_items, _dids, _dc = grove_main._build_stripe_line_items(dep, today=self.BEFORE_CUTOVER)
         self.assertEqual([li["kind"] for li in dep_items], ["deposit"])
 
@@ -587,7 +591,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         goods = next(li for li in line_items if li["name"] == self.product.display_name)
         self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(25.0))
         self.assertEqual(goods["quantity"], 2)
-        self.assertEqual(charged, stripe_gateway.to_cents(50.0))
+        # Goods + the WV tax line ride today's charge (company default tax from
+        # GroveTaxFixtureMixin); nothing is deferred on a full-charge order.
+        tax = next(li for li in line_items if li["kind"] == "tax")
+        self.assertEqual(charged, stripe_gateway.to_cents(50.0) + tax["amount_cents"])
 
     def test_calendar_gate_skips_pickup(self):
         """Farm pickup transfers at the WV farm, off the ship calendar — a
