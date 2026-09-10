@@ -45,30 +45,30 @@
   },
   "zone_4": {
     "large": {
-      "base": 49.0
+      "base": 24.0
     },
     "p24x10x4": {
-      "base": 47.0
+      "base": 22.0
     },
     "p24x10x6": {
-      "base": 54.0
+      "base": 36.0
     },
     "small": {
-      "base": 45.0
+      "base": 20.0
     }
   },
   "zone_5": {
     "large": {
-      "base": 43.0
+      "base": 28.0
     },
     "p24x10x4": {
-      "base": 41.0
+      "base": 26.0
     },
     "p24x10x6": {
-      "base": 52.0
+      "base": 41.0
     },
     "small": {
-      "base": 39.0
+      "base": 23.0
     }
   }
 }
