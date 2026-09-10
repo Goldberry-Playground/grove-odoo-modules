@@ -142,5 +142,45 @@ class MerchantEmailTests(unittest.TestCase):
         self.assertNotIn("&amp;amp;", body)
 
 
+class OrderCardPayloadTests(unittest.TestCase):
+    """The bridge-alert payload builder (GOL-1980) — reshapes the shared
+    order-alert context into the JSON body the Discord bridge expects."""
+
+    def _ctx(self):
+        return {
+            "order_ref": "S00042",
+            "customer": "Jamie Farmer",
+            "customer_email": "jamie@example.com",
+            "fulfillment": "ship",
+            "lines": [("American Plum (Bareroot)", 2.0), ("Pawpaw 'Shenandoah'", 1.0)],
+            "total": 1234.5,
+            "currency": "USD",
+            "carrier": None,
+            "tracking": None,
+        }
+
+    def test_reshapes_context_into_bridge_body(self):
+        p = oa.build_order_card_payload(order_id=42, company_id=1, is_deposit=False, context=self._ctx())
+        self.assertEqual(p["orderId"], 42)
+        self.assertEqual(p["companyId"], 1)
+        self.assertEqual(p["orderRef"], "S00042")
+        self.assertIs(p["isDeposit"], False)
+        self.assertEqual(p["customerEmail"], "jamie@example.com")
+        self.assertEqual(p["fulfillment"], "ship")
+        # tuples → {name, qty} objects the bridge card renders as bullets
+        self.assertEqual(
+            p["lines"],
+            [
+                {"name": "American Plum (Bareroot)", "qty": 2.0},
+                {"name": "Pawpaw 'Shenandoah'", "qty": 1.0},
+            ],
+        )
+
+    def test_carries_deposit_flag(self):
+        p = oa.build_order_card_payload(order_id=7, company_id=2, is_deposit=True, context=self._ctx())
+        self.assertIs(p["isDeposit"], True)
+        self.assertEqual(p["companyId"], 2)
+
+
 if __name__ == "__main__":
     unittest.main()

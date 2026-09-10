@@ -88,6 +88,34 @@ def format_new_order_discord(
     return "\n".join(parts)
 
 
+def build_order_card_payload(*, order_id, company_id, is_deposit, context):
+    """Reshape the shared order-alert ``context`` (the controller's
+    ``_order_alert_context``) into the JSON body the Discord bridge's
+    ``POST /orders/alert`` endpoint expects (GOL-1980): camelCase keys, the ids
+    the bridge routes on (``orderId`` for the button callback, ``companyId`` for
+    the per-brand channel map), and order lines as ``{"name", "qty"}`` objects
+    rather than tuples.
+
+    Pure/side-effect free like the formatters above — the controller owns the
+    actual POST. Keeping it here means the same primitives feed the interactive
+    card, the plain fallback ping, and the merchant email identically.
+    """
+    return {
+        "orderId": order_id,
+        "orderRef": context["order_ref"],
+        "companyId": company_id,
+        "customer": context["customer"],
+        "customerEmail": context["customer_email"],
+        "fulfillment": context["fulfillment"],
+        "isDeposit": is_deposit,
+        "lines": [{"name": name, "qty": qty} for name, qty in context["lines"]],
+        "total": context["total"],
+        "currency": context["currency"],
+        "carrier": context["carrier"],
+        "tracking": context["tracking"],
+    }
+
+
 def format_merchant_email(
     *,
     order_ref,

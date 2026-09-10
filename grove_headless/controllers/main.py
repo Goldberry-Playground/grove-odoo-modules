@@ -18,7 +18,11 @@ from ..models import stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.mail_from import mail_from_vals
 from ..models.newsletter import newsletter_tag_names
-from ..models.order_alerts import format_merchant_email, format_new_order_discord
+from ..models.order_alerts import (
+    build_order_card_payload,
+    format_merchant_email,
+    format_new_order_discord,
+)
 from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
 from ..models.shipment_email import NOTIFY_STATUSES, delivery_status_from_webhook, shipment_notice_copy
@@ -3086,12 +3090,61 @@ def _shipping_address_text(order):
     return "<br/>".join(html.escape(x) for x in bits if x) or None
 
 
-def _notify_new_order(env, order, is_deposit):
-    """Best-effort Discord ops ping on a new paid order (GOL-1933). Fires for
-    both fulfilment types; a missing DISCORD_OPS_WEBHOOK_URL or a failed POST is
-    swallowed by _notify_discord so it never breaks webhook processing."""
+def _post_order_alert_card(order, context, is_deposit):
+    """POST the order to the Discord bridge's ``/orders/alert`` endpoint so the
+    bridge bot-posts the *interactive* order card — the one carrying the
+    Mark-Shipped button (GOL-1980) — into the brand's order channel. A plain
+    incoming webhook (the GOL-1933 fallback below) cannot carry a ``custom_id``
+    button, so the interactive path has to go through the bridge bot.
+
+    Returns True only when the bridge accepts the alert (HTTP 200), so the caller
+    can skip the plain fallback ping and avoid a double-post. Inert when the
+    bridge is unconfigured (``ORDER_ALERT_SECRET`` / ``DISCORD_BRIDGE_BASE_URL``
+    unset) — returns False so the plain ping still fires. Never raises: order
+    alerts are best-effort and must not break webhook processing."""
+    secret = os.environ.get("ORDER_ALERT_SECRET", "")
+    base = os.environ.get("DISCORD_BRIDGE_BASE_URL", "").rstrip("/")
+    if not secret or not base:
+        return False
+    payload = build_order_card_payload(
+        order_id=order.id,
+        company_id=order.company_id.id,
+        is_deposit=is_deposit,
+        context=context,
+    )
     try:
-        message = format_new_order_discord(is_deposit=is_deposit, **_order_alert_context(order))
+        resp = requests.post(
+            f"{base}/orders/alert",
+            json=payload,
+            headers={"X-Order-Alert-Secret": secret},
+            timeout=10,
+        )
+    except Exception:  # noqa: BLE001 — bridge alert is best-effort
+        _logger.warning("Order-card bridge POST failed for %s", order.name, exc_info=True)
+        return False
+    if resp.status_code == 200:
+        return True
+    # 422 (no channel mapped for this company_id yet), 401, or 5xx: log it and
+    # let the caller fall back to the plain ping so staff still get *some* alert.
+    _logger.warning(
+        "Order-card bridge POST for %s returned %s; falling back to plain ping",
+        order.name,
+        resp.status_code,
+    )
+    return False
+
+
+def _notify_new_order(env, order, is_deposit):
+    """Best-effort Discord ops alert on a new paid order. When the Discord bridge
+    is configured (GOL-1980) this posts the interactive order card (with the
+    Mark-Shipped button) to the brand's order channel; otherwise — or on any
+    bridge failure — it falls back to the plain content ping (GOL-1933). Fires
+    for both fulfilment types and never breaks webhook processing."""
+    try:
+        context = _order_alert_context(order)
+        if _post_order_alert_card(order, context, is_deposit):
+            return
+        message = format_new_order_discord(is_deposit=is_deposit, **context)
         _notify_discord(message)
     except Exception:  # noqa: BLE001 — ops alert is best-effort
         _logger.warning("New-order Discord alert failed for %s", order.name, exc_info=True)
