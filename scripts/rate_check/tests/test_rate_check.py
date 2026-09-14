@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from datetime import date
 from unittest import mock
 
 _PATH = os.path.join(os.path.dirname(__file__), "..", "rate_check.py")
@@ -12,18 +13,27 @@ _spec = importlib.util.spec_from_file_location("rate_check", _PATH)
 rc = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(rc)
 
-FIXTURE = os.path.join(os.path.dirname(__file__), "..", "fixtures", "shippo_rates_response.json")
-# No allowlisted ground rate at all (only a non-ground service present) — the
-# "carrier not connected / lapsed" state under least-cost selection (GOL-1906).
-NO_GROUND_FIXTURE = os.path.join(os.path.dirname(__file__), "..", "fixtures", "shippo_rates_no_ground.json")
+_FX = os.path.join(os.path.dirname(__file__), "..", "fixtures")
+# Real 2026-09-09-shape Pirate Ship RatesQuery captures, one per box shape.
+SMALL_FIXTURE = os.path.join(_FX, "pirateship_rates_small.json")
+LARGE_FIXTURE = os.path.join(_FX, "pirateship_rates_large.json")
+P4_FIXTURE = os.path.join(_FX, "pirateship_rates_p24x10x4.json")
+P6_FIXTURE = os.path.join(_FX, "pirateship_rates_p24x10x6.json")
+# Calculator answered but returned no allowlisted ground rate (lapse / unpriced).
+NO_GROUND_FIXTURE = os.path.join(_FX, "pirateship_rates_no_ground.json")
+
+# Fixed probe date the captured fixtures were quoted against (delivery dates in
+# them are 9/16, 9/17 — 2 and 3 days out), so transit math is deterministic.
+PROBE_DATE = date(2026, 9, 14)
+
+
+def _rates(path):
+    with open(path, encoding="utf-8") as fh:
+        return rc.rates_from_response(json.load(fh))
 
 
 class TestReferenceAddresses(unittest.TestCase):
     def test_reference_zips_carry_a_real_city(self):
-        # Each reference destination must be (city, state, zip). A placeholder
-        # city ("n/a") makes UPS hard-reject the probe once a real carrier is
-        # connected ("111539 Invalid Destination Postal Code and City"),
-        # dropping the UPS Ground rate and failing rate-check (GOL-1446).
         for zone, corners in rc.REFERENCE_ZIPS.items():
             self.assertTrue(corners, f"{zone}: at least one reference corner")
             for entry in corners:
@@ -32,11 +42,14 @@ class TestReferenceAddresses(unittest.TestCase):
                 self.assertTrue(city and city.strip().lower() != "n/a", f"{zone}: bad city {city!r}")
                 self.assertEqual(len(zip5), 5, f"{zone}: bad zip {zip5!r}")
 
-    def test_probe_sends_the_zone_city_not_a_placeholder(self):
+
+class TestRequestShape(unittest.TestCase):
+    def test_probe_posts_pirateship_ratesquery_in_ounces(self):
         captured = {}
 
         def fake_post(url, json=None, timeout=None, headers=None):
-            captured["city"] = json["address_to"]["city"]
+            captured["url"] = url
+            captured["body"] = json
 
             class _R:
                 @staticmethod
@@ -45,36 +58,31 @@ class TestReferenceAddresses(unittest.TestCase):
 
                 @staticmethod
                 def json():
-                    return {"rates": []}
+                    return {"data": {"rates": []}}
 
             return _R()
 
         with mock.patch.object(rc.requests, "post", fake_post):
-            rc.quote_zone_box("k", "zone_2", next(iter(rc.PARCELS)))
-        # zone_2 reference is the band's worst-case (priciest) corner, NYC,
-        # not a mid-band representative like Columbus (GOL-1495).
-        self.assertEqual(captured["city"], "New York")
+            rc.quote_zone_box("zone_2", "small", PROBE_DATE)
 
-
-class TestRateMath(unittest.TestCase):
-    def test_cheapest_ground_rate_selected(self):
-        # Fixture: UPS Ground 14.23 vs USPS Ground Advantage 15.80 -> cheaper
-        # UPS wins the least-cost race (GOL-1906).
-        with open(FIXTURE) as fh:
-            data = json.load(fh)
-        self.assertEqual(rc.pick_cheapest_ground(data), 14.23)
-
-    def test_target_formula_ceil(self):
-        # 14.23 + 3.50 (small packaging) + 2.00 = 19.73 -> 20
-        self.assertEqual(rc.target_rate(14.23, "small"), 20)
+        self.assertEqual(captured["url"], rc.PIRATESHIP_URL)
+        body = captured["body"]
+        self.assertEqual(body["operationName"], "RatesQuery")
+        v = body["variables"]
+        # zone_2 reference is the band's worst-case corner, NYC (GOL-1495).
+        self.assertEqual(v["destinationZip"], "10001")
+        self.assertEqual(v["originZip"], "26651")
+        self.assertTrue(v["isResidential"])
+        self.assertEqual(v["destinationCountryCode"], "US")
+        self.assertEqual(v["mailClassKeys"], ["03", "93", "GroundAdvantage"])
+        self.assertEqual(v["packageTypeKeys"], ["Parcel"])
+        # small box: 24x6x4 at 7 lb representative -> weight in OUNCES.
+        self.assertEqual(v["weight"], 112.0)
+        self.assertEqual((v["dimensionX"], v["dimensionY"], v["dimensionZ"]), (24, 6, 4))
 
     def test_parcels_come_from_box_catalog(self):
-        # GOL-2199: the probe publishes ONLY go-live-shippable tiers, since the
-        # table it writes is served verbatim to checkout (shipping_zones.ZONE_RATES
-        # -> rate_feed). Potted go-live (CEO directive 2026-09-08): BOTH catalogs
-        # publish — bareroot (BOXES) and potted/peat-and-bagged (POTTED_BOXES,
-        # GOL-2031). One reference parcel per published box, quoted at its own
-        # catalog's representative billable weight (never undercharge).
+        # GOL-2199: BOTH catalogs publish (bareroot BOXES + potted POTTED_BOXES),
+        # each quoted at its own catalog's representative billable weight.
         self.assertEqual(
             set(rc.PARCELS),
             set(rc.shipping_boxes.BOXES) | set(rc.shipping_boxes.POTTED_BOXES),
@@ -84,61 +92,155 @@ class TestRateMath(unittest.TestCase):
                 expected = rc.shipping_boxes.potted_representative_billable_lb(box_id)
             else:
                 expected = rc.shipping_boxes.representative_billable_lb(box_id)
-            self.assertEqual(float(parcel["weight"]), expected)
+            self.assertEqual(parcel["weight_lb"], expected)
 
-    def test_potted_box_geometry_stays_probe_ready(self):
-        # GOL-2031 regression-lock kept live for potted go-live even though the
-        # potted catalog is NOT currently published (GOL-2199): the boxes must
-        # reach a probe at their real 24" length (so the USPS nonstandard-length
-        # surcharge lands in the quote) and at the firmed damp weights (Josh
-        # 2026-09-06: ~2 lb/tree -> 5-pack = 12 lb, 10-pack = 22 lb). Asserted
-        # against the catalog + weigher directly, so it holds regardless of what
-        # _CATALOGS currently probes.
-        pb = rc.shipping_boxes.POTTED_BOXES
-        self.assertEqual(pb["p24x10x4"]["length"], 24)
-        self.assertEqual(pb["p24x10x6"]["length"], 24)
-        self.assertEqual(rc.shipping_boxes.potted_representative_billable_lb("p24x10x4"), 12)
-        self.assertEqual(rc.shipping_boxes.potted_representative_billable_lb("p24x10x6"), 22)
+
+class TestTransit(unittest.TestCase):
+    def test_parses_delivery_date_to_days(self):
+        desc = "Estimated delivery [b]Wednesday 9/16 by 11:00 PM[/b] if shipped today"
+        self.assertEqual(rc.parse_transit_days(desc, PROBE_DATE), 2)
+
+    def test_unparsable_date_is_none_not_excluded(self):
+        self.assertIsNone(rc.parse_transit_days("Estimated delivery in 1-5 business days", PROBE_DATE))
+        self.assertIsNone(rc.parse_transit_days("", PROBE_DATE))
+        self.assertIsNone(rc.parse_transit_days(None, PROBE_DATE))
+
+    def test_year_rolls_forward_for_past_month(self):
+        # A December probe of an early-January delivery date rolls to next year.
+        self.assertEqual(rc.parse_transit_days("delivery 1/3", date(2026, 12, 30)), 4)
+
+
+class TestWinnerSelection(unittest.TestCase):
+    def test_every_captured_fixture_yields_an_allowlisted_winner(self):
+        # Each real per-box capture must select an allowlisted (carrier, service)
+        # winner at a positive price — proves the captured RatesQuery shape parses.
+        for path in (SMALL_FIXTURE, LARGE_FIXTURE, P4_FIXTURE, P6_FIXTURE):
+            winner = rc.select_cheapest_ground(_rates(path), PROBE_DATE)
+            self.assertIsNotNone(winner, path)
+            self.assertIn((winner["carrier"], winner["service"]), rc.GROUND_SERVICE_ALLOWLIST, path)
+            self.assertGreater(winner["price"], 0.0, path)
+
+    def test_cheapest_allowlisted_ground_wins(self):
+        # small fixture: UPS Ground 03 $9.84 < UPS Ground Saver 93 $11.75 <
+        # USPS GroundAdvantage $14.35 -> cheapest UPS Ground wins.
+        winner = rc.select_cheapest_ground(_rates(SMALL_FIXTURE), PROBE_DATE)
+        self.assertEqual((winner["carrier"], winner["service"]), ("UPS", "03"))
+        self.assertEqual(winner["price"], 9.84)
+        self.assertEqual(winner["service_title"], "UPS Ground")  # ® stripped
+
+    def test_ground_saver_can_win_on_the_big_box(self):
+        # p24x10x6 fixture: Ground Saver 93 $19.85 edges out UPS Ground 03 $19.89
+        # — the reason "93" is in the allowlist at all.
+        winner = rc.select_cheapest_ground(_rates(P6_FIXTURE), PROBE_DATE)
+        self.assertEqual((winner["carrier"], winner["service"]), ("UPS", "93"))
+        self.assertEqual(winner["price"], 19.85)
+
+    def test_transit_ceiling_excludes_too_slow_cheapest(self):
+        # Cheapest is 10 days out (> ceiling 7); a $2-dearer rate delivers in 3.
+        rates = [
+            {
+                "carrier": {"title": "UPS"},
+                "mailClassKey": "93",
+                "totalPrice": "8.00",
+                "title": "UPS Ground Saver",
+                "deliveryDescription": "delivery 9/24",
+            },  # 10 days
+            {
+                "carrier": {"title": "UPS"},
+                "mailClassKey": "03",
+                "totalPrice": "10.00",
+                "title": "UPS Ground",
+                "deliveryDescription": "delivery 9/17",
+            },  # 3 days
+        ]
+        winner = rc.select_cheapest_ground(rates, PROBE_DATE)
+        self.assertEqual(winner["service"], "03")
+        self.assertEqual(winner["price"], 10.00)
+
+    def test_fastest_wins_when_none_within_ceiling(self):
+        # No allowlisted rate fits the ceiling -> fastest known wins (ties cheapest),
+        # so a slow week never strands an order unshippable (GOL-1906).
+        rates = [
+            {
+                "carrier": {"title": "UPS"},
+                "mailClassKey": "03",
+                "totalPrice": "20.00",
+                "title": "UPS Ground",
+                "deliveryDescription": "delivery 9/30",
+            },  # 16 days
+            {
+                "carrier": {"title": "USPS"},
+                "mailClassKey": "GroundAdvantage",
+                "totalPrice": "25.00",
+                "title": "Ground Advantage",
+                "deliveryDescription": "delivery 9/25",
+            },  # 11 days
+        ]
+        winner = rc.select_cheapest_ground(rates, PROBE_DATE)
+        self.assertEqual(winner["service"], "GroundAdvantage")
+
+    def test_unknown_transit_is_not_excluded(self):
+        rates = [
+            {
+                "carrier": {"title": "UPS"},
+                "mailClassKey": "03",
+                "totalPrice": "12.00",
+                "title": "UPS Ground",
+                "deliveryDescription": "delivery in a few days",
+            },
+        ]
+        winner = rc.select_cheapest_ground(rates, PROBE_DATE)
+        self.assertEqual(winner["price"], 12.00)
+        self.assertIsNone(winner["transit_days"])
+
+    def test_non_allowlisted_service_ignored(self):
+        rates = [
+            {
+                "carrier": {"title": "UPS"},
+                "mailClassKey": "01",
+                "totalPrice": "5.00",
+                "title": "UPS Next Day Air",
+                "deliveryDescription": "delivery 9/15",
+            },
+        ]
+        self.assertIsNone(rc.select_cheapest_ground(rates, PROBE_DATE))
+
+
+class TestRateMath(unittest.TestCase):
+    def test_target_formula_ceil(self):
+        # 9.84 + 3.50 (small packaging) + 2.00 = 15.34 -> 16
+        self.assertEqual(rc.target_rate(9.84, "small"), 16)
 
     def test_diff_detects_material_drift(self):
         current = {"zone_1": {"bareroot": {"base": 21.0}}}
-        proposed = {"zone_1": {"bareroot": 20}}
-        drift = rc.compute_drift(current, proposed)
-        self.assertEqual(drift, [("zone_1", "bareroot", 21.0, 20)])
+        proposed = {"zone_1": {"bareroot": {"base": 20.0}}}
+        self.assertEqual(rc.compute_drift(current, proposed), [("zone_1", "bareroot", 21.0, 20.0)])
+
+    def test_diff_accepts_bare_number_cells(self):
+        current = {"zone_1": {"bareroot": {"base": 21.0}}}
+        self.assertEqual(rc.compute_drift(current, {"zone_1": {"bareroot": 20}}), [("zone_1", "bareroot", 21.0, 20)])
 
     def test_sub_dollar_drift_ignored(self):
         current = {"zone_1": {"bareroot": {"base": 20.4}}}
-        drift = rc.compute_drift(current, {"zone_1": {"bareroot": 20}})
-        self.assertEqual(drift, [])
+        self.assertEqual(rc.compute_drift(current, {"zone_1": {"bareroot": {"base": 20.0}}}), [])
 
 
 class TestCarrierVisibility(unittest.TestCase):
-    def test_present_carriers_reports_both_allowlisted_carriers(self):
-        # Fixture carries UPS Ground + USPS Ground Advantage (and a non-ground
-        # UPS 3-Day, which must be ignored). Visibility is independent of who
-        # wins on price (GOL-1906).
-        with open(FIXTURE) as fh:
-            data = json.load(fh)
+    def test_present_services_reports_all_three_allowlisted(self):
         self.assertEqual(
-            rc.present_carriers(data),
-            {("UPS", "ups_ground"), ("USPS", "usps_ground_advantage")},
+            rc.present_services(_rates(SMALL_FIXTURE), PROBE_DATE),
+            {("UPS", "03"), ("UPS", "93"), ("USPS", "GroundAdvantage")},
         )
 
-    def test_present_carriers_empty_when_no_ground_returned(self):
-        with open(NO_GROUND_FIXTURE) as fh:
-            data = json.load(fh)
-        self.assertEqual(rc.present_carriers(data), set())
+    def test_present_services_empty_when_no_ground_returned(self):
+        self.assertEqual(rc.present_services(_rates(NO_GROUND_FIXTURE), PROBE_DATE), set())
 
-    def test_visibility_report_flags_absent_carrier(self):
-        # USPS returned on every probe, UPS on none -> UPS flagged as never
-        # returned. This is the readout that proves whether a carrier reaches
-        # the automation's token (GOL-1906 CEO ruling step (b)).
-        report = rc.visibility_report({("USPS", "usps_ground_advantage"): 5}, 5)
-        self.assertIn("USPS usps_ground_advantage: 5/5", report)
-        self.assertIn("UPS ups_ground: 0/5", report)
+    def test_visibility_report_flags_absent_service(self):
+        report = rc.visibility_report({("USPS", "usps_ground_advantage"): 0, ("UPS", "03"): 5}, 5)
+        self.assertIn("UPS 03 (UPS Ground): 5/5", report)
         self.assertIn("NEVER RETURNED", report)
 
-    def test_quote_zone_box_returns_quote_and_present_carriers(self):
+    def test_quote_zone_box_returns_winner_and_present(self):
         def fake_post(url, json=None, timeout=None, headers=None):
             class _R:
                 @staticmethod
@@ -148,26 +250,188 @@ class TestCarrierVisibility(unittest.TestCase):
                 @staticmethod
                 def json():
                     return {
-                        "rates": [
-                            {"provider": "USPS", "servicelevel": {"token": "usps_ground_advantage"}, "amount": "12.74"},
-                        ]
+                        "data": {
+                            "rates": [
+                                {
+                                    "carrier": {"title": "USPS"},
+                                    "mailClassKey": "GroundAdvantage",
+                                    "totalPrice": "12.74",
+                                    "title": "Ground Advantage",
+                                    "deliveryDescription": "delivery 9/17",
+                                },
+                            ]
+                        }
                     }
 
             return _R()
 
         with mock.patch.object(rc.requests, "post", fake_post):
-            quote, present = rc.quote_zone_box("k", "zone_4", next(iter(rc.PARCELS)))
-        self.assertEqual(quote, 12.74)
-        self.assertEqual(present, {("USPS", "usps_ground_advantage")})
+            winner, present = rc.quote_zone_box("zone_4", "small", PROBE_DATE)
+        self.assertEqual(winner["price"], 12.74)
+        self.assertEqual((winner["carrier"], winner["service"]), ("USPS", "GroundAdvantage"))
+        self.assertEqual(present, {("USPS", "GroundAdvantage")})
+
+    def test_quote_zone_box_publishes_max_across_corners(self):
+        # zone_5 has 4 corners; each returns a different UPS Ground price.
+        prices = iter(["10.00", "18.00", "12.00", "15.00"])
+
+        def fake_post(url, json=None, timeout=None, headers=None):
+            amount = next(prices)
+
+            class _R:
+                @staticmethod
+                def raise_for_status():
+                    pass
+
+                @staticmethod
+                def json():
+                    return {
+                        "data": {
+                            "rates": [
+                                {
+                                    "carrier": {"title": "UPS"},
+                                    "mailClassKey": "03",
+                                    "totalPrice": amount,
+                                    "title": "UPS Ground",
+                                    "deliveryDescription": "delivery 9/18",
+                                },
+                            ]
+                        }
+                    }
+
+            return _R()
+
+        with mock.patch.object(rc.requests, "post", fake_post):
+            winner, _present = rc.quote_zone_box("zone_5", "small", PROBE_DATE)
+        # MAX across corners -> $18.00 sets the published (upper-bound) rate.
+        self.assertEqual(winner["price"], 18.00)
+
+    def test_quote_zone_box_skips_graphql_error_corner(self):
+        # First of zone_5's four corners errors (GraphQL errors[]); the run
+        # continues and prices from the remaining corners (max wins).
+        def _priced(amount):
+            return {
+                "data": {
+                    "rates": [
+                        {
+                            "carrier": {"title": "UPS"},
+                            "mailClassKey": "03",
+                            "totalPrice": amount,
+                            "title": "UPS Ground",
+                            "deliveryDescription": "delivery 9/18",
+                        },
+                    ]
+                }
+            }
+
+        responses = iter(
+            [
+                {"errors": [{"message": "bad zip"}]},
+                _priced("13.00"),
+                _priced("11.00"),
+                _priced("12.00"),
+            ]
+        )
+
+        def fake_post(url, json=None, timeout=None, headers=None):
+            payload = next(responses)
+
+            class _R:
+                @staticmethod
+                def raise_for_status():
+                    pass
+
+                @staticmethod
+                def json():
+                    return payload
+
+            return _R()
+
+        with mock.patch.object(rc.requests, "post", fake_post):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                winner, _present = rc.quote_zone_box("zone_5", "small", PROBE_DATE)
+        self.assertEqual(winner["price"], 13.00)
+        self.assertIn("pirateship error", err.getvalue())
 
 
-class TestNoUpsRatesSkips(unittest.TestCase):
-    def test_no_ups_against_real_shipped_file_fails(self):
-        # GOL-1495 published the real UPS Ground table, so the shipped file no
-        # longer carries the `_provisional` placeholder marker. An all-missing
-        # Shippo result against that real file is therefore a carrier lapse,
-        # not the not-ready state: the checker must FAIL (exit 1) so a fossilized
-        # table gets investigated, and must not rewrite the file (GOL-1312).
+class TestSchemaThreeAndWrite(unittest.TestCase):
+    def test_full_run_writes_schema_3_cells(self):
+        # Offline full-table dry-run via captured per-box fixtures, written to a
+        # temp rates file so the real table is untouched. Proves the schema-3
+        # cell shape and that the loader-visible `base` is present.
+        empty = {"_comment": "seed", "_schema": 2}  # empty -> everything drifts
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(empty, fh)
+            path = fh.name
+        out_dir = tempfile.mkdtemp()
+        try:
+            argv = ["--fixture-dir", _FX]
+            with mock.patch.object(rc, "RATES_PATH", path), mock.patch.object(rc, "OUT_DIR", out_dir):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    code = rc.main(argv)
+            self.assertEqual(code, 3)  # rewritten
+            with open(path, encoding="utf-8") as fh:
+                doc = json.load(fh)
+            self.assertEqual(doc["_schema"], 3)
+            cell = doc["zone_1"]["small"]
+            self.assertEqual(set(cell), {"base", "carrier", "service", "service_title"})
+            self.assertIsInstance(cell["base"], float)
+            self.assertEqual(cell["carrier"], "UPS")
+            self.assertEqual(cell["service"], "03")
+            self.assertEqual(cell["service_title"], "UPS Ground")
+            # small: ceil(9.84 + 3.50 + 2.00) = 16
+            self.assertEqual(cell["base"], 16.0)
+        finally:
+            os.unlink(path)
+
+    def test_dry_run_does_not_write(self):
+        empty = {"_comment": "seed", "_schema": 2}
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(empty, fh)
+            path = fh.name
+        before = open(path, encoding="utf-8").read()
+        try:
+            argv = ["--dry-run", "--fixture-dir", _FX]
+            with mock.patch.object(rc, "RATES_PATH", path):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    code = rc.main(argv)
+            self.assertEqual(code, 0)
+            self.assertEqual(open(path, encoding="utf-8").read(), before)
+        finally:
+            os.unlink(path)
+
+
+class TestNoGroundHandling(unittest.TestCase):
+    def _run_no_ground_against(self, doc):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(doc, fh)
+            path = fh.name
+        try:
+            argv = ["--fixture", NO_GROUND_FIXTURE]
+            with mock.patch.object(rc, "RATES_PATH", path):
+                err = io.StringIO()
+                with redirect_stdout(io.StringIO()), redirect_stderr(err):
+                    code = rc.main(argv)
+            return code, err.getvalue(), open(path, encoding="utf-8").read()
+        finally:
+            os.unlink(path)
+
+    def test_all_missing_with_real_published_rates_fails(self):
+        real = {"_comment": "x", "_schema": 3, "zone_1": {"small": {"base": 18.0}}}
+        before = json.dumps(real)
+        code, err, after = self._run_no_ground_against(real)
+        self.assertEqual(code, 1)
+        self.assertIn("Pirate Ship quote source down", err)
+        self.assertEqual(after, before)
+
+    def test_all_missing_with_empty_table_skips_cleanly(self):
+        code, _err, _after = self._run_no_ground_against({"_comment": "x", "_schema": 3})
+        self.assertEqual(code, 0)
+
+    def test_no_ground_against_real_shipped_file_fails(self):
+        # The shipped file holds real published rates (no `_provisional`), so an
+        # all-missing result is a lapse -> exit 1, file untouched.
         with open(rc.RATES_PATH, encoding="utf-8") as fh:
             rates_before = fh.read()
         with mock.patch("sys.argv", ["rate_check.py", "--fixture", NO_GROUND_FIXTURE]):
@@ -175,15 +439,13 @@ class TestNoUpsRatesSkips(unittest.TestCase):
             with redirect_stdout(io.StringIO()), redirect_stderr(err):
                 code = rc.main()
         self.assertEqual(code, 1)
-        self.assertIn("ground carrier connection lost", err.getvalue())
+        self.assertIn("Pirate Ship quote source down", err.getvalue())
         with open(rc.RATES_PATH, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), rates_before)
 
+
+class TestShippedRatesFile(unittest.TestCase):
     def test_shipped_rates_file_holds_real_published_rates(self):
-        # GOL-1495 published the real UPS Ground table: the launch-hypothesis
-        # `_provisional` marker is gone and every zone carries per-box rates.
-        # Dropping that marker is what flips the all-missing path from a clean
-        # skip to the lapse failure asserted above.
         with open(rc.RATES_PATH, encoding="utf-8") as fh:
             doc = json.load(fh)
         self.assertNotIn("_provisional", doc)
@@ -193,45 +455,6 @@ class TestNoUpsRatesSkips(unittest.TestCase):
         for zone in zones:
             self.assertTrue(doc[zone], f"{zone}: expected per-box rates")
 
-    def _run_no_ups_against(self, doc):
-        """Run the all-missing path against a rates file containing `doc`.
 
-        Returns (exit_code, stderr, rates_after). Uses a temp RATES_PATH so
-        the real shipped table is never touched.
-        """
-        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
-            json.dump(doc, fh)
-            path = fh.name
-        try:
-            argv = ["rate_check.py", "--fixture", NO_GROUND_FIXTURE]
-            with mock.patch.object(rc, "RATES_PATH", path), mock.patch("sys.argv", argv):
-                err = io.StringIO()
-                with redirect_stdout(io.StringIO()), redirect_stderr(err):
-                    code = rc.main()
-            with open(path, encoding="utf-8") as fh:
-                after = fh.read()
-            return code, err.getvalue(), after
-        finally:
-            os.unlink(path)
-
-    def test_all_missing_with_real_published_rates_fails(self):
-        # Real published rates exist (no `_provisional` marker) but Shippo now
-        # returns zero ground rates for every probe: the carrier link(s) have
-        # lapsed. The checker must FAIL (exit 1) so the fossilized table gets
-        # investigated, and must not rewrite the file (GOL-1312).
-        real = {
-            "_comment": "Maintained by scripts/rate_check",
-            "_schema": 2,
-            "zone_1": {"small": {"base": 18.0}},
-        }
-        before = json.dumps(real)
-        code, err, after = self._run_no_ups_against(real)
-        self.assertEqual(code, 1)
-        self.assertIn("ground carrier connection lost", err)
-        self.assertEqual(after, before)
-
-    def test_all_missing_with_empty_table_skips_cleanly(self):
-        # An empty (or fully placeholder-stripped) table has no real rates to
-        # protect, so all-missing is still the not-ready state — skip cleanly.
-        code, _err, _after = self._run_no_ups_against({"_comment": "x", "_schema": 2})
-        self.assertEqual(code, 0)
+if __name__ == "__main__":
+    unittest.main()
