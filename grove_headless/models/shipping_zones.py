@@ -14,7 +14,7 @@ checker is active is not safe; they will be dropped on the next rates PR.
 Design is documented in the vault wiki at ``Software/Grove Shipping``.
 
 Fail-safe by design: ``compute_order_shipping`` returns ``None`` for any
-address outside the 31-state green list, any cart containing a potted line,
+address outside the 32-state green list, any cart containing a potted line,
 and any cart the packer cannot plan — the checkout then adds NO shipping line
 (and the checkout endpoint blocks with an explicit message via
 ``unshippable_reason``). We never emit a wrong or guessed charge.
@@ -153,6 +153,7 @@ GREEN_STATES: frozenset[str] = frozenset(
         "CT",
         "DC",
         "DE",
+        "FL",
         "GA",
         "IA",
         "IL",
@@ -244,6 +245,18 @@ ZONE_BY_STATE: dict[str, str] = {
     "AR": "zone_6",
     "MO": "zone_6",
     "IA": "zone_6",
+    # zone_6 also fits Florida (GOL-2235). Contrary to the retired bulk-box-era
+    # assumption that FL "exceeds the table", a fresh two-SKU probe (2026-09-08,
+    # origin 26651, cheapest-of-{UPS Ground, USPS Ground Advantage} — the same
+    # selector the label purchase uses; read-only prod quotes) puts FL's tied
+    # worst corners (Miami 33101, Key West 33040) at small=$16.84 / large=$21.37,
+    # so ceil(quote + pkg + 2) = 23/28 — identical to the GOL-2238 zone_6 target
+    # above, so FL lands in the SAME cost bucket rather than a new zone. Zones are
+    # cost buckets, not distance rings, so a "farther" state sharing a nearer
+    # band is expected; the only invariant is never-undercharge, and 23/28 is FL's
+    # exact worst-corner upper bound. The daily rate-checker keeps this bucket honest
+    # from REFERENCE_ZIPS["zone_6"], which now includes FL's two southern corners.
+    "FL": "zone_6",
     # zone_7 — near-plains band. GOL-2238 re-probe: TN (Memphis) targets 29/32,
     # cheaper than the Gulf zone_5 corner but pricier than the zone_6 states, so
     # it gets its own band (published 29/32 = its worst-corner upper bound). Room
@@ -289,7 +302,7 @@ def rate_feed(calendar_override=None, today=None) -> dict:
 
     ``zones`` mirrors ``data/shipping_rates.json`` (minus the ``_``-prefixed
     keys, already stripped at load). ``zone_by_state`` is the authoritative
-    31-state green list -> zone map — the compliance gate the frontend must
+    32-state green list -> zone map — the compliance gate the frontend must
     stay in lockstep with. ``packing`` carries the box catalog + capacities so
     the frontend can mirror ``pack_order`` exactly. ``calendar`` is the annual,
     admin-editable shipping calendar keyed to USDA hardiness zone (NOT the

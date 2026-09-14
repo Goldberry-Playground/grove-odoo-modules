@@ -91,10 +91,16 @@ REFERENCE_ZIPS = {
     ],
     # band {AR,MO,IA} — GOL-2238 mid-continent band; all three co-maximal at
     # 23/28 (small/large) in the two-SKU re-probe, so all three are corners.
+    # AR/MO/IA (GOL-2238) plus FL (GOL-2235): FL's southern-tip corners (Miami +
+    # Key West both quoted small=$16.84 / large=$21.37 in the 2026-09-08 two-SKU
+    # probe) tie AR/MO/IA's 23/28 target, so FL shares this bucket. Probe every
+    # corner and publish the per-box max so no in-band destination is undercharged.
     "zone_6": [
         ("Texarkana", "AR", "71854"),
         ("Joplin", "MO", "64801"),
         ("Sioux City", "IA", "51101"),
+        ("Miami", "FL", "33101"),
+        ("Key West", "FL", "33040"),
     ],
     # band {TN} — GOL-2238 near-plains band; Memphis is TN's worst corner (29/32).
     "zone_7": [
