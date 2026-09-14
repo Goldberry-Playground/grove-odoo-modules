@@ -1,8 +1,13 @@
 # rate-check — operations runbook
 
 The `rate-check` workflow (`.github/workflows/rate-check.yml`) runs daily at
-07:00 ET, quotes Shippo for the shipping zones, and — when rates have drifted
-≥ $1 — force-pushes `chore/rate-check` and opens/refreshes a PR against `main`.
+07:00 ET, quotes **Pirate Ship** (public rate calculator, no auth — GOL-2270)
+for the shipping zones, and — when rates have drifted ≥ $1 — force-pushes
+`chore/rate-check` and opens/refreshes a PR against `main`. Each published cell
+records the winning carrier/service (`shipping_rates.json` `_schema` 3); the
+Odoo loader reads `base` only. Shippo is retired from quoting (spec
+`docs/superpowers/specs/2026-09-09-pirateship-fulfillment-design.md` §A). No
+`SHIPPO_API_KEY` is needed anymore.
 
 ## GOL-2114: required checks wedge at `action_required`
 
