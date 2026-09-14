@@ -23,6 +23,36 @@
         </field>
     </record>
 
+    <!-- Import wizard — defined before the batch form view because that form's
+         header button references %(action_grove_label_batch_import)d, which
+         Odoo resolves at parse time (the action must already exist). -->
+    <record id="view_grove_label_batch_import_form" model="ir.ui.view">
+        <field name="name">grove.label.batch.import.form</field>
+        <field name="model">grove.label.batch.import</field>
+        <field name="arch" type="xml">
+            <form string="Import Pirate Ship tracking">
+                <group>
+                    <field name="batch_id" readonly="1" />
+                    <field name="data" filename="filename"
+                           string="Export Tracking Data CSV" />
+                    <field name="filename" invisible="1" />
+                </group>
+                <footer>
+                    <button name="action_import" type="object" string="Import"
+                            class="btn-primary" />
+                    <button string="Cancel" class="btn-secondary" special="cancel" />
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_grove_label_batch_import" model="ir.actions.act_window">
+        <field name="name">Import Pirate Ship tracking</field>
+        <field name="res_model">grove.label.batch.import</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
     <record id="view_grove_label_batch_form" model="ir.ui.view">
         <field name="name">grove.label.batch.form</field>
         <field name="model">grove.label.batch</field>
@@ -94,34 +124,6 @@
             <p>Build a batch from the orders awaiting a label, export the CSV to
                Pirate Ship, buy the labels, then import the tracking CSV back.</p>
         </field>
-    </record>
-
-    <!-- Import wizard -->
-    <record id="view_grove_label_batch_import_form" model="ir.ui.view">
-        <field name="name">grove.label.batch.import.form</field>
-        <field name="model">grove.label.batch.import</field>
-        <field name="arch" type="xml">
-            <form string="Import Pirate Ship tracking">
-                <group>
-                    <field name="batch_id" readonly="1" />
-                    <field name="data" filename="filename"
-                           string="Export Tracking Data CSV" />
-                    <field name="filename" invisible="1" />
-                </group>
-                <footer>
-                    <button name="action_import" type="object" string="Import"
-                            class="btn-primary" />
-                    <button string="Cancel" class="btn-secondary" special="cancel" />
-                </footer>
-            </form>
-        </field>
-    </record>
-
-    <record id="action_grove_label_batch_import" model="ir.actions.act_window">
-        <field name="name">Import Pirate Ship tracking</field>
-        <field name="res_model">grove.label.batch.import</field>
-        <field name="view_mode">form</field>
-        <field name="target">new</field>
     </record>
 
     <menuitem
