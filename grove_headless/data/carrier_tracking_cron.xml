@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <!-- GOL-2272 (Pirate Ship C): poll UPS Track + USPS Tracking v3 directly for
+         shipped/delivered events, replacing the Shippo tracking webhook. Every
+         2 hours the cron sweeps orders still in flight (label_purchased/shipped
+         with tracking, not delivered, not past the 30-day cap), maps the carrier
+         status into the delivery-status vocabulary the shipment email consumes,
+         and applies it through the unchanged once-only email path. The method
+         never raises; auth failures pause a carrier for the run and ops is
+         alerted. Live carrier calls only where UPS_/USPS_CLIENT_ID/SECRET are
+         provisioned (Josh vaults per stage) — no credentials means a no-op. -->
+    <record id="poll_carrier_tracking" model="ir.cron">
+        <field name="name">Grove: poll UPS/USPS carrier tracking</field>
+        <field name="model_id" ref="sale.model_sale_order"/>
+        <field name="state">code</field>
+        <field name="code">model._cron_poll_carrier_tracking()</field>
+        <field name="interval_number">2</field>
+        <field name="interval_type">hours</field>
+        <field name="active" eval="True"/>
+    </record>
+</odoo>

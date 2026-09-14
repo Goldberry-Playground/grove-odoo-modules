@@ -71,7 +71,7 @@ _CARRIER_ALIASES = {
 }
 
 
-def _normalize_carrier(carrier):
+def normalize_carrier(carrier):
     """Fold a stored carrier name to a canonical key ("UPS"/"USPS") or "" when we
     don't recognise it."""
     key = (carrier or "").strip().upper()
@@ -82,7 +82,7 @@ def _normalize_carrier(carrier):
 def carrier_label(carrier):
     """Human-facing carrier name for the email. Falls back to a generic word so a
     missing/unknown carrier never renders an empty cell."""
-    return _normalize_carrier(carrier) or "Carrier"
+    return normalize_carrier(carrier) or "Carrier"
 
 
 def tracking_url(carrier, tracking_number):
@@ -90,7 +90,7 @@ def tracking_url(carrier, tracking_number):
     the carrier is unknown or the number is blank. URL-encodes the number."""
     if not tracking_number or not str(tracking_number).strip():
         return None
-    template = _TRACKING_URL.get(_normalize_carrier(carrier))
+    template = _TRACKING_URL.get(normalize_carrier(carrier))
     if not template:
         return None
     return template.format(t=quote(str(tracking_number).strip(), safe=""))
