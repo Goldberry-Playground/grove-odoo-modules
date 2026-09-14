@@ -8,4 +8,32 @@
     <field name="state">code</field>
     <field name="code">records.action_buy_shipping_labels()</field>
   </record>
+
+  <!-- Manual "build the open Pirate Ship batch" trigger (GOL-2271). Rolls every
+       eligible order (paid ship order awaiting a label / waved preorder) into
+       the one open batch and opens its form so the operator can Export the CSV.
+       Idempotent — re-running returns the same open batch with fresh rows. -->
+  <record id="action_grove_build_label_batch" model="ir.actions.server">
+    <field name="name">Build Pirate Ship batch</field>
+    <field name="model_id" ref="model_grove_label_batch"/>
+    <field name="state">code</field>
+    <field name="code">
+batch = model.build_open_batch(env.company)
+action = {
+    "type": "ir.actions.act_window",
+    "res_model": "grove.label.batch",
+    "res_id": batch.id,
+    "view_mode": "form",
+    "views": [(False, "form")],
+}
+    </field>
+  </record>
+
+  <menuitem
+    id="menu_grove_build_label_batch"
+    name="Build Pirate Ship batch"
+    parent="sale.sale_menu_root"
+    action="action_grove_build_label_batch"
+    sequence="91"
+  />
 </odoo>

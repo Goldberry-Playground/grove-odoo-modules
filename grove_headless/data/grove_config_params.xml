@@ -16,4 +16,17 @@
         <field name="value">50</field>
     </record>
 
+    <!-- Pirate Ship auto-buy switch (GOL-2271). "0" = review-only: the
+         grove-shipper runner pulls + uploads + price-checks a batch but STOPS
+         at the Pirate Ship review screen (no label is bought unless invoked
+         with the buy flag). Flip to "1" in Settings / Technical / System Parameters to
+         let the scheduled run buy without a deploy. noupdate="1" so the operator
+         edit survives module upgrades — this adjustability is the requirement,
+         so the seed must never be a code constant. Read by the runner via
+         GET /grove/api/v1/labels/config. -->
+    <record id="pirateship_autobuy_param" model="ir.config_parameter">
+        <field name="key">grove_headless.pirateship_autobuy</field>
+        <field name="value">0</field>
+    </record>
+
 </odoo>
