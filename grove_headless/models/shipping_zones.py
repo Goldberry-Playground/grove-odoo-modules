@@ -109,7 +109,7 @@ US_STATES: tuple[str, ...] = (
     "MP",
 )
 
-RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 8))
+RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 6))
 
 # Product tiers survive v2 as the shippability gate. GOL-2199 potted go-live
 # (CEO directive 2026-09-08): potted / peat-and-bagged now SHIPS on its own
@@ -191,6 +191,17 @@ ZONE_BY_STATE: dict[str, str] = {
     "NC": "zone_1",
     "DE": "zone_1",
     "DC": "zone_1",  # GOL-2128 probe: DC corner (Washington 20001) <= zone_1 for every box
+    # GOL-2238 (P1 correction 2026-09-14): TN belongs at zone_1, NOT the zone_7
+    # the 2026-09-08 probe assigned. A live re-probe (origin 26651, cheapest-of-
+    # {UPS Ground, USPS Ground Advantage}, current rates) quotes TN's OWN worst
+    # corner — Memphis 38103, the state's farthest tip — at 20/24 small/large and
+    # 22/36 potted, i.e. the zone_1 published rate EXACTLY; Nashville (37201) ties
+    # it and Knoxville (37902) is cheaper. TN borders KY/VA/NC (all zone_1), so
+    # this restores geography: binning a border state by a stale far-corner quote
+    # had it pricing above Iowa. zone_1 dominates even TN's worst corner, so
+    # never-undercharge holds; Memphis is added to zone_1's rate-checker corners
+    # so the published rate stays >= TN's worst going forward (see REFERENCE_ZIPS).
+    "TN": "zone_1",
     # zone_2
     "MD": "zone_2",
     "PA": "zone_2",
@@ -209,47 +220,39 @@ ZONE_BY_STATE: dict[str, str] = {
     "MA": "zone_4",
     "VT": "zone_4",
     "NH": "zone_4",
-    # zone_5 — farthest priced band (originally Maine only). GOL-2128 opened a
-    # ratified south/mid-continent tranche after a live Shippo probe; GOL-2238
-    # then RE-PROBED that tranche against the two-SKU (small/large) catalog
-    # (2026-09-08, origin 26651, cheapest-of-{UPS Ground, USPS Ground Advantage}
-    # — the SAME selector label purchase uses; for each state quote its worst
-    # (farthest) corner for every box, target = ceil(quote+pkg+2)). GOL-2128
-    # had lumped the whole tranche at zone_5 because no cheaper band DOMINATED
-    # their targets; the re-probe shows only GA/SC/AL/MS/LA genuinely belong at
-    # zone_5 (39/43) — GA/SC sit just below (37/41), AL/MS/LA exactly at the
-    # zone_5 corner. TN, AR, MO and IA quote materially cheaper and now get
-    # their own real distance bands (zone_6 / zone_7 below), so they stop paying
-    # a Maine-tier overcharge. Every published per-zone rate still dominates its
-    # members' worst-corner targets for every box, so no state is ever
-    # undercharged; the daily rate-checker probes MULTIPLE corners per zone and
-    # publishes the max (see scripts/rate_check REFERENCE_ZIPS).
+    # zone_5 — farthest priced band (Maine + the ratified Gulf/mid-continent
+    # tranche). GOL-2128 opened a south/mid-continent tranche; GOL-2238 re-probed
+    # it against the two-SKU + potted catalog (origin 26651, cheapest-of-{UPS
+    # Ground, USPS Ground Advantage} — the SAME selector label purchase uses; for
+    # each state quote its worst (farthest) corner for every box, target =
+    # ceil(quote+pkg+2)). GA/SC/AL/MS/LA and AR/MO/IA all bin here: their worst
+    # corners (e.g. Mobile AL, Texarkana AR, Joplin MO, Sioux City IA) quote
+    # 23/28 small/large and 26/41 potted — the zone_5 published rate exactly — so
+    # zone_5 is the cheapest band that dominates them for every box (never
+    # undercharged). The 2026-09-08 probe had briefly split AR/MO/IA into a
+    # separate zone_6 whose potted rows carried a stale interim ceiling (41/52),
+    # OVER-charging potted by ~$11-15/box; the 2026-09-14 re-probe folds them back
+    # to their real zone_5 rate and retires zone_6/zone_7. The daily rate-checker
+    # probes MULTIPLE corners per zone and publishes the max (see
+    # scripts/rate_check REFERENCE_ZIPS).
     #
     # The ratified FAR states (OK, KS, NE, SD, ND, TX, NM, AZ) are still NOT in
-    # GREEN_STATES: the re-probe confirms they clear on cost (all ≤ zone_7's
-    # 30/38 except TX at 41/55), but opening them adds new NPB plant-compliance
-    # surface (e.g. Carya / pecan weevil in AZ/NM) that the per-product carve-out
-    # gate must cover first — tracked as the GOL-2238 far-states follow-up. FL
-    # stays out on the same compliance track (GOL-2132).
+    # GREEN_STATES: they clear on cost but opening them adds new NPB plant-
+    # compliance surface (e.g. Carya / pecan weevil in AZ/NM) that the per-product
+    # carve-out gate must cover first — tracked as the GOL-2238 far-states
+    # follow-up (GOL-2243). FL stays out on the same compliance track (GOL-2132).
     "GA": "zone_5",
     "AL": "zone_5",
     "SC": "zone_5",
     "MS": "zone_5",
     "LA": "zone_5",
     "ME": "zone_5",
-    # zone_6 — mid-continent band. GOL-2238 re-probe (two-SKU catalog): AR
-    # (Texarkana), MO (Joplin) and IA (Sioux City) each target 23/28
-    # (small/large); zone_6's 23/28 published rate is their exact worst-corner
-    # upper bound, cutting the ~$15/box zone_5 overcharge GOL-2128 had assigned.
-    "AR": "zone_6",
-    "MO": "zone_6",
-    "IA": "zone_6",
-    # zone_7 — near-plains band. GOL-2238 re-probe: TN (Memphis) targets 29/32,
-    # cheaper than the Gulf zone_5 corner but pricier than the zone_6 states, so
-    # it gets its own band (published 29/32 = its worst-corner upper bound). Room
-    # for the ratified far plains states (OK/KS/AZ/NM ≤ 30/38) once compliance
-    # clears — see the far-states follow-up note above.
-    "TN": "zone_7",
+    # AR/MO/IA re-probe (2026-09-14): worst corners target 23/28 small/large,
+    # 26/41 potted = zone_5's published rate exactly. Back in zone_5 (their real
+    # band); the interim zone_6 potted ceiling that overcharged them is gone.
+    "AR": "zone_5",
+    "MO": "zone_5",
+    "IA": "zone_5",
 }
 
 assert set(ZONE_BY_STATE) == GREEN_STATES

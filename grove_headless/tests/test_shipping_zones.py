@@ -117,9 +117,10 @@ class TestShippingZoneEngineContract(unittest.TestCase):
         self.assertIsNone(sz.box_rate("", "small"))
         self.assertIsNone(sz.box_rate(None, "small"))
 
-    def test_there_are_exactly_seven_rate_zones(self):
-        # zone_1..5 + GOL-2238 real probe-derived zone_6 (mid-continent) / zone_7 (near-plains).
-        self.assertEqual(len(sz.RATE_ZONE_IDS), 7)
+    def test_there_are_exactly_five_rate_zones(self):
+        # zone_1..5. GOL-2238's 2026-09-08 zone_6/zone_7 split was retired
+        # 2026-09-14: TN re-binned to zone_1, AR/MO/IA folded back to zone_5.
+        self.assertEqual(len(sz.RATE_ZONE_IDS), 5)
 
     def test_rate_is_box_scoped(self):
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
@@ -262,6 +263,26 @@ class TestShippingZoneTableCoverage(unittest.TestCase):
     def test_every_rate_rule_targets_a_real_zone(self):
         for zone in sz.ZONE_RATES:
             self.assertIn(zone, sz.RATE_ZONE_IDS, f"rate rule for unknown zone {zone}")
+
+    def test_gol2238_corrected_bindings(self):
+        # GOL-2238 P1 regression (2026-09-14): TN must sit in zone_1 (it borders
+        # KY/VA/NC and its worst corner quotes the zone_1 rate), and AR/MO/IA in
+        # zone_5 — never the retired zone_6/zone_7. Guards against a re-introduced
+        # far-corner mis-bin that had TN pricing above Iowa.
+        if not sz.is_configured():
+            self.skipTest("rate table not yet populated")
+        self.assertEqual(sz.zone_for_state("TN"), "zone_1")
+        for st in ("AR", "MO", "IA"):
+            self.assertEqual(sz.zone_for_state(st), "zone_5", st)
+        # No green state may map to a retired band.
+        self.assertNotIn("zone_6", set(sz.ZONE_BY_STATE.values()))
+        self.assertNotIn("zone_7", set(sz.ZONE_BY_STATE.values()))
+        # TN (border state) must never cost more than a farther Gulf/mid-continent
+        # state for any box — the exact inversion the P1 defect reported.
+        for box_id in sb.known_box_ids():
+            tn = sz.box_rate("TN", box_id)
+            for far in ("AL", "IA", "MO"):
+                self.assertLessEqual(tn, sz.box_rate(far, box_id), f"TN > {far} for {box_id}")
 
 
 class TestOrderShipping(unittest.TestCase):
