@@ -1,0 +1,21 @@
+{
+  "name": "grove-shipper",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Pirate Ship label-batch runner for Goldberry Grove (GOL-2271 B2). Drives the Pirate Ship web UI with a persistent Chromium profile: pulls a label batch from Odoo, uploads the CSV, price-checks every row, optionally buys, then reconciles tracking back into Odoo. The manual path (Odoo menu buttons) stays first-class and uses the same files and endpoints.",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "grove-shipper": "./src/cli.js"
+  },
+  "scripts": {
+    "start": "node src/cli.js",
+    "test": "node --test",
+    "postinstall-hint": "npx playwright install chromium"
+  },
+  "dependencies": {
+    "playwright": "^1.47.0"
+  }
+}

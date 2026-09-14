@@ -1,0 +1,32 @@
+{
+  "_note": "Pirate Ship DOM selectors. These are CALIBRATION-PENDING: they must be confirmed once against the live UI during Josh's first headed sign-in (the runner has no way to verify them without an authenticated session). Every selector supports a Playwright locator string OR a getByRole spec {role, name}. Keep this file the single source of UI truth so a Pirate Ship redesign is a one-file fix, not a code change.",
+  "baseUrl": "https://ship.pirateship.com",
+  "shipPath": "/ship",
+  "signedInProbe": { "role": "link", "name": "Ship" },
+  "signInProbe": { "role": "button", "name": "Sign In" },
+  "upload": {
+    "openSpreadsheet": { "role": "link", "name": "Upload a spreadsheet" },
+    "fileInput": "input[type=file]",
+    "mappingSelect": "select[name='saved_mapping']",
+    "mappingName": "Grove batch v1",
+    "applyMapping": { "role": "button", "name": "Apply" },
+    "continue": { "role": "button", "name": "Continue" }
+  },
+  "review": {
+    "rowSelector": "[data-testid='ship-row'], tr.shipment-row",
+    "refCell": "[data-col='Grove Ref'], [data-testid='ref']",
+    "serviceCell": "[data-col='service'], [data-testid='service']",
+    "priceCell": "[data-col='price'], [data-testid='price']",
+    "addressFlag": "[data-testid='address-flag'], .address-warning, .icon-warning",
+    "totalCell": "[data-testid='order-total'], .order-total"
+  },
+  "buy": {
+    "buyButton": { "role": "button", "name": "Buy" },
+    "confirmProbe": { "role": "heading", "name": "Labels Created" },
+    "confirmTotal": "[data-testid='confirm-total'], .confirmation-total"
+  },
+  "export": {
+    "exportTracking": { "role": "link", "name": "Export Tracking Data" },
+    "downloadLabels": { "role": "link", "name": "Print" }
+  }
+}

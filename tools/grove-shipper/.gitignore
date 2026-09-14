@@ -1,0 +1,5 @@
+node_modules/
+out/
+# The persistent Chromium profile is the Pirate Ship credential; never commit it.
+profile/
+*.local.json
