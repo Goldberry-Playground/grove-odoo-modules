@@ -209,25 +209,25 @@ ZONE_BY_STATE: dict[str, str] = {
     "MA": "zone_4",
     "VT": "zone_4",
     "NH": "zone_4",
-    # zone_5 — farthest priced band (originally Maine only). GOL-2128 opened a
-    # ratified south/mid-continent tranche after a live Shippo probe; GOL-2238
-    # then RE-PROBED that tranche against the two-SKU (small/large) catalog
-    # (2026-09-08, origin 26651, cheapest-of-{UPS Ground, USPS Ground Advantage}
-    # — the SAME selector label purchase uses; for each state quote its worst
-    # (farthest) corner for every box, target = ceil(quote+pkg+2)). GOL-2128
-    # had lumped the whole tranche at zone_5 because no cheaper band DOMINATED
-    # their targets; the re-probe shows only GA/SC/AL/MS/LA genuinely belong at
-    # zone_5 (39/43) — GA/SC sit just below (37/41), AL/MS/LA exactly at the
-    # zone_5 corner. TN, AR, MO and IA quote materially cheaper and now get
-    # their own real distance bands (zone_6 / zone_7 below), so they stop paying
-    # a Maine-tier overcharge. Every published per-zone rate still dominates its
-    # members' worst-corner targets for every box, so no state is ever
+    # zone_5 — south/Gulf + Maine band {GA, AL, SC, MS, LA, ME}. GOL-2128 opened
+    # this tranche past Maine; GOL-2238 re-probed each state's worst corner
+    # (origin 26651, cheapest-of-{UPS Ground, USPS Ground Advantage} — the SAME
+    # transit-guarded selector label purchase uses; target = ceil(quote+pkg+2)).
+    # Bareroot (dormant) lands these at 23/28. TN, AR, MO and IA quote materially
+    # cheaper on the bareroot lane and moved to their own bands (zone_6 / zone_7
+    # below), so they stop paying a Maine-tier bareroot overcharge. Each published
+    # per-zone rate is its members' worst-corner upper bound, so no state is
     # undercharged; the daily rate-checker probes MULTIPLE corners per zone and
-    # publishes the max (see scripts/rate_check REFERENCE_ZIPS).
+    # publishes the max at each box's SHIP MODE (see scripts/rate_check
+    # REFERENCE_ZIPS + SHIP_MODE). CAVEAT (GOL-2238 P1): the CURRENT zone_5 potted
+    # rows (26/41) predate the SHIP_MODE fix — they were quoted at the dormant
+    # ceiling and UNDERCHARGE the leafed UPS-Ground potted label (~41/52); the
+    # next rate-check run re-derives them (pricing delta pending CEO ratification).
     #
     # The ratified FAR states (OK, KS, NE, SD, ND, TX, NM, AZ) are still NOT in
-    # GREEN_STATES: the re-probe confirms they clear on cost (all ≤ zone_7's
-    # 30/38 except TX at 41/55), but opening them adds new NPB plant-compliance
+    # GREEN_STATES: they clear on cost (they need their own probe under the
+    # corrected SHIP_MODE methodology before assignment), but opening them adds
+    # new NPB plant-compliance
     # surface (e.g. Carya / pecan weevil in AZ/NM) that the per-product carve-out
     # gate must cover first — tracked as the GOL-2238 far-states follow-up. FL
     # stays out on the same compliance track (GOL-2132).
@@ -237,18 +237,23 @@ ZONE_BY_STATE: dict[str, str] = {
     "MS": "zone_5",
     "LA": "zone_5",
     "ME": "zone_5",
-    # zone_6 — mid-continent band. GOL-2238 re-probe (two-SKU catalog): AR
-    # (Texarkana), MO (Joplin) and IA (Sioux City) each target 23/28
-    # (small/large); zone_6's 23/28 published rate is their exact worst-corner
-    # upper bound, cutting the ~$15/box zone_5 overcharge GOL-2128 had assigned.
+    # zone_6 — mid-continent band {AR, MO, IA}. GOL-2238: bareroot 23/28 (all
+    # three co-maximal at their USPS-GA dormant corner), potted 41/52 (leafed /
+    # UPS Ground). NB (no cross-zone monotonicity, by design — see monotonicity.py):
+    # these states are bareroot-pricier than zone_7's TN yet potted-comparable;
+    # the distance-band index is a label, not a per-box ordering.
     "AR": "zone_6",
     "MO": "zone_6",
     "IA": "zone_6",
-    # zone_7 — near-plains band. GOL-2238 re-probe: TN (Memphis) targets 29/32,
-    # cheaper than the Gulf zone_5 corner but pricier than the zone_6 states, so
-    # it gets its own band (published 29/32 = its worst-corner upper bound). Room
-    # for the ratified far plains states (OK/KS/AZ/NM ≤ 30/38) once compliance
-    # clears — see the far-states follow-up note above.
+    # zone_7 — single-state band {TN}. GOL-2238 P1 (2026-09-14 live re-probe):
+    # TN bareroot is FLAT $20/$24 across the whole state (one USPS Ground
+    # Advantage zone from 26651 — Memphis == Nashville), so binning it here at
+    # zone_5's 29/32 was a stale UPS-Ground-only OVERCHARGE, now 20/24. TN potted
+    # is 39/46 — its genuine worst corner is Chattanooga (SE), NOT Memphis, and
+    # even the WV-bordering NE tip (Bristol) is $38/$45: peat's 3-day transit
+    # ceiling forces UPS Ground everywhere USPS GA runs >3 days, so potted to TN
+    # is intrinsically pricey regardless of city. TN gets its OWN band precisely
+    # because no single existing zone holds cheap-bareroot + pricey-potted.
     "TN": "zone_7",
 }
 

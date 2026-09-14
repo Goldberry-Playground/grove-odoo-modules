@@ -59,8 +59,13 @@ ORIGIN = {
 # zone_2) would undercharge the band's far corner (NYC); quoting the far
 # corner(s) over-bills the cheapest in-band destination modestly — the accepted
 # cost of static zone pricing. The worst-case picks were determined by live
-# Shippo probe of each band's corner states (small + large; the ranking is
-# box-invariant, distance-zone driven).
+# Shippo probe of each band's corner states. NOTE (GOL-2238 P1): the corner
+# ranking is box-invariant ONLY for the bareroot/dormant lane (USPS Ground
+# Advantage, distance-zone driven). For the potted/leafed lane the carrier
+# flips to UPS Ground wherever USPS GA exceeds the 3-day peat transit ceiling,
+# so its worst corner can differ from bareroot's (see zone_7). A band whose two
+# lanes disagree must list every lane's worst corner; the per-box max then holds
+# for both.
 #
 # zones 1-4 carry a single corner: their bands were derived worst-corner-first
 # and no in-band state ties it. zone_5 was widened past Maine by GOL-2128 to the
@@ -96,8 +101,23 @@ REFERENCE_ZIPS = {
         ("Joplin", "MO", "64801"),
         ("Sioux City", "IA", "51101"),
     ],
-    # band {TN} — GOL-2238 near-plains band; Memphis is TN's worst corner (29/32).
+    # band {TN} — GOL-2238. TN is a SINGLE-state band, but its two lanes have
+    # different worst corners (GOL-2238 P1 re-probe, live prod Shippo 2026-09-14):
+    #   * bareroot (dormant, USPS Ground Advantage): FLAT $20/$24 across all of TN
+    #     — the whole state sits in one USPS zone from 26651, so Memphis and
+    #     Nashville quote identically. (The old "Memphis 29/32" figure was a stale
+    #     UPS-Ground-only artifact from a day USPS GA was absent from the token —
+    #     see the visibility_report; it is NOT a worst-corner effect.)
+    #   * potted (leafed, 3-day peat ceiling → UPS Ground): NON-flat and pricey —
+    #     Nashville is cheap ($22/$36, USPS GA still inside the 3-day ETA) but the
+    #     SE (Chattanooga $39/$46) and the WV-bordering NE tips (Bristol/Kingsport
+    #     $38/$45) fall out of the 3-day window onto UPS Ground. Chattanooga is the
+    #     max, so it must be a corner or the potted rate undercharges.
+    # We therefore carry the potted-maximal corners; bareroot is flat so any of
+    # them yields the same $20/$24.
     "zone_7": [
+        ("Chattanooga", "TN", "37402"),
+        ("Bristol", "TN", "37620"),
         ("Memphis", "TN", "38103"),
     ],
 }
@@ -162,16 +182,38 @@ PARCELS = {
 # sticker, care card, thank-you note) replaces the old flat $3.50/tree.
 PACKAGING = {box_id: box["packaging_usd"] for catalog, _ in _CATALOGS for box_id, box in catalog.items()}
 BUFFER = 2.00
+
+
+# Per-box SHIP MODE for quoting (GOL-2238 P1 fix, 2026-09-14). The published
+# rate must never-undercharge the label the checkout actually buys, and the
+# label carrier is chosen by shippo_client.select_cheapest_ground under the
+# ORDER's packing_mode transit ceiling (MAX_TRANSIT_DAYS: dormant 7d, leafed
+# 3d). Quoting every box at the loose dormant ceiling let USPS Ground Advantage
+# (≈4-day ETA) win for potted — but potted / peat-and-bagged ships LEAFED, whose
+# 3-day ceiling filters USPS GA out and forces the pricier UPS Ground. The
+# result was a table that undercharged every leafed potted label (e.g. a WV-
+# bordering NE-Tennessee corner quotes $45 UPS Ground but the table carried the
+# $22 USPS-GA figure). Bareroot only ever ships dormant (QUOTABLE_MODES), so it
+# stays at the dormant ceiling; potted is quoted at leafed, its worst (priciest)
+# purchasable mode, so the one static rate is safe in EVERY season.
+SHIP_MODE = {box_id: "leafed" if box_id in shipping_boxes.POTTED_BOXES else "dormant" for box_id in PARCELS}
 RATES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless", "data", "shipping_rates.json")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "out")
 
 
-def pick_cheapest_ground(shipment_json: dict) -> float | None:
+def pick_cheapest_ground(shipment_json: dict, box_id: str | None = None) -> float | None:
     """Cheapest allowlisted ground rate (UPS Ground vs USPS Ground Advantage),
     transit-guarded — the same selection the label purchase makes, so the
     published table matches what will actually be bought. None when neither
-    carrier returns a ground rate for this probe (GOL-1906)."""
-    rate = shippo_client.select_cheapest_ground(shipment_json.get("rates", []))
+    carrier returns a ground rate for this probe (GOL-1906).
+
+    ``box_id`` selects the transit ceiling via SHIP_MODE: potted probes at
+    "leafed" (3-day, the mode it actually ships), bareroot at "dormant" (7-day).
+    Omitted (fixture tests) falls back to select_cheapest_ground's own default
+    ("dormant"), preserving the legacy single-mode behavior for canned inputs."""
+    mode = SHIP_MODE.get(box_id) if box_id is not None else None
+    rates = shipment_json.get("rates", [])
+    rate = shippo_client.select_cheapest_ground(rates, mode) if mode else shippo_client.select_cheapest_ground(rates)
     return float(rate["amount"]) if rate else None
 
 
@@ -240,7 +282,7 @@ def quote_zone_box(api_key: str, zone: str, box_id: str):
         resp.raise_for_status()
         data = resp.json()
         present |= present_carriers(data)
-        quote = pick_cheapest_ground(data)
+        quote = pick_cheapest_ground(data, box_id)
         if quote is not None:
             best = quote if best is None else max(best, quote)
     return best, present
@@ -284,7 +326,7 @@ def main() -> int:
             if args.fixture:
                 with open(args.fixture, encoding="utf-8") as fh:
                     fixture_json = json.load(fh)
-                quote = pick_cheapest_ground(fixture_json)
+                quote = pick_cheapest_ground(fixture_json, box_id)
                 present = present_carriers(fixture_json)
             else:
                 api_key = os.environ.get("SHIPPO_API_KEY", "")
