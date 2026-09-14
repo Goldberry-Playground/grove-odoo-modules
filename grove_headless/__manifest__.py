@@ -69,6 +69,7 @@
         "data/shipping_actions.xml",
         "data/settlement_cron.xml",
         "data/order_rollup_cron.xml",
+        "data/carrier_tracking_cron.xml",
         "data/grove_dormancy_params.xml",
     ],
     "installable": True,

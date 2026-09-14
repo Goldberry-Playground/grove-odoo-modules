@@ -1,10 +1,12 @@
 import logging
 import os
+from datetime import timedelta
 
 from odoo import api, fields, models
 from odoo.exceptions import UserError
 
-from . import shippo_client
+from . import carrier_tracking, shippo_client
+from .shipment_email import normalize_carrier
 from .shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from .shipping_zones import pack_for_state, unshippable_reason
 
@@ -30,6 +32,16 @@ class SaleOrder(models.Model):
     grove_label_batch_id = fields.Many2one(
         "grove.label.batch", readonly=True, copy=False, index=True, ondelete="set null"
     )
+
+    # Carrier-tracking poll bookkeeping (GOL-2272, Pirate Ship C). Set when the
+    # label milestone lands (see _grove_advance_state) so the 2-hourly poll can
+    # stop chasing an order 30 days after its label was bought. The two booleans
+    # keep the poll's Discord notes once-only: the cap note fires once, then the
+    # order drops out of the poll domain, and the exception note fires once per
+    # order rather than every 2 hours a carrier keeps reporting a problem.
+    grove_label_purchased_at = fields.Datetime(readonly=True, copy=False)
+    grove_carrier_poll_stopped = fields.Boolean(default=False, readonly=True, copy=False)
+    grove_carrier_exception_noted = fields.Boolean(default=False, readonly=True, copy=False)
 
     # Fulfilment intent resolved at draft creation (GOL-1057/GOL-1933). Persisted
     # so the post-purchase chain has an unambiguous source of truth instead of
@@ -218,6 +230,12 @@ class SaleOrder(models.Model):
             )
             return False
         self.grove_fulfillment_state = target
+        # Stamp the label-purchase time once, at the single chokepoint every
+        # label path advances through (Shippo buy today, Pirate Ship reconcile
+        # under B). The carrier-tracking poll reads this to stop chasing an order
+        # 30 days after its label was bought (GOL-2272).
+        if target == "label_purchased" and not self.grove_label_purchased_at:
+            self.grove_label_purchased_at = fields.Datetime.now()
         who = f" by {operator}" if operator else ""
         body = note or (f"Fulfilment: {current} → {target} (via {source}{who}).")
         self.message_post(body=body)
@@ -548,3 +566,126 @@ class SaleOrder(models.Model):
         )
         for order in stuck:
             order._grove_settle_at_ship()
+
+    # ── Carrier-tracking poll (GOL-2272, Pirate Ship C) ─────────────────────
+
+    # How long to keep polling a shipped order before giving up and asking ops
+    # to check it by hand. A ground package that has not delivered in 30 days is
+    # lost or stuck, not in transit.
+    _CARRIER_POLL_MAX_AGE = timedelta(days=30)
+
+    def _grove_tracking_pairs(self):
+        """(carrier_key, tracking_number) pairs for this order's boxes, carrier
+        folded to the canonical "UPS"/"USPS"/"" key. Index-aligned reads of
+        grove_shipping_carriers / grove_tracking_numbers (GOL-1906), same pairing
+        the shipment email uses — a box with no carrier yields "" and is skipped
+        by the poll (no client to pick)."""
+        self.ensure_one()
+        trackings = (self.grove_tracking_numbers or "").splitlines()
+        carriers = (self.grove_shipping_carriers or "").splitlines()
+        pairs = []
+        for i, number in enumerate(trackings):
+            number = number.strip()
+            if not number:
+                continue
+            raw = carriers[i] if i < len(carriers) else ""
+            pairs.append((normalize_carrier(raw), number))
+        return pairs
+
+    def _cron_poll_carrier_tracking(self):
+        """Cron entry point (grove_headless.poll_carrier_tracking, every 2 h).
+        Never raises: any unexpected failure is logged and swallowed so a bad
+        carrier response or a schema surprise can never wedge the scheduler."""
+        try:
+            self._poll_carrier_tracking()
+        except Exception:  # noqa: BLE001 — the cron must never raise
+            _logger.exception("Carrier-tracking poll crashed; swallowed so the cron survives")
+
+    def _poll_carrier_tracking(self):
+        """Poll UPS/USPS for every order still in flight and fold the carrier's
+        status into the existing delivery-status email path (GOL-2272).
+
+        Orders in `label_purchased`/`shipped` with tracking, not yet delivered,
+        not past the poll cap. For each: pick the per-box client from the stored
+        carrier, map the carrier status, and apply the LEAST-advanced box status
+        through `_apply_delivery_status` (unchanged: same once-only guard and the
+        same shipped/out-for-delivery/delivered emails the Shippo webhook drove).
+        An exception status posts a silent Discord ops note (once per order); the
+        30-day cap posts one note and drops the order from the poll. Per-call
+        errors are logged and skipped; three consecutive auth failures for a
+        carrier post one ops alert and pause that carrier until the next run."""
+        from ..controllers.main import _apply_delivery_status, _notify_discord
+
+        clients = carrier_tracking.build_clients()
+        if not any(clients.values()):
+            _logger.info("poll_carrier_tracking: no UPS/USPS credentials configured; nothing to poll")
+            return
+
+        orders = self.sudo().search(
+            [
+                ("grove_fulfillment_stage", "in", ("label_purchased", "shipped")),
+                ("grove_tracking_numbers", "!=", False),
+                ("grove_delivery_status", "!=", "delivered"),
+                ("grove_carrier_poll_stopped", "=", False),
+            ]
+        )
+        now = fields.Datetime.now()
+        auth_failures = {"UPS": 0, "USPS": 0}
+        paused = set()
+
+        for order in orders:
+            purchased_at = order.grove_label_purchased_at
+            if purchased_at and (now - purchased_at) > self._CARRIER_POLL_MAX_AGE:
+                order.grove_carrier_poll_stopped = True
+                _notify_discord(
+                    f"Tracking poll stopped for {order.name}: 30 days since the label was bought with no "
+                    f"delivery scan. Please check the shipment manually."
+                )
+                continue
+
+            statuses = []
+            for carrier_key, tracking in order._grove_tracking_pairs():
+                if carrier_key in paused:
+                    continue
+                client = clients.get(carrier_key)
+                if client is None:
+                    # Unknown carrier, or credentials for it not provisioned this
+                    # stage — skip the box, not the whole order.
+                    continue
+                try:
+                    status = client.track(tracking)
+                    auth_failures[carrier_key] = 0
+                except carrier_tracking.CarrierAuthError:
+                    auth_failures[carrier_key] += 1
+                    _logger.warning(
+                        "Carrier auth failure #%s for %s on %s (%s)",
+                        auth_failures[carrier_key],
+                        carrier_key,
+                        order.name,
+                        tracking,
+                    )
+                    if auth_failures[carrier_key] >= 3:
+                        paused.add(carrier_key)
+                        _notify_discord(
+                            f"Carrier tracking paused: {carrier_key} auth failed 3 times this run. "
+                            f"Check {carrier_key}_CLIENT_ID / {carrier_key}_CLIENT_SECRET."
+                        )
+                    continue
+                except Exception:  # noqa: BLE001 — one bad call never stops the sweep
+                    _logger.warning(
+                        "Carrier track failed for %s on %s (%s)", order.name, carrier_key, tracking, exc_info=True
+                    )
+                    continue
+                if status:
+                    statuses.append(status)
+
+            if carrier_tracking.STATUS_FAILURE in statuses and not order.grove_carrier_exception_noted:
+                order.grove_carrier_exception_noted = True
+                _notify_discord(
+                    f"Shipment exception on {order.name}: a carrier reported a delivery problem "
+                    f"(tracking {order.grove_tracking_numbers or ''}). Please review."
+                )
+
+            new_status = carrier_tracking.least_advanced_status(statuses)
+            if new_status:
+                _apply_delivery_status(order.env, order, new_status, order.grove_tracking_numbers or "")
