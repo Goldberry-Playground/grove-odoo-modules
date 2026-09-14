@@ -56,14 +56,18 @@ CSV_COLUMNS = [
     "Rubber Stamp 1",
 ]
 
-# Grove carrier vocabulary (matches grove_shipping_carriers / shippo_client's
-# GROUND_SERVICE_ALLOWLIST tokens). Sub-project C's carrier-event poller picks a
-# tracking client off this token, so an unmappable carrier fails the reconcile
-# rather than writing an unpollable value. UPS Ground Saver (service 93) still
-# tracks on the UPS client, so it folds into the UPS token.
+# Grove carrier vocabulary. grove_shipping_carriers stores the canonical carrier
+# KEY ("UPS"/"USPS") exactly as the Shippo path does — shipment_email.normalize_carrier
+# and sub-project C's carrier-event poller (GOL-2272) both fold that field with
+# normalize_carrier, which only recognises the bare key. Writing a two-word
+# "UPS ups_ground" here would break the customer tracking-email link AND make the
+# poller skip the box (unmappable carrier). The service token rides alongside in
+# grove_shipping_services (again mirroring Shippo), from shippo_client's
+# GROUND_SERVICE_ALLOWLIST. UPS Ground Saver still tracks on the UPS client, so it
+# folds into the UPS pair. Map: Pirate Ship carrier prefix → (carrier_key, service_token).
 _CARRIER_TOKENS = {
-    "UPS": "UPS ups_ground",
-    "USPS": "USPS usps_ground_advantage",
+    "UPS": ("UPS", "ups_ground"),
+    "USPS": ("USPS", "usps_ground_advantage"),
 }
 
 
@@ -78,13 +82,13 @@ class LabelBatchError(UserError):
 
 
 def _carrier_token(carrier_raw):
-    """Map a Pirate Ship export carrier string to the Grove vocabulary token,
-    or None when unmappable."""
+    """Map a Pirate Ship export carrier string to a ``(carrier_key, service_token)``
+    pair in the Grove vocabulary, or ``(None, None)`` when unmappable."""
     c = (carrier_raw or "").strip().upper()
-    for prefix, token in _CARRIER_TOKENS.items():
+    for prefix, pair in _CARRIER_TOKENS.items():
         if c.startswith(prefix):
-            return token
-    return None
+            return pair
+    return (None, None)
 
 
 def _find_column(header, *needles):
@@ -380,8 +384,8 @@ class GroveLabelBatch(models.Model):
             if not self.env["grove.label.batch"]._is_valid_tracking(row["tracking"]):
                 errors.append(f"{ref}: invalid tracking number {row['tracking']!r}")
                 continue
-            token = _carrier_token(row["carrier_raw"])
-            if not token:
+            carrier_key, service_token = _carrier_token(row["carrier_raw"])
+            if not carrier_key:
                 errors.append(f"{ref}: unrecognised carrier {row['carrier_raw']!r}")
                 continue
             try:
@@ -389,17 +393,17 @@ class GroveLabelBatch(models.Model):
             except (TypeError, ValueError):
                 errors.append(f"{ref}: non-numeric cost {row['cost_raw']!r}")
                 continue
-            clean.append((row, line, cost, token))
+            clean.append((row, line, cost, carrier_key, service_token))
 
         # Group by order and enforce per-order completeness + state.
         rows_by_order = {}
-        for row, line, cost, token in clean:
-            rows_by_order.setdefault(line.order_id, []).append((line, cost, token, row))
+        for row, line, cost, carrier_key, service_token in clean:
+            rows_by_order.setdefault(line.order_id, []).append((line, cost, carrier_key, service_token, row))
         orders_to_write = []
         skipped_already = 0
         for order, entries in rows_by_order.items():
             batch_line_refs = {bl.grove_ref for bl in self.line_ids.filtered(lambda x: x.order_id == order)}
-            got_refs = {ln.grove_ref for (ln, _c, _t, _r) in entries}
+            got_refs = {ln.grove_ref for (ln, _c, _ca, _s, _r) in entries}
             if order.grove_tracking_numbers:
                 # Idempotent re-import: this order was already reconciled — skip
                 # every one of its rows, never re-write (spec: refuses to re-write
@@ -427,30 +431,36 @@ class GroveLabelBatch(models.Model):
         newly_total = 0.0
         for order, entries in orders_to_write:
             entries.sort(key=lambda e: e[0].box_index)
-            tracking = [e[3]["tracking"] for e in entries]
-            carriers = [e[2] for e in entries]
-            actual = round(sum(e[1] for e in entries), 2)
+            tracking = [row["tracking"] for (_ln, _c, _ca, _s, row) in entries]
+            carriers = [carrier_key for (_ln, _c, carrier_key, _s, _r) in entries]
+            services = [service_token for (_ln, _c, _ca, service_token, _r) in entries]
+            actual = round(sum(cost for (_ln, cost, _ca, _s, _r) in entries), 2)
             # Advance the watermark FIRST, while the order still derives to
             # awaiting_label/wave_assigned. Setting grove_delivery_status =
             # "label_purchased" up front would make the derived stage already
             # label_purchased, so _grove_advance_state would no-op (no watermark,
-            # no audit note). Advancing first fires the existing tracking notice
-            # (spec §B1); the field writes below then record the substatus + cost.
+            # no audit note). Advancing stamps grove_label_purchased_at + the
+            # chatter note; the customer shipment email itself is fired later by
+            # the GOL-2272 carrier poll once UPS/USPS reports transit — which is
+            # exactly why grove_shipping_carriers below must carry the canonical
+            # "UPS"/"USPS" key the poll folds with normalize_carrier.
             order._grove_advance_state("label_purchased", source="pirateship")
             order.write(
                 {
                     "grove_tracking_numbers": "\n".join(tracking),
                     "grove_shipping_carriers": "\n".join(carriers),
+                    "grove_shipping_services": "\n".join(services),
                     "grove_label_urls": "\n".join([""] * len(tracking)),  # labels print from Pirate Ship
                     "grove_actual_shipping_cost": actual,
                     "grove_delivery_status": "label_purchased",
                 }
             )
-            for line, cost, token, row in entries:
+            for line, cost, carrier_key, service_token, row in entries:
                 line.write(
                     {
                         "tracking_number": row["tracking"],
-                        "carrier_token": token,
+                        "carrier_token": carrier_key,
+                        "service_token": service_token,
                         "actual_cost": cost,
                     }
                 )
@@ -529,7 +539,8 @@ class GroveLabelBatchLine(models.Model):
     committed_rate = fields.Float(digits=(8, 2))
     # Written back on reconcile.
     tracking_number = fields.Char(copy=False)
-    carrier_token = fields.Char(copy=False)
+    carrier_token = fields.Char(copy=False, help="Canonical carrier key (UPS/USPS), as stored on the order.")
+    service_token = fields.Char(copy=False, help="Ground service token (ups_ground/usps_ground_advantage).")
     actual_cost = fields.Float(digits=(8, 2), copy=False)
 
     def _csv_row(self):

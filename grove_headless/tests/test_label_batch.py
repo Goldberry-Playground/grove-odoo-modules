@@ -164,7 +164,11 @@ class TestLabelBatch(GroveTaxFixtureMixin, TransactionCase):
         self.assertTrue(batch.purchased_at)
         self.assertEqual(order.grove_fulfillment_stage, "label_purchased")
         self.assertEqual(order.grove_tracking_numbers, f"{_VALID_TRACK[0]}\n{_VALID_TRACK[1]}")
-        self.assertEqual(order.grove_shipping_carriers, "UPS ups_ground\nUSPS usps_ground_advantage")
+        # Canonical carrier vocabulary: carrier key on grove_shipping_carriers (so
+        # shipment_email.normalize_carrier + the GOL-2272 poller fold it), service
+        # token on grove_shipping_services — mirroring the Shippo path.
+        self.assertEqual(order.grove_shipping_carriers, "UPS\nUSPS")
+        self.assertEqual(order.grove_shipping_services, "ups_ground\nusps_ground_advantage")
         self.assertEqual(order.grove_actual_shipping_cost, 17.46)
 
     def test_reconcile_bad_ref_writes_nothing(self):

@@ -102,6 +102,7 @@
                                     <field name="committed_rate" />
                                     <field name="tracking_number" />
                                     <field name="carrier_token" />
+                                    <field name="service_token" optional="hide" />
                                     <field name="actual_cost" />
                                 </list>
                             </field>
