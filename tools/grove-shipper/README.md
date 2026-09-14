@@ -93,7 +93,19 @@ The **pure logic** (CSV parse, price guard, buy-safety gates, Odoo client) is fu
 unit-tested and does not depend on the selectors:
 
 ```
-npm test        # node --test — no browser needed
+npm test        # node --test — pure-JS units need no browser
+```
+
+The **page-object** (`src/pirateship.js`) has Playwright tests that drive it against
+local HTML fixtures of the Ship / review / confirmation / tracking-export screens
+(`test/pirateship.fixture.test.js`, `test/fixtures/pages/`). They exercise the real
+`selectors.json`, so a selector that drifts from a plausible DOM fails the test.
+They **skip cleanly** when Chromium isn't installed; to run them (and during Josh's
+selector calibration):
+
+```
+npx playwright install --with-deps chromium
+npm test
 ```
 
 ## Manual path (always available)
