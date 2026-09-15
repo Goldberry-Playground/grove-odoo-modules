@@ -1,0 +1,74 @@
+<!doctype html>
+<!--
+  Local stand-in for the Pirate Ship "Ship" flow, wired to the SAME selectors.json
+  the runner uses in production (GOL-2297 §B2 acceptance: "Playwright tests on a
+  local HTML fixture of the Pirate Ship pages"). One page, three revealed stages:
+  upload → review → confirmation, so the page-object walks the real method chain
+  (uploadSpreadsheet → readReview → buyLabels → exportTracking) without the live
+  site or credentials. If selectors.json drifts from this DOM the test fails,
+  which is exactly the calibration signal we want.
+-->
+<html>
+  <head><meta charset="utf-8" /><title>Pirate Ship (fixture)</title></head>
+  <body>
+    <!-- signedInProbe: role=link name "Ship" -->
+    <a href="#" id="nav-ship">Ship</a>
+
+    <section id="stage-upload">
+      <!-- upload.openSpreadsheet -->
+      <a href="#" id="open-spreadsheet">Upload a spreadsheet</a>
+      <input type="file" id="file" />
+      <select name="saved_mapping">
+        <option value="">-- pick mapping --</option>
+        <option value="grove-v1">Grove batch v1</option>
+      </select>
+      <button type="button" id="apply">Apply</button>
+      <button type="button" id="continue">Continue</button>
+    </section>
+
+    <!-- Review rows are hidden until Continue; readReview() waits for them visible. -->
+    <section id="stage-review" style="display:none">
+      <table>
+        <tbody>
+          <tr class="shipment-row">
+            <td data-col="Grove Ref">S01001/1</td>
+            <td data-col="service">UPS Ground</td>
+            <td data-col="price">$9.10</td>
+          </tr>
+          <tr class="shipment-row">
+            <td data-col="Grove Ref">S01001/2</td>
+            <td data-col="service">USPS Ground Advantage</td>
+            <td data-col="price">$8.36</td>
+            <!-- addressFlag on this row only (inside a cell so it stays in the row) -->
+            <td><span data-testid="address-flag" class="address-warning">check address</span></td>
+          </tr>
+        </tbody>
+      </table>
+      <span class="order-total">$17.46</span>
+      <button type="button" id="buy">Buy</button>
+    </section>
+
+    <section id="stage-confirm" style="display:none">
+      <h1>Labels Created</h1>
+      <span class="confirmation-total">$17.46</span>
+      <!-- export.exportTracking: an anchor that downloads the tracking CSV -->
+      <a
+        id="export-tracking"
+        download="tracking.csv"
+        href="data:text/csv;charset=utf-8,Grove%20Ref,Tracking%20Number,Carrier,Cost%0AS01001/1,1Z999AA10123456784,UPS,9.10%0AS01001/2,9400100000000000000000,USPS,8.36%0A"
+        >Export Tracking Data</a
+      >
+      <a id="print" href="#">Print</a>
+    </section>
+
+    <script>
+      // "Continue" reveals the review stage; "Buy" reveals the confirmation.
+      document.getElementById('continue').addEventListener('click', function () {
+        document.getElementById('stage-review').style.display = '';
+      });
+      document.getElementById('buy').addEventListener('click', function () {
+        document.getElementById('stage-confirm').style.display = '';
+      });
+    </script>
+  </body>
+</html>
