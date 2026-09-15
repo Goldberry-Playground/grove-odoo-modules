@@ -272,9 +272,9 @@ class TestCarrierVisibility(unittest.TestCase):
         self.assertEqual(present, {("USPS", "GroundAdvantage")})
 
     def test_quote_zone_box_publishes_max_across_corners(self):
-        # zone_5 has 7 corners (GOL-2238 folded AR/MO/IA back in); each returns a
-        # different UPS Ground price.
-        prices = iter(["10.00", "18.00", "12.00", "15.00", "9.00", "11.00", "14.00"])
+        # zone_5 has 9 corners (GOL-2238 folded AR/MO/IA back in; GOL-2235 added
+        # FL's Miami + Key West); each returns a different UPS Ground price.
+        prices = iter(["10.00", "18.00", "12.00", "15.00", "9.00", "11.00", "14.00", "13.00", "16.00"])
 
         def fake_post(url, json=None, timeout=None, headers=None):
             amount = next(prices)
@@ -308,7 +308,7 @@ class TestCarrierVisibility(unittest.TestCase):
         self.assertEqual(winner["price"], 18.00)
 
     def test_quote_zone_box_skips_graphql_error_corner(self):
-        # First of zone_5's seven corners errors (GraphQL errors[]); the run
+        # First of zone_5's nine corners errors (GraphQL errors[]); the run
         # continues and prices from the remaining corners (max wins).
         def _priced(amount):
             return {
@@ -334,6 +334,8 @@ class TestCarrierVisibility(unittest.TestCase):
                 _priced("10.00"),
                 _priced("9.00"),
                 _priced("8.00"),
+                _priced("7.50"),
+                _priced("7.00"),
             ]
         )
 

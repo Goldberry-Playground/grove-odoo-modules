@@ -14,7 +14,7 @@ checker is active is not safe; they will be dropped on the next rates PR.
 Design is documented in the vault wiki at ``Software/Grove Shipping``.
 
 Fail-safe by design: ``compute_order_shipping`` returns ``None`` for any
-address outside the 31-state green list, any cart containing a potted line,
+address outside the 32-state green list, any cart containing a potted line,
 and any cart the packer cannot plan — the checkout then adds NO shipping line
 (and the checkout endpoint blocks with an explicit message via
 ``unshippable_reason``). We never emit a wrong or guessed charge.
@@ -153,6 +153,7 @@ GREEN_STATES: frozenset[str] = frozenset(
         "CT",
         "DC",
         "DE",
+        "FL",
         "GA",
         "IA",
         "IL",
@@ -240,7 +241,7 @@ ZONE_BY_STATE: dict[str, str] = {
     # GREEN_STATES: they clear on cost but opening them adds new NPB plant-
     # compliance surface (e.g. Carya / pecan weevil in AZ/NM) that the per-product
     # carve-out gate must cover first — tracked as the GOL-2238 far-states
-    # follow-up (GOL-2243). FL stays out on the same compliance track (GOL-2132).
+    # follow-up (GOL-2243). FL is green as of GOL-2235 (its carve-outs already gate it).
     "GA": "zone_5",
     "AL": "zone_5",
     "SC": "zone_5",
@@ -253,6 +254,15 @@ ZONE_BY_STATE: dict[str, str] = {
     "AR": "zone_5",
     "MO": "zone_5",
     "IA": "zone_5",
+    # Florida (GOL-2235): opened on the same probe basis. Its worst corners
+    # (Miami 33101, Key West 33040) quote exactly the zone_5 corners on the
+    # Pirate Ship rate source (2026-09-14: small $12.33/$14.24, large $17.23,
+    # potted $16.57/$22.54 -> targets 20/24/23/30), all at or under zone_5's
+    # published 23/28/26/41, so FL bins here (never undercharged, no new band).
+    # Plant-compliance carve-outs for FL (Castanea, Cornus) already live in
+    # plant_compliance.py (GOL-2132), which was the gate for opening it. The
+    # rate-checker keeps the bucket honest: Miami + Key West are zone_5 corners.
+    "FL": "zone_5",
 }
 
 assert set(ZONE_BY_STATE) == GREEN_STATES
@@ -292,7 +302,7 @@ def rate_feed(calendar_override=None, today=None) -> dict:
 
     ``zones`` mirrors ``data/shipping_rates.json`` (minus the ``_``-prefixed
     keys, already stripped at load). ``zone_by_state`` is the authoritative
-    31-state green list -> zone map — the compliance gate the frontend must
+    32-state green list -> zone map — the compliance gate the frontend must
     stay in lockstep with. ``packing`` carries the box catalog + capacities so
     the frontend can mirror ``pack_order`` exactly. ``calendar`` is the annual,
     admin-editable shipping calendar keyed to USDA hardiness zone (NOT the

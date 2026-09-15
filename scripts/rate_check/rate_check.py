@@ -89,6 +89,11 @@ REFERENCE_ZIPS = {
         ("Texarkana", "AR", "71854"),
         ("Joplin", "MO", "64801"),
         ("Sioux City", "IA", "51101"),
+        # FL (GOL-2235): Miami + Key West quote the zone_5 corners exactly on
+        # Pirate Ship (2026-09-14), so FL shares this band; both stay as corners
+        # so the published max never undercharges the southern tip.
+        ("Miami", "FL", "33101"),
+        ("Key West", "FL", "33040"),
     ],
 }
 
