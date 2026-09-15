@@ -224,3 +224,67 @@ class TestLabelBatch(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(second["orders_advanced"], 0)
         self.assertEqual(second["skipped_already_tracked"], 1)
         self.assertEqual(order.grove_tracking_numbers, _VALID_TRACK[0])
+
+    # ── Email fallback (real per-recipient export has NO Grove Ref, 2026-09-15) ─
+    _EMAIL_HEADER = ["Recipient", "Email", "Tracking Number", "Carrier", "Cost"]
+
+    def test_reconcile_email_fallback_single_box_matches_and_flags(self):
+        """A per-recipient export (no Grove Ref column) reconciles a single-box
+        order by recipient email and flags it loudly for manual review."""
+        order = self._paid_ship_order()
+        batch = self._build([_box(1)])  # single box → email is unambiguous
+        line = batch.line_ids
+        self.assertTrue(line.email)
+        raw = self._tracking_csv(
+            [[line.recipient_name, line.email, _VALID_TRACK[0], "UPS", "9.10"]],
+            header=self._EMAIL_HEADER,
+        )
+        result = batch.import_tracking(raw, filename="track.csv")
+        self.assertEqual(result["orders_advanced"], 1)
+        self.assertEqual(result["manual_review"], [line.grove_ref])
+        self.assertEqual(order.grove_fulfillment_stage, "label_purchased")
+        self.assertEqual(order.grove_tracking_numbers, _VALID_TRACK[0])
+        self.assertEqual(batch.state, "purchased")
+        self.assertIn("EMAIL-FALLBACK", batch.notes or "")
+
+    def test_reconcile_email_fallback_multibox_is_ambiguous(self):
+        """A multi-box order can't be disambiguated by email (which box gets
+        which tracking?) — hard-fail, nothing written. Grove Ref is required."""
+        order = self._paid_ship_order()
+        batch = self._build([_box(1), _box(1)])  # two boxes, same recipient email
+        email = batch.line_ids[0].email
+        raw = self._tracking_csv(
+            [
+                ["Label Customer", email, _VALID_TRACK[0], "UPS", "9.10"],
+                ["Label Customer", email, _VALID_TRACK[1], "USPS", "8.36"],
+            ],
+            header=self._EMAIL_HEADER,
+        )
+        with self.assertRaisesRegex(label_batch_module.LabelBatchError, "ambiguous"):
+            batch.import_tracking(raw)
+        self.assertFalse(order.grove_tracking_numbers)
+        self.assertEqual(batch.state, "exported")
+
+    def test_reconcile_email_fallback_unknown_email_rejected(self):
+        """A typo'd / unknown recipient email never silently matches — it is a
+        loud rejection (nothing written), not a fuzzy guess."""
+        self._paid_ship_order()
+        batch = self._build([_box(1)])
+        raw = self._tracking_csv(
+            [["Typo Person", "typo@example.com", _VALID_TRACK[0], "UPS", "9.10"]],
+            header=self._EMAIL_HEADER,
+        )
+        with self.assertRaisesRegex(label_batch_module.LabelBatchError, "no unmatched batch row"):
+            batch.import_tracking(raw)
+        self.assertEqual(batch.state, "exported")
+
+    def test_reconcile_missing_both_identity_columns_rejected(self):
+        """A file with neither Grove Ref nor Email can't be reconciled at all."""
+        self._paid_ship_order()
+        batch = self._build([_box(1)])
+        raw = self._tracking_csv(
+            [["Label Customer", _VALID_TRACK[0], "UPS", "9.10"]],
+            header=["Recipient", "Tracking Number", "Carrier", "Cost"],
+        )
+        with self.assertRaisesRegex(label_batch_module.LabelBatchError, "neither a Grove Ref nor an Email"):
+            batch.import_tracking(raw)

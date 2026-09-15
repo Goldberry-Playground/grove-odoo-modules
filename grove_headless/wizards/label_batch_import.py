@@ -34,14 +34,23 @@ class GroveLabelBatchImport(models.TransientModel):
             f"{result['skipped_already_tracked']} already-tracked skipped, "
             f"${result['total']:.2f} reconciled."
         )
+        manual_review = result.get("manual_review") or []
+        notify_type = "success"
+        sticky = False
+        if manual_review:
+            # Matched on recipient email, not the Grove Ref round-trip: keep the
+            # dialog sticky and yellow so the operator actually reviews it.
+            message += f" ⚠️ {len(manual_review)} row(s) matched by EMAIL — verify: {', '.join(manual_review)}."
+            notify_type = "warning"
+            sticky = True
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
             "params": {
                 "title": self.batch_id.name,
                 "message": message,
-                "type": "success",
-                "sticky": False,
+                "type": notify_type,
+                "sticky": sticky,
                 "next": {"type": "ir.actions.act_window_close"},
             },
         }

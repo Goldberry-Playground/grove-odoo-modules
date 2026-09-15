@@ -1229,6 +1229,7 @@ class GroveHeadlessAPI(http.Controller):
                 "orders_advanced": result["orders_advanced"],
                 "skipped_already_tracked": result["skipped_already_tracked"],
                 "total": result["total"],
+                "manual_review": result.get("manual_review", []),
             }
         )
 

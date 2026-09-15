@@ -295,10 +295,15 @@ class GroveLabelBatch(models.Model):
     def _parse_tracking_csv(self, raw_bytes):
         """Parse Pirate Ship's *Export Tracking Data* CSV into row dicts.
 
-        Loose header matching (§B1): Grove Ref, tracking number, carrier, cost
-        are required; service/mail-class is optional. Raises ``LabelBatchError``
-        when a required column is entirely absent (a wrong file, not a row-level
-        problem)."""
+        Loose header matching (§B1): tracking number, carrier and cost are always
+        required. For IDENTITY we need *either* Grove Ref (the proven round-trip
+        key, present only when the upload used the spec'd batch CSV + saved
+        mapping) *or* Email — the manual-review fallback. The real 2026-09-15
+        per-recipient export carried NO Grove Ref column at all (columns were
+        Created Date, Recipient, Email, Tracking Number, Cost, …), so refusing a
+        file that lacks Grove Ref would dead-end the operators' actual export.
+        Raises ``LabelBatchError`` only when a genuinely required column (tracking
+        / carrier / cost) or *both* identity columns are absent."""
         try:
             text = raw_bytes.decode("utf-8-sig")
         except (UnicodeDecodeError, AttributeError) as exc:
@@ -309,7 +314,11 @@ class GroveLabelBatch(models.Model):
             raise LabelBatchError("Tracking file is empty.")
         header = rows[0]
         col_ref = _find_column(header, "grove", "ref")
-        col_track = _find_column(header, "tracking") or _find_column(header, "track")
+        col_track = (
+            _find_column(header, "tracking", "number")
+            or _find_column(header, "tracking")
+            or _find_column(header, "track")
+        )
         col_carrier = _find_column(header, "carrier")
         col_cost = (
             _find_column(header, "cost")
@@ -318,10 +327,11 @@ class GroveLabelBatch(models.Model):
             or _find_column(header, "price")
         )
         col_service = _find_column(header, "service") or _find_column(header, "mail", "class")
+        col_email = _find_column(header, "email")
+        col_recipient = _find_column(header, "recipient") or _find_column(header, "name")
         missing = [
             label
             for label, col in (
-                ("Grove Ref", col_ref),
                 ("Tracking Number", col_track),
                 ("Carrier", col_carrier),
                 ("Cost", col_cost),
@@ -330,6 +340,10 @@ class GroveLabelBatch(models.Model):
         ]
         if missing:
             raise LabelBatchError(f"Tracking file is missing required column(s): {', '.join(missing)}.")
+        if col_ref is None and col_email is None:
+            raise LabelBatchError(
+                "Tracking file has neither a Grove Ref nor an Email column; cannot match rows to the batch."
+            )
         index = {name: header.index(name) for name in header}
         parsed = []
         for raw in rows[1:]:
@@ -342,20 +356,27 @@ class GroveLabelBatch(models.Model):
 
             parsed.append(
                 {
-                    "ref": cell(col_ref),
+                    "ref": cell(col_ref) if col_ref else "",
                     "tracking": cell(col_track),
                     "carrier_raw": cell(col_carrier),
                     "service": cell(col_service) if col_service else "",
                     "cost_raw": cell(col_cost),
+                    "email": cell(col_email) if col_email else "",
+                    "recipient": cell(col_recipient) if col_recipient else "",
                 }
             )
         return parsed
 
     def import_tracking(self, raw_bytes, filename=None):
         """All-or-nothing reconcile (spec §B1). Validate EVERY row before any
-        write; advance an order only when all of its batch lines matched. Returns
-        ``{orders_advanced, skipped_already_tracked, total, rows}``. Raises
-        ``LabelBatchError`` (→ 400) on any validation failure, writing nothing."""
+        write; advance an order only when all of its batch lines matched. Rows are
+        matched on Grove Ref (the proven round-trip key) and, for rows that arrive
+        without one, on recipient email as an unambiguous-only fallback (§B1 field
+        report 2026-09-15) — any email-matched order is flagged for manual review,
+        never written silently. Returns ``{orders_advanced, skipped_already_tracked,
+        total, rows, manual_review}`` (``manual_review`` = grove_refs reconciled by
+        the email fallback). Raises ``LabelBatchError`` (→ 400) on any validation
+        failure, writing nothing."""
         self.ensure_one()
         if self.state == "cancelled":
             raise LabelBatchError(f"{self.name} is cancelled; cannot import tracking.")
@@ -365,45 +386,80 @@ class GroveLabelBatch(models.Model):
             self.tracking_import_filename = filename
 
         lines_by_ref = {line.grove_ref: line for line in self.line_ids}
+        # Email fallback index (spec §B1, 2026-09-15 field report): lowercased
+        # recipient email → the batch lines carrying it. Used ONLY for rows that
+        # arrive without a usable Grove Ref, and ONLY when the email resolves to a
+        # single unclaimed line. Multi-box orders and duplicate emails (two labels
+        # across channels, the case that needed human judgment in the real run)
+        # stay ambiguous and hard-fail — the fallback never silently guesses.
+        empty_lines = self.env["grove.label.batch.line"]
+        lines_by_email = {}
+        for line in self.line_ids:
+            key = (line.email or "").strip().lower()
+            if key:
+                lines_by_email[key] = lines_by_email.get(key, empty_lines) | line
         errors = []
         seen_refs = set()
-        clean = []  # (row, line, cost, token)
+        claimed = set()  # line ids already matched by an earlier import row
+        clean = []  # (row, line, cost, carrier_key, service_token, via_email)
         for row in parsed:
             ref = row["ref"]
-            if not ref:
-                errors.append("(row with blank Grove Ref)")
-                continue
-            if ref in seen_refs:
-                errors.append(f"{ref}: appears more than once in the import")
-                continue
-            seen_refs.add(ref)
-            line = lines_by_ref.get(ref)
-            if not line:
-                errors.append(f"{ref}: not a row in {self.name}")
+            via_email = False
+            if ref:
+                if ref in seen_refs:
+                    errors.append(f"{ref}: appears more than once in the import")
+                    continue
+                seen_refs.add(ref)
+                line = lines_by_ref.get(ref)
+                if not line:
+                    errors.append(f"{ref}: not a row in {self.name}")
+                    continue
+            else:
+                # No Grove Ref on this row → loud, unambiguous-only email fallback.
+                email = (row["email"] or "").strip().lower()
+                who = row["recipient"] or row["email"] or "(row with no Grove Ref)"
+                if not email:
+                    errors.append(f"{who}: no Grove Ref and no Email — cannot match to {self.name}")
+                    continue
+                candidates = lines_by_email.get(email, empty_lines).filtered(lambda ln: ln.id not in claimed)
+                if not candidates:
+                    errors.append(f"{who} <{email}>: no unmatched batch row for this email in {self.name}")
+                    continue
+                if len(candidates) > 1:
+                    errors.append(
+                        f"{who} <{email}>: ambiguous — matches {', '.join(sorted(candidates.mapped('grove_ref')))}; "
+                        f"re-upload with the Grove Ref column or reconcile manually"
+                    )
+                    continue
+                line = candidates
+                via_email = True
+            if line.id in claimed:
+                errors.append(f"{line.grove_ref}: matched by more than one import row")
                 continue
             if not self.env["grove.label.batch"]._is_valid_tracking(row["tracking"]):
-                errors.append(f"{ref}: invalid tracking number {row['tracking']!r}")
+                errors.append(f"{line.grove_ref}: invalid tracking number {row['tracking']!r}")
                 continue
             carrier_key, service_token = _carrier_token(row["carrier_raw"])
             if not carrier_key:
-                errors.append(f"{ref}: unrecognised carrier {row['carrier_raw']!r}")
+                errors.append(f"{line.grove_ref}: unrecognised carrier {row['carrier_raw']!r}")
                 continue
             try:
                 cost = round(float(row["cost_raw"].replace("$", "").replace(",", "")), 2)
             except (TypeError, ValueError):
-                errors.append(f"{ref}: non-numeric cost {row['cost_raw']!r}")
+                errors.append(f"{line.grove_ref}: non-numeric cost {row['cost_raw']!r}")
                 continue
-            clean.append((row, line, cost, carrier_key, service_token))
+            claimed.add(line.id)
+            clean.append((row, line, cost, carrier_key, service_token, via_email))
 
         # Group by order and enforce per-order completeness + state.
         rows_by_order = {}
-        for row, line, cost, carrier_key, service_token in clean:
-            rows_by_order.setdefault(line.order_id, []).append((line, cost, carrier_key, service_token, row))
+        for row, line, cost, carrier_key, service_token, via_email in clean:
+            rows_by_order.setdefault(line.order_id, []).append((line, cost, carrier_key, service_token, row, via_email))
         orders_to_write = []
         skipped_already = 0
         for order, entries in rows_by_order.items():
             batch_line_refs = {bl.grove_ref for bl in self.line_ids.filtered(lambda x: x.order_id == order)}
-            got_refs = {ln.grove_ref for (ln, _c, _ca, _s, _r) in entries}
+            got_refs = {ln.grove_ref for (ln, _c, _ca, _s, _r, _v) in entries}
             if order.grove_tracking_numbers:
                 # Idempotent re-import: this order was already reconciled — skip
                 # every one of its rows, never re-write (spec: refuses to re-write
@@ -429,12 +485,14 @@ class GroveLabelBatch(models.Model):
         # ── All rows valid: write. ──────────────────────────────────────────
         orders_advanced = 0
         newly_total = 0.0
+        manual_review = []  # grove_refs reconciled via the weaker email fallback
         for order, entries in orders_to_write:
             entries.sort(key=lambda e: e[0].box_index)
-            tracking = [row["tracking"] for (_ln, _c, _ca, _s, row) in entries]
-            carriers = [carrier_key for (_ln, _c, carrier_key, _s, _r) in entries]
-            services = [service_token for (_ln, _c, _ca, service_token, _r) in entries]
-            actual = round(sum(cost for (_ln, cost, _ca, _s, _r) in entries), 2)
+            tracking = [row["tracking"] for (_ln, _c, _ca, _s, row, _v) in entries]
+            carriers = [carrier_key for (_ln, _c, carrier_key, _s, _r, _v) in entries]
+            services = [service_token for (_ln, _c, _ca, service_token, _r, _v) in entries]
+            actual = round(sum(cost for (_ln, cost, _ca, _s, _r, _v) in entries), 2)
+            fallback_refs = sorted(ln.grove_ref for (ln, _c, _ca, _s, _r, via_email) in entries if via_email)
             # Advance the watermark FIRST, while the order still derives to
             # awaiting_label/wave_assigned. Setting grove_delivery_status =
             # "label_purchased" up front would make the derived stage already
@@ -455,7 +513,7 @@ class GroveLabelBatch(models.Model):
                     "grove_delivery_status": "label_purchased",
                 }
             )
-            for line, cost, carrier_key, service_token, row in entries:
+            for line, cost, carrier_key, service_token, row, _via in entries:
                 line.write(
                     {
                         "tracking_number": row["tracking"],
@@ -464,22 +522,38 @@ class GroveLabelBatch(models.Model):
                         "actual_cost": cost,
                     }
                 )
+            if fallback_refs:
+                # Loud, per-order flag: this order reconciled without a Grove Ref
+                # round-trip (matched on recipient email). A human should confirm
+                # the tracking landed on the right order before we trust it.
+                manual_review.extend(fallback_refs)
+                order.message_post(
+                    body=(
+                        f"⚠️ Tracking reconciled by EMAIL FALLBACK from {self.name} "
+                        f"(no Grove Ref in the upload): {', '.join(fallback_refs)}. "
+                        f"Verify the tracking number belongs to this order."
+                    )
+                )
             orders_advanced += 1
             newly_total += actual
 
         if orders_advanced:
-            self.write(
-                {
-                    "state": "purchased",
-                    "purchased_total": round((self.purchased_total or 0.0) + newly_total, 2),
-                    "purchased_at": fields.Datetime.now(),
-                }
-            )
+            batch_vals = {
+                "state": "purchased",
+                "purchased_total": round((self.purchased_total or 0.0) + newly_total, 2),
+                "purchased_at": fields.Datetime.now(),
+            }
+            if manual_review:
+                stamp = fields.Datetime.now()
+                note = f"[{stamp}] EMAIL-FALLBACK reconcile (no Grove Ref): {', '.join(manual_review)}"
+                batch_vals["notes"] = (self.notes + "\n" + note) if self.notes else note
+            self.write(batch_vals)
         return {
             "orders_advanced": orders_advanced,
             "skipped_already_tracked": skipped_already,
             "total": round(newly_total, 2),
             "rows": len(clean),
+            "manual_review": sorted(manual_review),
         }
 
     @api.model
