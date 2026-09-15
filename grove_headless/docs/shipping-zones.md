@@ -7,10 +7,10 @@ Canonical design: vault **wiki/Software/Grove Shipping** (2026-07-02).
 Zone rates are stored in `grove_headless/data/shipping_rates.json` and loaded at
 startup by `models/shipping_zones.py`. The file ships with provisional launch-
 hypothesis values; the morning rate-checker (`scripts/rate_check/rate_check.py`)
-replaces them with real Shippo-derived values via automated PR on its first run.
+replaces them with real Pirate Ship-derived values via automated PR on its first run.
 
 > **Checker owns this file.** The daily rate-check rewrites `shipping_rates.json`
-> wholesale from live Shippo quotes. Only the `base` key per tier is preserved
+> wholesale from live Pirate Ship quotes. Only the `base` key per tier is preserved
 > across runs. Do **not** hand-add `per_lb` or `free_over` keys directly to this
 > file while the checker is active — they will be silently dropped on the next
 > rates PR. To make those keys permanent, modify the rate-checker script itself
@@ -52,7 +52,7 @@ NY, OH, PA, RI, VA, VT, WI, WV.
 `rate_feed()` serves the in-memory rate table and zone map as read-only JSON so
 the storefront product-page estimator prices against exactly what checkout will
 charge, instead of a bundled snapshot that drifts as the checker rewrites
-`shipping_rates.json`. Public, no Shippo call, no DB read.
+`shipping_rates.json`. Public, no external rate call, no DB read.
 
 ```json
 {
@@ -97,10 +97,16 @@ the rate zone) to determine:
 `scripts/rate_check/rate_check.py` + `.github/workflows/rate-check.yml`:
 
 - Runs daily at 07:00 ET via GitHub Actions cron
-- Fetches real least-cost ground quotes from Shippo (UPS Ground vs USPS Ground Advantage, transit-guarded) for each zone × tier parcel profile
+- Fetches real least-cost ground quotes from **Pirate Ship's public rate
+  calculator** (`POST https://ship.pirateship.com/api/graphql?opname=RatesQuery`,
+  no auth) — cheapest allowlisted ground among UPS Ground (`03`), UPS Ground
+  Saver (`93`), and USPS Ground Advantage, transit-guarded — for each zone × tier
+  parcel profile
 - If any rate drifts ≥ $1.00 from the JSON file, opens a PR to update
   `data/shipping_rates.json` and posts a Discord notification
-- Gated on `SHIPPO_API_KEY` (required — the run is skipped cleanly when absent).
-  `DISCORD_OPS_WEBHOOK_URL` is optional — the Discord notification step is
-  individually skipped when the secret is absent (safe to merge before
-  credentials exist)
+- **No API key required.** Pirate Ship's rate calculator is public, so the old
+  `SHIPPO_API_KEY` guard step is gone and the checker always runs. The only
+  optional secret is `DISCORD_OPS_WEBHOOK_URL` — the Discord notification step is
+  individually skipped when it is absent (safe to merge before credentials exist).
+  `RATE_CHECK_PR_TOKEN` is optional too: absent, the PR still opens under the
+  default token but wedges at `action_required` until re-triggered (see runbook)
