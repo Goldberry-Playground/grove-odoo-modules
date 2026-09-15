@@ -1,0 +1,36 @@
+{
+  "data": {
+    "rates": [
+      {
+        "title": "UPS\u00ae Ground",
+        "deliveryDescription": "Estimated delivery [b]Wednesday 9/16 by 11:00 PM[/b] if shipped today",
+        "mailClassKey": "03",
+        "carrier": {
+          "carrierKey": "ups",
+          "title": "UPS"
+        },
+        "totalPrice": 14.37
+      },
+      {
+        "title": "UPS Ground Saver\u00ae",
+        "deliveryDescription": "Estimated delivery [b]Thursday 9/17 by 11:00 PM[/b] if shipped today",
+        "mailClassKey": "93",
+        "carrier": {
+          "carrierKey": "ups",
+          "title": "UPS"
+        },
+        "totalPrice": 15.44
+      },
+      {
+        "title": "Ground Advantage",
+        "deliveryDescription": "Estimated delivery [b]Thursday 9/17 by 6:00 PM[/b] if shipped today",
+        "mailClassKey": "GroundAdvantage",
+        "carrier": {
+          "carrierKey": "usps",
+          "title": "USPS"
+        },
+        "totalPrice": 16.42
+      }
+    ]
+  }
+}

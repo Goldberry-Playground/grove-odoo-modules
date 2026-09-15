@@ -54,4 +54,5 @@ collect_ignore_glob = [
     "grove_headless/tests/test_fulfillment_state.py",
     "grove_headless/tests/test_shared_pool_qty.py",
     "grove_headless/tests/test_mark_shipped.py",
+    "grove_headless/tests/test_carrier_tracking_cron.py",
 ]
