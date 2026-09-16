@@ -66,29 +66,34 @@ ORIGIN = {"city": "Summersville", "state": "WV", "zip": "26651"}
 # bound for every customer in the band and no one is undercharged (GOL-1495,
 # GOL-2128). The city MUST match the zip (carriers validate city against zip).
 REFERENCE_ZIPS = {
-    "zone_1": [("Wilmington", "NC", "28401")],  # band {WV,VA,KY,NC,DE,DC}; NC coast
+    # band {WV,VA,KY,NC,DE,DC,TN}; corners = NC coast + TN's farthest tip
+    # (Memphis). GOL-2238 (2026-09-14): TN joins zone_1 — Memphis quotes the
+    # zone_1 rate exactly — and Memphis is kept as a corner so the published
+    # zone_1 rate stays >= TN's worst going forward (never undercharge).
+    "zone_1": [
+        ("Wilmington", "NC", "28401"),
+        ("Memphis", "TN", "38103"),
+    ],
     "zone_2": [("New York", "NY", "10001")],  # band {MD,PA,OH,IN,NJ,NY}
     "zone_3": [("Chicago", "IL", "60601")],  # band {IL,MI,CT,RI}
     "zone_4": [("Boston", "MA", "02108")],  # band {WI,MN,MA,VT,NH}
-    # band {ME,GA,SC,AL,MS,LA} — max across the Gulf/NE corners that tied for
-    # priciest in the probe (GA/SC quote just below). GOL-2238 moved TN/AR/MO/IA
-    # out of this band into their own real distance zones below.
+    # band {ME,GA,SC,AL,MS,LA,AR,MO,IA} — max across the Gulf/NE + mid-continent
+    # corners. GOL-2238 (2026-09-14) folded AR/MO/IA back here (their worst
+    # corners quote the zone_5 rate exactly) after the 2026-09-08 zone_6/zone_7
+    # split proved to overcharge them; those bands are retired.
     "zone_5": [
         ("Portland", "ME", "04101"),
         ("Mobile", "AL", "36602"),
         ("Gulfport", "MS", "39501"),
         ("Lake Charles", "LA", "70601"),
-    ],
-    # band {AR,MO,IA} — GOL-2238 mid-continent band; all three co-maximal at
-    # 23/28 (small/large) in the two-SKU re-probe, so all three are corners.
-    "zone_6": [
         ("Texarkana", "AR", "71854"),
         ("Joplin", "MO", "64801"),
         ("Sioux City", "IA", "51101"),
-    ],
-    # band {TN} — GOL-2238 near-plains band; Memphis is TN's worst corner (29/32).
-    "zone_7": [
-        ("Memphis", "TN", "38103"),
+        # FL (GOL-2235): Miami + Key West quote the zone_5 corners exactly on
+        # Pirate Ship (2026-09-14), so FL shares this band; both stay as corners
+        # so the published max never undercharges the southern tip.
+        ("Miami", "FL", "33101"),
+        ("Key West", "FL", "33040"),
     ],
 }
 

@@ -9,7 +9,7 @@ Two layers:
   * Contract tests — assert the engine's fail-safe behaviour. These pass at all
     times and guard against regression on the core routing logic.
   * Table-coverage tests — assert the finished table is complete and self-
-    consistent. They automatically enforce full coverage across all 31 green
+    consistent. They automatically enforce full coverage across all 32 green
     states, 5 zones, and every catalog box.
 """
 
@@ -24,7 +24,7 @@ _spec.loader.exec_module(sz)
 
 sb = sz.shipping_boxes
 
-# Independent pin of the 31 green states (deliberately NOT sz.GREEN_STATES:
+# Independent pin of the 32 green states (deliberately NOT sz.GREEN_STATES:
 # the test must catch an accidental edit to the module's set, so it keeps
 # its own copy of the compliance list).
 GREEN = frozenset(
@@ -34,6 +34,7 @@ GREEN = frozenset(
         "CT",
         "DC",
         "DE",
+        "FL",
         "GA",
         "IA",
         "IL",
@@ -117,9 +118,10 @@ class TestShippingZoneEngineContract(unittest.TestCase):
         self.assertIsNone(sz.box_rate("", "small"))
         self.assertIsNone(sz.box_rate(None, "small"))
 
-    def test_there_are_exactly_seven_rate_zones(self):
-        # zone_1..5 + GOL-2238 real probe-derived zone_6 (mid-continent) / zone_7 (near-plains).
-        self.assertEqual(len(sz.RATE_ZONE_IDS), 7)
+    def test_there_are_exactly_five_rate_zones(self):
+        # zone_1..5. GOL-2238's 2026-09-08 zone_6/zone_7 split was retired
+        # 2026-09-14: TN re-binned to zone_1, AR/MO/IA folded back to zone_5.
+        self.assertEqual(len(sz.RATE_ZONE_IDS), 5)
 
     def test_rate_is_box_scoped(self):
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
@@ -183,7 +185,7 @@ class TestShippingZoneEngineContract(unittest.TestCase):
 
 
 class TestGreenStateCoverage(unittest.TestCase):
-    """The 31-state green list and its rate coverage."""
+    """The 32-state green list and its rate coverage."""
 
     def test_exactly_the_green_states_are_mapped(self):
         self.assertEqual(set(sz.ZONE_BY_STATE), GREEN)
@@ -251,7 +253,7 @@ class TestShippingZoneTableCoverage(unittest.TestCase):
 
     def test_full_state_coverage_when_configured(self):
         if not sz.is_configured():
-            self.skipTest("31-state rate table not yet populated")
+            self.skipTest("32-state rate table not yet populated")
         mapped = set(sz.ZONE_BY_STATE)
         self.assertEqual(
             mapped,
@@ -262,6 +264,26 @@ class TestShippingZoneTableCoverage(unittest.TestCase):
     def test_every_rate_rule_targets_a_real_zone(self):
         for zone in sz.ZONE_RATES:
             self.assertIn(zone, sz.RATE_ZONE_IDS, f"rate rule for unknown zone {zone}")
+
+    def test_gol2238_corrected_bindings(self):
+        # GOL-2238 P1 regression (2026-09-14): TN must sit in zone_1 (it borders
+        # KY/VA/NC and its worst corner quotes the zone_1 rate), and AR/MO/IA in
+        # zone_5 — never the retired zone_6/zone_7. Guards against a re-introduced
+        # far-corner mis-bin that had TN pricing above Iowa.
+        if not sz.is_configured():
+            self.skipTest("rate table not yet populated")
+        self.assertEqual(sz.zone_for_state("TN"), "zone_1")
+        for st in ("AR", "MO", "IA"):
+            self.assertEqual(sz.zone_for_state(st), "zone_5", st)
+        # No green state may map to a retired band.
+        self.assertNotIn("zone_6", set(sz.ZONE_BY_STATE.values()))
+        self.assertNotIn("zone_7", set(sz.ZONE_BY_STATE.values()))
+        # TN (border state) must never cost more than a farther Gulf/mid-continent
+        # state for any box — the exact inversion the P1 defect reported.
+        for box_id in sb.known_box_ids():
+            tn = sz.box_rate("TN", box_id)
+            for far in ("AL", "IA", "MO"):
+                self.assertLessEqual(tn, sz.box_rate(far, box_id), f"TN > {far} for {box_id}")
 
 
 class TestOrderShipping(unittest.TestCase):

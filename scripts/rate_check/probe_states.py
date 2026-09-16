@@ -47,21 +47,40 @@ ORIGIN = {
 }
 BUFFER = 2.00
 
-# Worst corner per candidate state = farthest populous residential ZIP from
-# 26651 (real city/ZIP pairs so UPS does not hard-reject the mismatch, GOL-1446).
-# For the largest states two corners are probed and the pricier wins.
+# Corner per candidate state.
+#
+# REPRESENTATIVE-ZIP RULE (CEO directive, GOL-2238 P1 2026-09-14; bake into the
+# Pirate Ship re-derive GOL-2270): a state's zone must reflect where its
+# customers actually are, NOT its farthest tip. Binning by the far corner had TN
+# (which borders WV via KY/VA) priced above Iowa because the probe quoted Memphis
+# — the state's SW extremity. So for a near/border state whose spread crosses a
+# zone boundary, probe a population-weighted / capital-city REPRESENTATIVE ZIP
+# and bin on that; keep the far corner only as an undercharge sanity check, and
+# add it to rate_check.REFERENCE_ZIPS so the published rate still dominates the
+# worst member. For distant states with no near population (the far-plains
+# tranche) the far corner IS representative, so worst-corner and representative
+# coincide and either is fine.
+#
+# Format: {state: [(city, zip)]}; multiple entries -> pricier wins (worst-corner
+# probe). Real city/ZIP pairs so UPS does not hard-reject the mismatch (GOL-1446).
 CORNERS = {
-    "TN": [("Memphis", "38103")],
+    # Near/border states — REPRESENTATIVE ZIP (capital / population center).
+    # 2026-09-14 re-probe: TN Nashville AND its far tip (Memphis) both quote the
+    # zone_1 rate, so TN bins at zone_1. AR/MO/IA representative ZIPs quote the
+    # zone_5 rate (same as their far corners), so they bin at zone_5.
+    "TN": [("Nashville", "37201")],
+    "AR": [("Little Rock", "72201")],
+    "MO": [("Jefferson City", "65101")],
+    "IA": [("Des Moines", "50309")],
+    # Gulf-tier states — far corner IS the population, keep worst-corner.
     "GA": [("Valdosta", "31601")],
     "AL": [("Mobile", "36602")],
     "SC": [("Charleston", "29401")],
-    "AR": [("Texarkana", "71854")],
     "MS": [("Gulfport", "39501")],
     "LA": [("Lake Charles", "70601")],
+    # Far-plains / desert tranche — worst-corner == representative (no near pop).
     "OK": [("Guymon", "73942"), ("Oklahoma City", "73102")],
     "KS": [("Goodland", "67735")],
-    "MO": [("Joplin", "64801")],
-    "IA": [("Sioux City", "51101")],
     "NE": [("Scottsbluff", "69361")],
     "SD": [("Rapid City", "57701")],
     "ND": [("Williston", "58801")],

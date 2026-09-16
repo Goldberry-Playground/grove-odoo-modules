@@ -755,9 +755,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         return payload
 
     def test_state_gate_rejects_non_green_destination(self):
-        """Defect 1: an unsupported ship-to state (FL / any non-green-list state)
-        is rejected server-side at session creation, before any payment."""
-        order, error = grove_main._create_draft_order(self._website(), self.env, self._cart_payload("FL"))
+        """Defect 1: an unsupported ship-to state is rejected server-side at
+        session creation, before any payment. Fixture state = CA (permanently
+        closed per the NPB persimmon ruling); was FL, which GOL-2235 green-lists."""
+        order, error = grove_main._create_draft_order(self._website(), self.env, self._cart_payload("CA"))
         self.assertIsNone(order)
         self.assertEqual(error.status_code, 400)
         self.assertIn("can't ship", error.data.decode().lower())
