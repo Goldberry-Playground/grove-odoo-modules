@@ -374,9 +374,16 @@ def main(argv=None) -> int:
         "--fixture-dir",
         help="directory of pirateship_rates_<box_id>.json responses; used for every zone (offline dry-run)",
     )
+    ap.add_argument(
+        "--probe-date",
+        help="YYYY-MM-DD anchor for transit-day math (testing: fixtures carry "
+        "absolute delivery dates, so an offline run MUST pin the date the "
+        "fixtures were captured or every estimate eventually rolls a year "
+        "forward and flips the winner). Default: today.",
+    )
     args = ap.parse_args(argv)
 
-    probe_date = date.today()
+    probe_date = date.fromisoformat(args.probe_date) if args.probe_date else date.today()
 
     with open(RATES_PATH, encoding="utf-8") as fh:
         raw = json.load(fh)

@@ -372,7 +372,7 @@ class TestSchemaThreeAndWrite(unittest.TestCase):
             path = fh.name
         out_dir = tempfile.mkdtemp()
         try:
-            argv = ["--fixture-dir", _FX]
+            argv = ["--fixture-dir", _FX, "--probe-date", PROBE_DATE.isoformat()]
             with mock.patch.object(rc, "RATES_PATH", path), mock.patch.object(rc, "OUT_DIR", out_dir):
                 with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
                     code = rc.main(argv)
