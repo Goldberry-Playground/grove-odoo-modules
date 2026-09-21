@@ -2083,6 +2083,12 @@ def _stamp_bundle_substitution(kit_line, kit_bom, variant, dest, state_label):
             "sequence": (kit_line.sequence or 10) + 1,
         }
     )
+    # Persist onto the order so it mirrors to the delivery transfer and prints on
+    # the delivery slip the warehouse packs from (GOL-2237): the chatter + SO line
+    # note above stay on the sale order and never reach the picking. Accumulate
+    # across bundle lines so an order with two substituting kits carries both.
+    prior = order.grove_substitution_note or ""
+    order.grove_substitution_note = (prior + "\n\n" + note) if prior else note
 
 
 def _create_draft_order(website, env, payload):

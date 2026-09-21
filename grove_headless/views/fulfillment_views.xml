@@ -18,6 +18,14 @@
                     decoration-warning="grove_fulfillment == 'pickup'"
                     decoration-info="grove_fulfillment == 'ship'"
                 />
+                <!-- Compliance substitution the box must physically carry
+                     (GOL-2237): shown on the transfer so the packer sees the
+                     swap on screen as well as on the printed delivery slip. -->
+                <field
+                    name="grove_substitution_note"
+                    readonly="1"
+                    invisible="not grove_substitution_note"
+                />
             </xpath>
         </field>
     </record>

@@ -22,3 +22,16 @@ class StockPicking(models.Model):
         store=True,
         string="Fulfilment",
     )
+
+    # Per-state compliance substitution the box must physically carry (GOL-2237).
+    # Mirrored (stored-related, same safe timing as grove_fulfillment: written on
+    # the sale order at checkout, before confirmation spawns the picking) so the
+    # substitution prints on the delivery slip and shows on the transfer the
+    # warehouse actually works — the sale order's chatter/line note never reaches
+    # the picking Josh packs from. Empty on pickings with no sale order and on
+    # every order that needed no substitution.
+    grove_substitution_note = fields.Text(
+        related="sale_id.grove_substitution_note",
+        store=True,
+        string="Compliance substitution",
+    )
