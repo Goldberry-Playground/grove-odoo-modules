@@ -24,6 +24,7 @@ from unittest import mock
 import requests
 from odoo.addons.grove_headless.models.grove_enrich_job import PERENUAL_BUDGET_PARAM
 from odoo.addons.grove_headless.services.plant_data.perenual import PerenualProvider
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 
 _FX = os.path.join(os.path.dirname(__file__), "fixtures", "plant_data")
@@ -73,7 +74,7 @@ def _details_500(url, params=None, timeout=None):
 
 
 @tagged("post_install", "-at_install")
-class TestEnrichJob(TransactionCase):
+class TestEnrichJob(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.Job = self.env["grove.enrich.job"]
