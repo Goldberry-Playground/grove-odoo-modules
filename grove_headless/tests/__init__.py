@@ -17,6 +17,7 @@ from . import (
     test_growing_facts,  # noqa: F401
     test_kit_boms,  # noqa: F401
     test_label_batch,  # noqa: F401
+    test_listing_gate,  # noqa: F401
     test_mark_shipped,  # noqa: F401
     test_migration_relink_xmlids,  # noqa: F401
     test_newsletter_subscribe,  # noqa: F401

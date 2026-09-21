@@ -20,6 +20,37 @@
             </xpath>
             <xpath expr="//page[@name='sales']" position="after">
                 <page string="Grove Headless" name="grove_headless">
+                    <!-- Listing-content gate readiness banner (GOL-2382). -->
+                    <div class="alert alert-success" role="alert" invisible="grove_listing_missing" colspan="2">
+                        <i class="fa fa-check-circle" /> <b>Listing complete</b> — this plant meets the
+                        publish gate (all required facts, storefront description, approved care guide, facts reviewed).
+                    </div>
+                    <div
+                        class="alert alert-warning"
+                        role="alert"
+                        invisible="not grove_listing_missing or grove_gate_exempt"
+                        colspan="2"
+                    >
+                        <b>Not ready to publish.</b> Still needed:
+                        <field name="grove_listing_missing" class="oe_inline" nolabel="1" readonly="1" />
+                    </div>
+                    <group string="Listing Content Gate" name="grove_listing_gate">
+                        <group>
+                            <field name="grove_facts_reviewed" />
+                            <field name="grove_guide_ready" />
+                        </group>
+                        <group>
+                            <field name="grove_gate_exempt" />
+                            <field name="grove_draft_state" />
+                            <field name="grove_listing_complete" readonly="1" />
+                        </group>
+                        <div class="text-muted" colspan="2">
+                            A plant in the <b>Plants</b> category cannot be published until this
+                            listing is complete. Tick <b>Exempt from listing-content gate</b> for
+                            bundles, gift cards and supplies. Any auto-fill or agent write to a fact
+                            clears <b>Facts reviewed</b>.
+                        </div>
+                    </group>
                     <group>
                         <group string="Storefront">
                             <field name="grove_featured" />
@@ -57,11 +88,24 @@
                             </div>
                             <field name="grove_layer" />
                             <field name="grove_sun" />
-                        </group>
-                        <group>
                             <field name="grove_mature_size" />
+                            <field name="grove_mature_spread" />
                             <field name="grove_spacing" />
                             <field name="grove_soil" />
+                        </group>
+                        <group>
+                            <field name="grove_growth_rate" />
+                            <field name="grove_watering" />
+                            <field name="grove_bloom_season" />
+                            <field name="grove_harvest_season" />
+                            <field name="grove_wildlife" />
+                            <field name="grove_pollination" />
+                            <field name="grove_years_to_fruit" />
+                            <field name="grove_chill_hours" />
+                        </group>
+                        <group string="Facts provenance" colspan="2">
+                            <field name="grove_usda_symbol" />
+                            <field name="grove_perenual_id" />
                         </group>
                         <div class="text-muted" colspan="2">
                             USDA Zone min cannot exceed max — saving an inverted range is
@@ -90,7 +134,6 @@
                         </field>
                     </group>
                     <group string="Storefront Guide" name="grove_guide">
-                        <field name="grove_guide_ready" />
                         <div class="text-muted" colspan="2">
                             The species guide shown on the storefront is the
                             <b>Description for the website</b> field (Sales tab). It is drafted
@@ -130,6 +173,24 @@
                         </div>
                     </group>
                 </page>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- List filter for the published-but-incomplete plants the gate could not
+         retroactively unpublish (GOL-2382). -->
+    <record id="product_template_search_grove_listing" model="ir.ui.view">
+        <field name="name">product.template.search.grove_listing</field>
+        <field name="model">product.template</field>
+        <field name="inherit_id" ref="product.product_template_search_view" />
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <separator />
+                <filter
+                    name="grove_incomplete_listings"
+                    string="Incomplete listings"
+                    domain="[('website_published', '=', True), ('grove_listing_complete', '=', False), ('grove_gate_exempt', '=', False)]"
+                />
             </xpath>
         </field>
     </record>
