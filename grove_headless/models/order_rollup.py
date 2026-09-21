@@ -224,8 +224,15 @@ class SaleOrderRollup(models.AbstractModel):
             _logger.warning("grove.order.rollup: mail failed for %s", company.name, exc_info=True)
 
     def _discord_digest(self, company, text_body):
-        """Post the text digest to DISCORD_OPS_WEBHOOK_URL (best-effort)."""
-        url = os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+        """Post the text digest to the orders channel (best-effort).
+
+        This is an order/pickup summary, so it belongs in
+        DISCORD_ORDERS_WEBHOOK_URL alongside the individual order pings
+        (see controllers/main.py:_notify_discord) — not the bot-logs/ops
+        channel. Falls back to DISCORD_OPS_WEBHOOK_URL, same rationale as
+        _notify_discord: a missing orders webhook surfaces visibly in ops
+        instead of dropping the rollup silently."""
+        url = os.environ.get("DISCORD_ORDERS_WEBHOOK_URL", "") or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
         if not url:
             return
         try:
