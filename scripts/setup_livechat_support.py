@@ -101,10 +101,7 @@ def build_chatbot_steps() -> list[dict[str, Any]]:
         {
             "sequence": 4,
             "step_type": "text",
-            "message": (
-                "Thanks! We've got your question. An operator will follow up "
-                "here in the chat or by email."
-            ),
+            "message": ("Thanks! We've got your question. An operator will follow up here in the chat or by email."),
         },
         {
             "sequence": 5,
@@ -196,7 +193,10 @@ def ref_id(models, uid, xmlid: str) -> int:
     """Resolve a module.name external id to its res_id (like env.ref)."""
     module, name = xmlid.split(".", 1)
     rows = _call(
-        models, uid, "ir.model.data", "search_read",
+        models,
+        uid,
+        "ir.model.data",
+        "search_read",
         [[["module", "=", module], ["name", "=", name]]],
         {"fields": ["res_id"], "limit": 1},
     )
@@ -208,7 +208,10 @@ def ref_id(models, uid, xmlid: str) -> int:
 def preflight_modules(models, uid) -> None:
     """Refuse to run until the step-1 modules are actually installed."""
     installed = _call(
-        models, uid, "ir.module.module", "search_read",
+        models,
+        uid,
+        "ir.module.module",
+        "search_read",
         [[["name", "in", ["im_livechat", "website_livechat", "crm"]], ["state", "=", "installed"]]],
         {"fields": ["name"]},
     )
@@ -226,8 +229,12 @@ def upsert_chatbot(models, uid) -> int:
     steps = build_chatbot_steps()
     assert_capture_only(steps)
     existing = _call(
-        models, uid, "chatbot.script", "search_read",
-        [[["title", "=", CHATBOT_TITLE]]], {"fields": ["id"], "limit": 1},
+        models,
+        uid,
+        "chatbot.script",
+        "search_read",
+        [[["title", "=", CHATBOT_TITLE]]],
+        {"fields": ["id"], "limit": 1},
     )
     step_cmds = [(5, 0, 0)] + [(0, 0, s) for s in steps]  # replace all steps
     if existing:
@@ -247,8 +254,12 @@ def resolve_operators(models, uid) -> list[int]:
     if WES_EMAIL:
         logins.append(WES_EMAIL)
     rows = _call(
-        models, uid, "res.users", "search_read",
-        [[["login", "in", logins]]], {"fields": ["id", "login"]},
+        models,
+        uid,
+        "res.users",
+        "search_read",
+        [[["login", "in", logins]]],
+        {"fields": ["id", "login"]},
     )
     found = {r["login"]: r["id"] for r in rows}
     for login in logins:
@@ -261,9 +272,7 @@ def upsert_channel(models, uid, chatbot_script_id: int, operator_ids: list[int])
     vals: dict[str, Any] = {
         "name": CHANNEL_NAME,
         "user_ids": [(6, 0, operator_ids)],
-        "default_message": (
-            "Hi! Welcome to At The Grove Nursery. How can we help you today?"
-        ),
+        "default_message": ("Hi! Welcome to At The Grove Nursery. How can we help you today?"),
     }
     # Company scoping is version-dependent on im_livechat.channel. Set it only
     # if the model actually carries the field (verified live via fields_get),
@@ -272,8 +281,12 @@ def upsert_channel(models, uid, chatbot_script_id: int, operator_ids: list[int])
     company_field = next((f for f in ("company_id", "company_ids") if f in fields), None)
     if company_field:
         companies = _call(
-            models, uid, "res.company", "search_read",
-            [[["name", "=", NURSERY_COMPANY_NAME]]], {"fields": ["id"], "limit": 1},
+            models,
+            uid,
+            "res.company",
+            "search_read",
+            [[["name", "=", NURSERY_COMPANY_NAME]]],
+            {"fields": ["id"], "limit": 1},
         )
         if companies:
             cid = companies[0]["id"]
@@ -283,8 +296,12 @@ def upsert_channel(models, uid, chatbot_script_id: int, operator_ids: list[int])
             print(f"  WARNING: company '{NURSERY_COMPANY_NAME}' not found — channel left unscoped", file=sys.stderr)
 
     existing = _call(
-        models, uid, "im_livechat.channel", "search_read",
-        [[["name", "=", CHANNEL_NAME]]], {"fields": ["id"], "limit": 1},
+        models,
+        uid,
+        "im_livechat.channel",
+        "search_read",
+        [[["name", "=", CHANNEL_NAME]]],
+        {"fields": ["id"], "limit": 1},
     )
     if existing:
         channel_id = existing[0]["id"]
@@ -299,15 +316,24 @@ def upsert_channel(models, uid, chatbot_script_id: int, operator_ids: list[int])
     if channel_id:
         rule_vals = channel_rule_vals(channel_id, chatbot_script_id)
         rules = _call(
-            models, uid, "im_livechat.channel.rule", "search_read",
-            [[["channel_id", "=", channel_id]]], {"fields": ["id"]},
+            models,
+            uid,
+            "im_livechat.channel.rule",
+            "search_read",
+            [[["channel_id", "=", channel_id]]],
+            {"fields": ["id"]},
         )
         if rules:
             rule_id = rules[0]["id"]
             _plan("im_livechat.channel.rule", f"update #{rule_id} action=display_button + chatbot")
             if not DRY_RUN:
-                _call(models, uid, "im_livechat.channel.rule", "write",
-                      [[rule_id], {k: v for k, v in rule_vals.items() if k != "channel_id"}])
+                _call(
+                    models,
+                    uid,
+                    "im_livechat.channel.rule",
+                    "write",
+                    [[rule_id], {k: v for k, v in rule_vals.items() if k != "channel_id"}],
+                )
         else:
             _plan("im_livechat.channel.rule", "create action=display_button + chatbot (regex_url=/)")
             if not DRY_RUN:
@@ -326,8 +352,12 @@ def provision_wes(models, uid) -> None:
     user_group_id = ref_id(models, uid, "base.group_user")
     portal_group_id = ref_id(models, uid, "base.group_portal")
     existing = _call(
-        models, uid, "res.users", "search_read",
-        [[["login", "=", WES_EMAIL]]], {"fields": ["id", "group_ids", "active"]},
+        models,
+        uid,
+        "res.users",
+        "search_read",
+        [[["login", "=", WES_EMAIL]]],
+        {"fields": ["id", "group_ids", "active"]},
         # NB Odoo 19: the field is group_ids, NOT groups_id.
     )
     if existing:
@@ -364,12 +394,13 @@ def main() -> None:
     channel_id = upsert_channel(models, uid, chatbot_script_id, operator_ids)
     provision_wes(models, uid)
     print(
-        f"Done. channel={channel_id or '(dry-run)'} chatbot={chatbot_script_id or '(dry-run)'} "
-        f"operators={operator_ids}"
+        f"Done. channel={channel_id or '(dry-run)'} chatbot={chatbot_script_id or '(dry-run)'} operators={operator_ids}"
     )
     if not DRY_RUN:
-        print("Verify: load a nursery page, confirm the widget launcher renders and the bot "
-              "greets -> collects question -> collects email.")
+        print(
+            "Verify: load a nursery page, confirm the widget launcher renders and the bot "
+            "greets -> collects question -> collects email."
+        )
 
 
 if __name__ == "__main__":
