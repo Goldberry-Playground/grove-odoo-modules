@@ -9,6 +9,7 @@ from . import (
     test_availability_events,  # noqa: F401
     test_carrier_tracking,  # noqa: F401
     test_carrier_tracking_cron,  # noqa: F401
+    test_checkout_quote,  # noqa: F401
     test_detail_serialization,  # noqa: F401
     test_effective_shipping_tier,  # noqa: F401
     test_fulfillment_state,  # noqa: F401
