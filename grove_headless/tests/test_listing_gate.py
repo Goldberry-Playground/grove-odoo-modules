@@ -119,6 +119,12 @@ class TestListingGate(GroveTaxFixtureMixin, TransactionCase):
         with self.assertRaises(UserError):
             self._plant(published=True)
 
+    def test_is_published_write_is_gated(self):
+        """Direct is_published=True write must not bypass the listing-content gate."""
+        plant = self._plant()
+        with self.assertRaises(UserError):
+            plant.write({"is_published": True})
+
     def test_exempt_plant_publishes_incomplete(self):
         plant = self._plant(grove_gate_exempt=True)
         plant.website_published = True

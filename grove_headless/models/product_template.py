@@ -138,9 +138,12 @@ class ProductTemplate(models.Model):
             self.env["grove.publish.event"].sudo().note_availability_candidates(self)
         # Snapshot which records are crossing the publish transition BEFORE the
         # write, so an already-published incomplete product editing one field is
-        # never re-gated.
+        # never re-gated. `website_published` is the stored related of
+        # `is_published`; a direct `is_published=True` write (data import,
+        # XML-RPC, list-view toggle, server action) must be gated too.
+        publishing = vals.get("website_published") or vals.get("is_published")
         transitioning = (
-            self.filtered(lambda r: not r.website_published) if vals.get("website_published") else self.browse()
+            self.filtered(lambda r: not r.website_published) if publishing else self.browse()
         )
         res = super().write(vals)
         for record in transitioning:
