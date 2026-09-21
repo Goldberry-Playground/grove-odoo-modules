@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <!-- GOL-2391 (Listing content B wiring): drain the Perenual enrichment queue.
+         The Fetch-facts button runs USDA synchronously and enqueues one
+         grove.enrich.job (provider=perenual) per plant. Perenual is rate-limited
+         (free tier), so it is never called from the button — this cron drains
+         the queue oldest-first every 10 minutes, spending at most
+         grove_headless.perenual_daily_budget real HTTP calls per UTC day. HTTP
+         429 marks the day exhausted and requeues; a lookup that keeps failing
+         fails the job after the second attempt. The method never raises. No
+         PERENUAL_API_KEY in the container env means each lookup no-ops with a
+         chatter note, so this is inert until Terra/Josh provision the key. -->
+    <record id="process_enrich_jobs" model="ir.cron">
+        <field name="name">Grove: process plant-fact enrich jobs (Perenual, budgeted)</field>
+        <field name="model_id" ref="model_grove_enrich_job"/>
+        <field name="state">code</field>
+        <field name="code">model._cron_process_enrich_jobs()</field>
+        <field name="interval_number">10</field>
+        <field name="interval_type">minutes</field>
+        <field name="active" eval="True"/>
+    </record>
+</odoo>

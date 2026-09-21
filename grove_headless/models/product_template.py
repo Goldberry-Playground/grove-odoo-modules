@@ -1,7 +1,16 @@
 import re
 
+from markupsafe import Markup, escape
+
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError, ValidationError
+
+# Plant-fact enrichment providers (GOL-2383/B). The pure mapping + the USDA
+# provider are wrapped by the Fetch-facts handler below; Perenual is never
+# called from this file — it is enqueued as a grove.enrich.job and drained by
+# the budgeted cron (models/grove_enrich_job.py).
+from ..services.plant_data import mapping as plant_mapping
+from ..services.plant_data.usda import USDAProvider
 
 # ── Preorder cap (GOL-2171) ──────────────────────────────────────────────
 # The global default preorder cap lives in ir.config_parameter under this key
@@ -565,6 +574,118 @@ class ProductTemplate(models.Model):
         if not self.grove_facts_reviewed:
             missing.append(_GROVE_LABEL_REVIEWED)
         return missing
+
+    # ── Fetch facts: USDA sync + enqueue Perenual (GOL-2391/B) ───────────
+    def action_fetch_facts(self):
+        """Form button: fill empty growing facts from USDA now, queue Perenual.
+
+        USDA (free, no key) runs synchronously and writes only the empty fields
+        it is authoritative-first for; its zone/spacing hints are posted to
+        chatter, never written. Perenual owns the rest but is rate-limited, so it
+        is enqueued as a grove.enrich.job and drained by the budgeted cron.
+        """
+        for record in self:
+            record._grove_fetch_facts_sync()
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("Fetch facts"),
+                "message": _(
+                    "USDA fields applied where empty (see the chatter). "
+                    "Perenual enrichment queued — it runs on the budgeted schedule."
+                ),
+                "type": "success",
+                "next": {"type": "ir.actions.act_window_close"},
+            },
+        }
+
+    def _grove_fetch_facts_sync(self):
+        self.ensure_one()
+        provider = USDAProvider()
+        facts = provider.lookup(self.grove_botanical_name, cached_id=self.grove_usda_symbol or None)
+        if facts.resolved_id and not self.grove_usda_symbol:
+            self.grove_usda_symbol = facts.resolved_id
+        self._grove_apply_facts(facts, "usda")
+        self._grove_enqueue_perenual()
+
+    def _grove_enqueue_perenual(self):
+        """Queue one Perenual enrich job for this product, unless one is pending."""
+        self.ensure_one()
+        Job = self.env["grove.enrich.job"].sudo()
+        existing = Job.search(
+            [
+                ("product_tmpl_id", "=", self.id),
+                ("provider", "=", "perenual"),
+                ("state", "in", ("queued", "running")),
+            ],
+            limit=1,
+        )
+        if not existing:
+            Job.create({"product_tmpl_id": self.id, "provider": "perenual"})
+
+    def _grove_field_empty(self, name):
+        """True when a growing-fact field holds no usable value.
+
+        Integers (zones) count as empty at 0/False; chars and selections count
+        as empty when blank after strip.
+        """
+        value = self[name]
+        if self._fields[name].type == "integer":
+            return not value
+        return not str(value or "").strip()
+
+    def _grove_apply_facts(self, facts, provider_name):
+        """Apply a provider's PlantFacts to this template, conservatively.
+
+        A field is written only when (a) this provider is authoritative-FIRST for
+        it in FIELD_PRECEDENCE and (b) the field is currently empty. Every write
+        is recorded in grove_facts_provenance and echoed to chatter one line per
+        field; hints/candidates are chatter-only. Writing provenance alongside a
+        content field clears the human "Facts reviewed" sign-off (see write()).
+        Returns True when at least one field was filled.
+        """
+        self.ensure_one()
+        writes = {}
+        lines = []
+        provenance = dict(self.grove_facts_provenance or {})
+        now_iso = fields.Datetime.now().isoformat()
+        for name, fv in facts.fields.items():
+            order = plant_mapping.FIELD_PRECEDENCE.get(name, ())
+            if not order or order[0] != provider_name:
+                continue  # this provider is not authoritative-first for the field
+            if not self._grove_field_empty(name):
+                continue  # never overwrite an existing value
+            writes[name] = fv.value
+            provenance[name] = {"source": fv.source, "ref": fv.ref, "at": now_iso}
+            lines.append(f"{escape(self._fields[name].string)}: {escape(str(fv.value))} (source: {escape(fv.source)})")
+
+        # Hints and candidates are chatter-only — never written to a field.
+        if facts.hints:
+            self.message_post(
+                body=Markup("<b>{}</b> notes:<br/>{}").format(
+                    provider_name.upper(),
+                    Markup("<br/>").join(escape(h) for h in facts.hints),
+                )
+            )
+        if facts.candidates:
+            self.message_post(
+                body=Markup("<b>{}</b> found no exact match. Candidates:<br/>{}").format(
+                    provider_name.upper(),
+                    Markup("<br/>").join(escape(c) for c in facts.candidates),
+                )
+            )
+        if not writes:
+            return False
+
+        writes["grove_facts_provenance"] = provenance
+        self.write(writes)
+        self.message_post(
+            body=Markup("Auto-filled {} field(s) from <b>{}</b>:<br/>{}").format(
+                len(lines), provider_name.upper(), Markup("<br/>").join(Markup(line) for line in lines)
+            )
+        )
+        return True
 
     # ── Publish gate (GOL-2382) ─────────────────────────────────────────
     def _grove_is_gated(self):
