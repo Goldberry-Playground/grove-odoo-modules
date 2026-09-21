@@ -1,0 +1,57 @@
+[
+  {
+    "Text": "<i>Diospyros virginiana</i> L.",
+    "Plant": {
+      "Id": 64536,
+      "Symbol": "DIVI5",
+      "ScientificName": "<i>Diospyros virginiana</i> L.",
+      "ScientificNameWithoutAuthor": null,
+      "Rank": "Species",
+      "CommonName": "common persimmon"
+    }
+  },
+  {
+    "Text": "<i>Diospyros virginiana</i> L. var. <i>mosieri</i> (Small) Sarg.",
+    "Plant": {
+      "Id": 64538,
+      "Symbol": "DIVIM2",
+      "ScientificName": "<i>Diospyros virginiana</i> L. var. <i>mosieri</i> (Small) Sarg.",
+      "ScientificNameWithoutAuthor": null,
+      "Rank": "Variety",
+      "CommonName": null
+    }
+  },
+  {
+    "Text": "<i>Diospyros virginiana</i> L. var. <i>platycarpa</i> Sarg.",
+    "Plant": {
+      "Id": 64539,
+      "Symbol": "DIVIP2",
+      "ScientificName": "<i>Diospyros virginiana</i> L. var. <i>platycarpa</i> Sarg.",
+      "ScientificNameWithoutAuthor": null,
+      "Rank": "Variety",
+      "CommonName": null
+    }
+  },
+  {
+    "Text": "<i>Diospyros virginiana</i> L. var. <i>pubescens</i> (Pursh) Dippel",
+    "Plant": {
+      "Id": 64540,
+      "Symbol": "DIVIP3",
+      "ScientificName": "<i>Diospyros virginiana</i> L. var. <i>pubescens</i> (Pursh) Dippel",
+      "ScientificNameWithoutAuthor": null,
+      "Rank": "Variety",
+      "CommonName": null
+    }
+  },
+  {
+    "Text": "<i>Diospyros virginiana</i> L. var. <i>virginiana </i>",
+    "Plant": {
+      "Id": 64541,
+      "Symbol": "DIVIV4",
+      "ScientificName": "<i>Diospyros virginiana</i> L. var. <i>virginiana </i>",
+      "ScientificNameWithoutAuthor": null,
+      "Rank": "Variety",
+      "CommonName": null
+    }
+  }
+]

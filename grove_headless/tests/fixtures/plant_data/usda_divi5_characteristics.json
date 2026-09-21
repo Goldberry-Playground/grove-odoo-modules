@@ -1,0 +1,569 @@
+[
+  {
+    "PlantCharacteristicName": "Active Growth Period",
+    "PlantCharacteristicValue": "Spring and Summer",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Bloat",
+    "PlantCharacteristicValue": "None",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "C:N Ratio",
+    "PlantCharacteristicValue": "High",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Coppice Potential",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Fall Conspicuous",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Fire Resistant",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Flower Color",
+    "PlantCharacteristicValue": "Yellow",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Flower Conspicuous",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Foliage Color",
+    "PlantCharacteristicValue": "Dark Green",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Foliage Porosity Summer",
+    "PlantCharacteristicValue": "Moderate",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Foliage Porosity Winter",
+    "PlantCharacteristicValue": "Porous",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Foliage Texture",
+    "PlantCharacteristicValue": "Medium",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Fruit/Seed Color",
+    "PlantCharacteristicValue": "Orange",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Fruit/Seed Conspicuous",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Growth Form",
+    "PlantCharacteristicValue": "Single Crown",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Growth Rate",
+    "PlantCharacteristicValue": "Slow",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Height at 20 Years, Maximum (feet)",
+    "PlantCharacteristicValue": "25",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Height, Mature (feet)",
+    "PlantCharacteristicValue": "55.0",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Known Allelopath",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Leaf Retention",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Lifespan",
+    "PlantCharacteristicValue": "Long",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Low Growing Grass",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Nitrogen Fixation",
+    "PlantCharacteristicValue": "None",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Resprout Ability",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Shape and Orientation",
+    "PlantCharacteristicValue": "Irregular",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Toxicity",
+    "PlantCharacteristicValue": "None",
+    "PlantCharacteristicCategory": "Morphology/Physiology",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Adapted to Coarse Textured Soils",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Adapted to Fine Textured Soils",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Adapted to Medium Textured Soils",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Anaerobic Tolerance",
+    "PlantCharacteristicValue": "None",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "CaCO3 Tolerance",
+    "PlantCharacteristicValue": "None",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Cold Stratification Required",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Drought Tolerance",
+    "PlantCharacteristicValue": "Medium",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Fertility Requirement",
+    "PlantCharacteristicValue": "Medium",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Fire Tolerance",
+    "PlantCharacteristicValue": "Medium",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Frost Free Days, Minimum",
+    "PlantCharacteristicValue": "200",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Hedge Tolerance",
+    "PlantCharacteristicValue": "None",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Moisture Use",
+    "PlantCharacteristicValue": "Medium",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "pH, Maximum",
+    "PlantCharacteristicValue": "7.5",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "pH, Minimum",
+    "PlantCharacteristicValue": "4.7",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Planting Density per Acre, Maximum",
+    "PlantCharacteristicValue": "700",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Planting Density per Acre, Minimum",
+    "PlantCharacteristicValue": "300",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Precipitation, Maximum",
+    "PlantCharacteristicValue": "80",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Precipitation, Minimum",
+    "PlantCharacteristicValue": "30",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Root Depth, Minimum (inches)",
+    "PlantCharacteristicValue": "36",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Salinity Tolerance",
+    "PlantCharacteristicValue": "Low",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Shade Tolerance",
+    "PlantCharacteristicValue": "Low",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Temperature, Minimum (\u00b0F)",
+    "PlantCharacteristicValue": "-21",
+    "PlantCharacteristicCategory": "Growth Requirements",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Bloom Period",
+    "PlantCharacteristicValue": "Late Spring",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Commercial Availability",
+    "PlantCharacteristicValue": "Routinely Available",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Fruit/Seed Abundance",
+    "PlantCharacteristicValue": "High",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Fruit/Seed Period Begin",
+    "PlantCharacteristicValue": "Summer",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Fruit/Seed Period End",
+    "PlantCharacteristicValue": "Winter",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Fruit/Seed Persistence",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Propagated by Bare Root",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Propagated by Bulb",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Propagated by Container",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Propagated by Corm",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Propagated by Cuttings",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Propagated by Seed",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Propagated by Sod",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Propagated by Sprigs",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Propagated by Tubers",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Seed per Pound",
+    "PlantCharacteristicValue": "1200",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Seed Spread Rate",
+    "PlantCharacteristicValue": "Slow",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Seedling Vigor",
+    "PlantCharacteristicValue": "High",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Small Grain",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Vegetative Spread Rate",
+    "PlantCharacteristicValue": "Moderate",
+    "PlantCharacteristicCategory": "Reproduction",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Berry/Nut/Seed Product",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Christmas Tree Product",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Fodder Product",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Fuelwood Product",
+    "PlantCharacteristicValue": "High",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Lumber Product",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Naval Store Product",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Nursery Stock Product",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Palatable Browse Animal",
+    "PlantCharacteristicValue": "Medium",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Palatable Graze Animal",
+    "PlantCharacteristicValue": "Low",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Palatable Human",
+    "PlantCharacteristicValue": "Yes",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Post Product",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Pulpwood Product",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  },
+  {
+    "PlantCharacteristicName": "Veneer Product",
+    "PlantCharacteristicValue": "No",
+    "PlantCharacteristicCategory": "Suitability/Use",
+    "CultivarName": null,
+    "SynonymName": null
+  }
+]

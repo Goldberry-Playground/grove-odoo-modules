@@ -1,0 +1,15 @@
+{
+  "Id": 64536,
+  "Symbol": "DIVI5",
+  "ScientificName": "<i>Diospyros virginiana</i> L.",
+  "ScientificNameWithoutAuthor": null,
+  "Rank": "Species",
+  "CommonName": "common persimmon",
+  "GrowthHabits": [
+    "Tree"
+  ],
+  "Durations": [
+    "Perennial"
+  ],
+  "HasCharacteristics": true
+}
