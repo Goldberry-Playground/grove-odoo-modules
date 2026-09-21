@@ -142,9 +142,7 @@ class ProductTemplate(models.Model):
         # `is_published`; a direct `is_published=True` write (data import,
         # XML-RPC, list-view toggle, server action) must be gated too.
         publishing = vals.get("website_published") or vals.get("is_published")
-        transitioning = (
-            self.filtered(lambda r: not r.website_published) if publishing else self.browse()
-        )
+        transitioning = self.filtered(lambda r: not r.website_published) if publishing else self.browse()
         res = super().write(vals)
         for record in transitioning:
             record._grove_check_publish_gate()
