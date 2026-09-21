@@ -1,7 +1,6 @@
 import re
 
 from markupsafe import Markup, escape
-
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError, ValidationError
 

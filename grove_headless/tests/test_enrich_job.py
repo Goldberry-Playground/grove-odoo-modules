@@ -22,7 +22,6 @@ import os
 from unittest import mock
 
 import requests
-
 from odoo.addons.grove_headless.models.grove_enrich_job import PERENUAL_BUDGET_PARAM
 from odoo.addons.grove_headless.services.plant_data.perenual import PerenualProvider
 from odoo.tests import TransactionCase, tagged
@@ -82,9 +81,7 @@ class TestEnrichJob(TransactionCase):
 
     # ── helpers ─────────────────────────────────────────────────────────────
     def _product(self, name="Ficus carica"):
-        return self.env["product.template"].create(
-            {"name": f"Plant {name}", "grove_botanical_name": name}
-        )
+        return self.env["product.template"].create({"name": f"Plant {name}", "grove_botanical_name": name})
 
     def _queue(self, tmpl):
         return self.Job.create({"product_tmpl_id": tmpl.id, "provider": "perenual"})
