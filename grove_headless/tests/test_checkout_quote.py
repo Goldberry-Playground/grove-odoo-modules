@@ -229,21 +229,47 @@ class TestCheckoutQuoteEndpoint(_PoolFixture, GroveTaxFixtureMixin, HttpCase):
         )
         self.assertEqual(self._post({"items": [{"variant_id": 99999999, "quantity": 1}]}).status_code, 404)
 
-    def test_zero_quantity_coerces_to_one_like_the_order_path(self):
-        """An explicit ``quantity: 0`` is read as 1, NOT rejected.
+    def test_explicit_zero_quantity_is_rejected_but_omitted_defaults_to_one(self):
+        """``quantity: 0`` is a client error, an ABSENT quantity means one.
 
-        Both this route and ``_create_draft_order`` parse quantity as
-        ``float(raw.get("quantity") or 1)``, and ``0 or 1`` is 1 in Python. The
-        coercion is deliberately kept identical: the quote must describe the
-        cart the checkout session would actually build, so rejecting here while
-        the session happily charges a line of 1 would be exactly the
-        preview-vs-charge divergence this endpoint exists to prevent. The
-        storefront never sends 0 (the cart floors at 1); only a negative
-        quantity is a real client error, and that still 400s above.
+        The parser defaults only on a missing key (``.get("quantity", 1)``).
+        Using ``or 1`` instead made an explicit 0 falsy, coercing it to one unit
+        past the positivity guard — on the order path that silently CHARGED a
+        tree nobody ordered (Ada, review of #244).
         """
-        resp = self._post({"items": [{"variant_id": self.bareroot.id, "quantity": 0}]})
-        self.assertEqual(resp.status_code, 200)
-        self.assertEqual(resp.json()["lines"][0]["quantity"], 1.0)
+        self.assertEqual(self._post({"items": [{"variant_id": self.bareroot.id, "quantity": 0}]}).status_code, 400)
+        self.assertEqual(self._post({"items": [{"variant_id": self.bareroot.id, "quantity": None}]}).status_code, 400)
+        omitted = self._post({"items": [{"variant_id": self.bareroot.id}]})
+        self.assertEqual(omitted.status_code, 200)
+        self.assertEqual(omitted.json()["lines"][0]["quantity"], 1.0)
+
+    def test_order_path_rejects_zero_quantity_identically(self):
+        """The CHARGE surface must reject exactly what the preview rejects.
+
+        ``/orders`` (and therefore ``/checkout/session``, which shares
+        ``_create_draft_order``) parses quantity with the same helper. If only
+        the quote were fixed, a qty-0 cart would 400 in the preview and become a
+        charged qty-1 line at checkout — the preview-vs-charge divergence this
+        endpoint exists to prevent. Asserted here rather than in
+        test_stripe_checkout.py so the money-path test file stays untouched.
+        """
+        body = {
+            "contact": {"name": "Quote Zero", "email": "quote-zero@example.com"},
+            "items": [{"variant_id": self.bareroot.id, "quantity": 0}],
+        }
+        resp = self.url_open(
+            "/grove/api/v1/orders",
+            data=json.dumps(body).encode(),
+            headers={
+                "X-Odoo-Database": get_db_name(),
+                "X-Grove-Tenant": "goldberry",
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            },
+        )
+        self.assertEqual(resp.status_code, 400, resp.text)
+        # And no partial order was left behind by the rejected request.
+        self.assertFalse(self.env["sale.order"].search_count([("partner_id.email", "=", "quote-zero@example.com")]))
 
     def test_requires_bearer_auth(self):
         resp = self._post({"items": [{"variant_id": self.bareroot.id, "quantity": 1}]}, authed=False)

@@ -1171,7 +1171,12 @@ class GroveHeadlessAPI(http.Controller):
         parsed_items: list[tuple[int, float]] = []
         for raw_item in items:
             try:
-                parsed_items.append((int(raw_item.get("variant_id")), float(raw_item.get("quantity") or 1)))
+                # `.get("quantity", 1)`, never `or 1`: an explicit 0 is falsy, so
+                # `0 or 1` would coerce it to one unit and sail past the
+                # positivity guard below (Ada, review of #244). Defaulting only
+                # on an ABSENT key keeps "omitted means one" while letting an
+                # explicit 0 reach the guard; None/"" still raise and 400.
+                parsed_items.append((int(raw_item.get("variant_id")), float(raw_item.get("quantity", 1))))
             except (AttributeError, TypeError, ValueError):
                 return _json_response({"error": "Each item needs numeric variant_id and quantity"}, status=400)
         if any(qty <= 0 for _, qty in parsed_items):
@@ -2033,7 +2038,11 @@ def _create_draft_order(website, env, payload):
     parsed_items: list[tuple[int, float]] = []
     for raw_item in items:
         try:
-            parsed_items.append((int(raw_item.get("variant_id")), float(raw_item.get("quantity") or 1)))
+            # See the matching note in checkout_quote: `or 1` silently turned an
+            # explicit `quantity: 0` into a CHARGED line of one tree here, and it
+            # would also have split the quote from the charge. Default only when
+            # the key is absent so an explicit 0 hits the positivity guard.
+            parsed_items.append((int(raw_item.get("variant_id")), float(raw_item.get("quantity", 1))))
         except (TypeError, ValueError):
             order.unlink()
             return None, _json_response(
