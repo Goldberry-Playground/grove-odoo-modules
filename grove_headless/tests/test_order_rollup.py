@@ -16,7 +16,10 @@ class TestOrderRollupDiscordRouting(TransactionCase):
         rollup = self.env["grove.order.rollup"]
         with mock.patch.dict(
             "os.environ",
-            {"DISCORD_ORDERS_WEBHOOK_URL": "https://discord.example/orders", "DISCORD_OPS_WEBHOOK_URL": "https://discord.example/ops"},
+            {
+                "DISCORD_ORDERS_WEBHOOK_URL": "https://discord.example/orders",
+                "DISCORD_OPS_WEBHOOK_URL": "https://discord.example/ops",
+            },
         ):
             with mock.patch("odoo.addons.grove_headless.models.order_rollup.requests.post") as post:
                 rollup._discord_digest(self.env.company, "weekly rollup body")
