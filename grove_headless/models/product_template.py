@@ -12,6 +12,64 @@ from odoo.exceptions import UserError, ValidationError
 PREORDER_CAP_PARAM = "grove_headless.preorder_cap_default"
 PREORDER_CAP_SEED = 50
 
+# ── Listing-content gate (GOL-2382, spec 2026-09-21) ─────────────────────
+# The 12 growing facts every plant listing must carry before it can be
+# published, in the order the missing-items banner and the form field group use.
+# kind drives the "is set" test: ints count when > 0, chars/selections when
+# non-blank after strip. The other three completeness requirements (storefront
+# description, approved care guide, facts reviewed) are checked separately with
+# custom labels so the banner reads the way Josh signed off on ("Plant Spacing,
+# Chill Hours, Care guide approval, Facts reviewed").
+_GROVE_REQUIRED_FACTS = [
+    ("grove_botanical_name", "char"),
+    ("grove_zone_min", "int"),
+    ("grove_zone_max", "int"),
+    ("grove_layer", "char"),
+    ("grove_sun", "char"),
+    ("grove_mature_size", "char"),
+    ("grove_mature_spread", "char"),
+    ("grove_spacing", "char"),
+    ("grove_soil", "char"),
+    ("grove_pollination", "char"),
+    ("grove_years_to_fruit", "char"),
+    ("grove_chill_hours", "char"),
+]
+
+# Storefront-facing content fields. Every one gets tracking=True (chatter shows
+# who/what changed it) and a machine write to any of them — one that stamps
+# grove_facts_provenance in the same vals, i.e. the enrichment (B) or drafter (C)
+# path — clears the human "Facts reviewed" sign-off, per the field's contract.
+_GROVE_CONTENT_FACT_FIELDS = frozenset(name for name, _kind in _GROVE_REQUIRED_FACTS) | frozenset(
+    {
+        "grove_growth_rate",
+        "grove_watering",
+        "grove_bloom_season",
+        "grove_harvest_season",
+        "grove_wildlife",
+    }
+)
+
+# Human labels for the three non-fact completeness requirements. Kept explicit
+# (not derived from field.string) so the banner text matches the spec exactly.
+_GROVE_LABEL_DESCRIPTION = "Description"
+_GROVE_LABEL_GUIDE = "Care guide approval"
+_GROVE_LABEL_REVIEWED = "Facts reviewed"
+
+
+def _html_is_blank(value):
+    """True when an HTML field has no visible text after stripping tags.
+
+    Odoo stores an "empty" rich-text field as markup like ``<p><br></p>`` or
+    ``<p>\xa0</p>`` rather than a falsy value, so a bare truthiness check would
+    wrongly count those as filled. Strip tags and non-breaking spaces, then look
+    for any remaining non-whitespace text.
+    """
+    if not value:
+        return True
+    text = re.sub(r"<[^>]+>", " ", value)
+    text = text.replace("\xa0", " ").replace("&nbsp;", " ")
+    return not text.strip()
+
 
 def _parse_preorder_variant_ids(raw):
     """Parse a sale.order.grove_preorder_variant_ids Char into a set of ints.
@@ -56,10 +114,39 @@ class ProductTemplate(models.Model):
     # crosses through stock.quant (see stock_quant.py).
     _GROVE_AVAILABILITY_FIELDS = frozenset({"sale_ok", "website_published", "is_published", "active"})
 
+    @api.model_create_multi
+    def create(self, vals_list):
+        records = super().create(vals_list)
+        # A create that publishes a gated plant must still pass the gate.
+        for record in records:
+            if record.website_published:
+                record._grove_check_publish_gate()
+        return records
+
     def write(self, vals):
+        # An enrichment/agent write stamps grove_facts_provenance alongside the
+        # fact it wrote; that invalidates the human "Facts reviewed" sign-off
+        # unless the write is itself (re)setting the flag. Human form edits never
+        # touch provenance, so their sign-off survives.
+        if (
+            "grove_facts_reviewed" not in vals
+            and "grove_facts_provenance" in vals
+            and _GROVE_CONTENT_FACT_FIELDS.intersection(vals)
+        ):
+            vals = dict(vals, grove_facts_reviewed=False)
         if self._GROVE_AVAILABILITY_FIELDS.intersection(vals):
             self.env["grove.publish.event"].sudo().note_availability_candidates(self)
-        return super().write(vals)
+        # Snapshot which records are crossing the publish transition BEFORE the
+        # write, so an already-published incomplete product editing one field is
+        # never re-gated. `website_published` is the stored related of
+        # `is_published`; a direct `is_published=True` write (data import,
+        # XML-RPC, list-view toggle, server action) must be gated too.
+        publishing = vals.get("website_published") or vals.get("is_published")
+        transitioning = self.filtered(lambda r: not r.website_published) if publishing else self.browse()
+        res = super().write(vals)
+        for record in transitioning:
+            record._grove_check_publish_gate()
+        return res
 
     grove_featured = fields.Boolean(
         string="Grove Featured",
@@ -321,9 +408,9 @@ class ProductTemplate(models.Model):
     # Filterable facts live here (typed); display-only facts stay Char.
     # Narrative content deliberately does NOT live in Odoo (Ghost, keyed
     # by grove_slug — see the nursery product-pages spec).
-    grove_botanical_name = fields.Char(string="Botanical Name")
-    grove_zone_min = fields.Integer(string="USDA Zone Min")
-    grove_zone_max = fields.Integer(string="USDA Zone Max")
+    grove_botanical_name = fields.Char(string="Botanical Name", tracking=True)
+    grove_zone_min = fields.Integer(string="USDA Zone Min", tracking=True)
+    grove_zone_max = fields.Integer(string="USDA Zone Max", tracking=True)
     grove_layer = fields.Selection(
         [
             ("canopy", "Canopy"),
@@ -333,14 +420,194 @@ class ProductTemplate(models.Model):
             ("vine", "Vine"),
         ],
         string="Food Forest Layer",
+        tracking=True,
     )
     grove_sun = fields.Selection(
         [("full", "Full sun"), ("partial", "Partial sun"), ("shade", "Shade")],
         string="Sun Requirement",
+        tracking=True,
     )
-    grove_mature_size = fields.Char(string="Mature Size")
-    grove_spacing = fields.Char(string="Plant Spacing")
-    grove_soil = fields.Char(string="Soil")
+    grove_mature_size = fields.Char(string="Mature Size", tracking=True)
+    grove_spacing = fields.Char(string="Plant Spacing", tracking=True)
+    grove_soil = fields.Char(string="Soil", tracking=True)
+
+    # ── Listing content gate: new required + optional facts (GOL-2382) ──
+    # Required chars joining the 12-fact required set. "Not applicable" is a
+    # valid non-blank value for non-fruiting/ornamental plants (chill hours,
+    # pollination, years to fruit).
+    grove_mature_spread = fields.Char(string="Mature Spread", tracking=True, help='Display-only, e.g. "6–8 ft".')
+    grove_chill_hours = fields.Char(
+        string="Chill Hours",
+        tracking=True,
+        help='e.g. "450–550"; enter "Not applicable" for non-fruiting plants.',
+    )
+    grove_pollination = fields.Char(
+        string="Pollination",
+        tracking=True,
+        help='e.g. "Self-fertile" / "Needs a second variety".',
+    )
+    grove_years_to_fruit = fields.Char(
+        string="Years to Fruit",
+        tracking=True,
+        help='e.g. "2–4 years"; "Not applicable" for ornamentals.',
+    )
+    # Optional facts (auto-filled by enrichment in GOL-2383/B); not gated.
+    grove_growth_rate = fields.Selection(
+        [("slow", "Slow"), ("moderate", "Moderate"), ("fast", "Fast")],
+        string="Growth Rate",
+        tracking=True,
+    )
+    grove_bloom_season = fields.Char(string="Bloom Season", tracking=True, help='e.g. "Late spring".')
+    grove_harvest_season = fields.Char(string="Harvest Season", tracking=True, help='e.g. "Summer–winter".')
+    grove_watering = fields.Selection(
+        [("low", "Low"), ("moderate", "Moderate"), ("high", "High")],
+        string="Watering",
+        tracking=True,
+    )
+    grove_wildlife = fields.Char(string="Wildlife", tracking=True, help='e.g. "Attracts bees, birds".')
+
+    # eCommerce marketing description + care guide are content fields too, so
+    # extend the inherited definitions to track changes in chatter. The
+    # storefront description becomes description_ecommerce (the PDP renders it as
+    # description_html); description_sale reverts to its Odoo quotation/invoice
+    # role and is no longer the storefront copy. website_description carries the
+    # care guide, gated on the storefront by grove_guide_ready as before.
+    description_ecommerce = fields.Html(tracking=True)
+    website_description = fields.Html(tracking=True)
+
+    # ── Provenance and workflow (GOL-2382) ──────────────────────────────
+    grove_facts_provenance = fields.Json(
+        string="Facts Provenance",
+        help="Per-field {source, ref, at} record of each auto-fill/draft write, e.g. "
+        '{"grove_soil": {"source": "perenual", "ref": "1234", "at": "2026-09-21T..."}}. '
+        "Writing this (an enrichment/agent write) clears the Facts Reviewed sign-off.",
+    )
+    grove_usda_symbol = fields.Char(string="USDA PLANTS Symbol", help='Resolved PLANTS symbol, e.g. "DIVI5"; editable.')
+    grove_perenual_id = fields.Integer(string="Perenual Species Id", help="Resolved Perenual species id; editable.")
+    grove_facts_reviewed = fields.Boolean(
+        string="Facts reviewed for storefront",
+        default=False,
+        tracking=True,
+        help="Tick once the growing facts have been reviewed for the storefront. "
+        "Cleared automatically by any enrichment or agent write to a fact.",
+    )
+    grove_gate_exempt = fields.Boolean(
+        string="Exempt from listing-content gate",
+        default=False,
+        tracking=True,
+        help="Bundles, gift cards and supplies are not plant listings — tick to "
+        "let them publish without the growing-facts / description / guide gate.",
+    )
+    grove_draft_state = fields.Selection(
+        [("none", "None"), ("requested", "Draft requested"), ("drafted", "Draft ready")],
+        string="Content Draft State",
+        default="none",
+        help="Tracks the Paperclip content-drafter workflow (GOL-2384/C).",
+    )
+    grove_listing_complete = fields.Boolean(
+        string="Listing complete",
+        compute="_compute_grove_listing_status",
+        store=True,
+        help="True when every required fact, the storefront description, the "
+        "approved care guide and the Facts Reviewed sign-off are present.",
+    )
+    grove_listing_missing = fields.Char(
+        string="Missing for storefront",
+        compute="_compute_grove_listing_status",
+        help="Human-readable list of the items still needed before this plant can "
+        "be published; empty when the listing is complete.",
+    )
+
+    @api.depends(
+        "grove_botanical_name",
+        "grove_zone_min",
+        "grove_zone_max",
+        "grove_layer",
+        "grove_sun",
+        "grove_mature_size",
+        "grove_mature_spread",
+        "grove_spacing",
+        "grove_soil",
+        "grove_pollination",
+        "grove_years_to_fruit",
+        "grove_chill_hours",
+        "description_ecommerce",
+        "website_description",
+        "grove_guide_ready",
+        "grove_facts_reviewed",
+    )
+    def _compute_grove_listing_status(self):
+        for record in self:
+            missing = record._grove_missing_items()
+            record.grove_listing_missing = ", ".join(missing)
+            record.grove_listing_complete = not missing
+
+    def _grove_missing_items(self):
+        """Ordered list of human labels for every unmet completeness requirement.
+
+        Empty means the listing is complete. Order follows the spec so the banner
+        reads facts first, then description, care guide, facts reviewed.
+        """
+        self.ensure_one()
+        missing = []
+        for name, kind in _GROVE_REQUIRED_FACTS:
+            value = self[name]
+            if kind == "int":
+                is_set = bool(value) and value > 0
+            else:
+                is_set = bool(str(value or "").strip())
+            if not is_set:
+                missing.append(self._fields[name].string)
+        if _html_is_blank(self.description_ecommerce):
+            missing.append(_GROVE_LABEL_DESCRIPTION)
+        if _html_is_blank(self.website_description) or not self.grove_guide_ready:
+            missing.append(_GROVE_LABEL_GUIDE)
+        if not self.grove_facts_reviewed:
+            missing.append(_GROVE_LABEL_REVIEWED)
+        return missing
+
+    # ── Publish gate (GOL-2382) ─────────────────────────────────────────
+    def _grove_is_gated(self):
+        """True when this template must pass the listing-content gate to publish.
+
+        Gated == a consumable plant: type 'consu', not exempt, and categorised
+        under the Plants root from data/grove_product_categories.xml. Services,
+        supplies, bundles (exempt) and anything outside the Plants tree publish
+        freely.
+        """
+        self.ensure_one()
+        if self.grove_gate_exempt or self.type != "consu":
+            return False
+        plants_root = self.env.ref("grove_headless.categ_plants", raise_if_not_found=False)
+        categ = self.categ_id
+        if not plants_root or not categ:
+            return False
+        # parent_path is the materialised root→node id path (e.g. "1/7/"); a
+        # descendant's path is prefixed by its ancestor's, and the root's own
+        # path is a prefix of itself, so this covers "under Plants, inclusive".
+        return bool(
+            categ.parent_path and plants_root.parent_path and categ.parent_path.startswith(plants_root.parent_path)
+        )
+
+    def _grove_check_publish_gate(self):
+        """Raise UserError if a gated template is being published while incomplete.
+
+        Called only for records that just transitioned website_published False →
+        True, so an already-published incomplete product keeps selling and can be
+        edited field by field (the nightly audit, GOL-2385/D, chases it instead).
+        """
+        self.ensure_one()
+        if not self.website_published or not self._grove_is_gated():
+            return
+        missing = self._grove_missing_items()
+        if missing:
+            raise UserError(
+                _(
+                    "Cannot publish %(name)s: missing %(items)s",
+                    name=self.display_name,
+                    items=", ".join(missing),
+                )
+            )
 
     # ── Product-photo resolution guardrail (GOL-837) ────────────────────
     # The storefront can't add resolution a source lacks, so we surface the

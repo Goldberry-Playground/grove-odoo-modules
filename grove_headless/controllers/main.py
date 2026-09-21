@@ -354,7 +354,12 @@ def _serialize_product(product, fields):
 
 
 def _serialize_facts(product):
-    """Growing-facts block for the detail endpoint (catalog spec 2026-07-13)."""
+    """Growing-facts block for the detail endpoint.
+
+    Catalog spec 2026-07-13 (first 8) plus the listing-content-gate facts
+    (GOL-2382): chars normalise to "" when blank, selections to None so the
+    storefront can distinguish "not applicable" from an unset selection.
+    """
     return {
         "botanical_name": product.grove_botanical_name or "",
         "zone_min": product.grove_zone_min or None,
@@ -364,6 +369,16 @@ def _serialize_facts(product):
         "mature_size": product.grove_mature_size or "",
         "spacing": product.grove_spacing or "",
         "soil": product.grove_soil or "",
+        # Listing-content-gate facts (GOL-2382).
+        "growth_rate": product.grove_growth_rate or None,
+        "bloom_season": product.grove_bloom_season or "",
+        "harvest_season": product.grove_harvest_season or "",
+        "watering": product.grove_watering or None,
+        "wildlife": product.grove_wildlife or "",
+        "mature_spread": product.grove_mature_spread or "",
+        "chill_hours": product.grove_chill_hours or "",
+        "pollination": product.grove_pollination or "",
+        "years_to_fruit": product.grove_years_to_fruit or "",
     }
 
 
@@ -642,6 +657,11 @@ class GroveHeadlessAPI(http.Controller):
         template_rootstock = _template_rootstock(product)
         data["variants"] = [_structure_variant(v, template_rootstock) for v in _ordered_variants(product)]
         data["facts"] = _serialize_facts(product)
+        # Storefront marketing description now lives in description_ecommerce
+        # (GOL-2382); expose it as description_html (raw HTML — grove-sites
+        # sanitizes on render). description_sale stays in the payload above until
+        # the app has switched over.
+        data["description_html"] = product.description_ecommerce or None
         data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
         data["categories"] = [{"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids]
         data["images"] = _serialize_images(product)
