@@ -54,6 +54,18 @@ class SaleOrder(models.Model):
         copy=False,
     )
 
+    # Per-state bundle component substitution the warehouse MUST honour when
+    # packing (GOL-2237). Written at checkout by _stamp_bundle_substitution when
+    # a bundle (phantom-BOM kit) ships into a state that restricts one of its
+    # default components: the box must contain the compliant substitute, not the
+    # default part. Persisted here as the single source of truth and mirrored
+    # onto the delivery transfer (stock.picking.grove_substitution_note) so it
+    # prints on the delivery slip Josh packs from — otherwise the legal
+    # composition and the contents of the box diverge in the barn, where no CI or
+    # e2e check catches it. Empty on the overwhelming common case (no swap) and
+    # on every non-bundle order. Plain text, newline-joined across bundle lines.
+    grove_substitution_note = fields.Text(readonly=True, copy=False)
+
     # Stripe Checkout linkage (GOL-642). Written when a checkout session is
     # created; read by the webhook to reconcile session.completed/expired back
     # to this order. copy=False so a duplicated order never inherits a payment.
