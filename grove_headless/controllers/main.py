@@ -1236,6 +1236,98 @@ class GroveHeadlessAPI(http.Controller):
     # ── Stripe checkout ──────────────────────────────────────────────────
 
     @http.route(
+        "/grove/api/v1/checkout/quote",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def checkout_quote(self, **_kwargs):
+        """Pre-checkout charge preview (GOL-2233): does THIS cart take the flat
+        $10 reservation deposit today, or charge in full?
+
+        Body: ``{"items": [{"variant_id": 2, "quantity": 1}, ...],
+                 "fulfillment": "ship" | "pickup" | null}``.
+
+        Read-only — no partner, order, or Stripe session is created. Runs the
+        SAME predicate the checkout session charges by (``_deposit_reason_for_lines``,
+        on live free/shared-pool stock in this storefront's company), so the
+        storefront's cart and checkout-form summaries can show "$10 due today"
+        before the Stripe step without ever disagreeing with the charge. The
+        storefront BFF calls this server-side with its bearer key (same auth as
+        ``/orders``), so stock detail never reaches the public internet
+        unauthenticated.
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+
+        items = payload.get("items") or []
+        if not isinstance(items, list) or not items:
+            return _json_response({"error": "items must be a non-empty list"}, status=400)
+        parsed_items: list[tuple[int, float]] = []
+        for raw_item in items:
+            try:
+                # `.get("quantity", 1)`, never `or 1`: an explicit 0 is falsy, so
+                # `0 or 1` would coerce it to one unit and sail past the
+                # positivity guard below (Ada, review of #244). Defaulting only
+                # on an ABSENT key keeps "omitted means one" while letting an
+                # explicit 0 reach the guard; None/"" still raise and 400.
+                parsed_items.append((int(raw_item.get("variant_id")), float(raw_item.get("quantity", 1))))
+            except (AttributeError, TypeError, ValueError):
+                return _json_response({"error": "Each item needs numeric variant_id and quantity"}, status=400)
+        if any(qty <= 0 for _, qty in parsed_items):
+            return _json_response({"error": "Each item quantity must be positive"}, status=400)
+
+        fulfillment = payload.get("fulfillment")
+        if fulfillment not in (None, "ship", "pickup"):
+            return _json_response({"error": 'fulfillment must be "ship", "pickup" or null'}, status=400)
+
+        # Same tenant scoping + company context as _create_draft_order, so the
+        # quote reads exactly the stock the order lines would.
+        company = request.website.company_id
+        wanted_ids = {variant_id for variant_id, _ in parsed_items}
+        variants = (
+            request.env["product.product"]
+            .sudo()
+            .with_company(company)
+            .search([("id", "in", list(wanted_ids)), ("company_id", "in", [company.id, False])])
+        )
+        by_id = {v.id: v for v in variants}
+        missing = wanted_ids - set(by_id)
+        if missing:
+            return _json_response({"error": f"Product variant(s) not found: {sorted(missing)}"}, status=404)
+
+        lines = [(by_id[variant_id], qty) for variant_id, qty in parsed_items]
+        today = _date.today()
+        reason = _deposit_reason_for_lines(request.env, lines, fulfillment, today)
+        deposit_now = reason is not None
+        line_quotes = []
+        for product, qty in lines:
+            bareroot, sold_out, free = _line_sold_out(product, qty)
+            line_quotes.append(
+                {
+                    "variant_id": product.id,
+                    "quantity": qty,
+                    "bareroot": bareroot,
+                    "sold_out": sold_out,
+                    "free_qty": free,
+                }
+            )
+        return _json_response(
+            {
+                "deposit_now": deposit_now,
+                "deposit_reason": reason,
+                "deposit_amount": stripe_gateway.PREORDER_DEPOSIT,
+                "amount_due_today": stripe_gateway.PREORDER_DEPOSIT if deposit_now else None,
+                "after_cutover": _after_deposit_cutover(request.env, today),
+                "lines": line_quotes,
+            }
+        )
+
+    @http.route(
         "/grove/api/v1/checkout/session",
         type="http",
         auth="bearer",
@@ -2080,7 +2172,11 @@ def _create_draft_order(website, env, payload):
     parsed_items: list[tuple[int, float]] = []
     for raw_item in items:
         try:
-            parsed_items.append((int(raw_item.get("variant_id")), float(raw_item.get("quantity") or 1)))
+            # See the matching note in checkout_quote: `or 1` silently turned an
+            # explicit `quantity: 0` into a CHARGED line of one tree here, and it
+            # would also have split the quote from the charge. Default only when
+            # the key is absent so an explicit 0 hits the positivity guard.
+            parsed_items.append((int(raw_item.get("variant_id")), float(raw_item.get("quantity", 1))))
         except (TypeError, ValueError):
             order.unlink()
             return None, _json_response(
@@ -2484,41 +2580,68 @@ def _after_deposit_cutover(env, today):
     return (today.month, today.day) > _deposit_cutover_md(env)
 
 
-def _has_bareroot_line(order):
-    """True when ``order`` carries at least one real bareroot product line
-    (same line filter as ``_sold_out_bareroot``, without the stock check)."""
+def _deposit_lines(order):
+    """The ``(product, qty)`` pairs the deposit rule judges on ``order``: real
+    product lines only — no sections/notes, no loyalty reward lines, and never
+    the synthetic shipping product."""
+    pairs = []
     for line in order.order_line:
         if line.display_type or not line.product_id or line.reward_id:
             continue
         product = line.product_id
         if product.default_code == SHIPPING_PRODUCT_CODE:
             continue
-        if _bareroot_tier(product):
-            return True
-    return False
+        pairs.append((product, line.product_uom_qty))
+    return pairs
+
+
+def _line_sold_out(product, qty):
+    """Is this bareroot line short on free (shared-pool) stock? Free stock is the
+    shared pool (GOL-2031: bareroot draws on the potted pool). A shortfall
+    (``free < qty``), unknown, or negative free stock all count as sold out.
+    Returns ``(bareroot, sold_out, free)``; a potted line is never sold out for
+    the rule's purposes (potted is pickup-only and full-charge unless the
+    cutover fired)."""
+    if not _bareroot_tier(product):
+        return False, False, None
+    free = product.grove_shared_pool_qty("free_qty")
+    return True, (free is None or free < qty), free
+
+
+def _has_bareroot_line(order):
+    """True when ``order`` carries at least one real bareroot product line
+    (same line filter as ``_sold_out_bareroot``, without the stock check)."""
+    return any(_bareroot_tier(product) for product, _qty in _deposit_lines(order))
 
 
 def _sold_out_bareroot(order):
     """True when any bareroot line in ``order`` cannot be fully filled from free
     (shared-pool) stock — the "sold out of the tree" deposit trigger (GOL-2233).
+    Routes the WHOLE order to the flat deposit; see ``_line_sold_out``."""
+    return any(_line_sold_out(product, qty)[1] for product, qty in _deposit_lines(order))
 
-    Free stock is the shared pool (GOL-2031: bareroot draws on the potted pool).
-    A shortfall (``free < ordered qty``), unknown, or negative free stock all
-    count as sold out and route the WHOLE order to the flat deposit. Potted lines
-    never trigger this — potted is pickup-only and full-charge unless the cutover
-    fired."""
-    for line in order.order_line:
-        if line.display_type or not line.product_id or line.reward_id:
-            continue
-        product = line.product_id
-        if product.default_code == SHIPPING_PRODUCT_CODE:
-            continue
-        if not _bareroot_tier(product):
-            continue
-        free = product.grove_shared_pool_qty("free_qty")
-        if free is None or free < line.product_uom_qty:
-            return True
-    return False
+
+def _deposit_reason_for_lines(env, lines, fulfillment, today):
+    """The GOL-2233 rule over bare ``(product, qty)`` pairs, independent of any
+    sale.order — the single predicate behind ``_order_takes_deposit`` (the
+    checkout session) and ``/checkout/quote`` (the pre-checkout preview), so
+    the two can never disagree.
+
+    Returns ``"sold-out"`` (a bareroot line short on free stock — any
+    fulfillment, any date), ``"off-season"`` (after the season cutover on a
+    shipped order carrying bareroot; unset fulfillment counts as ship), or
+    ``None`` (charged in full today). Sold-out is checked first so the stated
+    reason matches the trigger a shopper can act on."""
+    judged = [_line_sold_out(product, qty) for product, qty in lines]
+    if any(sold_out for _bareroot, sold_out, _free in judged):
+        return "sold-out"
+    if not _after_deposit_cutover(env, today):
+        return None
+    if fulfillment == "pickup":
+        return None
+    if any(bareroot for bareroot, _sold_out, _free in judged):
+        return "off-season"
+    return None
 
 
 def _order_takes_deposit(order, today=None):
@@ -2542,13 +2665,7 @@ def _order_takes_deposit(order, today=None):
     tree onto the deposit path."""
     if today is None:
         today = _date.today()
-    if _sold_out_bareroot(order):
-        return True
-    if not _after_deposit_cutover(order.env, today):
-        return False
-    if order.grove_fulfillment == "pickup":
-        return False
-    return _has_bareroot_line(order)
+    return _deposit_reason_for_lines(order.env, _deposit_lines(order), order.grove_fulfillment, today) is not None
 
 
 def _cart_has_preorder(env, order, payload=None, today=None):
