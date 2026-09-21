@@ -1,0 +1,22 @@
+{
+  "Food": [
+    {
+      "Source": "Yarrow",
+      "LargeMammals": "Low",
+      "SmallMammals": "Low",
+      "WaterBirds": "",
+      "TerrestrialBirds": "Low"
+    }
+  ],
+  "Cover": [],
+  "Sources": [
+    {
+      "AuthorName": "Yarrow, G.K., and D.T. Yarrow",
+      "PublisherName": "Sweet Water Press",
+      "PublicationPlace": "Birmingham",
+      "Title": "Managing wildlife",
+      "PublicationYear": 1999,
+      "PublicationURL": ""
+    }
+  ]
+}

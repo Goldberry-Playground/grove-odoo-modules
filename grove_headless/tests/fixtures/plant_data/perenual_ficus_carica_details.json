@@ -1,0 +1,40 @@
+{
+  "id": 3,
+  "common_name": "fig",
+  "scientific_name": [
+    "Ficus carica"
+  ],
+  "family": "Moraceae",
+  "hardiness": {
+    "min": "7",
+    "max": "10"
+  },
+  "hardiness_location": {
+    "full_url": "https://perenual.com/api/hardiness-map?species_id=3"
+  },
+  "watering": "Average",
+  "sunlight": [
+    "full sun"
+  ],
+  "growth_rate": "High",
+  "soil": [
+    "loamy",
+    "sandy"
+  ],
+  "flowering_season": "",
+  "harvest_season": "Summer",
+  "attracts": [
+    "bees",
+    "birds"
+  ],
+  "dimensions": [
+    {
+      "type": "Height",
+      "min_value": 10,
+      "max_value": 30,
+      "unit": "feet"
+    }
+  ],
+  "cycle": "Perennial",
+  "edible_fruit": true
+}
