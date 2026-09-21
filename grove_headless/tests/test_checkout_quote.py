@@ -220,7 +220,7 @@ class TestCheckoutQuoteEndpoint(_PoolFixture, GroveTaxFixtureMixin, HttpCase):
     def test_validation_and_unknown_variant(self):
         self.assertEqual(self._post({"items": []}).status_code, 400)
         self.assertEqual(self._post({"items": [{"variant_id": "x", "quantity": 1}]}).status_code, 400)
-        self.assertEqual(self._post({"items": [{"variant_id": self.bareroot.id, "quantity": 0}]}).status_code, 400)
+        self.assertEqual(self._post({"items": [{"variant_id": self.bareroot.id, "quantity": -1}]}).status_code, 400)
         self.assertEqual(
             self._post(
                 {"items": [{"variant_id": self.bareroot.id, "quantity": 1}], "fulfillment": "teleport"}
@@ -228,6 +228,22 @@ class TestCheckoutQuoteEndpoint(_PoolFixture, GroveTaxFixtureMixin, HttpCase):
             400,
         )
         self.assertEqual(self._post({"items": [{"variant_id": 99999999, "quantity": 1}]}).status_code, 404)
+
+    def test_zero_quantity_coerces_to_one_like_the_order_path(self):
+        """An explicit ``quantity: 0`` is read as 1, NOT rejected.
+
+        Both this route and ``_create_draft_order`` parse quantity as
+        ``float(raw.get("quantity") or 1)``, and ``0 or 1`` is 1 in Python. The
+        coercion is deliberately kept identical: the quote must describe the
+        cart the checkout session would actually build, so rejecting here while
+        the session happily charges a line of 1 would be exactly the
+        preview-vs-charge divergence this endpoint exists to prevent. The
+        storefront never sends 0 (the cart floors at 1); only a negative
+        quantity is a real client error, and that still 400s above.
+        """
+        resp = self._post({"items": [{"variant_id": self.bareroot.id, "quantity": 0}]})
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json()["lines"][0]["quantity"], 1.0)
 
     def test_requires_bearer_auth(self):
         resp = self._post({"items": [{"variant_id": self.bareroot.id, "quantity": 1}]}, authed=False)
