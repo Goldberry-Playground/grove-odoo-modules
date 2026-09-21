@@ -65,6 +65,7 @@
         "views/potting_batch_views.xml",
         "views/grove_publish_event_views.xml",
         "views/fulfillment_views.xml",
+        "views/label_batch_views.xml",
         "data/shipping_actions.xml",
         "data/settlement_cron.xml",
         "data/order_rollup_cron.xml",

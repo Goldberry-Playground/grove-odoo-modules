@@ -488,6 +488,36 @@ def box_rate(state: str, box_id: str) -> float | None:
     return round(float(rule.get("base", 0.0)), 2)
 
 
+def box_service_title(state: str, box_id: str) -> str:
+    """Human carrier/service label for one `box_id` to `state` (e.g. ``UPS
+    Ground``), or ``""`` when unknown.
+
+    This is the ``Service`` column the Pirate Ship label batch prints for the
+    buyer (informational — the runner asserts the quoted service matches it).
+    Sub-project A bumps ``shipping_rates.json`` to schema 3, adding a
+    ``service_title`` (and ``carrier``/``service``) to every cell; this helper
+    reads it when present. Before A lands the cells are schema-2 (``base`` only),
+    so we fall back to deriving a title from ``carrier``/``service`` if those
+    keys exist, else return ``""``. The runtime never depends on a non-empty
+    value, so B works with either schema and picks up real titles the moment A
+    merges. None-of-the-above (no rate for this zone/box) also returns ``""``.
+    """
+    zone = zone_for_state(state)
+    if not zone:
+        return ""
+    rule = (ZONE_RATES.get(zone) or {}).get(box_id)
+    if not rule:
+        return ""
+    title = rule.get("service_title")
+    if title:
+        return str(title)
+    carrier = rule.get("carrier")
+    service = rule.get("service")
+    if carrier and service:
+        return f"{carrier} {service}"
+    return ""
+
+
 def single_tree_rate(
     state: str, length_class: int = shipping_boxes.DEFAULT_LENGTH, mode: str = "leafed"
 ) -> float | None:

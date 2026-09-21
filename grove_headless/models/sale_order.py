@@ -26,6 +26,12 @@ class SaleOrder(models.Model):
     # these to audit the live label cost against the quoted rate table.
     grove_shipping_carriers = fields.Text(readonly=True, copy=False)
     grove_shipping_services = fields.Text(readonly=True, copy=False)
+    # The open/exported Pirate Ship label batch this order was rolled into
+    # (GOL-2271). Set when the batch CSV is built; the round-trip tracking import
+    # matches an order's rows back to it. Cleared to nothing on a cancelled batch.
+    grove_label_batch_id = fields.Many2one(
+        "grove.label.batch", readonly=True, copy=False, index=True, ondelete="set null"
+    )
 
     # Carrier-tracking poll bookkeeping (GOL-2272, Pirate Ship C). Set when the
     # label milestone lands (see _grove_advance_state) so the 2-hourly poll can
@@ -317,119 +323,134 @@ class SaleOrder(models.Model):
         with self.env.registry.cursor() as cr:
             self.with_env(self.env(cr=cr)).write(vals)
 
+    def _grove_pack_for_label(self):
+        """Carrier-neutral shipment plan for ONE order: ``(address, plan, mode)``.
+
+        The eligibility gate (preorder wave still closed → skip those lines;
+        dormancy window; unpriceable destination; non-integer qty) plus the Box
+        Engine v2 packing that used to live inline in ``action_buy_shipping_labels``
+        (Shippo), factored out so the Pirate Ship label batch (GOL-2271) and the
+        legacy Shippo buy plan the SAME boxes at the SAME weights — the boxes
+        bought are always the boxes the order was charged for. Raises ``UserError``
+        with a human reason when the order cannot ship a label yet; the batch
+        builder catches that to SKIP the order, the Shippo action re-raises it to
+        the operator. ``address`` is Shippo-shaped (``street1``/``street2``/``zip``)
+        because ``build_shipment_payload`` consumes it verbatim; the batch CSV
+        builder maps those keys to its own column names."""
+        self.ensure_one()
+        # Preorder lines owe no label UNTIL their ship wave opens.
+        # grove_preorder_variant_ids is the permanent order-time record of
+        # which variants were charged as a deposit — it is never cleared, so
+        # skipping on it unconditionally would strand a preorder forever (it
+        # could never ship). action_grove_assign_wave (-> wave_assigned) is
+        # the signal the wave has opened and those lines rejoin the ship path
+        # (label_purchased is a legal move from wave_assigned). So exclude
+        # preorder lines only while the wave is still closed; once it is open
+        # they pack.
+        skip_preorder_ids = (
+            set() if self.grove_fulfillment_stage == "wave_assigned" else self._preorder_variant_id_set()
+        )
+        partner = self.partner_shipping_id
+        address = {
+            "name": partner.name,
+            "street1": partner.street or "",
+            "street2": partner.street2 or "",
+            "city": partner.city or "",
+            "state": partner.state_id.code or "",
+            "zip": partner.zip or "",
+            "country": "US",
+            "email": partner.email or "",
+            # USPS Ground Advantage wants a recipient contact too; pass the
+            # partner's phone so a USPS label isn't left thin on delivery-contact
+            # info (GOL-1906). NB: res.partner has no `mobile` field in Odoo 19
+            # (removed in 18.0), so referencing it AttributeErrors on any
+            # phone-less partner — `phone` only.
+            "phone": partner.phone or "",
+        }
+
+        # Validate all lines and pack BEFORE the caller buys/exports anything, so
+        # a bad quantity on line N never causes a partial batch on one order.
+        items: list[tuple[str, int, float]] = []  # (tier, length_class, qty)
+        for line in self.order_line:
+            if line.display_type or not line.product_id:
+                continue
+            tmpl = line.product_id.product_tmpl_id
+            if tmpl.type == "service":  # skip the shipping-charge line itself
+                continue
+            if line.product_id.id in skip_preorder_ids:
+                # Pre-wave preorder line: consumes preorder_cap, not on-hand,
+                # and owes no label yet (GOL-1982 / GOL-1933) — never pack it,
+                # even on a bareroot (shippable-tier) variant. The label is
+                # bought later, when the wave opens and the balance is charged
+                # (at which point skip_preorder_ids is empty and it packs).
+                continue
+            tier = line.product_id.grove_effective_shipping_tier or "potted"
+            qty = line.product_uom_qty
+            if qty != int(qty):
+                raise UserError(
+                    f"{self.name}: line '{line.product_id.display_name}' has "
+                    f"non-integer quantity {qty}; trees pack per whole unit."
+                )
+            items.append((tier, int(tmpl.grove_tree_length or "20"), qty))
+        if not items:
+            # Nothing shippable remains — the order is all-preorder with its
+            # wave still closed (or has no real product lines). No on-hand pool
+            # is decremented and no label is owed; refuse rather than silently
+            # "succeed" with zero labels. Once the wave opens (wave_assigned) the
+            # preorder lines pack and this branch is not reached.
+            raise UserError(
+                f"{self.name}: no shippable lines — all preorder (wave not open) or pickup, no label is owed."
+            )
+        reason = unshippable_reason(items)
+        if reason:
+            raise UserError(f"{self.name}: {reason}")
+        today = fields.Date.context_today(self)
+        # Dormancy window is Odoo-editable (GOL-1906, Josh 2026-09-07) — read it
+        # from config here and inject, so the label gate tracks the same dates
+        # the storefront quotes. A malformed param raises out of
+        # `dormancy_window`, failing closed rather than shipping an
+        # underpriced/heavier-than-quoted label off a bad window.
+        window = dormancy_window(self.env)
+        # Seasonal gate (GOL-1906): bareroot ships ONLY in the nursery dormancy
+        # window. `unshippable_reason` above already cleared any pickup-only
+        # (potted) line, so every remaining line here is bareroot — a label
+        # outside the window would be a leafed bareroot parcel, impossible by
+        # policy. Fail CLOSED: such an order is a preorder that ships in the next
+        # dormant wave (the deposit path routed it there at checkout).
+        if not can_ship_bareroot(today, window):
+            raise UserError(
+                f"{self.name}: bareroot shipping labels can only be bought inside "
+                "the nursery dormancy window. This order is a preorder and ships in "
+                "the next dormant wave — assign it to that wave and buy the label then."
+            )
+        mode = packing_mode(today, window)
+        plan = pack_for_state(address["state"], items, mode)
+        if plan is None:
+            raise UserError(
+                f"{self.name}: cannot plan boxes for '{address['state']}' — "
+                "destination or a line is outside the configured rate table."
+            )
+        return address, plan, mode
+
     def action_buy_shipping_labels(self):
         """Buy one least-cost ground label per PACKED BOX via Shippo (Box Engine
         v2: the same packer that priced the order plans the labels, so the boxes
         bought are the boxes charged). Each box races UPS Ground vs USPS Ground
         Advantage and buys the cheaper, transit-guarded (GOL-1906); the carrier
         that won is persisted per box. Idempotent-ish: refuses to run twice on
-        an order that already has tracking numbers."""
+        an order that already has tracking numbers.
+
+        NB (GOL-2271): the Pirate Ship batch flow supersedes this Shippo buy path
+        as the label channel; this action + ``SHIPPO_API_KEY`` are removed when
+        sub-project C retires Shippo entirely (spec §C). Kept meanwhile so the
+        tested Shippo path stays live during the transition."""
         api_key = os.environ.get("SHIPPO_API_KEY", "")
         if not api_key:
             raise UserError("SHIPPO_API_KEY is not configured on this server.")
         for order in self:
             if order.grove_tracking_numbers:
                 raise UserError(f"{order.name} already has labels; clear fields to re-buy.")
-            # Preorder lines owe no label UNTIL their ship wave opens.
-            # grove_preorder_variant_ids is the permanent order-time record of
-            # which variants were charged as a deposit — it is never cleared, so
-            # skipping on it unconditionally would strand a preorder forever (it
-            # could never ship). action_grove_assign_wave (-> wave_assigned) is
-            # the signal the wave has opened and those lines rejoin the ship path
-            # (label_purchased is a legal move from wave_assigned; see the
-            # lifecycle comment above, and GOL-2053 settles the deferred balance
-            # at the end of THIS method). So exclude preorder lines only while the
-            # wave is still closed; once it is open, this method IS the preorder
-            # ship + settle path and must pack them.
-            skip_preorder_ids = (
-                set() if order.grove_fulfillment_stage == "wave_assigned" else order._preorder_variant_id_set()
-            )
-            partner = order.partner_shipping_id
-            address = {
-                "name": partner.name,
-                "street1": partner.street or "",
-                "street2": partner.street2 or "",
-                "city": partner.city or "",
-                "state": partner.state_id.code or "",
-                "zip": partner.zip or "",
-                "country": "US",
-                "email": partner.email or "",
-                # USPS Ground Advantage wants a recipient contact too; pass the
-                # partner's phone so a USPS label isn't left thin on
-                # delivery-contact info (GOL-1906). NB: res.partner has no
-                # `mobile` field in Odoo 19 (removed in 18.0), so referencing it
-                # AttributeErrors on any phone-less partner — `phone` only.
-                "phone": partner.phone or "",
-            }
-
-            # ── Pass 1: validate all lines and pack BEFORE buying anything ─
-            # Build the purchase plan up front so a bad quantity on line N
-            # never causes a partial purchase on a single order.
-            items: list[tuple[str, int, float]] = []  # (tier, length_class, qty)
-            for line in order.order_line:
-                if line.display_type or not line.product_id:
-                    continue
-                tmpl = line.product_id.product_tmpl_id
-                if tmpl.type == "service":  # skip the shipping-charge line itself
-                    continue
-                if line.product_id.id in skip_preorder_ids:
-                    # Pre-wave preorder line: consumes preorder_cap, not on-hand,
-                    # and owes no label yet (GOL-1982 / GOL-1933) — never pack it,
-                    # even on a bareroot (shippable-tier) variant. The label is
-                    # bought later, when the wave opens and the balance is charged
-                    # (at which point skip_preorder_ids is empty and it packs).
-                    continue
-                tier = line.product_id.grove_effective_shipping_tier or "potted"
-                qty = line.product_uom_qty
-                if qty != int(qty):
-                    raise UserError(
-                        f"{order.name}: line '{line.product_id.display_name}' has "
-                        f"non-integer quantity {qty}; trees pack per whole unit."
-                    )
-                items.append((tier, int(tmpl.grove_tree_length or "20"), qty))
-            if not items:
-                # Nothing shippable remains — the order is all-preorder with its
-                # wave still closed (or has no real product lines). No on-hand pool
-                # is decremented and no label is owed; refuse rather than silently
-                # "succeed" with zero labels (which would falsely flip
-                # grove_delivery_status). Once the wave opens (wave_assigned) the
-                # preorder lines pack and this branch is not reached.
-                raise UserError(
-                    f"{order.name}: no shippable lines — all preorder (wave not open) or pickup, no label is owed."
-                )
-            reason = unshippable_reason(items)
-            if reason:
-                raise UserError(f"{order.name}: {reason}")
-            today = fields.Date.context_today(order)
-            # Dormancy window is Odoo-editable (GOL-1906, Josh 2026-09-07) — read
-            # it from config here and inject, so the label gate tracks the same
-            # dates the storefront quotes. A malformed param raises out of
-            # `dormancy_window`, failing the purchase closed rather than buying an
-            # underpriced label off a bad window.
-            window = dormancy_window(order.env)
-            # Seasonal gate (GOL-1906, Josh 2026-09-07): bareroot ships ONLY in
-            # the nursery dormancy window. `unshippable_reason` above already
-            # cleared any pickup-only (potted) line, so every remaining line here
-            # is bareroot — the parcel about to be built (`build_shipment_payload`
-            # at the declared `mode`) would be a leafed bareroot label outside the
-            # window, which is impossible by policy. Fail CLOSED with a loud error
-            # rather than buy a heavier-than-quoted label: such an order is a
-            # preorder that ships in the next dormant wave (the deposit path routed
-            # it there at checkout), so a leafed-season label attempt is an
-            # operator/timing error, not a valid purchase.
-            if not can_ship_bareroot(today, window):
-                raise UserError(
-                    f"{order.name}: bareroot shipping labels can only be bought inside "
-                    "the nursery dormancy window. This order is a preorder and ships in "
-                    "the next dormant wave — assign it to that wave and buy the label then."
-                )
-            mode = packing_mode(today, window)
-            plan = pack_for_state(address["state"], items, mode)
-            if plan is None:
-                raise UserError(
-                    f"{order.name}: cannot plan boxes for '{address['state']}' — "
-                    "destination or a line is outside the configured rate table."
-                )
+            address, plan, mode = order._grove_pack_for_label()
             purchase_plan: list[tuple[dict, str]] = []  # (payload, box_id) per box
             for pb in plan:
                 purchase_plan.append(

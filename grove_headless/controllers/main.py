@@ -16,6 +16,7 @@ from odoo.http import Response, request
 from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME
 from ..models import bundle_substitution, stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
+from ..models.label_batch import LabelBatchError
 from ..models.mail_from import mail_from_vals
 from ..models.newsletter import newsletter_tag_names
 from ..models.order_alerts import (
@@ -1131,6 +1132,104 @@ class GroveHeadlessAPI(http.Controller):
                 "settlement": result["settlement"],
                 "tracking_numbers": tracking.split("\n") if tracking else [],
                 "carriers": carriers.split("\n") if carriers else [],
+            }
+        )
+
+    # ── Pirate Ship label batch (GOL-2271) ────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/labels/config",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["GET"],
+        csrf=False,
+    )
+    def labels_config(self, **_kwargs):
+        """Runner-facing switches. Exposes ``grove_headless.pirateship_autobuy``
+        (seed "0" = review-only) so the grove-shipper runner knows whether a
+        scheduled run may buy without ``--buy``. Bearer-auth'd like the other
+        operator routes; no Pirate Ship credentials ever transit Odoo."""
+        autobuy = request.env["ir.config_parameter"].sudo().get_param("grove_headless.pirateship_autobuy", "0")
+        return _json_response({"pirateship_autobuy": str(autobuy).strip() in ("1", "true", "True")})
+
+    @http.route(
+        "/grove/api/v1/labels/batch",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def labels_batch_build(self, **_kwargs):
+        """Build (or return) the open Pirate Ship label batch for this company.
+
+        Idempotent (spec §B1): repeated calls return the SAME open/exported
+        batch with freshly rebuilt rows — one row per packed box across every
+        eligible order (paid ship order awaiting a label, or a preorder whose
+        wave has opened; never pickup, never already-tracked). Returns the batch
+        id/name, the CSV download url, the row count and the expected total so
+        the runner (and the manual path) can price-check before buying.
+
+        200 with ``{rows: 0}`` when nothing is eligible — the runner exits
+        "nothing to ship" rather than uploading an empty spreadsheet."""
+        company = request.website.company_id
+        batch = request.env["grove.label.batch"].sudo().build_open_batch(company)
+        csv_name = batch.csv_export_filename or f"{batch.name}.csv"
+        return _json_response(
+            {
+                "batch_id": batch.id,
+                "name": batch.name,
+                "state": batch.state,
+                "rows": batch.row_count,
+                "expected_total": round(batch.expected_total, 2),
+                "csv_url": f"/web/content/grove.label.batch/{batch.id}/csv_export/{csv_name}?download=true",
+            }
+        )
+
+    @http.route(
+        "/grove/api/v1/labels/batch/<int:batch_id>/tracking",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def labels_batch_tracking(self, batch_id, **_kwargs):
+        """Reconcile a batch from Pirate Ship's *Export Tracking Data* CSV.
+
+        Multipart upload (``file=`` the tracking CSV). All-or-nothing: every row
+        is validated before any order is written, and an order is advanced to
+        ``label_purchased`` (firing the existing tracking email) only when all of
+        its batch rows matched. Any validation failure returns **400** with the
+        offending refs and writes nothing. Idempotent re-import: an order already
+        tracked is skipped, never re-written. A batch from another tenant is 404.
+        """
+        company = request.website.company_id
+        batch = (
+            request.env["grove.label.batch"]
+            .sudo()
+            .search([("id", "=", batch_id), ("company_id", "=", company.id)], limit=1)
+        )
+        if not batch:
+            return _json_response({"error": "Batch not found"}, status=404)
+        upload = request.httprequest.files.get("file")
+        if upload is None:
+            return _json_response({"error": "Missing tracking CSV (multipart 'file')"}, status=400)
+        raw = upload.read()
+        try:
+            result = batch.import_tracking(raw, filename=upload.filename or "tracking.csv")
+        except LabelBatchError as exc:
+            return _json_response({"error": str(exc), "refs": exc.refs}, status=400)
+        return _json_response(
+            {
+                "batch_id": batch.id,
+                "name": batch.name,
+                "state": batch.state,
+                "orders_advanced": result["orders_advanced"],
+                "skipped_already_tracked": result["skipped_already_tracked"],
+                "total": result["total"],
+                "manual_review": result.get("manual_review", []),
             }
         )
 

@@ -1,0 +1,138 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+
+    <!-- Pirate Ship label batch (GOL-2271). The manual path: build a batch,
+         Export the CSV, upload/buy in Pirate Ship, then Import the tracking
+         CSV — the same files the grove-shipper runner drives. -->
+
+    <record id="view_grove_label_batch_list" model="ir.ui.view">
+        <field name="name">grove.label.batch.list</field>
+        <field name="model">grove.label.batch</field>
+        <field name="arch" type="xml">
+            <list decoration-muted="state == 'cancelled'" decoration-success="state == 'purchased'">
+                <field name="name" />
+                <field name="state" widget="badge"
+                       decoration-info="state == 'exported'"
+                       decoration-success="state == 'purchased'" />
+                <field name="row_count" />
+                <field name="expected_total" widget="monetary" />
+                <field name="purchased_total" widget="monetary" />
+                <field name="purchased_at" />
+                <field name="currency_id" column_invisible="1" />
+            </list>
+        </field>
+    </record>
+
+    <!-- Import wizard — defined before the batch form view because that form's
+         header button references %(action_grove_label_batch_import)d, which
+         Odoo resolves at parse time (the action must already exist). -->
+    <record id="view_grove_label_batch_import_form" model="ir.ui.view">
+        <field name="name">grove.label.batch.import.form</field>
+        <field name="model">grove.label.batch.import</field>
+        <field name="arch" type="xml">
+            <form string="Import Pirate Ship tracking">
+                <group>
+                    <field name="batch_id" readonly="1" />
+                    <field name="data" filename="filename"
+                           string="Export Tracking Data CSV" />
+                    <field name="filename" invisible="1" />
+                </group>
+                <footer>
+                    <button name="action_import" type="object" string="Import"
+                            class="btn-primary" />
+                    <button string="Cancel" class="btn-secondary" special="cancel" />
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_grove_label_batch_import" model="ir.actions.act_window">
+        <field name="name">Import Pirate Ship tracking</field>
+        <field name="res_model">grove.label.batch.import</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+    <record id="view_grove_label_batch_form" model="ir.ui.view">
+        <field name="name">grove.label.batch.form</field>
+        <field name="model">grove.label.batch</field>
+        <field name="arch" type="xml">
+            <form>
+                <header>
+                    <button name="action_export_csv" type="object" string="Export Pirate Ship batch"
+                            class="btn-primary" invisible="state not in ('open', 'exported')" />
+                    <button name="%(action_grove_label_batch_import)d" type="action"
+                            string="Import Pirate Ship tracking"
+                            invisible="state == 'cancelled'" context="{'active_id': id}" />
+                    <button name="action_cancel" type="object" string="Cancel batch"
+                            confirm="Release these orders back to the label pool?"
+                            invisible="state in ('purchased', 'cancelled')" />
+                    <field name="state" widget="statusbar"
+                           statusbar_visible="open,exported,purchased" />
+                </header>
+                <sheet>
+                    <div class="oe_title">
+                        <h1><field name="name" readonly="1" /></h1>
+                    </div>
+                    <group>
+                        <group>
+                            <field name="company_id" groups="base.group_multi_company" />
+                            <field name="row_count" />
+                            <field name="expected_total" widget="monetary" />
+                            <field name="currency_id" invisible="1" />
+                        </group>
+                        <group>
+                            <field name="purchased_total" widget="monetary" />
+                            <field name="purchased_at" />
+                            <field name="csv_export" filename="csv_export_filename" />
+                            <field name="csv_export_filename" invisible="1" />
+                            <field name="tracking_import" filename="tracking_import_filename" />
+                            <field name="tracking_import_filename" invisible="1" />
+                        </group>
+                    </group>
+                    <notebook>
+                        <page string="Rows">
+                            <field name="line_ids" readonly="1">
+                                <list>
+                                    <field name="grove_ref" />
+                                    <field name="order_id" />
+                                    <field name="box_id" />
+                                    <field name="weight_lb" />
+                                    <field name="service" />
+                                    <field name="committed_rate" />
+                                    <field name="tracking_number" />
+                                    <field name="carrier_token" />
+                                    <field name="service_token" optional="hide" />
+                                    <field name="actual_cost" />
+                                </list>
+                            </field>
+                        </page>
+                        <page string="Notes" invisible="not notes">
+                            <field name="notes" readonly="1" />
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_grove_label_batch" model="ir.actions.act_window">
+        <field name="name">Pirate Ship Label Batches</field>
+        <field name="res_model">grove.label.batch</field>
+        <field name="view_mode">list,form</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No label batches yet</p>
+            <p>Build a batch from the orders awaiting a label, export the CSV to
+               Pirate Ship, buy the labels, then import the tracking CSV back.</p>
+        </field>
+    </record>
+
+    <menuitem
+        id="menu_grove_label_batch"
+        name="Pirate Ship Labels"
+        parent="sale.sale_menu_root"
+        action="action_grove_label_batch"
+        sequence="90"
+    />
+
+</odoo>

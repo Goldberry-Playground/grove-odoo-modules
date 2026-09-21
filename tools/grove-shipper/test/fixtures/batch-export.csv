@@ -1,0 +1,4 @@
+Grove Ref,Order,Name,Email,Phone,Address 1,Address 2,City,State,Zip,Country,Weight (lb),Length,Width,Height,Service,Committed Rate,Rubber Stamp 1
+S00021/1,S00021,Jane Grower,jane@example.com,3045551212,12 Oak Ln,,Charleston,WV,25301,US,8.0,18,14,10,USPS Ground Advantage,14.20,S00021
+S00021/2,S00021,Jane Grower,jane@example.com,3045551212,12 Oak Ln,,Charleston,WV,25301,US,12.5,24,18,12,UPS Ground,21.75,S00021
+S00034/1,S00034,"Bob ""Big"" Vance",bob@example.com,,900 Pine St,Apt 5,Nashville,TN,37201,US,6.0,16,12,8,USPS Ground Advantage,16.40,S00034
