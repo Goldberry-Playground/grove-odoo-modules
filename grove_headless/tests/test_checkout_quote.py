@@ -159,7 +159,7 @@ class TestDepositReasonForLines(_PoolFixture, GroveTaxFixtureMixin, TransactionC
 
 
 @tagged("grove_headless", "post_install", "-at_install")
-class TestCheckoutQuoteEndpoint(_PoolFixture, HttpCase):
+class TestCheckoutQuoteEndpoint(_PoolFixture, GroveTaxFixtureMixin, HttpCase):
     def setUp(self):
         super().setUp()
         self._build_pool()
