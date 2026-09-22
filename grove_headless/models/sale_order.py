@@ -42,6 +42,10 @@ class SaleOrder(models.Model):
     grove_label_purchased_at = fields.Datetime(readonly=True, copy=False)
     grove_carrier_poll_stopped = fields.Boolean(default=False, readonly=True, copy=False)
     grove_carrier_exception_noted = fields.Boolean(default=False, readonly=True, copy=False)
+    # Customer shipment notices already sent, one "<event>:<tracking set>" key
+    # per line (GOL-2429). The once-only ledger the carrier poll, Shippo webhook
+    # and operator button all check, so a re-delivered event never re-emails.
+    grove_shipment_notices_sent = fields.Text(readonly=True, copy=False)
 
     # Fulfilment intent resolved at draft creation (GOL-1057/GOL-1933). Persisted
     # so the post-purchase chain has an unambiguous source of truth instead of
@@ -620,8 +624,9 @@ class SaleOrder(models.Model):
         Orders in `label_purchased`/`shipped` with tracking, not yet delivered,
         not past the poll cap. For each: pick the per-box client from the stored
         carrier, map the carrier status, and apply the LEAST-advanced box status
-        through `_apply_delivery_status` (unchanged: same once-only guard and the
-        same shipped/out-for-delivery/delivered emails the Shippo webhook drove).
+        through `_apply_delivery_status`, which emails each shipped/out-for-
+        delivery/delivered notice once and advances the order to shipped then
+        the terminal delivered (GOL-2429).
         An exception status posts a silent Discord ops note (once per order); the
         30-day cap posts one note and drops the order from the poll. Per-call
         errors are logged and skipped; three consecutive auth failures for a
@@ -700,4 +705,6 @@ class SaleOrder(models.Model):
 
             new_status = carrier_tracking.least_advanced_status(statuses)
             if new_status:
-                _apply_delivery_status(order.env, order, new_status, order.grove_tracking_numbers or "")
+                _apply_delivery_status(
+                    order.env, order, new_status, order.grove_tracking_numbers or "", source="carrier_poll"
+                )
