@@ -2907,25 +2907,34 @@ def _build_stripe_line_items(order, today=None):
             }
         )
         tax_today += line.price_tax
-    # Loyalty reward discount (GOL-2088 / GOL-2450): ONE negative line at pre-tax
-    # face value (promotions.normalize_reward_line collapsed sale_loyalty's
-    # per-tax-group split), carrying the goods' WV tax so its negative tax nets
-    # the WV line and the tax below reflects the DISCOUNTED base. A deposit cart
-    # never reaches here: _create_draft_order rejects a promo code on a deposit
-    # cart upstream (CEO directive 2026-09-06), and the deposit branch above
-    # ignores reward lines entirely, so no discount ever leaks onto a flat
+    # Loyalty reward discount (GOL-2088 / GOL-2450): collapse EVERY reward line
+    # into ONE negative `discount` line item at pre-tax face value.
+    # promotions.normalize_reward_line already puts the whole face on a single
+    # line for the common homogeneous-WV cart; sale_loyalty can still split a
+    # fixed reward into one line per tax group, so we sum the reward lines here
+    # to guarantee the Review & pay summary renders exactly one "Discount" line
+    # regardless (Josh saw "$10 on your order" twice). The summed negative tax
+    # nets the WV line so the tax below reflects the DISCOUNTED base. A deposit
+    # cart never reaches here: _create_draft_order rejects a promo code on a
+    # deposit cart upstream (CEO directive 2026-09-06), and the deposit branch
+    # above ignores reward lines entirely, so no discount ever leaks onto a flat
     # deposit charge.
     discount_items = []
+    discount_subtotal = 0.0
+    discount_name = None
+    discount_low = 0.0  # track the most-negative line so the label is the survivor's
     for line in order.order_line:
         if not line.reward_id or line.display_type:
             continue
-        cents = stripe_gateway.to_cents(line.price_subtotal)  # negative, pre-tax face
-        if cents == 0:
-            continue
-        discount_items.append(
-            {"name": line.name or "Discount", "kind": "discount", "amount_cents": cents, "quantity": 1}
-        )
+        discount_subtotal += line.price_subtotal  # negative, pre-tax face
         tax_today += line.price_tax  # negative → reduces tax owed today
+        if discount_name is None or line.price_subtotal < discount_low:
+            discount_low = line.price_subtotal
+            discount_name = line.name or "Discount"
+    if discount_name is not None:
+        cents = stripe_gateway.to_cents(discount_subtotal)
+        if cents != 0:
+            discount_items.append({"name": discount_name, "kind": "discount", "amount_cents": cents, "quantity": 1})
     shipping_items = []
     for line in order.order_line:
         if line.display_type or not line.product_id:
