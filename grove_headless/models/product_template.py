@@ -686,6 +686,57 @@ class ProductTemplate(models.Model):
         )
         return True
 
+    # ── Request content draft (GOL-2384/C) ──────────────────────────────
+    def action_request_draft(self):
+        """Form button: hand this listing to the Paperclip content-drafter.
+
+        Flips ``grove_draft_state`` to ``requested`` and posts a chatter note.
+        The AgenticOS routine ``grove-content-drafter`` polls Odoo over XML-RPC
+        for ``[('grove_draft_state','=','requested')]`` and writes the storefront
+        description + care guide from the recorded facts, one product per run.
+
+        Guard: a botanical name AND at least one fact fetched into provenance are
+        required, so the agent never drafts from nothing — run **Fetch facts**
+        first. A gate-exempt product (bundle/gift card/supply) is not a plant
+        listing and cannot request a draft.
+        """
+        for record in self:
+            record._grove_request_draft_one()
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("Request content draft"),
+                "message": _(
+                    "Draft requested. The content-drafter routine will pick this "
+                    "up on its next run (every 15 min) and write the storefront "
+                    "description and care guide from the recorded facts."
+                ),
+                "type": "success",
+                "next": {"type": "ir.actions.act_window_close"},
+            },
+        }
+
+    def _grove_request_draft_one(self):
+        self.ensure_one()
+        if self.grove_gate_exempt:
+            raise UserError(
+                _("This product is exempt from the listing-content gate, so it does not take a content draft.")
+            )
+        if not (self.grove_botanical_name or "").strip():
+            raise UserError(_("Set the Botanical Name before requesting a content draft."))
+        if not self.grove_facts_provenance:
+            raise UserError(
+                _(
+                    "Run Fetch facts first: the drafter needs at least one fetched fact "
+                    "(with its source) recorded in provenance so it never drafts from nothing."
+                )
+            )
+        self.grove_draft_state = "requested"
+        self.message_post(
+            body=Markup("<b>Content draft requested.</b> Queued for the grove-content-drafter routine (GOL-2384/C).")
+        )
+
     # ── Publish gate (GOL-2382) ─────────────────────────────────────────
     def _grove_is_gated(self):
         """True when this template must pass the listing-content gate to publish.
