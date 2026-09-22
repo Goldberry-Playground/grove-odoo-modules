@@ -108,6 +108,21 @@ npx playwright install --with-deps chromium
 npm test
 ```
 
+**Rootless / headless runtimes (CI, the fleet browser-runtime).** Chromium needs
+`--no-sandbox` (and, in a container, `--disable-dev-shm-usage --disable-gpu`) to
+launch without a real sandbox. Both `PirateShip.launch()` and the fixture suite
+read these from `PW_CHROMIUM_ARGS` (whitespace-separated), so the exact same code
+runs Josh's headed sign-in (env unset → normal browser) and a headless CI run:
+
+```
+export PW_CHROMIUM_ARGS="--no-sandbox --disable-dev-shm-usage --disable-gpu"
+npm test        # all 24 tests, incl. the 5 Playwright fixture tests, run green
+```
+
+The fleet's rootless Chromium runtime (grove-sites `tools/browser-runtime`,
+GOL-2259) sets this — and `FONTCONFIG_FILE` (Chromium aborts on document load
+without a fontconfig config + at least one font) — via its `activate.sh`.
+
 ## Manual path (always available)
 
 1. In Odoo: Fulfillment → build the label batch → download its CSV (the same file
