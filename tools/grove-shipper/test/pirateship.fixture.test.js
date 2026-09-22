@@ -10,7 +10,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-import { PirateShip, loadSelectors } from '../src/pirateship.js';
+import { PirateShip, loadSelectors, chromiumArgsFromEnv } from '../src/pirateship.js';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const PAGES = path.join(HERE, 'fixtures', 'pages');
@@ -33,10 +33,12 @@ before(async () => {
   if (!available) return;
   profileDir = await mkdtemp(path.join(tmpdir(), 'grove-shipper-fixture-'));
   try {
+    const args = chromiumArgsFromEnv();
     context = await chromium.launchPersistentContext(profileDir, {
       headless: true,
       acceptDownloads: true,
       viewport: { width: 1440, height: 900 },
+      ...(args.length ? { args } : {}),
     });
     context.setDefaultTimeout(15_000);
   } catch {
