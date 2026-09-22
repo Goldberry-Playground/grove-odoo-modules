@@ -402,6 +402,85 @@ def _measure(order, apply_callable):
         return rb.value
 
 
+def _goods_tax_ids(order):
+    """Union of the tax records the real goods lines carry — the taxes a single
+    normalized discount line mirrors so the discount reduces the SAME taxable
+    base as the goods (GOL-2450). Empty for an out-of-state (de-taxed) cart, so
+    the discount stays untaxed and no WV tax line is emitted downstream. Real
+    nursery carts are homogeneous (one WV tax); a mixed-tax cart just gets the
+    union, which still collapses to a single line."""
+    taxes = order.env["account.tax"]
+    for line in order.order_line:
+        if line.display_type or not line.product_id or line.reward_id:
+            continue
+        if line.product_id.default_code == SHIPPING_PRODUCT_CODE:
+            continue
+        taxes |= line.tax_ids
+    return taxes
+
+
+def _discount_line_name(reward, code):
+    """The single discount line's label (GOL-2450). A code-applied reward reads
+    ``Discount (CODE)``; an automatic volume tier reads ``Volume discount N%``
+    (a non-percent tier, which we never configure, falls back to
+    ``Volume discount``)."""
+    if code:
+        return f"Discount ({code.strip().upper()})"
+    if reward.discount_mode == "percent":
+        return f"Volume discount {_fmt_percent(reward.discount or 0.0)}"
+    return "Volume discount"
+
+
+def normalize_reward_line(order, reward, code=None):
+    """Collapse the reward line(s) sale_loyalty just wrote into ONE headless
+    discount line, at pre-tax FACE value, mirroring the goods' taxes (GOL-2450).
+
+    ``sale_loyalty`` renders a fixed-amount reward tax-INCLUSIVE and splits it
+    into one negative line per tax group present in the cart — Josh saw "$10 on
+    your order" listed twice. The headless Review & pay summary must instead show
+    a SINGLE ``Discount`` line at face value, pre-tax, with WV tax then computed
+    on the discounted base. We rewrite the reward lines in place:
+
+    * keep exactly ONE line (unlink the rest), still tagged with the original
+      ``reward_id``/``coupon_id`` so loyalty bookkeeping and every downstream
+      ``reward_id`` filter (magnitude, Stripe coupon) still recognise it;
+    * set ``price_unit`` to the negative pre-tax face — ``-amount`` for a fixed
+      reward, ``-percent x goods-subtotal`` for a percent tier (Josh: "$10 code
+      -> -$10.00; a 10% tier -> -10% of the goods subtotal");
+    * mirror the goods' taxes onto it so Odoo taxes ``(goods - discount +
+      shipping)`` at the WV rate, and nothing out of state;
+    * label it ``Discount (CODE)`` / ``Volume discount N%``.
+
+    Never raises: a loyalty/ORM hiccup logs and leaves sale_loyalty's own reward
+    lines intact (the pre-GOL-2450 behaviour) rather than breaking checkout."""
+    try:
+        reward_lines = order.order_line.filtered(lambda ln: ln.reward_id and not ln.display_type)
+        if not reward_lines:
+            return
+        subtotal = goods_subtotal(order)
+        if reward.discount_mode == "percent":
+            amount = round((reward.discount or 0.0) / 100.0 * subtotal, 2)
+        else:
+            # Fixed per-order/per-point face, capped at the goods subtotal so the
+            # discount never drives the taxable base negative.
+            amount = round(min(reward.discount or 0.0, subtotal), 2)
+        survivor = reward_lines[:1]
+        extras = reward_lines - survivor
+        if extras:
+            extras.unlink()
+        survivor.write(
+            {
+                "name": _discount_line_name(reward, code),
+                "product_uom_qty": 1.0,
+                "price_unit": -amount,
+                "tax_ids": [(6, 0, _goods_tax_ids(order).ids)],
+            }
+        )
+        order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
+    except Exception:  # noqa: BLE001 — a discount-shaping gap must never break checkout
+        _logger.warning("GOL-2450: could not normalize reward line to a single discount", exc_info=True)
+
+
 def apply_code_reward(order, code):
     """Register + apply a promo/loyalty code's discount reward(s) to ``order``.
 
@@ -416,6 +495,7 @@ def apply_code_reward(order, code):
     if result.get("error"):
         return result["error"]
     applied = False
+    discount_reward = None
     for coupon, rewards in result.items():
         for reward in rewards:
             if reward.multi_product:
@@ -424,8 +504,14 @@ def apply_code_reward(order, code):
             if isinstance(status, dict) and status.get("error"):
                 return status["error"]
             applied = True
+            if reward.reward_type == "discount":
+                discount_reward = reward
     if not applied:
         return "This code isn't valid for the items in your cart."
+    # Collapse sale_loyalty's per-tax-group split into one pre-tax discount line
+    # (GOL-2450). One code = one discount reward in our programs.
+    if discount_reward is not None:
+        normalize_reward_line(order, discount_reward, code=code)
     return None
 
 
@@ -435,6 +521,9 @@ def _apply_reward(order, pair):
     status = order._apply_program_reward(reward, coupon)
     if isinstance(status, dict) and status.get("error"):
         return status["error"]
+    # Automatic volume tier: same single pre-tax discount line as a code (GOL-2450).
+    if reward.reward_type == "discount":
+        normalize_reward_line(order, reward, code=None)
     return None
 
 

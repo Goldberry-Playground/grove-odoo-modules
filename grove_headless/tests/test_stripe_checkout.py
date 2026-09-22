@@ -413,13 +413,13 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
     # ── GOL-2233 / GOL-2052: a deposit order defers shipping + tax to ship ──
 
     def _seed_wv_tax(self):
-        """Put the WV state tax on the product so a today-charge would tax."""
-        wv_state = self.env["account.tax"].search(
-            [("name", "=", "WV State Sales Tax 6%"), ("amount_type", "=", "percent")], limit=1
+        """Put the WV group tax on the product so a today-charge would tax."""
+        wv_group = self.env["account.tax"].search(
+            [("name", "=", "WV Sales Tax 7%"), ("amount_type", "=", "group")], limit=1
         )
-        self.assertTrue(wv_state, "WV state tax must exist (post_init_hook)")
-        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_state.ids)]
-        return wv_state
+        self.assertTrue(wv_group, "WV group tax must exist (post_init_hook)")
+        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_group.ids)]
+        return wv_group
 
     def test_deposit_order_charges_deposit_only_no_shipping_no_tax(self):
         """A deposit cart charges exactly $10 today — the quoted shipping line
@@ -478,21 +478,23 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
     # ── promo / loyalty discount (GOL-2088) ──────────────────────────────
 
     def test_promo_code_applies_reward_line(self):
-        """A valid code on an eligible cart adds a sale_loyalty reward line and
-        drops the order's GRAND total by the discount amount. sale_loyalty's
-        fixed per-order discount is tax-INCLUSIVE: a "$10 off" reward splits into
-        a negative untaxed subtotal + negative tax that together total exactly
-        -$10 off `amount_total` (so the untaxed subtotal alone is ~-$9.43 at 6%)."""
+        """GOL-2450: a valid code adds exactly ONE reward line at pre-tax FACE
+        value — a "$10 off" reward is -$10.00 off the untaxed subtotal, NOT
+        sale_loyalty's tax-inclusive per-tax-group split. WV tax is then computed
+        on the discounted base, so the grand total falls by more than $10 (the
+        $10 face plus the tax saved on it), and the line reads `Discount (CODE)`."""
         self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
         self._set_stock(self.product, 5)
         order = self._make_order(qty=2)  # 2 * $25 = $50 subtotal, meets min_qty
-        before_total = order.amount_total
+        before_untaxed = order.amount_untaxed
         err = grove_main._apply_promo_code(order, "TESTPROMO")
         self.assertIsNone(err)
         reward_lines = order.order_line.filtered(lambda line: line.reward_id)
-        self.assertTrue(reward_lines, "a reward order line should exist")
-        self.assertLess(sum(reward_lines.mapped("price_subtotal")), 0.0)
-        self.assertAlmostEqual(order.amount_total, before_total - 10.0, places=2)
+        self.assertEqual(len(reward_lines), 1, "exactly one discount line")
+        # Pre-tax face: the untaxed subtotal drops by exactly $10 (not $10/1.07).
+        self.assertAlmostEqual(reward_lines.price_subtotal, -10.0, places=2)
+        self.assertAlmostEqual(order.amount_untaxed, before_untaxed - 10.0, places=2)
+        self.assertEqual(reward_lines.name, "Discount (TESTPROMO)")
 
     def test_promo_code_ineligible_cart_returns_error(self):
         """A real code whose rule the cart doesn't meet (min_qty) is a
@@ -514,9 +516,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertFalse(order.order_line.filtered(lambda line: line.reward_id))
 
     def test_discount_line_item_reduces_todays_charge(self):
-        """The reward line surfaces as a negative `discount` line item, and the
-        charged-today total equals the order's discounted grand total — Stripe
-        collects exactly `amount_total` on a fully-in-stock (ships-now) cart."""
+        """GOL-2450: the reward surfaces as a SINGLE negative `discount` line at
+        pre-tax face value ($10), which is exactly the amount that becomes the
+        one-time Stripe coupon; the charged-today total equals the order's
+        discounted grand total (Stripe collects exactly `amount_total`)."""
         self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
         self._set_stock(self.product, 5)
         plain = self._make_order(qty=2)
@@ -526,17 +529,16 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertIsNone(grove_main._apply_promo_code(order, "TESTPROMO"))
         line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
 
-        discount = next(li for li in line_items if li["kind"] == "discount")
-        self.assertLess(discount["amount_cents"], 0)  # negative (untaxed portion)
+        discounts = [li for li in line_items if li["kind"] == "discount"]
+        self.assertEqual(len(discounts), 1, "exactly one discount line item")
+        # Pre-tax face: -$10 exactly — the amount stripe_gateway turns into the coupon.
+        self.assertEqual(discounts[0]["amount_cents"], -stripe_gateway.to_cents(10.0))
         self.assertEqual(preorder_ids, [])
         # charged is the sum over the itemized lines (the review page renders the
         # same array) and matches Odoo's discounted grand total to the cent — the
         # reward's own negative tax nets the WV tax line, so no over/under-charge.
         self.assertEqual(charged, sum(li["amount_cents"] * li["quantity"] for li in line_items))
         self.assertEqual(charged, stripe_gateway.to_cents(order.amount_total))
-        # And today's charge is exactly $10 below the undiscounted cart — the
-        # tax-inclusive discount lands as a full $10 off regardless of the split.
-        self.assertEqual(full_charged - charged, stripe_gateway.to_cents(10.0))
         # And it is strictly below the undiscounted cart (goods + full tax).
         self.assertLess(charged, full_charged)
 
@@ -556,6 +558,216 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertIn("preorder", error.data.decode().lower())
         # No orphan draft (nor its reward line) persisted.
         self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
+
+    # ── GOL-2450: single-line Discount + WV-taxed Review & pay summary ────
+
+    def _wv_state_tax(self):
+        """The company's WV 6% state sales tax (created by GroveTaxFixtureMixin).
+        Odoo enforces global tax-name uniqueness in the chartless CI DB, so we
+        REUSE this record rather than create a colliding duplicate."""
+        tax = self.env["account.tax"].search(
+            [
+                ("name", "=", "WV State Sales Tax 6%"),
+                ("amount_type", "=", "percent"),
+                ("company_id", "=", self.company.id),
+            ],
+            limit=1,
+        )
+        self.assertTrue(tax, "WV 6% state tax must exist (GroveTaxFixtureMixin)")
+        return tax
+
+    def _taxed_plant(self, name, price, tax, categ=None):
+        vals = {
+            "name": name,
+            "type": "consu",
+            "is_storable": True,
+            "list_price": price,
+            "taxes_id": [(6, 0, tax.ids)],
+            "company_id": self.company.id,
+        }
+        if categ is not None:
+            vals["categ_id"] = categ.id
+        return self.env["product.product"].create(vals)
+
+    def _order_with(self, product, qty):
+        return (
+            self.env["sale.order"]
+            .with_company(self.company)
+            .create(
+                {
+                    "partner_id": self.partner.id,
+                    "company_id": self.company.id,
+                    "order_line": [(0, 0, {"product_id": product.id, "product_uom_qty": qty})],
+                }
+            )
+        )
+
+    def _add_taxed_shipping(self, order, amount, tax):
+        """A GROVE-SHIP line forced to `tax` so shipping is taxed at the same WV
+        rate as goods (mirrors _apply_shipping_line's real behaviour)."""
+        ship = grove_main._get_shipping_product(self.env, self.company)
+        line = self.env["sale.order.line"].create(
+            {
+                "order_id": order.id,
+                "product_id": ship.id,
+                "name": "Shipping (WV)",
+                "product_uom_qty": 1,
+                "price_unit": amount,
+            }
+        )
+        line.tax_ids = [(6, 0, tax.ids)]
+        order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
+        return line
+
+    def _make_auto_percent_program(self, percent=10.0, min_qty=2, products=None):
+        """An automatic percent volume tier: 1 point per unit, `percent`% off once
+        `min_qty` units (points) are reached — the GOL-2431 QA shape, single tier."""
+        prod_ids = products.ids if products is not None else []
+        return (
+            self.env["loyalty.program"]
+            .with_company(self.company)
+            .create(
+                {
+                    "name": f"Volume {percent:g}",
+                    "program_type": "promotion",
+                    "trigger": "auto",
+                    "applies_on": "current",
+                    "company_id": self.company.id,
+                    "rule_ids": [
+                        (
+                            0,
+                            0,
+                            {
+                                "mode": "auto",
+                                "reward_point_mode": "unit",
+                                "reward_point_amount": 1.0,
+                                "minimum_qty": min_qty,
+                                "product_ids": [(6, 0, prod_ids)],
+                            },
+                        )
+                    ],
+                    "reward_ids": [
+                        (
+                            0,
+                            0,
+                            {
+                                "reward_type": "discount",
+                                "discount": percent,
+                                "discount_mode": "percent",
+                                "discount_applicability": "order",
+                                "required_points": float(min_qty),
+                                "description": f"{percent:g}% off",
+                            },
+                        )
+                    ],
+                }
+            )
+        )
+
+    def test_review_summary_exact_shape_and_order(self):
+        """The Review & pay summary renders EXACTLY Josh's 2026-09-22 ruling
+        (GOL-2450): goods, then Discount, then Shipping, then a WV 6% tax line on
+        the DISCOUNTED base — $70 / -$10 / $22 / $4.92 → $86.92 due today."""
+        tax = self._wv_state_tax()
+        pear = self._taxed_plant("Pear (Magness, Potted)", 35.0, tax)
+        self._set_stock(pear, 5)
+        order = self._order_with(pear, 2)  # 2 x $35 = $70 goods
+        self._add_taxed_shipping(order, 22.0, tax)
+        self._make_promo_program("FLATWOODS", min_qty=2, amount=10.0)
+        self.assertIsNone(grove_main._apply_promo_code(order, "FLATWOODS"))
+
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        self.assertEqual(preorder_ids, [])
+        # Order matters — the frontend renders this array verbatim.
+        self.assertEqual([li["kind"] for li in line_items], ["goods", "discount", "shipping", "tax"])
+        goods, discount, shipping, taxline = line_items
+        self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(35.0))
+        self.assertEqual(goods["quantity"], 2)  # frontend shows "x 2  $70.00"
+        self.assertEqual(discount["amount_cents"], -stripe_gateway.to_cents(10.0))
+        self.assertEqual(discount["name"], "Discount (FLATWOODS)")
+        self.assertEqual(shipping["amount_cents"], stripe_gateway.to_cents(22.0))
+        # 6% x (70 - 10 + 22) = 6% x 82 = 4.92
+        self.assertEqual(taxline["amount_cents"], stripe_gateway.to_cents(4.92))
+        self.assertEqual(taxline["name"], "WV Sales Tax (6%)")
+        # TOTAL DUE TODAY = 70 - 10 + 22 + 4.92 = 86.92
+        self.assertEqual(charged, stripe_gateway.to_cents(86.92))
+        self.assertEqual(charged, stripe_gateway.to_cents(order.amount_total))
+
+    def test_percent_tier_single_line_and_label(self):
+        """An automatic percent volume tier also collapses to ONE pre-tax line,
+        labelled `Volume discount 10%`, worth 10% of the goods subtotal
+        (GOL-2450)."""
+        tax = self._wv_state_tax()
+        plants_root = self.env.ref("grove_headless.categ_plants")
+        pear = self._taxed_plant("Pear tier", 35.0, tax, categ=plants_root)
+        self._set_stock(pear, 10)
+        order = self._order_with(pear, 2)  # $70 goods
+        self._make_auto_percent_program(percent=10.0, min_qty=2, products=pear)
+        result = grove_main.promotions.resolve_discounts(order)
+        self.assertEqual(result["applied"], "tier")
+        reward_lines = order.order_line.filtered("reward_id")
+        self.assertEqual(len(reward_lines), 1)
+        self.assertEqual(reward_lines.name, "Volume discount 10%")
+        self.assertAlmostEqual(reward_lines.price_subtotal, -7.0, places=2)  # 10% of $70
+
+    def test_out_of_state_cart_has_discount_but_no_tax_line(self):
+        """Shipping out of state strips WV tax from every line (incl. the mirrored
+        discount), so the summary shows goods + discount + shipping and NO tax
+        line (GOL-2450)."""
+        tax = self._wv_state_tax()
+        pear = self._taxed_plant("Pear OOS", 35.0, tax)
+        self._set_stock(pear, 5)
+        order = self._order_with(pear, 2)
+        self._add_taxed_shipping(order, 22.0, tax)
+        self._make_promo_program("FLATWOODS", min_qty=2, amount=10.0)
+        self.assertIsNone(grove_main._apply_promo_code(order, "FLATWOODS"))
+        # Ship to Ohio: strip WV tax from all lines (goods, shipping, discount).
+        grove_main._apply_destination_tax(self.env, order, {"state": "OH"})
+
+        line_items, _pre, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        self.assertEqual([li["kind"] for li in line_items], ["goods", "discount", "shipping"])
+        self.assertFalse([li for li in line_items if li["kind"] == "tax"])
+        # 70 - 10 + 22 = 82, untaxed.
+        self.assertEqual(charged, stripe_gateway.to_cents(82.0))
+
+    def test_reward_collapses_to_single_line_across_tax_groups(self):
+        """Even when the cart mixes two tax groups, the headless discount is ONE
+        line, not sale_loyalty's per-tax-group split (GOL-2450)."""
+        tax6 = self._wv_state_tax()
+        tax_other = self.env["account.tax"].create(
+            {
+                "name": "Other Sales Tax 3% (test)",
+                "amount": 3.0,
+                "amount_type": "percent",
+                "type_tax_use": "sale",
+                "company_id": self.company.id,
+            }
+        )
+        a = self._taxed_plant("A", 40.0, tax6)
+        b = self._taxed_plant("B", 30.0, tax_other)
+        self._set_stock(a, 5)
+        self._set_stock(b, 5)
+        order = (
+            self.env["sale.order"]
+            .with_company(self.company)
+            .create(
+                {
+                    "partner_id": self.partner.id,
+                    "company_id": self.company.id,
+                    "order_line": [
+                        (0, 0, {"product_id": a.id, "product_uom_qty": 1}),
+                        (0, 0, {"product_id": b.id, "product_uom_qty": 1}),
+                    ],
+                }
+            )
+        )
+        self._make_promo_program("FLATWOODS", min_qty=2, amount=10.0)
+        self.assertIsNone(grove_main._apply_promo_code(order, "FLATWOODS"))
+        reward_lines = order.order_line.filtered("reward_id")
+        self.assertEqual(len(reward_lines), 1, "one discount line even across two tax groups")
+        self.assertAlmostEqual(reward_lines.price_subtotal, -10.0, places=2)
+        line_items, _pre, _charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        self.assertEqual(len([li for li in line_items if li["kind"] == "discount"]), 1)
 
     def test_cart_has_preorder_agrees_with_line_builder(self):
         """The promo-gate predicate (_cart_has_preorder) must classify a cart the
@@ -838,17 +1050,13 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.product.product_tmpl_id.grove_shipping_tier = "potted"
         # Seed the WV default tax explicitly so the test doesn't hinge on
         # ir.default timing in the transaction — the real product default
-        # (hooks.setup_wv_sales_tax) puts this same state tax on every line.
-        wv_state = self.env["account.tax"].search(
-            [
-                ("name", "=", "WV State Sales Tax 6%"),
-                ("company_id", "=", self.company.id),
-                ("amount_type", "=", "percent"),
-            ],
+        # (hooks.setup_wv_sales_tax) puts this same group on every line.
+        wv_group = self.env["account.tax"].search(
+            [("name", "=", "WV Sales Tax 7%"), ("company_id", "=", self.company.id), ("amount_type", "=", "group")],
             limit=1,
         )
-        self.assertTrue(wv_state, "WV state tax must exist (post_init_hook)")
-        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_state.ids)]
+        self.assertTrue(wv_group, "WV group tax must exist (post_init_hook)")
+        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_group.ids)]
         payload = self._cart_payload("OH", fulfillment="pickup")
         order, error = grove_main._create_draft_order(self._website(), self.env, payload)
         self.assertIsNone(error)
