@@ -44,9 +44,37 @@ so they sort FIRST under the ``/shop`` grid's ``name asc`` order.
      "Ships now" (no reserve badge, no pickup gate). The potted fixture cannot
      satisfy these because a ship submit 400s on it.
 
+  3. **Plants-category bareroot fixture** (``E2E-BAREROOT-PLANT``, GOL-2463)
+     Same shippable shape as (2), but **categorised under the Plants root**
+     (``grove_headless.categ_trees``) so ``is_qualifying_plant()`` counts it.
+     Fixtures (1) and (2) carry NO ``categ_id``, so they are not plants and can
+     never earn a volume tier: a 6-unit cart of ``E2E-BAREROOT-INSTOCK`` returns
+     ``qualifyingUnits: 0`` from ``/api/cart/tiers``. That is *deliberately*
+     preserved — putting 797 under Plants would silently apply 10-20% off to
+     every existing gate spec with a 5+ qty cart and turn a green run red for an
+     unrelated reason. So the volume-tier / promo-nudge specs get their OWN
+     plant instead, and the deterministic carts stay deterministic.
+
+     Being under Plants makes this fixture **gated** by the listing-content gate
+     (GOL-2382, ``_grove_is_gated``): a gated template cannot cross
+     unpublished→published while it is missing any of the 12 growing facts, the
+     eCommerce description, an approved care guide or the facts sign-off. So this
+     fixture seeds that content too (``listing_gate_content()``) — which also
+     keeps the nightly listing audit (GOL-2385) from Discord-pinging Josh about
+     a permanently-incomplete QA fixture every morning.
+
+     Its name keeps the ``AAA QA E2E `` prefix (grove-sites
+     ``E2E_FIXTURE_NAME_RE`` excludes exactly that from the catalog set, and
+     these fixtures carry no photo — ``qa-photos.spec.ts`` would otherwise fail
+     on a "Photo coming soon" placeholder) while sorting LAST of the three under
+     ``/shop``'s ``name asc``, so ``findProductByCta`` still lands on the
+     existing fixtures first and the current specs keep buying exactly what they
+     buy today.
+
 The ``Reserve`` (bareroot preorder) and ``Coming soon`` states the other specs
-need are ALREADY present in the real catalog, so these fixtures only add the two
-missing "enabled Add to Cart" states (pickup + shippable).
+need are ALREADY present in the real catalog, so these fixtures only add the
+missing "enabled Add to Cart" states (pickup + shippable) plus the plant-
+categorised one the volume-tier specs need.
 
 Determinism
 -----------
@@ -92,17 +120,36 @@ Usage
     # (Only permitted against a known-QA host+DB; otherwise refused.)
     DRY_RUN=0 ODOO_URL=... ODOO_DB=odoo ... python3 scripts/seed_e2e_test_inventory.py
 
-    # Seed only one fixture: FIXTURE=potted (or FIXTURE=bareroot).
+    # Seed only one fixture: FIXTURE=potted (or bareroot | plant).
+
+    # Verify the plant fixture really earns a tier, through the real storefront
+    # BFF (GOL-2463 done-criterion). Runs after the seed, read-only:
+    E2E_TIERS_URL=https://nursery.qa.gatheringatthegrove.com/api/cart/tiers \\
+    DRY_RUN=0 ODOO_URL=... FIXTURE=plant python3 scripts/seed_e2e_test_inventory.py
 
 Knobs (env, all optional):
     DRY_RUN           default "1" (dry)      set "0" for a LIVE run (opt-out)
-    FIXTURE           default "" (both)      "potted" | "bareroot" to seed one
+    FIXTURE           default "" (all)       "potted" | "bareroot" | "plant"
     E2E_POTTED_SKU    default "E2E-POTTED-INSTOCK"
     E2E_BAREROOT_SKU  default "E2E-BAREROOT-INSTOCK"
-    E2E_PRICE         default "42.00"        list_price (USD), both fixtures
-    E2E_QTY           default "50"           on-hand target, both fixtures
-    E2E_TREE_LENGTH   default "20"           grove_tree_length for the bareroot
-                                             (shippable) fixture: 16|20|32|46
+    E2E_PLANT_SKU     default "E2E-BAREROOT-PLANT"
+    E2E_PRICE         default "42.00"        list_price (USD), all fixtures
+    E2E_QTY           default "50"           on-hand target, potted + bareroot
+    E2E_PLANT_QTY     default "500"          on-hand target, plant fixture. Higher
+                                             because each volume-tier run buys 5-10
+                                             units, and a drained free_qty flips the
+                                             cart to a deposit cart -> false red.
+    E2E_TREE_LENGTH   default "20"           grove_tree_length for the shippable
+                                             fixtures: 16|20|32|46
+    E2E_PLANT_CATEG   default "grove_headless.categ_trees"
+                                             xmlid of the plant fixture's product
+                                             category; MUST be at/under
+                                             grove_headless.categ_plants or the
+                                             fixture cannot earn a tier.
+    E2E_TIERS_URL     default "" (skip)      storefront /api/cart/tiers endpoint; when
+                                             set, the plant fixture is probed after
+                                             seeding and a 0 qualifyingUnits FAILS.
+    E2E_TIERS_QTY     default "6"            cart qty used for that probe.
 
 Flags (argv):
     --force-i-know-this-is-not-qa   allow a LIVE run against a non-QA target
@@ -114,6 +161,7 @@ from __future__ import annotations
 
 import json as _json
 import os
+import re
 import sys
 import urllib.request as _ureq
 import xmlrpc.client
@@ -146,12 +194,149 @@ FORMAT_ATTR = "Format"
 
 E2E_PRICE = float(os.getenv("E2E_PRICE", "42.00"))
 E2E_QTY = int(os.getenv("E2E_QTY", "50"))
+# The plant fixture is stocked much deeper than the other two: every volume-tier
+# run buys 5-10 units of it, and once free_qty hits 0 the cart flips to a deposit
+# cart and the tier assertions go false-red (the GOL-2375 trap, seen on 797).
+E2E_PLANT_QTY = int(os.getenv("E2E_PLANT_QTY", "500"))
 # grove_tree_length is a selection on product.template; only these ship (16|20|32|46).
 E2E_TREE_LENGTH = os.getenv("E2E_TREE_LENGTH", "20")
+# Product category for the plant fixture. is_qualifying_plant() (grove_headless
+# promotions.py) counts a unit only when its template is type 'consu' AND its
+# categ_id sits at/under grove_headless.categ_plants — so this xmlid is the whole
+# reason the plant fixture can earn a tier.
+E2E_PLANT_CATEG = os.getenv("E2E_PLANT_CATEG", "grove_headless.categ_trees")
+PLANTS_ROOT_XMLID = "grove_headless.categ_plants"
+
+# Optional post-seed verification through the real storefront BFF (GOL-2463).
+E2E_TIERS_URL = os.getenv("E2E_TIERS_URL", "").strip()
+E2E_TIERS_QTY = int(os.getenv("E2E_TIERS_QTY", "6"))
+
+# The 12 growing facts the listing-content gate (GOL-2382) requires before a
+# Plants-categorised template may cross unpublished -> published. Mirrors
+# grove_headless/models/product_template.py::_GROVE_REQUIRED_FACTS; the unit test
+# asserts listing_gate_content() covers every one of them.
+REQUIRED_LISTING_FACTS = (
+    "grove_botanical_name",
+    "grove_zone_min",
+    "grove_zone_max",
+    "grove_layer",
+    "grove_sun",
+    "grove_mature_size",
+    "grove_mature_spread",
+    "grove_spacing",
+    "grove_soil",
+    "grove_pollination",
+    "grove_years_to_fruit",
+    "grove_chill_hours",
+)
+
+
+def listing_gate_content(name: str) -> dict[str, Any]:
+    """Every field a gated (Plants-categorised) template needs to publish.
+
+    The gate refuses the False->True publish transition while any of the 12
+    growing facts, the eCommerce description, an approved care guide
+    (``website_description`` + ``grove_guide_ready``) or the facts sign-off
+    (``grove_facts_reviewed``) is missing — so a Plants fixture that skipped this
+    would simply fail to create. Filling it also keeps the nightly listing audit
+    (GOL-2385) from raising a Discord ping + an activity on a QA fixture every
+    single morning.
+
+    Deliberately NOT accompanied by a ``grove_facts_provenance`` stamp: a write
+    that stamps provenance alongside a fact is treated as a machine enrichment
+    write and CLEARS ``grove_facts_reviewed`` in the same write
+    (product_template.py::write), which would leave the fixture ungated-but-
+    unreviewed and un-publishable on the next run.
+    """
+    return {
+        "grove_botanical_name": "Testus fixtura",
+        "grove_zone_min": 4,
+        "grove_zone_max": 8,
+        "grove_layer": "canopy",
+        "grove_sun": "full",
+        "grove_mature_size": "20-25 ft",
+        "grove_mature_spread": "15-20 ft",
+        "grove_spacing": "20 ft",
+        "grove_soil": "Well-drained loam",
+        "grove_pollination": "Self-fertile",
+        "grove_years_to_fruit": "3-4",
+        "grove_chill_hours": "Not applicable",
+        "description_ecommerce": (
+            f"<p>{name}. Automated QA fixture for the volume-tier / promo-nudge "
+            "Playwright specs (GOL-2463). Not a real plant — do not ship.</p>"
+        ),
+        "website_description": (
+            "<p>Automated QA care guide placeholder. This template exists so the "
+            "volume-tier specs have a Plants-categorised product to buy.</p>"
+        ),
+        "grove_guide_ready": True,
+        "grove_facts_reviewed": True,
+    }
+
+
+# Fields in `want` that Odoo's read() returns as a many2one pair [id, name].
+_M2O_WANT_FIELDS = frozenset({"categ_id"})
+
+# Gate fields stored as HTML; "set" means non-blank once tags are stripped, the
+# same test Odoo's own gate uses (product_template.py::_html_is_blank).
+_HTML_GATE_FIELDS = frozenset({"description_ecommerce", "website_description"})
+
+
+def _html_is_blank(value) -> bool:
+    """True when an HTML field holds no visible text (mirrors the Odoo gate)."""
+    text = re.sub(r"<[^>]*>", "", str(value or ""))
+    return not text.replace("&nbsp;", " ").strip()
+
+
+def want_drift(cur: dict, want: dict) -> dict:
+    """The subset of ``want`` whose stored value differs — pure, unit-tested.
+
+    ``categ_id`` reads back as ``[id, display_name]``; comparing that pair to the
+    bare id we want would report drift on EVERY run and rewrite the category
+    forever, so many2one fields are compared on the id.
+    """
+    drift: dict[str, Any] = {}
+    for key, value in want.items():
+        current = cur.get(key)
+        if key in _M2O_WANT_FIELDS:
+            current = current[0] if current else False
+        if current != value:
+            drift[key] = value
+    return drift
+
+
+def missing_gate_content(cur: dict, content: dict) -> dict:
+    """Only the listing-gate fields that are currently UNSET — pure, unit-tested.
+
+    Gap-fill, never clobber: if an operator wrote a better description or ticked
+    the sign-off by hand, a re-run leaves it alone; if a field got cleared, the
+    fixture is repaired so it can still publish and stays out of the nightly
+    incomplete-listing audit.
+    """
+    out: dict[str, Any] = {}
+    for key, value in content.items():
+        current = cur.get(key)
+        if key in _HTML_GATE_FIELDS:
+            is_set = not _html_is_blank(current)
+        elif isinstance(value, bool):
+            is_set = bool(current)
+        elif isinstance(value, int):
+            is_set = bool(current) and current > 0
+        else:
+            is_set = bool(str(current or "").strip())
+        if not is_set:
+            out[key] = value
+    return out
+
 
 # The fixtures — the single source of truth the E2E specs assert against.
 # Each is a one-Format-value template so its default (only) variant is the
 # in-stock line and the CTA renders "Add to Cart" on first paint.
+#
+# `categ_xmlid` is the volume-tier switch: None (the two original fixtures)
+# leaves categ_id untouched, so they stay non-plants and their carts stay
+# deterministic. Only the `plant` fixture is categorised — and therefore only it
+# is subject to the listing-content gate, hence `gated`.
 FIXTURES: list[dict[str, Any]] = [
     {
         "key": "potted",  # GOL-1148 — pickup-only leg
@@ -160,6 +345,9 @@ FIXTURES: list[dict[str, Any]] = [
         "format_value": "Potted",
         "shipping_tier": "potted",  # farm-pickup only (GOL-1114) — ship submit 400s
         "tree_length": None,  # irrelevant for pickup; leave unset
+        "categ_xmlid": None,  # NOT a plant — never earns a volume tier
+        "gated": False,
+        "qty": E2E_QTY,
     },
     {
         "key": "bareroot",  # GOL-1154 — shippable happy-path leg
@@ -168,6 +356,30 @@ FIXTURES: list[dict[str, Any]] = [
         "format_value": "Bareroot",
         "shipping_tier": "bareroot",  # genuinely shippable -> Box Engine sizes a box
         "tree_length": E2E_TREE_LENGTH,  # required so shipping isn't $0 (breaker trips otherwise)
+        "categ_xmlid": None,  # NOT a plant — keeps every existing gate cart tier-free
+        "gated": False,
+        "qty": E2E_QTY,
+    },
+    {
+        "key": "plant",  # GOL-2463 — volume-tier / promo-nudge leg (Train #2)
+        "sku": os.getenv("E2E_PLANT_SKU", "E2E-BAREROOT-PLANT"),
+        # The name carries TWO hard constraints, both load-bearing:
+        #   * it MUST keep the "AAA QA E2E " prefix — grove-sites
+        #     `E2E_FIXTURE_NAME_RE` (apps/nursery/e2e/qa-helpers.ts) excludes
+        #     exactly that prefix from the catalog set, and these fixtures are
+        #     seeded WITHOUT a photo, so anything else makes qa-photos.spec.ts
+        #     fail on a "Photo coming soon" placeholder; and
+        #   * it must sort LAST of the three under /shop's `name asc`
+        #     ("Volume" > "Potted" > "Bareroot"), so findProductByCta still
+        #     reaches the existing fixtures first and today's specs keep buying
+        #     exactly what they buy today.
+        "name": "AAA QA E2E Volume Tier Plant (automated test fixture)",
+        "format_value": "Bareroot",
+        "shipping_tier": "bareroot",
+        "tree_length": E2E_TREE_LENGTH,
+        "categ_xmlid": E2E_PLANT_CATEG,  # under Plants -> is_qualifying_plant() True
+        "gated": True,  # ... which also means the listing-content gate applies
+        "qty": E2E_PLANT_QTY,
     },
 ]
 
@@ -270,6 +482,77 @@ def resolve_sale_taxes(models, uid, company_id: int) -> list[int]:
     return tax_ids
 
 
+def resolve_xmlid(models, uid, xmlid: str, expected_model: str) -> int:
+    """Resolve ``module.name`` to a res_id, failing loudly if it is missing.
+
+    Read straight off ``ir.model.data`` rather than ``check_object_reference``:
+    the plain search_read is available to any RPC user, and a missing row here
+    means grove_headless isn't installed/upgraded on the target — which we want
+    as a hard error, not a silently uncategorised fixture.
+    """
+    if "." not in xmlid:
+        fail(f"xmlid {xmlid!r} must be 'module.name'")
+    module, name = xmlid.split(".", 1)
+    rows = call(
+        models,
+        uid,
+        "ir.model.data",
+        "search_read",
+        [[("module", "=", module), ("name", "=", name)]],
+        {"fields": ["model", "res_id"], "limit": 1},
+    )
+    if not rows:
+        fail(f"xmlid {xmlid!r} not found on this database (is grove_headless installed and upgraded?)")
+    if rows[0]["model"] != expected_model:
+        fail(f"xmlid {xmlid!r} points at {rows[0]['model']}, expected {expected_model}")
+    return rows[0]["res_id"]
+
+
+def resolve_plant_categ(models, uid, xmlid: str) -> int:
+    """Resolve the plant fixture's category AND prove it is under Plants.
+
+    ``is_qualifying_plant()`` compares materialised ``parent_path`` prefixes, so
+    a category that merely *looks* plant-ish (or a Plants tree that got re-
+    parented) would seed a fixture that still counts 0 qualifying units — the
+    exact GOL-2463 failure this script exists to prevent. Check it here, before
+    anything is written, instead of discovering it in a red e2e run.
+    """
+    categ_id = resolve_xmlid(models, uid, xmlid, "product.category")
+    plants_root_id = resolve_xmlid(models, uid, PLANTS_ROOT_XMLID, "product.category")
+    paths = call(
+        models,
+        uid,
+        "product.category",
+        "read",
+        [[categ_id, plants_root_id], ["complete_name", "parent_path"]],
+    )
+    by_id = {row["id"]: row for row in paths}
+    categ, root = by_id[categ_id], by_id[plants_root_id]
+    if not categ.get("parent_path") or not root.get("parent_path"):
+        fail(f"category {xmlid!r} or the Plants root has no parent_path; cannot verify plant membership")
+    if not categ["parent_path"].startswith(root["parent_path"]):
+        fail(
+            f"category {xmlid!r} ({categ['complete_name']!r}, path {categ['parent_path']}) is NOT under "
+            f"{PLANTS_ROOT_XMLID} (path {root['parent_path']}); the fixture could never earn a volume tier"
+        )
+    print(f"  = plant category {xmlid} -> {categ['complete_name']!r} (id={categ_id}, under Plants)")
+    return categ_id
+
+
+def probe_volume_tiers(url: str, template_id: int, variant_id: int, qty: int) -> dict:
+    """POST one cart to the storefront BFF's /api/cart/tiers and return the body.
+
+    This is the GOL-2463 done-criterion, executable: a fixture that is not under
+    Plants answers ``qualifyingUnits: 0`` no matter how many units are in the
+    cart, which is precisely the bug. Read-only — the endpoint prices a
+    hypothetical cart and creates nothing.
+    """
+    payload = {"items": [{"variantId": variant_id, "templateId": template_id, "quantity": qty}]}
+    req = _ureq.Request(url, data=_json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+    with _ureq.urlopen(req, timeout=30) as resp:
+        return _json.loads(resp.read())
+
+
 def apply_stock(models, uid, ctx, variant_id: int, location_id: int, qty: float) -> None:
     """Idempotently set on-hand ``qty`` for ``variant_id`` at ``location_id``.
 
@@ -330,9 +613,14 @@ def apply_stock(models, uid, ctx, variant_id: int, location_id: int, qty: float)
         fail(f"action_apply_inventory jsonrpc error: {resp['error']}")
 
 
-def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, format_attr, spec) -> None:
-    """Create or reconcile one single-Format fixture template + its stock."""
+def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, format_attr, spec, categ_id=None):
+    """Create or reconcile one single-Format fixture template + its stock.
+
+    Returns ``(template_id, variant_id)`` on a live run, or ``None`` on a dry run
+    (nothing was resolved, so there is nothing to hand to the tier probe).
+    """
     sku = spec["sku"]
+    qty = spec.get("qty", E2E_QTY)
     print(f"\n════ Fixture: {spec['key']} ({sku!r}) ════")
 
     format_value_id = find_or_create(
@@ -356,6 +644,8 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
     }
     if spec["tree_length"] is not None:
         want["grove_tree_length"] = spec["tree_length"]
+    if categ_id:
+        want["categ_id"] = categ_id
 
     existing = call(
         models,
@@ -367,8 +657,16 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
     )
     if existing:
         tmpl_id = existing[0]
-        cur = call(models, uid, "product.template", "read", [[tmpl_id], list(want) + ["taxes_id"]])[0]
-        drift = {k: v for k, v in want.items() if cur.get(k) != v}
+        gate_fields = list(listing_gate_content(spec["name"])) if spec.get("gated") else []
+        cur = call(models, uid, "product.template", "read", [[tmpl_id], list(want) + ["taxes_id"] + gate_fields])[0]
+        # categ_id reads back as [id, display_name]; compare on the id or every
+        # run would "drift" and rewrite it forever.
+        drift = want_drift(cur, want)
+        # A gated fixture only has its listing content GAP-FILLED: whatever an
+        # operator improved by hand survives, and an unset field is restored so
+        # the fixture can still publish / stays out of the nightly audit.
+        if gate_fields:
+            drift.update(missing_gate_content(cur, listing_gate_content(spec["name"])))
         # Sale taxes are a m2m; reconcile them to the resolved set if they differ
         # (an existing fixture created outside this script may lack them).
         if sorted(cur.get("taxes_id", [])) != sorted(tax_ids):
@@ -416,6 +714,13 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
         }
         if spec["tree_length"] is not None:
             vals["grove_tree_length"] = spec["tree_length"]
+        if categ_id:
+            vals["categ_id"] = categ_id
+        if spec.get("gated"):
+            # MUST be in the same create as is_published=True: create() runs the
+            # publish gate on the finished record, so a two-step "create then
+            # fill" would be refused on step one.
+            vals.update(listing_gate_content(spec["name"]))
         tmpl_id = call(models, uid, "product.template", "create", [vals], ctx)
         print(f"  + created template {sku} -> id={tmpl_id}")
 
@@ -444,7 +749,7 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
     else:
         print(f"  = variant {variant_id} default_code {sku} ok")
 
-    apply_stock(models, uid, ctx, variant_id, stock_location_id, float(E2E_QTY))
+    apply_stock(models, uid, ctx, variant_id, stock_location_id, float(qty))
 
     on_hand = call(models, uid, "product.product", "read", [[variant_id], ["qty_available"]])[0]["qty_available"]
     print(f"  stock: variant {sku} on hand = {on_hand} @ location {stock_location_id}")
@@ -454,6 +759,30 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
         f"  Done: {spec['key']} template id={tmpl_id}, variant id={variant_id} "
         f"({on_hand} on hand). /shop/{tmpl_id} should render an enabled 'Add to Cart'."
     )
+    return tmpl_id, variant_id
+
+
+def verify_plant_tiers(tmpl_id: int, variant_id: int) -> None:
+    """Prove the plant fixture earns a tier, through the real storefront BFF.
+
+    The GOL-2463 done-criterion. ``qualifyingUnits == 0`` means the fixture is
+    still not counted as a plant (wrong category, module not upgraded, tier feed
+    scoped elsewhere) — that is a FAILURE, not a warning, because the volume-tier
+    specs would then be asserting against a silently non-qualifying cart.
+    """
+    print(f"\n── Volume-tier probe ── POST {E2E_TIERS_URL} (qty {E2E_TIERS_QTY})")
+    try:
+        body = probe_volume_tiers(E2E_TIERS_URL, tmpl_id, variant_id, E2E_TIERS_QTY)
+    except Exception as exc:  # noqa: BLE001 — any failure here must be loud
+        fail(f"tier probe against {E2E_TIERS_URL} failed: {exc}")
+    units = body.get("qualifyingUnits")
+    print(f"  qualifyingUnits={units}  tiers={body.get('tiers')}")
+    if not units:
+        fail(
+            f"tier probe returned qualifyingUnits={units!r} for {E2E_TIERS_QTY} units of variant "
+            f"{variant_id}: the fixture is still NOT a qualifying plant (GOL-2463)."
+        )
+    print(f"  OK: {E2E_TIERS_QTY} units counted as {units} qualifying units.")
 
 
 def main() -> None:
@@ -499,10 +828,25 @@ def main() -> None:
         FORMAT_ATTR,
     )
 
+    seeded: dict[str, tuple[int, int]] = {}
     for spec in specs:
-        seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, format_attr, spec)
+        categ_id = None
+        if spec.get("categ_xmlid"):
+            print(f"\n── Plant category for {spec['key']} ──")
+            categ_id = resolve_plant_categ(models, uid, spec["categ_xmlid"])
+        ids = seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, format_attr, spec, categ_id)
+        if ids:
+            seeded[spec["key"]] = ids
 
     print(f"\nDone. Seeded {len(specs)} fixture(s): {[f['sku'] for f in specs]}")
+    for key, (tmpl_id, variant_id) in seeded.items():
+        # Printed so the ids can be pasted straight into the e2e spec / issue.
+        print(f"  ids: {key} templateId={tmpl_id} variantId={variant_id}")
+
+    if E2E_TIERS_URL and "plant" in seeded:
+        verify_plant_tiers(*seeded["plant"])
+    elif E2E_TIERS_URL:
+        print("E2E_TIERS_URL set but the plant fixture was not seeded this run — skipping the tier probe.")
 
 
 if __name__ == "__main__":
