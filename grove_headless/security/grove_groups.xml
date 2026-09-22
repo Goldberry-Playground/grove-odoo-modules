@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+
+    <!--
+        Grove security groups.
+
+        Content Drafter (GOL-2384/C)
+        ============================
+        A dedicated group for the Paperclip "grove-content-drafter" routine
+        (AgenticOS), which polls Odoo over XML-RPC as a service user and writes
+        the storefront description + care guide from the recorded growing facts.
+
+        The group implies base.group_user so the service user is a proper
+        internal user: it can traverse the ORM over XML-RPC and post to the
+        product chatter (mail.message create). The dedicated group is the marker
+        that identifies the agent (versus a human salesperson) and carries the
+        product.template read/write ACL below, so the grant survives even if the
+        generic Internal-User product ACL is later tightened.
+
+        Company scoping (At The Grove Nursery) is enforced by the standard,
+        global product multi-company record rule together with the service
+        user's own company_id — set when the user is provisioned. The service
+        user itself is NOT shipped in this module: its credentials are vaulted by
+        Josh (or minted by the WS3c provisioner, odoocker #615 / GOL-2095) and
+        never committed. To provision: create an internal user "Content Drafter",
+        set its company to At The Grove Nursery, and add it to this group.
+
+        No category_id: Odoo 19 dropped res.groups.category_id (groups now hang
+        off res.groups.privilege). A standalone technical group is the right shape
+        for a service account anyway — it shows under Extra Rights on the user form.
+    -->
+    <record id="group_content_drafter" model="res.groups">
+        <field name="name">Content Drafter</field>
+        <field name="implied_ids" eval="[(4, ref('base.group_user'))]" />
+        <field name="comment">Paperclip content-drafter service account: reads products and writes the
+            storefront description + care guide (grove-content-drafter routine, GOL-2384).</field>
+    </record>
+
+</odoo>

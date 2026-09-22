@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.43.1",
+    "version": "19.0.1.44.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -52,6 +52,7 @@
         "pos_sale",
     ],
     "data": [
+        "security/grove_groups.xml",
         "security/ir.model.access.csv",
         "security/grove_security_rules.xml",
         "data/grove_companies.xml",
