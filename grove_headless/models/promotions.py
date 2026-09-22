@@ -466,17 +466,22 @@ def normalize_reward_line(order, reward, code=None):
             amount = round(min(reward.discount or 0.0, subtotal), 2)
         survivor = reward_lines[:1]
         extras = reward_lines - survivor
-        if extras:
-            extras.unlink()
+        # Rewrite the survivor BEFORE unlinking the extras: writing a line after
+        # sibling lines were unlinked makes sale_stock's write recompute browse a
+        # now-deleted line (MissingError). Capture the mirrored taxes first for
+        # the same reason.
+        tax_ids = _goods_tax_ids(order).ids
         survivor.write(
             {
                 "name": _discount_line_name(reward, code),
                 "product_uom_qty": 1.0,
                 "price_unit": -amount,
-                "tax_ids": [(6, 0, _goods_tax_ids(order).ids)],
+                "tax_ids": [(6, 0, tax_ids)],
             }
         )
-        order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
+        if extras:
+            extras.unlink()
+        order.invalidate_recordset(["order_line", "amount_untaxed", "amount_tax", "amount_total"])
     except Exception:  # noqa: BLE001 — a discount-shaping gap must never break checkout
         _logger.warning("GOL-2450: could not normalize reward line to a single discount", exc_info=True)
 
