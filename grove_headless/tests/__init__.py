@@ -15,6 +15,7 @@ from . import (
     test_detail_serialization,  # noqa: F401
     test_effective_shipping_tier,  # noqa: F401
     test_enrich_job,  # noqa: F401
+    test_fulfillment_pool_gate,  # noqa: F401
     test_fulfillment_state,  # noqa: F401
     test_growing_facts,  # noqa: F401
     test_kit_boms,  # noqa: F401
