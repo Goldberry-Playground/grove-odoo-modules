@@ -54,13 +54,13 @@ class GroveTaxFixtureMixin:
         from odoo.addons.grove_headless.hooks import _ensure_company_wv_taxes
 
         company = cls.env.company
-        group = _ensure_company_wv_taxes(cls.env, company)
+        state = _ensure_company_wv_taxes(cls.env, company)
         # Authoritative default for new products in this company (the source of
-        # the dangling id before the fix).
-        cls.env["ir.default"].set("product.template", "taxes_id", group.ids, company_id=company.id)
+        # the dangling id before the fix). GOL-2449: the default is the WV 6%
+        # state tax only — no municipal, no group.
+        cls.env["ir.default"].set("product.template", "taxes_id", state.ids, company_id=company.id)
         try:
-            company.account_sale_tax_id = group.id
+            company.account_sale_tax_id = state.id
         except Exception:
-            # Some builds restrict this field's domain to non-group taxes; the
             # ir.default above still governs product creation, so ignore.
             pass
