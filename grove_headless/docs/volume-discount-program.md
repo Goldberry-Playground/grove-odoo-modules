@@ -54,10 +54,12 @@ units both rewards are affordable, and it keeps the 20% one (never both).
   loser's reward line is never written. See `models/promotions.py::resolve_discounts`.
 - **Deposit/preorder carts get neither** (same gate as promo codes; CEO directive
   2026-09-06). Revisit at ship-time settlement.
-- **Storefront nudge.** `GET /grove/api/v1/promotions/auto` returns
-  `{"tiers": [{min_qty, percent, label}, ...]}` derived from this program (min_qty
+- **Storefront nudge.** `GET /grove/api/v1/promotions/auto` returns a bare JSON
+  array `[{min_qty, percent, label}, ...]` derived from this program (min_qty
   = `required_points / points-per-unit`), so the storefront can say
-  "Add 2 more trees to unlock 10% off".
+  "Add 2 more trees to unlock 10% off". It is deliberately a top-level array, not
+  a `{"tiers": [...]}` wrapper — the storefront normalizer reads the array
+  directly (GOL-2439 contract; a wrapper parses as empty and hides the nudge).
 - **Stripe.** The Odoo-computed discount rides to Stripe as a one-time coupon on
   the Checkout Session (`stripe_gateway.create_coupon`), exactly as promo codes
   already do. No Stripe promotion codes are ever used.
