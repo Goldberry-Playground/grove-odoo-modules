@@ -165,6 +165,20 @@ class TestEnrichJob(GroveTaxFixtureMixin, TransactionCase):
         # day marked exhausted: counter clamped to the full budget
         self.assertEqual(self._counter(), 100)
 
+    def test_unkeyed_leaves_jobs_queued(self):
+        # No PERENUAL_API_KEY -> the cron must NOT drain the backlog into a
+        # no-op "done"; jobs stay queued so they enrich once the key lands.
+        tmpl = self._product()
+        job = self._queue(tmpl)
+
+        def unkeyed_provider(job_self, on_call):
+            return PerenualProvider(get=_ok_get, api_key="", on_call=on_call)
+
+        with mock.patch.object(type(self.Job), "_perenual_provider", unkeyed_provider):
+            self.Job._cron_process_enrich_jobs()
+        self.assertEqual(job.state, "queued")  # untouched, not "done"
+        self.assertEqual(self._counter(), 0)  # no HTTP call attempted
+
     def test_action_fetch_facts_applies_usda_and_queues_perenual(self):
         from odoo.addons.grove_headless.services.plant_data.mapping import FactValue, PlantFacts
 

@@ -45,6 +45,17 @@ class PerenualProvider:
         self._base = base.rstrip("/")
         self._on_call = on_call
 
+    @property
+    def configured(self) -> bool:
+        """True when a PERENUAL_API_KEY is available to make live calls.
+
+        The budgeted cron probes this before draining so that, while the key is
+        unprovisioned, queued jobs are left untouched (not silently completed)
+        and drain for real once the key lands — the "queue now, drain when
+        keyed" contract.
+        """
+        return bool(self._key)
+
     def _fetch(self, path: str, params: dict):
         if self._on_call:
             self._on_call()

@@ -109,6 +109,14 @@ class GroveEnrichJob(models.Model):
     @api.model
     def _cron_process_enrich_jobs(self):
         """Drain queued Perenual jobs oldest-first while today's budget allows."""
+        # No PERENUAL_API_KEY yet? Leave every job queued rather than draining
+        # the backlog into a no-op ``done`` (lookup() short-circuits without an
+        # HTTP call when unkeyed). This preserves the "queue now, drain when
+        # keyed" contract: products fetched before the key lands still enrich
+        # once it does, instead of needing an operator to re-press Fetch.
+        if not self._perenual_provider(lambda: None).configured:
+            return
+
         key = self._counter_key_today()
         budget = self._budget()
 
