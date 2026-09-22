@@ -49,22 +49,54 @@ WV_KEEP_NAMES = frozenset({WV_STATE_NAME, WV_MUNI_NAME})
 SHIPPING_PRODUCT_CODE = "GROVE-SHIP"
 
 
-def _ensure_company_wv_taxes(env, company):
-    """Find-or-create the WV **state** 6% sale tax for one company and return it.
+def _accessible_companies(company):
+    """Return ``company`` plus its ancestor companies (root-inclusive).
 
-    GOL-2449: the web/POS default is 6% state only. We still find-or-create the
-    1% municipal record (kept for bookkeeping / quarterly filing) but never bind
-    it and never combine it into a group tax — creating an ``amount_type='group'``
-    tax fails on Odoo 19, and that swallowed failure is exactly why prod fell back
-    to the demo 15% default.
+    This is the set of companies whose taxes ``company`` may use: ``account.tax``
+    declares ``_check_company_domain = check_company_domain_parent_of``, so a tax
+    owned by a parent/root company is valid on a branch's products and orders.
+    """
+    chain = company
+    parent = company.parent_id
+    while parent:
+        chain |= parent
+        parent = parent.parent_id
+    return chain
+
+
+def _ensure_company_wv_taxes(env, company):
+    """Find-or-reuse the WV **state** 6% sale tax usable by one company, return it.
+
+    GOL-2449: the three Grove businesses are *branch* companies of a single root
+    (``base.main_company`` — see ``data/grove_companies.xml``). Odoo 19 scopes
+    ``account.tax`` name-uniqueness to the company-hierarchy **root**
+    (``account.tax._constrains_name`` searches ``company_id child_of root``), so a
+    per-branch ``"WV State Sales Tax 6%"`` cannot be created — it collides with
+    the root's record and raises *"Tax names must be unique!"*. That collision is
+    exactly why the old hook's per-company ``create`` blew up for the nursery/GGG
+    branches, and its swallowed failure left 2 of 3 companies on the demo 15%
+    default on prod.
+
+    A branch may *use* a root/ancestor company's tax (check_company is
+    ``parent_of``), so we reuse the WV record already accessible to the company
+    (its own or an ancestor's) and only create one — on the branch **root**, so
+    it satisfies the root-scoped constraint and is shared by every branch — when
+    the hierarchy has none (e.g. the chartless CI DB where install purges the
+    XML-seeded rows).
+
+    The web/POS default is 6% state only; the 1% municipal record is kept for the
+    books but never bound and never combined into a group tax.
     """
     Tax = env["account.tax"].with_company(company)
+    root = company.root_id or company
 
     def _find(name):
         return Tax.search(
             [
                 ("name", "=", name),
-                ("company_id", "=", company.id),
+                # A tax on the company or any ancestor is usable here — reusing it
+                # avoids the root-scoped "Tax names must be unique!" collision.
+                ("company_id", "parent_of", company.id),
                 ("type_tax_use", "=", "sale"),
                 ("amount_type", "=", "percent"),
             ],
@@ -73,26 +105,26 @@ def _ensure_company_wv_taxes(env, company):
 
     state = _find(WV_STATE_NAME)
     if not state:
-        state = Tax.create(
+        state = Tax.with_company(root).create(
             {
                 "name": WV_STATE_NAME,
                 "amount": 6.0,
                 "amount_type": "percent",
                 "type_tax_use": "sale",
-                "company_id": company.id,
+                "company_id": root.id,
                 "description": "WV 6%",
             }
         )
 
     # Keep the municipal record for the books, but do NOT bind it anywhere.
     if not _find(WV_MUNI_NAME):
-        Tax.create(
+        Tax.with_company(root).create(
             {
                 "name": WV_MUNI_NAME,
                 "amount": 1.0,
                 "amount_type": "percent",
                 "type_tax_use": "sale",
-                "company_id": company.id,
+                "company_id": root.id,
                 "description": "Muni 1%",
             }
         )
@@ -112,12 +144,14 @@ def _get_company_wv_state_tax(env, company):
 def _retrofit_products(env, company, state):
     """Strip wrong sale taxes from existing products and ensure the WV 6% state tax.
 
-    "Wrong" = any sale tax that belongs to a DIFFERENT company (the cross-company
-    leak behind the prod defect: 52 nursery products carried company-1's demo
-    15%) or a this-company tax that is not one of the WV records (e.g. the Odoo
-    demo "15%"). Those are removed and the company's WV state tax is ensured
-    present. Products already carrying only WV record(s) for this company are left
-    untouched. Purchase taxes are never touched. Logged so the change is
+    "Wrong" = any sale tax that is NOT a WV record accessible to this company.
+    That covers the prod defect two ways: the Odoo demo ``"15%"`` (a non-WV name,
+    stripped) and any tax owned by a company OUTSIDE this branch's hierarchy
+    (unusable here, stripped). A WV record owned by the company **or one of its
+    ancestors** is legitimately usable by a branch (check_company is ``parent_of``)
+    and is kept — so re-running is idempotent even though ``state`` may be the
+    shared root-company record. Products already carrying only such WV record(s)
+    are left untouched. Purchase taxes are never touched. Logged so the change is
     auditable.
     """
     Template = env["product.template"].with_company(company)
@@ -127,11 +161,12 @@ def _retrofit_products(env, company, state):
             ("company_id", "in", [company.id, False]),
         ]
     )
+    accessible = _accessible_companies(company)
     changed = 0
     for tmpl in templates:
         sale_taxes = tmpl.taxes_id
-        wrong = sale_taxes.filtered(lambda t: t.company_id != company or t.name not in WV_KEEP_NAMES)
-        desired = (sale_taxes - wrong) | state
+        keep = sale_taxes.filtered(lambda t: t.name in WV_KEEP_NAMES and t.company_id in accessible)
+        desired = keep | state
         if set(desired.ids) == set(sale_taxes.ids):
             continue  # already correct
         tmpl.taxes_id = [(6, 0, desired.ids)]
@@ -176,9 +211,35 @@ def _retrofit_shipping_product(env, company, state):
 def setup_wv_sales_tax(env):
     """Ensure every company charges the WV 6% state sales tax by default."""
     companies = env["res.company"].search([])
+    bound = 0
     for company in companies:
         try:
             state = _ensure_company_wv_taxes(env, company)
+
+            # Authoritative default for new products (UI + website + API).
+            env["ir.default"].set(
+                "product.template",
+                "taxes_id",
+                state.ids,
+                company_id=company.id,
+            )
+
+            # The single-valued company default. A branch may point at a root
+            # company's tax (check_company is parent_of), so this is expected to
+            # succeed — but if it ever cannot, the ir.default above still governs
+            # product creation, so log at WARNING and carry on rather than abort.
+            try:
+                company.account_sale_tax_id = state.id
+            except Exception as exc:
+                _logger.warning(
+                    "grove_headless: could not set account_sale_tax_id for %s (%s); ir.default taxes_id still applies",
+                    company.name,
+                    exc,
+                )
+
+            _retrofit_products(env, company, state)
+            _retrofit_shipping_product(env, company, state)
+            bound += 1
         except Exception as exc:  # never let tax setup abort install/upgrade
             _logger.warning(
                 "grove_headless: WV tax setup FAILED for company %s: %s — company keeps its previous default sale tax",
@@ -187,29 +248,19 @@ def setup_wv_sales_tax(env):
             )
             continue
 
-        # Authoritative default for new products (UI + website + API).
-        env["ir.default"].set(
-            "product.template",
-            "taxes_id",
-            state.ids,
-            company_id=company.id,
+    # Count actual successes, not the loop length: a swallowed per-company
+    # failure (the GOL-2449 defect) must never read as "all companies bound".
+    _logger.info(
+        "grove_headless: WV 6%% state sales tax bound for %s of %s companies",
+        bound,
+        len(companies),
+    )
+    if bound < len(companies):
+        _logger.warning(
+            "grove_headless: WV 6%% state sales tax bound for only %s of %s companies — see WARNINGs above",
+            bound,
+            len(companies),
         )
-
-        # The single-valued company default. A plain percent tax is always a
-        # valid value here, so a failure now is a real problem — log at WARNING.
-        try:
-            company.account_sale_tax_id = state.id
-        except Exception as exc:
-            _logger.warning(
-                "grove_headless: could not set account_sale_tax_id for %s (%s); ir.default taxes_id still applies",
-                company.name,
-                exc,
-            )
-
-        _retrofit_products(env, company, state)
-        _retrofit_shipping_product(env, company, state)
-
-    _logger.info("grove_headless: WV 6%% state sales tax bound for %s companies", len(companies))
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -143,6 +143,66 @@ class TestTaxCompanyIntegrity(GroveTaxFixtureMixin, TransactionCase):
 
 
 @tagged("post_install", "-at_install")
+class TestBranchCompanyTaxBinding(GroveTaxFixtureMixin, TransactionCase):
+    """GOL-2449 regression: the WV 6% default must bind for a NON-main (branch)
+    company, not just the first company the hook iterates.
+
+    The nursery and GGG companies are branches of the Farm hierarchy root
+    (data/grove_companies.xml). Odoo 19 scopes account.tax name-uniqueness to
+    that root, so the *old* per-company create raised "Tax names must be unique!"
+    for the branches and its swallowed failure left them on the demo 15% default
+    — the exact prod defect. This asserts the branch is bound (reusing the shared
+    root tax), so the regression cannot silently return.
+    """
+
+    def setUp(self):
+        super().setUp()
+        # A branch company (parent_id = base.main_company). Falls back to GGG if
+        # the nursery xmlid is unavailable in a given DB.
+        self.branch = self.env.ref("grove_headless.company_nursery", raise_if_not_found=False) or self.env.ref(
+            "grove_headless.company_ggg"
+        )
+        self.assertTrue(self.branch.parent_id, "test company must be a branch, not the root")
+
+    def test_ensure_company_wv_taxes_reuses_root_tax_without_collision(self):
+        """The helper returns a usable 6% state tax for the branch and never
+        raises the root-scoped name-uniqueness error."""
+        from odoo.addons.grove_headless.hooks import _accessible_companies, _ensure_company_wv_taxes
+
+        # The hook runs under SUPERUSER at install/migration; mirror that so the
+        # assertion exercises the binding, not test-only record-rule visibility.
+        env = self.env(su=True)
+        state = _ensure_company_wv_taxes(env, self.branch.with_env(env))
+        self.assertTrue(state, "branch must resolve a WV state tax")
+        self.assertEqual(state.amount, 6.0)
+        self.assertEqual(state.amount_type, "percent")
+        self.assertEqual(state.name, WV_STATE_NAME)
+        # It is the shared record accessible to the branch (its own or an ancestor's).
+        self.assertIn(state.company_id, _accessible_companies(self.branch.with_env(env)))
+
+    def test_hook_binds_branch_product_default_to_wv_state_tax(self):
+        """Running the full binder sets the branch's authoritative product-tax
+        default (ir.default) to the WV 6% state tax — the bind the old hook skipped."""
+        from odoo.addons.grove_headless.hooks import setup_wv_sales_tax
+
+        env = self.env(su=True)
+        setup_wv_sales_tax(env)
+
+        default_ids = env["ir.default"]._get("product.template", "taxes_id", company_id=self.branch.id)
+        self.assertTrue(default_ids, "branch company must get a product-tax default")
+        default_taxes = env["account.tax"].browse(default_ids)
+        self.assertEqual(
+            default_taxes.mapped("name"),
+            [WV_STATE_NAME],
+            "branch default must be the WV 6% state tax, not the demo 15%",
+        )
+        # The single-valued company default also points at a WV 6% state tax.
+        branch = self.branch.with_env(env)
+        self.assertEqual(branch.account_sale_tax_id.name, WV_STATE_NAME)
+        self.assertEqual(branch.account_sale_tax_id.amount, 6.0)
+
+
+@tagged("post_install", "-at_install")
 class TestDestinationTax(GroveTaxFixtureMixin, TransactionCase):
     """GOL-1021 defect 2 — WV sales tax is destination-based: it must apply only
     to WV-bound orders and be stripped for any other ship-to state (e.g. Ohio),
