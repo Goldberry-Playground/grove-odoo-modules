@@ -14,7 +14,7 @@ from odoo import http
 from odoo.http import Response, request
 
 from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME
-from ..models import bundle_substitution, stripe_gateway
+from ..models import bundle_substitution, promotions, stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
 from ..models.mail_from import mail_from_vals
@@ -478,6 +478,11 @@ def _structure_variant(variant, template_rootstock=""):
         "qty_available": variant.grove_shared_pool_qty("qty_available"),
         "shipping_tier": variant.grove_effective_shipping_tier,
         "image_url": _image_url("product.product", variant, "image_128"),
+        # Qualifying-tree count for one unit (GOL-2439): 1 for a nursery plant,
+        # the bundle's BoM tree count (Remembrance Grove = 5), 0 for supplies,
+        # gift cards and services. The storefront sums tree_count × qty across
+        # the cart for the volume-tier nudge; a missing field hides the nudge.
+        "tree_count": promotions.variant_tree_count(variant),
     }
 
 
@@ -1496,6 +1501,106 @@ class GroveHeadlessAPI(http.Controller):
         )
 
     @http.route(
+        "/grove/api/v1/checkout/promo/preview",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def checkout_promo_preview(self, **_kwargs):
+        """Preview which discount a cart would get, WITHOUT creating anything
+        (GOL-2431).
+
+        Body = ``{items:[{variant_id, quantity}], fulfillment?, promo_code?}``
+        with NO contact and NO shipping address (GOL-2439): the shopper can press
+        Apply — and the page auto-previews the tier on load — before filling
+        either in. Inside a ``cr.savepoint()`` we build the draft order with a
+        synthetic contact and farm-pickup fulfillment (below) so the contact and
+        ship-to gates never fire, resolve the best single discount (automatic
+        volume tier vs promo code, whichever saves more) against the goods
+        subtotal, read the numbers, then ROLL BACK. Never creates an order,
+        never touches Stripe.
+
+        The discount is address-free by construction — the volume tier keys off
+        tree count and a code discounts the goods subtotal — so previewing as
+        pickup yields the goods-based numbers ``subtotal_after`` reports; the
+        authoritative, shipping-inclusive figure is computed at real checkout.
+
+        Returns ``{ok, applied: "code"|"tier"|null, code, discount_amount,
+        subtotal_after, message}`` plus an optional ``tier: {min_qty, percent}``
+        when ``applied == "tier"``. A deposit/preorder cart with a code surfaces
+        the same 400 the real checkout would; without a code it returns
+        ``applied=null`` (a deposit cart simply earns no tier).
+
+        Bearer auth mirrors /orders + /checkout/session: the storefront BFF calls
+        this server-side with its key, so cart/stock detail never reaches the
+        public internet unauthenticated.
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+
+        # A savepoint we always unwind: _create_draft_order (and the discount
+        # resolver's own measurement savepoints) write real rows; rolling the
+        # OUTER savepoint back guarantees no sale.order / partner / reward line
+        # persists regardless of which internal path ran.
+        class _Unwind(Exception):
+            def __init__(self, response):
+                self.response = response
+
+        # The preview runs before the shopper has entered contact or a shipping
+        # address, yet _create_draft_order requires a contact and — for a ship-to
+        # cart — a green-list address to compute the shipping line. Neither
+        # affects which discount applies, so we build against a synthetic contact
+        # and farm-pickup fulfillment: pickup skips the ship-to/shipping/$0
+        # gates while the goods lines, deposit detection and discount resolution
+        # run exactly as checkout. The whole savepoint is rolled back, so the
+        # synthetic partner never persists, never emails, never reaches Stripe.
+        preview_payload = dict(payload)
+        preview_payload["contact"] = {"name": "Promo preview", "email": "promo-preview@grove.invalid"}
+        preview_payload["fulfillment"] = "pickup"
+        preview_payload.pop("shipping", None)
+        preview_payload.pop("billing", None)
+
+        try:
+            with request.env.cr.savepoint():
+                # _create_draft_order runs the real deposit/discount path and
+                # writes the outcome into `discount` (incl. an optional `tier`
+                # when a volume tier applies). A deposit cart with a code 400s
+                # here (same as the real checkout); a deposit cart without a code
+                # returns applied=null.
+                discount = {"ok": True, "applied": None, "code": None, "discount_amount": 0.0, "message": None}
+                order, error = _create_draft_order(request.website, request.env, preview_payload, discount_out=discount)
+                if error is not None:
+                    raise _Unwind(error)
+                discount["subtotal_after"] = round(promotions.goods_subtotal(order) - discount["discount_amount"], 2)
+                raise _Unwind(_json_response(discount))
+        except _Unwind as u:
+            return u.response
+
+    @http.route(
+        "/grove/api/v1/promotions/auto",
+        type="http",
+        auth="public",
+        methods=["GET"],
+        csrf=False,
+    )
+    def promotions_auto(self, **_kwargs):
+        """Automatic volume-tier feed for the storefront nudge (GOL-2431):
+        ``[{min_qty, percent, label}]`` derived from this tenant's automatic
+        percent-discount programs, ascending by threshold. Public and cheap
+        (config read only), like the shipping-rate feed — the storefront turns it
+        into "Add 2 more trees to unlock 10% off"."""
+        company = request.website.company_id
+        # A bare JSON array `[{min_qty, percent, label}, ...]` (GOL-2439 contract):
+        # the storefront normalizer reads the top-level array directly, so a
+        # `{"tiers": [...]}` wrapper would parse as empty and silently hide the
+        # nudge. Ascending by threshold (see auto_tier_feed).
+        return _json_response(promotions.auto_tier_feed(request.env, company, _date.today()))
+
+    @http.route(
         "/grove/api/v1/stripe/webhook",
         type="http",
         auth="public",
@@ -2014,40 +2119,13 @@ MAX_PROMO_CODE = 64
 def _apply_promo_code(order, code):
     """Apply a storefront promo/loyalty code to ``order`` via sale_loyalty.
 
-    Returns ``None`` on success (a reward order line now exists on the order) or
-    a shopper-facing error string when the code is unknown, ineligible (the cart
-    doesn't meet the program's rule — e.g. FLATWOODS needs 2+ qualifying trees),
-    expired, or already applied. An invalid code is never silently ignored
-    (GOL-2088).
-
-    Mirrors the website_sale_loyalty coupon flow: ``_try_apply_code`` validates +
-    registers the code and returns the claimable rewards grouped by coupon; we
-    then apply each with ``_apply_program_reward``. We only auto-apply rewards
-    that need no product selection (a fixed/percent discount, which is all the
-    storefront advertises); a reward that requires choosing a free product can't
-    be resolved from the headless payload, so it is rejected with a clear
-    message rather than guessed at.
+    Thin wrapper kept for the /orders path and existing callers/tests; the code
+    application itself lives in ``promotions.apply_code_reward`` (GOL-2431) so the
+    preview endpoint and best-single-discount resolver share exactly one code
+    path. Returns ``None`` on success or a shopper-facing error string; an invalid
+    code is never silently ignored (GOL-2088).
     """
-    result = order._try_apply_code(code)
-    if not isinstance(result, dict):
-        return "This promo code can't be applied to your cart."
-    if result.get("error"):
-        return result["error"]
-    # Success: ``result`` maps coupon (loyalty.card) -> claimable rewards
-    # (loyalty.reward recordset). Empty when the code registered but yields no
-    # reward for this cart.
-    applied = False
-    for coupon, rewards in result.items():
-        for reward in rewards:
-            if reward.multi_product:
-                return "This promo needs a product choice we can't make at checkout — please contact us to redeem it."
-            status = order._apply_program_reward(reward, coupon)
-            if isinstance(status, dict) and status.get("error"):
-                return status["error"]
-            applied = True
-    if not applied:
-        return "This code isn't valid for the items in your cart."
-    return None
+    return promotions.apply_code_reward(order, code)
 
 
 def _stamp_bundle_substitution(kit_line, kit_bom, variant, dest, state_label):
@@ -2085,7 +2163,7 @@ def _stamp_bundle_substitution(kit_line, kit_bom, variant, dest, state_label):
     )
 
 
-def _create_draft_order(website, env, payload):
+def _create_draft_order(website, env, payload, discount_out=None):
     """Build a draft sale.order from a posted cart payload.
 
     Shared by POST /orders and POST /checkout/session. Returns
@@ -2401,19 +2479,19 @@ def _create_draft_order(website, env, payload):
     # state. An invalid or ineligible code is a shopper-facing 400, never a
     # silent no-op; the cart is unlinked so no partial order persists.
     promo_code = payload.get("promo_code")
-    if promo_code is not None and promo_code != "":
-        if not isinstance(promo_code, str) or len(promo_code) > MAX_PROMO_CODE:
-            order.unlink()
-            return None, _json_response({"error": "That promo code isn't valid."}, status=400)
-        # CEO directive 2026-09-06 (GOL-2088): a promo code is REJECTED on a
-        # preorder (deposit) cart rather than deferred to ship. The store is
-        # ships-now through Oct 16, so a preorder cart cannot occur during the
-        # FLATWOODS window — this branch is defensive and revisited when preorder
-        # season reopens. Rejecting keeps the money path simple: a deposit cart
-        # never carries a reward line to settle off-session at ship. Checked
-        # before _apply_promo_code so an eligible code is still refused (the cart
-        # shape, not the code, is the reason) and no reward line is ever written.
-        if _cart_has_preorder(env, order, payload):
+    code_supplied = promo_code is not None and promo_code != ""
+    if code_supplied and (not isinstance(promo_code, str) or len(promo_code) > MAX_PROMO_CODE):
+        order.unlink()
+        return None, _json_response({"error": "That promo code isn't valid."}, status=400)
+
+    # Deposit/preorder carts get NEITHER a promo code NOR an automatic volume
+    # tier (CEO directive 2026-09-06, GOL-2088; extended to tiers by GOL-2431):
+    # the flat $10 deposit defers all goods/shipping/tax, so no discount can ride
+    # it. A supplied code on such a cart is a hard 400 (the cart shape, not the
+    # code, is the reason); a tier is simply not applied. Same predicate as the
+    # line-item builder so the money path never diverges.
+    if _cart_has_preorder(env, order, payload):
+        if code_supplied:
             order.unlink()
             return None, _json_response(
                 {
@@ -2424,10 +2502,23 @@ def _create_draft_order(website, env, payload):
                 },
                 status=400,
             )
-        promo_error = _apply_promo_code(order, promo_code.strip())
-        if promo_error:
+    else:
+        # Ships-now cart: apply the best single discount (automatic volume tier vs
+        # promo code, whichever saves more — never both). Runs after the shipping
+        # line exists so an order-level discount splits across the same tax groups
+        # and BEFORE the destination-tax step so the reward line is de-taxed with
+        # the goods when shipping out of state. When a code was supplied but
+        # nothing applied (neither it nor a better tier), it is a shopper-facing
+        # 400 with the specific shortfall reason — never a silent no-op (GOL-2088).
+        result = promotions.resolve_discounts(order, promo_code if code_supplied else None)
+        if discount_out is not None:
+            discount_out.update(result)
+        if code_supplied and result["applied"] is None:
             order.unlink()
-            return None, _json_response({"error": promo_error}, status=400)
+            return None, _json_response(
+                {"error": result["message"] or "This promo code can't be applied to your cart."},
+                status=400,
+            )
         order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
 
     # WV sales tax is destination-based for SHIPPED orders (GOL-1021): keep it
