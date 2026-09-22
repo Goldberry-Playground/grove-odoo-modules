@@ -2816,6 +2816,28 @@ def _cart_has_preorder(env, order, payload=None, today=None):
     return _order_takes_deposit(order, today)
 
 
+def _wv_tax_label(order):
+    """The Review & pay summary's tax-line label, e.g. ``WV Sales Tax (6%)``
+    (GOL-2450). The percent is read off the account.tax records the goods lines
+    actually carry — summing a legacy group tax's children — so the label always
+    tells the truth about the rate charged, whatever the WV binding is set to.
+    Falls back to the plain label if nothing legible is found."""
+    seen = order.env["account.tax"]
+    for line in order.order_line:
+        if line.display_type or not line.product_id or line.reward_id:
+            continue
+        if line.product_id.default_code == SHIPPING_PRODUCT_CODE:
+            continue
+        seen |= line.tax_ids
+    pct = 0.0
+    for tax in seen:
+        if tax.amount_type == "group":
+            pct += sum(child.amount for child in tax.children_tax_ids if child.amount_type == "percent")
+        elif tax.amount_type == "percent":
+            pct += tax.amount
+    return f"WV Sales Tax ({pct:g}%)" if pct else "Sales tax (WV)"
+
+
 def _build_stripe_line_items(order, today=None):
     """Turn a draft order's lines into Stripe Checkout line items.
 
@@ -2869,11 +2891,14 @@ def _build_stripe_line_items(order, today=None):
         return line_items, preorder_variant_ids, charged_cents
 
     # Ships-now full-charge path: every good at full price + shipping + WV tax +
-    # any loyalty discount, all collected today.
-    line_items = []
+    # any loyalty discount, all collected today. The Review & pay summary renders
+    # this array verbatim, so it is assembled in the ruling's exact order
+    # (GOL-2450 — Josh 2026-09-22): goods, then Discount, then Shipping, then the
+    # WV tax line.
+    goods_items = []
     tax_today = 0.0
     for line in product_lines:
-        line_items.append(
+        goods_items.append(
             {
                 "name": line.product_id.display_name,
                 "kind": "goods",
@@ -2882,6 +2907,35 @@ def _build_stripe_line_items(order, today=None):
             }
         )
         tax_today += line.price_tax
+    # Loyalty reward discount (GOL-2088 / GOL-2450): collapse EVERY reward line
+    # into ONE negative `discount` line item at pre-tax face value.
+    # promotions.normalize_reward_line already puts the whole face on a single
+    # line for the common homogeneous-WV cart; sale_loyalty can still split a
+    # fixed reward into one line per tax group, so we sum the reward lines here
+    # to guarantee the Review & pay summary renders exactly one "Discount" line
+    # regardless (Josh saw "$10 on your order" twice). The summed negative tax
+    # nets the WV line so the tax below reflects the DISCOUNTED base. A deposit
+    # cart never reaches here: _create_draft_order rejects a promo code on a
+    # deposit cart upstream (CEO directive 2026-09-06), and the deposit branch
+    # above ignores reward lines entirely, so no discount ever leaks onto a flat
+    # deposit charge.
+    discount_items = []
+    discount_subtotal = 0.0
+    discount_name = None
+    discount_low = 0.0  # track the most-negative line so the label is the survivor's
+    for line in order.order_line:
+        if not line.reward_id or line.display_type:
+            continue
+        discount_subtotal += line.price_subtotal  # negative, pre-tax face
+        tax_today += line.price_tax  # negative → reduces tax owed today
+        if discount_name is None or line.price_subtotal < discount_low:
+            discount_low = line.price_subtotal
+            discount_name = line.name or "Discount"
+    if discount_name is not None:
+        cents = stripe_gateway.to_cents(discount_subtotal)
+        if cents != 0:
+            discount_items.append({"name": discount_name, "kind": "discount", "amount_cents": cents, "quantity": 1})
+    shipping_items = []
     for line in order.order_line:
         if line.display_type or not line.product_id:
             continue
@@ -2890,39 +2944,24 @@ def _build_stripe_line_items(order, today=None):
         amount = stripe_gateway.to_cents(line.price_unit)
         if amount <= 0:
             continue
-        line_items.append(
+        shipping_items.append(
             {"name": line.product_id.display_name, "kind": "shipping", "amount_cents": amount, "quantity": 1}
         )
         tax_today += line.price_tax
-    # Loyalty reward discount(s) (GOL-2088): a negative line that reduces today's
-    # charge, plus its negative tax that reduces the WV tax line. Netted BEFORE
-    # the tax line is emitted so an out-of-state (untaxed) cart doesn't sprout a
-    # spurious tax line, and a WV cart's tax reflects the discounted base. A
-    # deposit cart never reaches here: _create_draft_order rejects a promo code on
-    # a deposit cart upstream (CEO directive 2026-09-06), and the deposit branch
-    # above ignores reward lines entirely, so no discount ever leaks onto a
-    # flat-deposit charge.
-    discount_items = []
-    for line in order.order_line:
-        if not line.reward_id or line.display_type:
-            continue
-        cents = stripe_gateway.to_cents(line.price_subtotal)  # negative
-        if cents == 0:
-            continue
-        discount_items.append(
-            {"name": line.name or "Discount", "kind": "discount", "amount_cents": cents, "quantity": 1}
-        )
-        tax_today += line.price_tax  # negative → reduces tax owed today
+    # One WV tax line on the discounted base. Emitted only when positive so an
+    # out-of-state (de-taxed) cart never sprouts a spurious tax line; the label
+    # reads the real applied rate (GOL-2450).
+    tax_items = []
     if tax_today > 0:
-        line_items.append(
+        tax_items.append(
             {
-                "name": "Sales tax (WV)",
+                "name": _wv_tax_label(order),
                 "kind": "tax",
                 "amount_cents": stripe_gateway.to_cents(tax_today),
                 "quantity": 1,
             }
         )
-    line_items.extend(discount_items)
+    line_items = goods_items + discount_items + shipping_items + tax_items
     charged_cents = sum(li["amount_cents"] * li["quantity"] for li in line_items)
     return line_items, [], charged_cents
 
