@@ -25,6 +25,22 @@ export async function loadSelectors(file) {
   return JSON.parse(await readFile(p, 'utf8'));
 }
 
+/**
+ * Extra Chromium launch flags from `PW_CHROMIUM_ARGS` (whitespace-separated).
+ * Empty by default so Josh's real headed sign-in launches a normal browser. A
+ * rootless container (CI, the fleet browser-runtime) sets
+ * `PW_CHROMIUM_ARGS="--no-sandbox --disable-dev-shm-usage --disable-gpu"` so the
+ * same code — and the fixture suite — can run headless without a sandbox.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {string[]}
+ */
+export function chromiumArgsFromEnv(env = process.env) {
+  return String(env.PW_CHROMIUM_ARGS || '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+}
+
 export class PirateShip {
   /** @param {import('playwright').BrowserContext} context @param {object} selectors */
   constructor(context, page, selectors) {
@@ -38,13 +54,15 @@ export class PirateShip {
    * time so Josh can sign in + enter 2FA; the profile IS the credential.
    * @returns {Promise<PirateShip>}
    */
-  static async launch({ profileDir, headed = true, selectors, timeoutMs = ACTION_TIMEOUT }) {
+  static async launch({ profileDir, headed = true, selectors, timeoutMs = ACTION_TIMEOUT, args }) {
     const { chromium } = await import('playwright');
     const sel = selectors || (await loadSelectors());
+    const launchArgs = args ?? chromiumArgsFromEnv();
     const context = await chromium.launchPersistentContext(profileDir, {
       headless: !headed,
       acceptDownloads: true,
       viewport: { width: 1440, height: 900 },
+      ...(launchArgs.length ? { args: launchArgs } : {}),
     });
     context.setDefaultTimeout(timeoutMs);
     const page = context.pages()[0] || (await context.newPage());
