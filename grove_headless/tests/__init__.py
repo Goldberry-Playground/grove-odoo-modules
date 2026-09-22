@@ -7,6 +7,7 @@
 # BOTH lists is the "double-skip" that leaves a suite fully dormant (GOL-1936).
 from . import (
     test_availability_events,  # noqa: F401
+    test_bundle_packing_slip,  # noqa: F401
     test_bundle_substitution,  # noqa: F401
     test_carrier_tracking,  # noqa: F401
     test_carrier_tracking_cron,  # noqa: F401

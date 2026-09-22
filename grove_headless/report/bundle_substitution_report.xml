@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+
+    <!-- Print the per-state compliance substitution on the delivery slip the
+         warehouse packs from (GOL-2237). The backend resolves the effective
+         composition (ship shagbark hickory for chestnut into FL, etc.) and the
+         checkout mirrors it onto the picking via
+         stock.picking.grove_substitution_note; without this block the packer
+         works the default bundle contents and the box diverges from the order's
+         legal composition — a failure that happens in the barn, not in CI.
+
+         `o` in the delivery document is the stock.picking. Rendered only when a
+         substitution exists, so ordinary bundles and non-bundle orders print
+         unchanged. Anchored above the stock moves table (the standard delivery
+         slip anchor) and NOT gated by that table's own state t-if, so it prints
+         whatever state the transfer is in when the slip is pulled. -->
+    <template id="report_delivery_document_grove_substitution" inherit_id="stock.report_delivery_document">
+        <xpath expr="//table[@name='stock_move_table']" position="before">
+            <div
+                t-if="o.grove_substitution_note"
+                class="alert alert-warning"
+                role="alert"
+                style="border: 2px solid #d9822b; padding: 8px; margin-bottom: 12px;"
+            >
+                <strong>&#9888; COMPLIANCE SUBSTITUTION — pack the swaps below, not the default bundle parts:</strong>
+                <pre
+                    style="white-space: pre-wrap; font-family: inherit; margin: 0.5rem 0 0 0;"
+                ><t t-esc="o.grove_substitution_note" /></pre>
+            </div>
+        </xpath>
+    </template>
+
+</odoo>
