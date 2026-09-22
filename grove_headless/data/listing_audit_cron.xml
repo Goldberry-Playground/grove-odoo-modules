@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Nightly listing-content audit (GOL-2385, spec 2026-09-21 section D).
+     Reports every published plant listing still missing required content to
+     the ops Discord channel and schedules a To-Do activity on each product's
+     responsible user. Never unpublishes anything. -->
+<odoo>
+    <record id="ir_cron_audit_listing_content" model="ir.cron">
+        <field name="name">Grove: nightly listing-content audit</field>
+        <field name="model_id" ref="product.model_product_template"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_audit_listing_content()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <!-- 06:00 America/New_York. ir.cron stores nextcall in UTC and has no
+             timezone field, so this is pinned to EDT (UTC-4) → 10:00 UTC, the
+             same fixed-UTC approach the weekly order rollup uses. It will drift
+             one hour during EST; acceptable for a data-quality report. -->
+        <field name="nextcall">2026-09-23 10:00:00</field>
+        <!-- NB: ir.cron.doall was removed in Odoo 17+ (fails load on Odoo 19). -->
+        <field name="active" eval="True"/>
+    </record>
+</odoo>

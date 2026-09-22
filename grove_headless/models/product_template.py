@@ -1,5 +1,8 @@
+import logging
+import os
 import re
 
+import requests
 from markupsafe import Markup, escape
 from odoo import _, api, fields, models
 from odoo.exceptions import UserError, ValidationError
@@ -10,6 +13,8 @@ from odoo.exceptions import UserError, ValidationError
 # the budgeted cron (models/grove_enrich_job.py).
 from ..services.plant_data import mapping as plant_mapping
 from ..services.plant_data.usda import USDAProvider
+
+_logger = logging.getLogger(__name__)
 
 # ── Preorder cap (GOL-2171) ──────────────────────────────────────────────
 # The global default preorder cap lives in ir.config_parameter under this key
@@ -728,6 +733,118 @@ class ProductTemplate(models.Model):
                     items=", ".join(missing),
                 )
             )
+
+    # ── Nightly listing-content audit (GOL-2385/D, spec 2026-09-21) ──────
+    @api.model
+    def cron_audit_listing_content(self):
+        """Daily 06:00 America/New_York: chase published-but-incomplete plants.
+
+        Selects every gated (plant) template that is published yet still missing
+        a required fact, description, care guide or sign-off, posts one Discord
+        summary to the ops webhook and schedules one open "To Do" activity (due
+        today) per product on its responsible user — skipping any product that
+        already carries an open audit activity so nightly runs never pile up.
+
+        This never unpublishes anything: an already-selling incomplete plant
+        keeps selling (the publish gate only blocks the False→True transition);
+        the audit is the follow-up that gets a human to finish the listing.
+        """
+        incomplete = self._grove_audit_incomplete_listings()
+        if not incomplete:
+            _logger.info("listing-content audit: no published plant listing is incomplete")
+            return
+        self._grove_audit_post_discord(incomplete)
+        scheduled = self._grove_audit_schedule_activities(incomplete)
+        _logger.info(
+            "listing-content audit: %d incomplete published listing(s), %d new activity(ies) scheduled",
+            len(incomplete),
+            scheduled,
+        )
+
+    @api.model
+    def _grove_audit_incomplete_listings(self):
+        """Published, gated, incomplete plant templates, ordered by name.
+
+        grove_listing_complete is stored, so the completeness half is a plain
+        domain; gating (under the Plants category, consu, not exempt) needs the
+        parent_path prefix check, so it is filtered in Python — the published +
+        incomplete pre-filter keeps that set tiny.
+        """
+        candidates = self.sudo().search(
+            [("website_published", "=", True), ("grove_listing_complete", "=", False)],
+            order="name",
+        )
+        return candidates.filtered(lambda t: t._grove_is_gated())
+
+    @api.model
+    def _grove_audit_discord_text(self, products):
+        """Build the ops-channel summary line (kept pure for payload-shape tests).
+
+        Mirrors the spec example: "3 published listings incomplete: Apple —
+        Plant Spacing, Soil, Description, Care guide; ...".
+        """
+        parts = [f"{p.display_name} — {p.grove_listing_missing}" for p in products]
+        return f"{len(products)} published listing(s) incomplete: " + "; ".join(parts)
+
+    @api.model
+    def _grove_audit_post_discord(self, products):
+        """Post the audit summary to the ops Discord webhook (best-effort).
+
+        Reuses the same env-var mechanism as grove.order.rollup._discord_digest;
+        this is a data-quality/ops report so it targets DISCORD_OPS_WEBHOOK_URL
+        (not the orders channel). A missing webhook logs and no-ops rather than
+        raising — the activities below are the durable half of the audit.
+        """
+        url = os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+        if not url:
+            _logger.info("listing-content audit: DISCORD_OPS_WEBHOOK_URL unset — skipping Discord post")
+            return
+        text = self._grove_audit_discord_text(products)
+        try:
+            requests.post(url, json={"content": text[:2000]}, timeout=10)
+        except Exception:
+            _logger.warning("listing-content audit: Discord notify failed", exc_info=True)
+
+    @api.model
+    def _grove_audit_schedule_activities(self, products):
+        """One open To-Do per incomplete product, deduped; returns count created.
+
+        Assigned to the product's responsible user (falling back to the admin
+        user, then the current user). A product that already carries an open
+        activity of this type is skipped, so re-running the audit is idempotent.
+        """
+        todo_type = self.env.ref("mail.mail_activity_data_todo")
+        model_id = self.env["ir.model"]._get_id("product.template")
+        deadline = fields.Date.context_today(self)
+        fallback = self.env.ref("base.user_admin", raise_if_not_found=False) or self.env.user
+        Activity = self.env["mail.activity"].sudo()
+        created = 0
+        for product in products:
+            existing = Activity.search_count(
+                [
+                    ("res_model_id", "=", model_id),
+                    ("res_id", "=", product.id),
+                    ("activity_type_id", "=", todo_type.id),
+                ]
+            )
+            if existing:
+                continue
+            user = product.responsible_id or fallback
+            Activity.create(
+                {
+                    "res_model_id": model_id,
+                    "res_id": product.id,
+                    "activity_type_id": todo_type.id,
+                    "summary": _("Complete storefront listing"),
+                    "note": Markup("<p>{}</p>").format(
+                        _("Missing before this plant is a complete listing: %s") % product.grove_listing_missing
+                    ),
+                    "date_deadline": deadline,
+                    "user_id": user.id,
+                }
+            )
+            created += 1
+        return created
 
     # ── Product-photo resolution guardrail (GOL-837) ────────────────────
     # The storefront can't add resolution a source lacks, so we surface the
