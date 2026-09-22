@@ -1584,6 +1584,7 @@ class GroveHeadlessAPI(http.Controller):
         "/grove/api/v1/promotions/auto",
         type="http",
         auth="public",
+        website=True,
         methods=["GET"],
         csrf=False,
     )

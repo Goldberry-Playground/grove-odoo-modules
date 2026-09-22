@@ -14,7 +14,7 @@ from datetime import date, timedelta
 from odoo.addons.grove_headless.controllers import main as grove_main
 from odoo.addons.grove_headless.models import promotions, stripe_gateway
 from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
-from odoo.tests import TransactionCase, tagged
+from odoo.tests import HttpCase, TransactionCase, get_db_name, tagged
 
 
 @tagged("post_install", "-at_install")
@@ -356,3 +356,98 @@ class TestPromotions(GroveTaxFixtureMixin, TransactionCase):
         self.assertIsNone(result["applied"])
         self.assertEqual(result["discount_amount"], 0.0)
         self.assertEqual(result["subtotal_after"], promotions.goods_subtotal(order))
+
+
+@tagged("post_install", "-at_install")
+class TestPromotionsAutoEndpoint(GroveTaxFixtureMixin, HttpCase):
+    """HTTP regression for the GOL-2439 storefront contract endpoints.
+
+    ``TestPromotions`` above exercises the model layer (``auto_tier_feed``,
+    ``variant_tree_count``) directly, so it cannot see a route that fails to
+    *dispatch*. ``GET /grove/api/v1/promotions/auto`` reads
+    ``request.website.company_id`` and therefore must be registered with
+    ``website=True`` — without it Odoo never populates ``request.website`` and
+    the route 500s (``AttributeError: 'Request' object has no attribute
+    'website'``, GOL-2439). Driving it through the real dispatch chain with
+    ``url_open`` is the only test that catches that; a pure model test passes
+    while the live storefront silently hides the nudge.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.ref("base.main_company")
+        plants_root = self.env.ref("grove_headless.categ_plants")
+        self.apple = self.env["product.product"].create(
+            {
+                "name": "Apple 'Honeycrisp'",
+                "type": "consu",
+                "list_price": 25.0,
+                "categ_id": plants_root.id,
+            }
+        )
+        # Automatic 10%-off-at-5-trees program: the "real QA program" shape the
+        # storefront nudge reads (see TestPromotions._auto_volume_program).
+        self.env["loyalty.program"].with_company(self.company).create(
+            {
+                "name": "Volume discount",
+                "program_type": "promotion",
+                "trigger": "auto",
+                "applies_on": "current",
+                "company_id": self.company.id,
+                "rule_ids": [
+                    (
+                        0,
+                        0,
+                        {
+                            "mode": "auto",
+                            "reward_point_mode": "unit",
+                            "reward_point_amount": 1.0,
+                            "product_ids": [(6, 0, self.apple.ids)],
+                        },
+                    )
+                ],
+                "reward_ids": [
+                    (
+                        0,
+                        0,
+                        {
+                            "reward_type": "discount",
+                            "discount": 10.0,
+                            "discount_mode": "percent",
+                            "discount_applicability": "order",
+                            "required_points": 5.0,
+                            "description": "10% off (5+ trees)",
+                        },
+                    )
+                ],
+            }
+        )
+
+    def _headers(self, **extra):
+        # X-Odoo-Database routes the public request without a session cookie;
+        # X-Grove-Tenant selects the Goldberry website/company (base.main_company).
+        # Same pattern as TestProductSlugEndpoint in test_product_slug.py.
+        headers = {"X-Odoo-Database": get_db_name(), "X-Grove-Tenant": "goldberry"}
+        headers.update(extra)
+        return headers
+
+    def test_promotions_auto_dispatches_and_returns_bare_array(self):
+        """GET /grove/api/v1/promotions/auto returns 200 and a bare JSON array
+        of ``{min_qty, percent, label}`` — not a 500, and not a wrapped object.
+
+        Guards two things at once: the route registers with ``website=True`` (so
+        ``request.website`` resolves), and the body is the top-level array the
+        storefront normalizer reads (a ``{"tiers": [...]}`` wrapper would parse
+        as empty and hide the nudge)."""
+        response = self.url_open(
+            "/grove/api/v1/promotions/auto",
+            headers=self._headers(),
+        )
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertIsInstance(body, list, "contract is a bare array, not a wrapper object")
+        self.assertTrue(body, "the seeded automatic program must surface at least one tier")
+        first = body[0]
+        self.assertEqual(set(first), {"min_qty", "percent", "label"})
+        self.assertEqual(first["min_qty"], 5)
+        self.assertEqual(first["percent"], 10.0)
