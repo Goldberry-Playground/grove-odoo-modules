@@ -24,16 +24,13 @@
         Josh (or minted by the WS3c provisioner, odoocker #615 / GOL-2095) and
         never committed. To provision: create an internal user "Content Drafter",
         set its company to At The Grove Nursery, and add it to this group.
-    -->
-    <record id="module_category_grove" model="ir.module.category">
-        <field name="name">Grove</field>
-        <field name="description">Goldberry Grove headless / storefront roles.</field>
-        <field name="sequence">50</field>
-    </record>
 
+        No category_id: Odoo 19 dropped res.groups.category_id (groups now hang
+        off res.groups.privilege). A standalone technical group is the right shape
+        for a service account anyway — it shows under Extra Rights on the user form.
+    -->
     <record id="group_content_drafter" model="res.groups">
         <field name="name">Content Drafter</field>
-        <field name="category_id" ref="module_category_grove" />
         <field name="implied_ids" eval="[(4, ref('base.group_user'))]" />
         <field name="comment">Paperclip content-drafter service account: reads products and writes the
             storefront description + care guide (grove-content-drafter routine, GOL-2384).</field>
