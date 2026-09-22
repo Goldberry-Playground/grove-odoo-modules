@@ -22,7 +22,7 @@ database had a chart of accounts.
 from odoo.addons.account.tests.common import AccountTestInvoicingCommon
 from odoo.addons.grove_headless.hooks import (
     POS_CONFIG_SPECS,
-    WV_GROUP_NAME,
+    WV_STATE_NAME,
     _ensure_company_wv_taxes,
     _setup_company_pos,
 )
@@ -42,7 +42,7 @@ class TestPosConfig(AccountTestInvoicingCommon):
         # channels would actually hold — so both the hook and the reads resolve.
         cls.env.user.group_ids |= cls.env.ref("point_of_sale.group_pos_manager")
         cls.env.user.group_ids |= cls.env.ref("sales_team.group_sale_manager")
-        # Ensure the WV 7% group tax exists in this company (products in the
+        # Ensure the WV 6% state tax exists in this company (products in the
         # tax test bind to it explicitly), then stand up the POS channels.
         _ensure_company_wv_taxes(cls.env, cls.company)
         cls.configs = _setup_company_pos(cls.env, cls.company)
@@ -99,32 +99,32 @@ class TestPosConfig(AccountTestInvoicingCommon):
                 f"cash method {cash_label!r} must belong to exactly one POS config",
             )
 
-    def test_pos_sale_charges_7_percent(self):
-        """A $100 POS line is taxed exactly $7.00 via the WV group tax.
+    def test_pos_sale_charges_6_percent(self):
+        """A $100 POS line is taxed exactly $6.00 via the WV state tax.
 
         POS computes line tax with account.tax the same way sale orders do, so
         asserting the tax the product carries proves the market-sale charge.
         """
-        group = self.env["account.tax"].search(
+        state = self.env["account.tax"].search(
             [
-                ("name", "=", WV_GROUP_NAME),
+                ("name", "=", WV_STATE_NAME),
                 ("company_id", "=", self.company.id),
-                ("amount_type", "=", "group"),
+                ("amount_type", "=", "percent"),
             ],
             limit=1,
         )
-        self.assertTrue(group, "WV Sales Tax 7% group tax should exist")
+        self.assertTrue(state, "WV State Sales Tax 6% should exist")
         product = self.env["product.product"].create(
             {
                 "name": "Market Test Item",
                 "type": "consu",
                 "list_price": 100.0,
-                "taxes_id": [(6, 0, group.ids)],
+                "taxes_id": [(6, 0, state.ids)],
             }
         )
         result = product.taxes_id.compute_all(100.0, currency=self.company.currency_id)
-        self.assertAlmostEqual(result["total_included"], 107.0, places=2)
-        self.assertAlmostEqual(result["total_included"] - result["total_excluded"], 7.0, places=2)
+        self.assertAlmostEqual(result["total_included"], 106.0, places=2)
+        self.assertAlmostEqual(result["total_included"] - result["total_excluded"], 6.0, places=2)
 
     def test_idempotent(self):
         """Re-running the setup does not duplicate configs, methods, or teams."""

@@ -413,13 +413,13 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
     # ── GOL-2233 / GOL-2052: a deposit order defers shipping + tax to ship ──
 
     def _seed_wv_tax(self):
-        """Put the WV group tax on the product so a today-charge would tax."""
-        wv_group = self.env["account.tax"].search(
-            [("name", "=", "WV Sales Tax 7%"), ("amount_type", "=", "group")], limit=1
+        """Put the WV state tax on the product so a today-charge would tax."""
+        wv_state = self.env["account.tax"].search(
+            [("name", "=", "WV State Sales Tax 6%"), ("amount_type", "=", "percent")], limit=1
         )
-        self.assertTrue(wv_group, "WV group tax must exist (post_init_hook)")
-        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_group.ids)]
-        return wv_group
+        self.assertTrue(wv_state, "WV state tax must exist (post_init_hook)")
+        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_state.ids)]
+        return wv_state
 
     def test_deposit_order_charges_deposit_only_no_shipping_no_tax(self):
         """A deposit cart charges exactly $10 today — the quoted shipping line
@@ -482,7 +482,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         drops the order's GRAND total by the discount amount. sale_loyalty's
         fixed per-order discount is tax-INCLUSIVE: a "$10 off" reward splits into
         a negative untaxed subtotal + negative tax that together total exactly
-        -$10 off `amount_total` (so the untaxed subtotal alone is ~-$9.35 at 7%)."""
+        -$10 off `amount_total` (so the untaxed subtotal alone is ~-$9.43 at 6%)."""
         self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
         self._set_stock(self.product, 5)
         order = self._make_order(qty=2)  # 2 * $25 = $50 subtotal, meets min_qty
@@ -838,13 +838,17 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.product.product_tmpl_id.grove_shipping_tier = "potted"
         # Seed the WV default tax explicitly so the test doesn't hinge on
         # ir.default timing in the transaction — the real product default
-        # (hooks.setup_wv_sales_tax) puts this same group on every line.
-        wv_group = self.env["account.tax"].search(
-            [("name", "=", "WV Sales Tax 7%"), ("company_id", "=", self.company.id), ("amount_type", "=", "group")],
+        # (hooks.setup_wv_sales_tax) puts this same state tax on every line.
+        wv_state = self.env["account.tax"].search(
+            [
+                ("name", "=", "WV State Sales Tax 6%"),
+                ("company_id", "=", self.company.id),
+                ("amount_type", "=", "percent"),
+            ],
             limit=1,
         )
-        self.assertTrue(wv_group, "WV group tax must exist (post_init_hook)")
-        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_group.ids)]
+        self.assertTrue(wv_state, "WV state tax must exist (post_init_hook)")
+        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_state.ids)]
         payload = self._cart_payload("OH", fulfillment="pickup")
         order, error = grove_main._create_draft_order(self._website(), self.env, payload)
         self.assertIsNone(error)

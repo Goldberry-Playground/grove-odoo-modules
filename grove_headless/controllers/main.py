@@ -13,7 +13,7 @@ import requests
 from odoo import http
 from odoo.http import Response, request
 
-from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME
+from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME, _get_company_wv_state_tax
 from ..models import bundle_substitution, promotions, stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
@@ -50,11 +50,12 @@ from ..models.shipping_zones import (
 from ..models.shippo_client import is_valid_tracking
 from .product_domain import build_product_domain, slugify, zone_response
 
-# Grove has sales-tax nexus only in West Virginia, so the WV 7% tax (the product
-# default set by hooks.setup_wv_sales_tax) legally applies only to a WV-destination
-# shipment. Any order shipping elsewhere must have the WV tax stripped — see
-# _apply_destination_tax. The set is the WV group tax + its two components so a
-# line carrying either the combined group or a bare component is caught.
+# Grove has sales-tax nexus only in West Virginia, so the WV 6% state tax (the
+# product default set by hooks.setup_wv_sales_tax) legally applies only to a
+# WV-destination shipment. Any order shipping elsewhere must have the WV tax
+# stripped — see _apply_destination_tax. The set also includes the legacy 7%
+# group + 1% municipal names so a line left on an old order carrying either is
+# still caught and stripped out of state (GOL-2449).
 WV_TAX_NAMES = frozenset({WV_GROUP_NAME, WV_STATE_NAME, WV_MUNI_NAME})
 WV_NEXUS_STATE = "WV"
 
@@ -1990,6 +1991,13 @@ def _get_shipping_product(env, company):
     Scoped per-company so each tenant's order carries its own shipping SKU.
     Only ever runs once the zone table is configured — until then
     `_apply_shipping_line` returns before reaching here.
+
+    The SKU is created with the company's WV 6% state tax explicitly (GOL-2449):
+    shipping is taxable at the same rate as goods for a WV shipment, and an
+    untaxed create would otherwise inherit whatever company default was in place
+    (the demo 15% on prod). A SKU that predates this fix — or that inherited the
+    wrong company's tax — is repaired on read so every shipment prices shipping
+    at 6%. Out-of-state orders are stripped later by `_apply_destination_tax`.
     """
     Product = env["product.product"].sudo().with_company(company)
     product = Product.search(
@@ -1999,6 +2007,7 @@ def _get_shipping_product(env, company):
         ],
         limit=1,
     )
+    state = _get_company_wv_state_tax(env, company)
     if not product:
         product = Product.create(
             {
@@ -2009,8 +2018,11 @@ def _get_shipping_product(env, company):
                 "sale_ok": True,
                 "purchase_ok": False,
                 "company_id": company.id,
+                "taxes_id": [(6, 0, state.ids)],
             }
         )
+    elif set(product.taxes_id.ids) != set(state.ids):
+        product.taxes_id = [(6, 0, state.ids)]
     return product
 
 
@@ -2059,15 +2071,26 @@ def _apply_shipping_line(env, order, shipping, company):
         return None
 
     product = _get_shipping_product(env, company)
-    env["sale.order.line"].sudo().create(
-        {
-            "order_id": order.id,
-            "product_id": product.id,
-            "name": f"Shipping ({state})",
-            "product_uom_qty": 1.0,
-            "price_unit": charge,
-        }
+    ship_line = (
+        env["sale.order.line"]
+        .sudo()
+        .create(
+            {
+                "order_id": order.id,
+                "product_id": product.id,
+                "name": f"Shipping ({state})",
+                "product_uom_qty": 1.0,
+                "price_unit": charge,
+            }
+        )
     )
+    # Force the WV 6% state tax on the shipping line regardless of the product's
+    # tax data (GOL-2449) — shipping is taxable at the same rate as goods. For an
+    # out-of-state destination `_apply_destination_tax` strips it again right
+    # after this line is added.
+    wv_state = _get_company_wv_state_tax(env, company)
+    if set(ship_line.tax_ids.ids) != set(wv_state.ids):
+        ship_line.tax_ids = [(6, 0, wv_state.ids)]
     order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
     return charge
 
@@ -2075,11 +2098,13 @@ def _apply_shipping_line(env, order, shipping, company):
 def _apply_destination_tax(env, order, shipping):
     """Strip the WV sales tax from every line when the order ships out of state.
 
-    The product default (hooks.setup_wv_sales_tax) puts the "WV Sales Tax 7%"
-    group on every line, which is only lawful for a WV-destination shipment —
-    Grove's sole sales-tax nexus. For any other ship-to state (e.g. Ohio) the WV
-    tax is removed so the customer is not wrongly charged WV tax. Called after
-    the shipping line is added so that line is de-taxed too when out of state.
+    The product default (hooks.setup_wv_sales_tax) puts the "WV State Sales Tax
+    6%" tax on every line (GOL-2449: 6% state only, no municipal, no group),
+    which is only lawful for a WV-destination shipment — Grove's sole sales-tax
+    nexus. For any other ship-to state (e.g. Ohio) any WV tax (by name, incl. a
+    legacy "7%" group left on an old order) is removed so the customer is not
+    wrongly charged WV tax. Called after the shipping line is added so that line
+    is de-taxed too when out of state.
 
     Ship-to state is canonicalized identically to the shipping path. If it can't
     be determined we conservatively leave the default WV tax in place rather than

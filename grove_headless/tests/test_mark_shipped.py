@@ -266,9 +266,15 @@ class TestMarkShipped(GroveTaxFixtureMixin, TransactionCase):
     # ── helper (mirrors the settlement fixture) ──────────────────────────
 
     def _seed_wv_tax(self):
-        wv_group = self.env["account.tax"].search(
-            [("name", "=", "WV Sales Tax 7%"), ("amount_type", "=", "group")], limit=1
-        )
-        self.assertTrue(wv_group, "WV group tax must exist (post_init_hook)")
-        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_group.ids)]
-        return wv_group
+        # GOL-2449: the web/POS tax is the WV 6% *state* tax only — the legacy
+        # combined ``amount_type='group'`` "7%" tax is no longer created (it
+        # failed to install on Odoo 19, which is what let prod fall back to the
+        # demo 15%). Seed via the same hook the fixture mixin uses so the tax is
+        # the single source of truth; these tests only need *a* WV tax on the
+        # line to exercise the ship-time settlement path, not a specific rate.
+        from odoo.addons.grove_headless.hooks import _ensure_company_wv_taxes
+
+        wv_state = _ensure_company_wv_taxes(self.env, self.company)
+        self.assertTrue(wv_state, "WV 6% state tax must exist (post_init_hook)")
+        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_state.ids)]
+        return wv_state
