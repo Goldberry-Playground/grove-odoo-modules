@@ -1,5 +1,6 @@
 from . import (
     carrier_tracking,  # noqa: F401  pure UPS/USPS tracking clients (GOL-2272), no ORM models
+    grove_enrich_job,  # noqa: F401  Perenual enrich job queue + budgeted cron (GOL-2391)
     grove_publish,  # noqa: F401  pure HMAC signer/sender (GOL-985), no ORM models
     grove_publish_event,  # noqa: F401
     grove_stripe_event,  # noqa: F401

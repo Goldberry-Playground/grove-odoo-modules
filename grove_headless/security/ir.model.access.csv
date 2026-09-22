@@ -12,3 +12,5 @@ access_grove_label_batch_user,grove_headless.label_batch.user,model_grove_label_
 access_grove_label_batch_manager,grove_headless.label_batch.manager,model_grove_label_batch,sales_team.group_sale_manager,1,1,1,1
 access_grove_label_batch_line_user,grove_headless.label_batch_line.user,model_grove_label_batch_line,sales_team.group_sale_salesman,1,1,1,0
 access_grove_label_batch_line_manager,grove_headless.label_batch_line.manager,model_grove_label_batch_line,sales_team.group_sale_manager,1,1,1,1
+access_grove_enrich_job_user,grove_headless.enrich_job.user,model_grove_enrich_job,base.group_user,1,0,0,0
+access_grove_enrich_job_manager,grove_headless.enrich_job.manager,model_grove_enrich_job,sales_team.group_sale_manager,1,1,1,1

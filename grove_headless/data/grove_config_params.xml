@@ -29,4 +29,18 @@
         <field name="value">0</field>
     </record>
 
+    <!-- Perenual daily call budget (GOL-2391). The Fetch-facts button enqueues a
+         grove.enrich.job per plant; the process_enrich_jobs cron drains them
+         oldest-first, spending at most this many real Perenual HTTP calls per
+         UTC day (2 calls per plant, or 1 when the species id is already cached).
+         Seed = 100 (free-tier headroom). noupdate="1" so an operator can raise
+         or lower it in Settings / Technical / System Parameters without a
+         deploy — that adjustability is the requirement, so 100 is never a code
+         constant (the DEFAULT_DAILY_BUDGET in mapping.py is only the fallback
+         when the row is missing). -->
+    <record id="perenual_daily_budget_param" model="ir.config_parameter">
+        <field name="key">grove_headless.perenual_daily_budget</field>
+        <field name="value">100</field>
+    </record>
+
 </odoo>

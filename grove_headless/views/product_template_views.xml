@@ -103,6 +103,19 @@
                             <field name="grove_years_to_fruit" />
                             <field name="grove_chill_hours" />
                         </group>
+                        <div colspan="2">
+                            <button
+                                name="action_fetch_facts"
+                                type="object"
+                                string="Fetch facts (USDA now + queue Perenual)"
+                                class="btn-secondary"
+                                icon="fa-download"
+                                help="Fill empty growing facts from USDA PLANTS synchronously and
+                                      enqueue Perenual enrichment (drained on the budgeted schedule).
+                                      Only empty fields are written; each write is recorded in the
+                                      chatter and clears the Facts Reviewed sign-off."
+                            />
+                        </div>
                         <group string="Facts provenance" colspan="2">
                             <field name="grove_usda_symbol" />
                             <field name="grove_perenual_id" />
