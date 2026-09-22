@@ -2098,11 +2098,13 @@ def _apply_shipping_line(env, order, shipping, company):
 def _apply_destination_tax(env, order, shipping):
     """Strip the WV sales tax from every line when the order ships out of state.
 
-    The product default (hooks.setup_wv_sales_tax) puts the "WV Sales Tax 7%"
-    group on every line, which is only lawful for a WV-destination shipment —
-    Grove's sole sales-tax nexus. For any other ship-to state (e.g. Ohio) the WV
-    tax is removed so the customer is not wrongly charged WV tax. Called after
-    the shipping line is added so that line is de-taxed too when out of state.
+    The product default (hooks.setup_wv_sales_tax) puts the "WV State Sales Tax
+    6%" tax on every line (GOL-2449: 6% state only, no municipal, no group),
+    which is only lawful for a WV-destination shipment — Grove's sole sales-tax
+    nexus. For any other ship-to state (e.g. Ohio) any WV tax (by name, incl. a
+    legacy "7%" group left on an old order) is removed so the customer is not
+    wrongly charged WV tax. Called after the shipping line is added so that line
+    is de-taxed too when out of state.
 
     Ship-to state is canonicalized identically to the shipping path. If it can't
     be determined we conservatively leave the default WV tax in place rather than
