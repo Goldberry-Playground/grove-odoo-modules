@@ -1752,7 +1752,7 @@ class GroveHeadlessAPI(http.Controller):
             return _json_response({"ok": True, "matched": 0})
         orders = request.env["sale.order"].sudo().search([("grove_tracking_numbers", "like", tracking)])
         for order in orders:
-            _apply_delivery_status(request.env, order, new_status, tracking)
+            _apply_delivery_status(request.env, order, new_status, tracking, source="shippo")
         return _json_response({"ok": True, "matched": len(orders)})
 
 
@@ -3497,17 +3497,91 @@ def _send_order_confirmation_email(env, order):
         _logger.warning("Order confirmation email failed for %s", order.name, exc_info=True)
 
 
-def _apply_delivery_status(env, order, new_status, tracking):
-    """Record the new Shippo delivery status and, on a *transition* into a
-    notify-worthy state, email the customer. Idempotent: a repeated webhook for
-    a status the order already has sends no second email, so a customer gets one
-    "shipped" and one "delivered" notice even when both the operator signal
-    (Phase 2) and the Shippo transit scan fire. Returns True when the status
-    changed."""
+# Progress order of the notify-worthy carrier statuses. A carrier event that is
+# not MORE advanced than the status already recorded is dropped (GOL-2429): the
+# poll re-delivers the same scan every 2 h, a multi-box order's least-advanced
+# status can dip when one box lags, and a stale Shippo retry can land after the
+# poll. Without this, delivered -> transit would re-send the "shipped" notice.
+_DELIVERY_PROGRESS_RANK = {"transit": 1, "out_for_delivery": 2, "delivered": 3}
+
+# Fulfilment stages a carrier event may never touch (GOL-2429 mode gate, per
+# GOL-1982): a preorder deposit before its wave opens has shipped nothing of its
+# own, so a stray label/tracking event must neither email the customer nor
+# close the order; terminal-by-other-path orders are done.
+_CARRIER_EVENT_BLOCKED_STAGES = ("deposit_paid", "wave_assigned", "collected", "cancelled")
+
+
+def _shipment_notice_key(order, status, tracking):
+    """Dedupe key for one customer shipment notice: event type + the order's
+    tracking set (sorted, so box order never matters). Read from the persisted
+    per-box numbers so the operator button, the Shippo webhook (one number per
+    call) and the carrier poll all agree on the same key; falls back to the
+    event's own number when nothing is persisted. A relabel (new tracking
+    numbers) is a new shipment and yields a new key."""
+    numbers = sorted({n.strip() for n in (order.grove_tracking_numbers or "").splitlines() if n.strip()})
+    if not numbers and tracking:
+        numbers = [str(tracking).strip()]
+    return f"{status}:{','.join(numbers)}"
+
+
+def _apply_delivery_status(env, order, new_status, tracking, source="shippo"):
+    """Fold one carrier event (Shippo webhook, carrier poll, operator button)
+    into the order: record the delivery status, advance the GOL-1981 fulfilment
+    state, and email the customer the branded notice. Returns True when the
+    status changed.
+
+    Every step is at-most-once per order (GOL-2429), because the poll re-delivers
+    events and several sources can report the same scan:
+      * pickup orders and pre-wave preorder deposits are skipped outright (no
+        email, no state move, no status write);
+      * a status that is not more advanced than the recorded one is a no-op;
+      * transit / out-for-delivery / delivered advance the watermark to
+        ``shipped`` (and delivered on to the terminal ``delivered``) through the
+        idempotent transition methods, which also refuse illegal jumps;
+      * each notice is keyed on event type + tracking set in
+        ``grove_shipment_notices_sent``, so it goes out once even if a status
+        write is replayed.
+    """
+    if not order.grove_should_send_shipment_email():
+        _logger.info("Ignoring %s carrier event %r on pickup order %s", source, new_status, order.name)
+        return False
+    # Serialise racing sources (poll cron vs Shippo webhook vs operator button)
+    # on this row, then re-read what the winner committed.
+    env.cr.execute("SELECT id FROM sale_order WHERE id = %s FOR UPDATE", (order.id,))
+    order.invalidate_recordset(
+        ["grove_delivery_status", "grove_shipment_notices_sent", "grove_fulfillment_state", "grove_fulfillment_stage"]
+    )
+    if order.grove_fulfillment_stage in _CARRIER_EVENT_BLOCKED_STAGES:
+        _logger.info(
+            "Ignoring %s carrier event %r on %s: stage %s does not take carrier events",
+            source,
+            new_status,
+            order.name,
+            order.grove_fulfillment_stage,
+        )
+        return False
     if new_status == order.grove_delivery_status:
         return False
+    new_rank = _DELIVERY_PROGRESS_RANK.get(new_status)
+    current_rank = _DELIVERY_PROGRESS_RANK.get(order.grove_delivery_status)
+    if new_rank is not None and current_rank is not None and new_rank <= current_rank:
+        return False
     order.grove_delivery_status = new_status
-    _notify_shipping_status(env, order, new_status, tracking)
+
+    if new_rank is not None:
+        # Any progress scan means the parcel is with the carrier. A first scan
+        # that is already "delivered" still walks shipped -> delivered so the
+        # machine never skips a state.
+        order.action_grove_mark_shipped(source=source)
+        if new_status == "delivered":
+            order.action_grove_mark_delivered(source=source)
+
+    if new_status in NOTIFY_STATUSES:
+        key = _shipment_notice_key(order, new_status, tracking)
+        sent = (order.grove_shipment_notices_sent or "").splitlines()
+        if key not in sent:
+            order.grove_shipment_notices_sent = "\n".join([*sent, key])
+            _notify_shipping_status(env, order, new_status, tracking)
     return True
 
 
@@ -3544,7 +3618,7 @@ def _operator_mark_shipped(env, order, actor=None):
     settlement = None
     if newly_shipped:
         settlement = order._grove_settle_at_ship()
-        _apply_delivery_status(env, order, "transit", order.grove_tracking_numbers or "")
+        _apply_delivery_status(env, order, "transit", order.grove_tracking_numbers or "", source="discord")
     return {"newly_shipped": newly_shipped, "settlement": settlement}
 
 
