@@ -441,9 +441,11 @@ def normalize_reward_line(order, reward, code=None):
     a SINGLE ``Discount`` line at face value, pre-tax, with WV tax then computed
     on the discounted base. We rewrite the reward lines in place:
 
-    * keep exactly ONE line (unlink the rest), still tagged with the original
-      ``reward_id``/``coupon_id`` so loyalty bookkeeping and every downstream
-      ``reward_id`` filter (magnitude, Stripe coupon) still recognise it;
+    * put the whole discount on ONE line and zero the rest (sale_loyalty may
+      split a fixed reward into one line per tax group), each still tagged with
+      its original ``reward_id``/``coupon_id`` so loyalty bookkeeping and every
+      downstream ``reward_id`` filter (magnitude, Stripe coupon) still recognise
+      it — the summary builder sums them into a single Discount item;
     * set ``price_unit`` to the negative pre-tax face — ``-amount`` for a fixed
       reward, ``-percent x goods-subtotal`` for a percent tier (Josh: "$10 code
       -> -$10.00; a 10% tier -> -10% of the goods subtotal");
@@ -466,10 +468,15 @@ def normalize_reward_line(order, reward, code=None):
             amount = round(min(reward.discount or 0.0, subtotal), 2)
         survivor = reward_lines[:1]
         extras = reward_lines - survivor
-        # Rewrite the survivor BEFORE unlinking the extras: writing a line after
-        # sibling lines were unlinked makes sale_stock's write recompute browse a
-        # now-deleted line (MissingError). Capture the mirrored taxes first for
-        # the same reason.
+        # Put the FULL pre-tax face on the survivor and mirror the goods' taxes,
+        # then ZERO the other split lines (do not unlink them). sale_loyalty splits
+        # a fixed reward into one negative line per tax group; deleting one of
+        # those sibling lines makes sale_loyalty treat the whole reward as removed
+        # and drops the discount entirely (the homogeneous WV cart has a single
+        # line so it never hit this — a genuinely mixed-tax cart did, GOL-2450).
+        # Zeroing the extras keeps the discount on ONE valued line; the Review &
+        # pay summary (`_build_stripe_line_items`) sums the reward lines into a
+        # single Discount item, so the zeroed siblings never render.
         tax_ids = _goods_tax_ids(order).ids
         survivor.write(
             {
@@ -480,7 +487,7 @@ def normalize_reward_line(order, reward, code=None):
             }
         )
         if extras:
-            extras.unlink()
+            extras.write({"price_unit": 0.0})
         order.invalidate_recordset(["order_line", "amount_untaxed", "amount_tax", "amount_total"])
     except Exception:  # noqa: BLE001 — a discount-shaping gap must never break checkout
         _logger.warning("GOL-2450: could not normalize reward line to a single discount", exc_info=True)

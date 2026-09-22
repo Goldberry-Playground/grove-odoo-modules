@@ -763,11 +763,18 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         )
         self._make_promo_program("FLATWOODS", min_qty=2, amount=10.0)
         self.assertIsNone(grove_main._apply_promo_code(order, "FLATWOODS"))
+        # sale_loyalty may split a fixed reward into one line per tax group, but the
+        # whole discount lands on a single valued line (the rest are zeroed), so the
+        # reward lines still sum to exactly the -$10 pre-tax face.
         reward_lines = order.order_line.filtered("reward_id")
-        self.assertEqual(len(reward_lines), 1, "one discount line even across two tax groups")
-        self.assertAlmostEqual(reward_lines.price_subtotal, -10.0, places=2)
+        self.assertAlmostEqual(sum(reward_lines.mapped("price_subtotal")), -10.0, places=2)
+        # The Review & pay summary renders exactly ONE Discount line regardless of
+        # how many tax groups the cart spans — the real GOL-2450 requirement.
         line_items, _pre, _charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
-        self.assertEqual(len([li for li in line_items if li["kind"] == "discount"]), 1)
+        discounts = [li for li in line_items if li["kind"] == "discount"]
+        self.assertEqual(len(discounts), 1, "one Discount line even across two tax groups")
+        self.assertEqual(discounts[0]["amount_cents"], -stripe_gateway.to_cents(10.0))
+        self.assertEqual(discounts[0]["name"], "Discount (FLATWOODS)")
 
     def test_cart_has_preorder_agrees_with_line_builder(self):
         """The promo-gate predicate (_cart_has_preorder) must classify a cart the
