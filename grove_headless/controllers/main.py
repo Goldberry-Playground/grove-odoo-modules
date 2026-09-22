@@ -478,6 +478,11 @@ def _structure_variant(variant, template_rootstock=""):
         "qty_available": variant.grove_shared_pool_qty("qty_available"),
         "shipping_tier": variant.grove_effective_shipping_tier,
         "image_url": _image_url("product.product", variant, "image_128"),
+        # Qualifying-tree count for one unit (GOL-2439): 1 for a nursery plant,
+        # the bundle's BoM tree count (Remembrance Grove = 5), 0 for supplies,
+        # gift cards and services. The storefront sums tree_count × qty across
+        # the cart for the volume-tier nudge; a missing field hides the nudge.
+        "tree_count": promotions.variant_tree_count(variant),
     }
 
 
@@ -1507,17 +1512,26 @@ class GroveHeadlessAPI(http.Controller):
         """Preview which discount a cart would get, WITHOUT creating anything
         (GOL-2431).
 
-        Body = the checkout payload (``items``, ``fulfillment``, ``promo_code``).
-        Inside a ``cr.savepoint()`` we build the draft order exactly as the real
-        checkout does (``_create_draft_order`` — same gates, same shipping line,
-        same deposit refusal), resolve the best single discount (automatic volume
-        tier vs promo code, whichever saves more), read the numbers, then ROLL
-        BACK. Never creates an order, never touches Stripe.
+        Body = ``{items:[{variant_id, quantity}], fulfillment?, promo_code?}``
+        with NO contact and NO shipping address (GOL-2439): the shopper can press
+        Apply — and the page auto-previews the tier on load — before filling
+        either in. Inside a ``cr.savepoint()`` we build the draft order with a
+        synthetic contact and farm-pickup fulfillment (below) so the contact and
+        ship-to gates never fire, resolve the best single discount (automatic
+        volume tier vs promo code, whichever saves more) against the goods
+        subtotal, read the numbers, then ROLL BACK. Never creates an order,
+        never touches Stripe.
+
+        The discount is address-free by construction — the volume tier keys off
+        tree count and a code discounts the goods subtotal — so previewing as
+        pickup yields the goods-based numbers ``subtotal_after`` reports; the
+        authoritative, shipping-inclusive figure is computed at real checkout.
 
         Returns ``{ok, applied: "code"|"tier"|null, code, discount_amount,
-        subtotal_after, message}``. A deposit/preorder cart (or an ineligible
-        code on one) surfaces the same 400 the real checkout would, so the
-        storefront can show the shopper the outcome before committing.
+        subtotal_after, message}`` plus an optional ``tier: {min_qty, percent}``
+        when ``applied == "tier"``. A deposit/preorder cart with a code surfaces
+        the same 400 the real checkout would; without a code it returns
+        ``applied=null`` (a deposit cart simply earns no tier).
 
         Bearer auth mirrors /orders + /checkout/session: the storefront BFF calls
         this server-side with its key, so cart/stock detail never reaches the
@@ -1536,14 +1550,29 @@ class GroveHeadlessAPI(http.Controller):
             def __init__(self, response):
                 self.response = response
 
+        # The preview runs before the shopper has entered contact or a shipping
+        # address, yet _create_draft_order requires a contact and — for a ship-to
+        # cart — a green-list address to compute the shipping line. Neither
+        # affects which discount applies, so we build against a synthetic contact
+        # and farm-pickup fulfillment: pickup skips the ship-to/shipping/$0
+        # gates while the goods lines, deposit detection and discount resolution
+        # run exactly as checkout. The whole savepoint is rolled back, so the
+        # synthetic partner never persists, never emails, never reaches Stripe.
+        preview_payload = dict(payload)
+        preview_payload["contact"] = {"name": "Promo preview", "email": "promo-preview@grove.invalid"}
+        preview_payload["fulfillment"] = "pickup"
+        preview_payload.pop("shipping", None)
+        preview_payload.pop("billing", None)
+
         try:
             with request.env.cr.savepoint():
-                # _create_draft_order runs every real gate and applies the best
-                # single discount on a ships-now cart, writing the outcome into
-                # `discount`. A deposit cart with a code 400s here (same as the real
-                # checkout); a deposit cart without a code returns applied=null.
+                # _create_draft_order runs the real deposit/discount path and
+                # writes the outcome into `discount` (incl. an optional `tier`
+                # when a volume tier applies). A deposit cart with a code 400s
+                # here (same as the real checkout); a deposit cart without a code
+                # returns applied=null.
                 discount = {"ok": True, "applied": None, "code": None, "discount_amount": 0.0, "message": None}
-                order, error = _create_draft_order(request.website, request.env, payload, discount_out=discount)
+                order, error = _create_draft_order(request.website, request.env, preview_payload, discount_out=discount)
                 if error is not None:
                     raise _Unwind(error)
                 discount["subtotal_after"] = round(promotions.goods_subtotal(order) - discount["discount_amount"], 2)
@@ -1565,7 +1594,11 @@ class GroveHeadlessAPI(http.Controller):
         (config read only), like the shipping-rate feed — the storefront turns it
         into "Add 2 more trees to unlock 10% off"."""
         company = request.website.company_id
-        return _json_response({"tiers": promotions.auto_tier_feed(request.env, company, _date.today())})
+        # A bare JSON array `[{min_qty, percent, label}, ...]` (GOL-2439 contract):
+        # the storefront normalizer reads the top-level array directly, so a
+        # `{"tiers": [...]}` wrapper would parse as empty and silently hide the
+        # nudge. Ascending by threshold (see auto_tier_feed).
+        return _json_response(promotions.auto_tier_feed(request.env, company, _date.today()))
 
     @http.route(
         "/grove/api/v1/stripe/webhook",

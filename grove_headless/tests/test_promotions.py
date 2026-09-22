@@ -172,6 +172,29 @@ class TestPromotions(GroveTaxFixtureMixin, TransactionCase):
         # 2 + 3 bundle components + 1 standalone plum = 6
         self.assertEqual(promotions.qualifying_tree_count(order), 6)
 
+    def test_variant_tree_count_per_variant(self):
+        """The per-variant field the product-detail payload exposes (GOL-2439):
+        1 for a standalone plant, 0 for a supply, the exploded component count
+        for a phantom-BOM bundle."""
+        bundle = self.env["product.product"].create(
+            {"name": "Remembrance Grove", "type": "consu", "grove_gate_exempt": True}
+        )
+        self.env["mrp.bom"].create(
+            {
+                "product_tmpl_id": bundle.product_tmpl_id.id,
+                "product_id": bundle.id,
+                "product_qty": 1,
+                "type": "phantom",
+                "bom_line_ids": [
+                    (0, 0, {"product_id": self.apple.id, "product_qty": 2}),
+                    (0, 0, {"product_id": self.pear.id, "product_qty": 3}),
+                ],
+            }
+        )
+        self.assertEqual(promotions.variant_tree_count(self.apple), 1)
+        self.assertEqual(promotions.variant_tree_count(self.mulch), 0)
+        self.assertEqual(promotions.variant_tree_count(bundle), 5)
+
     # ── automatic tier feed ──────────────────────────────────────────────
 
     def test_auto_tier_feed_shape(self):
@@ -202,6 +225,22 @@ class TestPromotions(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(self._applied_tier_percent(9), 10.0)
         self.assertEqual(self._applied_tier_percent(10), 20.0)
         self.assertEqual(self._applied_tier_percent(12), 20.0)
+
+    def test_tier_descriptor_in_result(self):
+        """When a tier applies, the result carries `tier: {min_qty, percent}`
+        (GOL-2439) so the storefront can label the summary row; when nothing
+        applies the key is absent."""
+        self._auto_volume_program()
+        result = promotions.resolve_discounts(self._order([(self.apple, 5)]))
+        self.assertEqual(result["applied"], "tier")
+        self.assertEqual(result["tier"], {"min_qty": 5, "percent": 10.0})
+        # top tier at 10 units
+        top = promotions.resolve_discounts(self._order([(self.apple, 10)]))
+        self.assertEqual(top["tier"], {"min_qty": 10, "percent": 20.0})
+        # below the first threshold: no tier, no `tier` key
+        none_result = promotions.resolve_discounts(self._order([(self.apple, 4)]))
+        self.assertIsNone(none_result["applied"])
+        self.assertNotIn("tier", none_result)
 
     def test_tier_counts_bundle_components(self):
         """4 standalone apples + a 2-component bundle = 6 trees → 10% tier."""

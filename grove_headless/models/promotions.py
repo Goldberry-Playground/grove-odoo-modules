@@ -101,6 +101,19 @@ def qualifying_tree_count(order):
     return total
 
 
+def variant_tree_count(variant):
+    """Qualifying-tree count for ONE unit of ``variant`` — the per-variant field
+    the product-detail payload exposes (``variants[].tree_count``, GOL-2439) so
+    the storefront can sum ``tree_count × qty`` for the volume-tier nudge. Same
+    rule as ``qualifying_tree_count``: a phantom-BOM bundle expands to its
+    component tree count (Remembrance Grove = 5), a standalone nursery plant is
+    1, and supplies, gift cards and services are 0."""
+    per_unit = _bundle_tree_count(variant.env, variant)
+    if per_unit:
+        return per_unit
+    return 1 if is_qualifying_plant(variant) else 0
+
+
 # ── automatic volume-tier feed (GET /promotions/auto) ────────────────────────
 
 
@@ -481,8 +494,20 @@ def _applied_message(applied, order, code, tier_value, code_value, reward=None):
     return None
 
 
-def _result(ok, applied, code, discount_amount, subtotal_after, message):
-    return {
+def _tier_descriptor(pair):
+    """``{min_qty, percent}`` for an applied automatic volume tier (GOL-2439) —
+    the numbers the storefront turns into "Volume discount (10% for 5+ trees)".
+    Only a percent-off reward carries a percent; a non-percent reward has no
+    "% for N+ trees" reading and yields ``None`` (the field is then omitted)."""
+    reward, coupon = pair
+    if reward.discount_mode != "percent":
+        return None
+    program = coupon.program_id
+    return {"min_qty": _reward_min_units(program, reward), "percent": reward.discount}
+
+
+def _result(ok, applied, code, discount_amount, subtotal_after, message, tier=None):
+    result = {
         "ok": ok,
         "applied": applied,
         "code": code.upper() if code else None,
@@ -490,6 +515,11 @@ def _result(ok, applied, code, discount_amount, subtotal_after, message):
         "subtotal_after": round(subtotal_after, 2),
         "message": message,
     }
+    # Optional volume-tier descriptor: present only when a tier applied, so the
+    # storefront can label the summary row without re-deriving the threshold.
+    if tier is not None:
+        result["tier"] = tier
+    return result
 
 
 def resolve_discounts(order, code=None, today=None):
@@ -500,7 +530,12 @@ def resolve_discounts(order, code=None, today=None):
     larger is applied for real — the other's lines are never written. A tie
     favours the code (an explicit shopper action). Returns::
 
-        {ok, applied: "code"|"tier"|None, code, discount_amount, subtotal_after, message}
+        {ok, applied: "code"|"tier"|None, code, discount_amount, subtotal_after,
+         message, tier?: {min_qty, percent}}
+
+    ``tier`` is present only when ``applied == "tier"`` (and the reward is a
+    percent-off) — the storefront labels the summary row "Volume discount (10%
+    for 5+ trees)" from it.
 
     Mutates ``order`` by adding at most one reward line. The caller has already
     refused deposit/preorder carts (same predicate as the promo gate), so no
@@ -513,6 +548,7 @@ def resolve_discounts(order, code=None, today=None):
 
     tier_pair = _best_auto_reward(order)
     tier_value = 0.0
+    tier = None
     if tier_pair:
         tier_value, _tier_err = _measure(order, lambda: _apply_reward(order, tier_pair))
 
@@ -532,6 +568,7 @@ def resolve_discounts(order, code=None, today=None):
     elif tier_value > 0:
         _apply_reward(order, tier_pair)
         applied = "tier"
+        tier = _tier_descriptor(tier_pair)
         message = _applied_message("tier", order, code, tier_value, code_value, reward=tier_pair[0])
     else:
         applied = None
@@ -539,4 +576,4 @@ def resolve_discounts(order, code=None, today=None):
 
     order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
     discount_amount = reward_magnitude(order) if applied else 0.0
-    return _result(True, applied, code, discount_amount, round(subtotal - discount_amount, 2), message)
+    return _result(True, applied, code, discount_amount, round(subtotal - discount_amount, 2), message, tier=tier)
