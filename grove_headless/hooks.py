@@ -64,6 +64,83 @@ def _accessible_companies(company):
     return chain
 
 
+def _converge_root_wv_taxes(env, root):
+    """Collapse duplicate same-named WV sale taxes in one hierarchy onto the root.
+
+    GOL-2449 follow-up (prod incident 2026-09-23). Odoo 19 scopes
+    ``account.tax`` name-uniqueness to the hierarchy root
+    (``_constrains_name`` searches ``company_id child_of root``) and validates
+    ``@api.constrains`` at **flush**, not at ``create``. So two records with the
+    same name *can* both land in the table — a historical per-branch row (the
+    2026-08-08 ``data/grove_taxes.xml`` seed, owned by the nursery) and the
+    root-level row this hook creates — and then **every later flush raises**
+    *"Tax names must be unique!"*. ``setup_wv_sales_tax`` swallows that per
+    company, so prod upgraded to ``1 of 3`` companies bound while the other two
+    silently kept the demo 15% default.
+
+    A branch may *use* a root/ancestor company's tax (``check_company`` is
+    ``parent_of``), so the correct steady state is exactly ONE record per name,
+    owned by the **root**. Converge to that:
+
+      * keep the OLDEST row — it carries the product and accounting history
+        (on prod, 123 nursery templates point at it);
+      * repoint anything that referenced a younger duplicate at the keeper;
+      * drop the duplicates, archiving instead of deleting any that turn out to
+        be referenced after all;
+      * only then move the keeper to the root, so the constraint never sees two
+        same-named rows in the subtree at once.
+
+    Idempotent: a hierarchy already in the steady state is left untouched.
+    """
+    Tax = env["account.tax"].sudo()
+    Template = env["product.template"].sudo()
+    Company = env["res.company"].sudo()
+
+    for name in (WV_STATE_NAME, WV_MUNI_NAME):
+        dupes = Tax.search(
+            [
+                ("name", "=", name),
+                ("company_id", "child_of", root.id),
+                ("type_tax_use", "=", "sale"),
+            ],
+            order="id asc",
+        )
+        if not dupes:
+            continue
+
+        keeper, extras = dupes[0], dupes[1:]
+
+        for extra in extras:
+            # Repoint the places a duplicate can be referenced before removing it.
+            for tmpl in Template.search([("taxes_id", "in", extra.ids)]):
+                tmpl.taxes_id = [(3, extra.id, 0), (4, keeper.id, 0)]
+            for comp in Company.search([("account_sale_tax_id", "=", extra.id)]):
+                comp.account_sale_tax_id = keeper.id
+            try:
+                extra.unlink()
+            except Exception as exc:  # still referenced somewhere we do not know
+                extra.active = False
+                _logger.warning(
+                    "grove_headless: could not delete duplicate tax %s (id %s) for %s (%s) — archived instead",
+                    name,
+                    extra.id,
+                    root.name,
+                    exc,
+                )
+
+        # Deletions are flushed before this write, so the constraint sees one row.
+        if keeper.company_id != root:
+            env.flush_all()
+            _logger.info(
+                "grove_headless: moving tax %s (id %s) from %s to hierarchy root %s so every branch can share it",
+                name,
+                keeper.id,
+                keeper.company_id.name,
+                root.name,
+            )
+            keeper.company_id = root.id
+
+
 def _ensure_company_wv_taxes(env, company):
     """Find-or-reuse the WV **state** 6% sale tax usable by one company, return it.
 
@@ -211,6 +288,23 @@ def _retrofit_shipping_product(env, company, state):
 def setup_wv_sales_tax(env):
     """Ensure every company charges the WV 6% state sales tax by default."""
     companies = env["res.company"].search([])
+
+    # Converge each hierarchy to ONE root-owned record per WV tax name FIRST.
+    # Odoo validates the root-scoped name-uniqueness constraint at flush, so a
+    # leftover per-branch duplicate makes companies below it fail with
+    # "Tax names must be unique!" — the 2026-09-23 prod incident, where this
+    # loop reported "bound for only 1 of 3". See _converge_root_wv_taxes.
+    roots = env["res.company"].browse(sorted({(c.root_id or c).id for c in companies}))
+    for root in roots:
+        try:
+            _converge_root_wv_taxes(env, root)
+        except Exception as exc:  # never let convergence abort install/upgrade
+            _logger.warning(
+                "grove_headless: WV tax convergence FAILED for hierarchy root %s: %s",
+                root.name,
+                exc,
+            )
+
     bound = 0
     for company in companies:
         try:
