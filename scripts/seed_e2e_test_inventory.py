@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Seed the QA Playwright E2E **test-inventory fixtures** (GOL-1148 + GOL-1154).
+"""Seed the QA Playwright E2E **test-inventory fixtures** (GOL-1148 + GOL-1154 + GOL-2464).
 
 Parent: GOL-1074 (nursery checkout E2E). This is the gating data fixture for a
 green run: the suite's ``findProductByCta(page, "Add to Cart")`` walks the
@@ -43,10 +43,27 @@ so they sort FIRST under the ``/shop`` grid's ``name asc`` order.
      cart-clear) assert against: itemized goods + a non-$0 **shipping** line +
      "Ships now" (no reserve badge, no pickup gate). The potted fixture cannot
      satisfy these because a ship submit 400s on it.
+     ``categ_id`` is deliberately LEFT UNSET so ``is_qualifying_plant()`` is
+     False and 5–6 of these count as ZERO qualifying trees — the deterministic
+     Train #1 cart totals must never trip the promo/volume tiers.
+
+  3. **Plants-category qualifying fixture** (``E2E-PLANTS-INSTOCK``, GOL-2464)
+     A second **shippable** bareroot line, identical to #2 EXCEPT its
+     ``categ_id`` is set under the Plants root (``grove_headless.categ_trees``,
+     child of ``grove_headless.categ_plants`` = categ 29 on QA). So
+     ``is_qualifying_plant()`` returns True and N in-cart count as N qualifying
+     trees. This is the Train #2 promo/volume-tier fixture: the Apply-preview,
+     discount-summary row and volume-tier nudge specs (GOL-2432 / #800,
+     GOL-2436) assert against it. Kept SEPARATE from #2 so 797 stays a
+     deterministic non-qualifying gate fixture (do NOT mutate 797). Stocked
+     ``E2E_QTY`` (default 50) so both the 5+ (10%) and 10+ (20%) tiers fire.
+     ``public_categ_ids`` is still left empty (like all three) so it does not
+     inflate a storefront ``?cat=<slug>`` facet — the INTERNAL accounting
+     ``categ_id`` is what `is_qualifying_plant()` reads, not the public categs.
 
 The ``Reserve`` (bareroot preorder) and ``Coming soon`` states the other specs
-need are ALREADY present in the real catalog, so these fixtures only add the two
-missing "enabled Add to Cart" states (pickup + shippable).
+need are ALREADY present in the real catalog, so these fixtures only add the
+missing "enabled Add to Cart" states (pickup + shippable + qualifying).
 
 Determinism
 -----------
@@ -81,7 +98,7 @@ genuinely purchasable test trees at the top of the live storefront. Two guards:
 Usage
 -----
     # Dry run (read-only, DEFAULT): resolves company/warehouse/axis, reports the
-    # plan for BOTH fixtures. Writes nothing.
+    # plan for ALL fixtures. Writes nothing.
     ODOO_URL=https://odoo.qa.gatheringatthegrove.com \\
     ODOO_DB=odoo \\
     ODOO_USER=josh@goldberrygrove.farm \\
@@ -92,13 +109,14 @@ Usage
     # (Only permitted against a known-QA host+DB; otherwise refused.)
     DRY_RUN=0 ODOO_URL=... ODOO_DB=odoo ... python3 scripts/seed_e2e_test_inventory.py
 
-    # Seed only one fixture: FIXTURE=potted (or FIXTURE=bareroot).
+    # Seed only one fixture: FIXTURE=potted | bareroot | plants.
 
 Knobs (env, all optional):
     DRY_RUN           default "1" (dry)      set "0" for a LIVE run (opt-out)
-    FIXTURE           default "" (both)      "potted" | "bareroot" to seed one
+    FIXTURE           default "" (all)       "potted" | "bareroot" | "plants" to seed one
     E2E_POTTED_SKU    default "E2E-POTTED-INSTOCK"
     E2E_BAREROOT_SKU  default "E2E-BAREROOT-INSTOCK"
+    E2E_PLANTS_SKU    default "E2E-PLANTS-INSTOCK"  (Plants-category qualifying, GOL-2464)
     E2E_PRICE         default "42.00"        list_price (USD), both fixtures
     E2E_QTY           default "50"           on-hand target, both fixtures
     E2E_TREE_LENGTH   default "20"           grove_tree_length for the bareroot
@@ -160,6 +178,10 @@ FIXTURES: list[dict[str, Any]] = [
         "format_value": "Potted",
         "shipping_tier": "potted",  # farm-pickup only (GOL-1114) — ship submit 400s
         "tree_length": None,  # irrelevant for pickup; leave unset
+        # categ_id LEFT UNSET on purpose: the deterministic Train #1 gate specs
+        # (@stripe / test:e2e:gate) add 5–6 of these and MUST NOT trip the
+        # promo/volume tiers, so this fixture must NOT be a qualifying plant.
+        "categ_xmlid": None,
     },
     {
         "key": "bareroot",  # GOL-1154 — shippable happy-path leg
@@ -168,6 +190,37 @@ FIXTURES: list[dict[str, Any]] = [
         "format_value": "Bareroot",
         "shipping_tier": "bareroot",  # genuinely shippable -> Box Engine sizes a box
         "tree_length": E2E_TREE_LENGTH,  # required so shipping isn't $0 (breaker trips otherwise)
+        # categ_id LEFT UNSET (see potted note): product.product 797 is the
+        # deterministic Train #1 cart-total fixture. Terra kept it out of Plants
+        # so `is_qualifying_plant()` returns False and 6×797 counts as ZERO
+        # qualifying trees — a green Train #1 gate stays green. DO NOT categorize.
+        "categ_xmlid": None,
+    },
+    {
+        "key": "plants",  # GOL-2464 — promo/volume-tier leg (Train #2 e2e)
+        "sku": os.getenv("E2E_PLANTS_SKU", "E2E-PLANTS-INSTOCK"),
+        "name": "AAA QA E2E Plants Tier Tree (automated test fixture)",
+        "format_value": "Bareroot",
+        "shipping_tier": "bareroot",  # shippable so the tier specs can drive a real ship checkout
+        "tree_length": E2E_TREE_LENGTH,
+        # THE distinguishing field: categ_id under the Plants root
+        # (grove_headless.categ_plants, categ 29 on QA) via its Trees child, so
+        # `is_qualifying_plant()` returns True and N in-cart count as N qualifying
+        # trees. This is the fixture the promo Apply-preview, discount-summary row
+        # and volume-tier nudge specs (GOL-2432/#800, GOL-2436) assert against.
+        # Kept SEPARATE from the bareroot fixture (797) so Train #1 stays
+        # deterministic and Train #2 has qualifying units. Stock E2E_QTY (default
+        # 50) covers both the 5+ (10%) and 10+ (20%) tiers.
+        "categ_xmlid": "grove_headless.categ_trees",
+        # Under Plants -> the listing-content publish gate (GOL-2382) would
+        # demand the full botanical field set (botanical name, USDA zones, food-
+        # forest layer, care guide, facts sign-off, …) that a synthetic fixture
+        # has no honest values for. `grove_gate_exempt` lets it publish without
+        # them; `is_qualifying_plant()` (promotions.py) ignores gate_exempt, so
+        # the fixture STAYS a qualifying plant for the volume/promo tiers. The
+        # potted/bareroot fixtures don't need this — they aren't under Plants so
+        # they were never gated.
+        "gate_exempt": True,
     },
 ]
 
@@ -238,6 +291,29 @@ def find_or_create(models, uid, model: str, domain: list, vals: dict, label: str
     new_id = call(models, uid, model, "create", [vals])
     print(f"  + created {model} '{label}' (id={new_id})")
     return new_id
+
+
+def resolve_xmlid(models, uid, xmlid: str) -> int:
+    """Resolve ``module.name`` external id to its integer ``res_id``.
+
+    Used for the Plants-category fixture (GOL-2464): the qualifying category is
+    module-seeded with a stable xmlid (``grove_headless.categ_trees`` under the
+    ``grove_headless.categ_plants`` root), so we key on that instead of a name
+    lookup that a tenant rename could break. Fails loudly if the record was
+    never installed on the target DB.
+    """
+    module, _, name = xmlid.partition(".")
+    rows = call(
+        models,
+        uid,
+        "ir.model.data",
+        "search_read",
+        [[("module", "=", module), ("name", "=", name)]],
+        {"fields": ["res_id"], "limit": 1},
+    )
+    if not rows:
+        fail(f"External id {xmlid!r} not found on this DB (is grove_headless installed?)")
+    return rows[0]["res_id"]
 
 
 def resolve_sale_taxes(models, uid, company_id: int) -> list[int]:
@@ -344,6 +420,11 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
         f"{FORMAT_ATTR}:{spec['format_value']}",
     )
 
+    # The qualifying-plant category (GOL-2464). None for the potted/bareroot
+    # fixtures (must stay non-qualifying); resolved to a categ under the Plants
+    # root for the ``plants`` fixture so `is_qualifying_plant()` returns True.
+    categ_id = resolve_xmlid(models, uid, spec["categ_xmlid"]) if spec.get("categ_xmlid") else None
+
     # Fields the E2E specs depend on; reconciled on an existing fixture so a
     # re-run converges even if a prior run (or a manual poke) drifted them.
     want: dict[str, Any] = {
@@ -356,6 +437,10 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
     }
     if spec["tree_length"] is not None:
         want["grove_tree_length"] = spec["tree_length"]
+    if spec.get("gate_exempt"):
+        # Must be reconciled alongside categ_id so a qualifying-Plants fixture can
+        # publish past the listing-content gate (see the plants spec note).
+        want["grove_gate_exempt"] = True
 
     existing = call(
         models,
@@ -367,12 +452,17 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
     )
     if existing:
         tmpl_id = existing[0]
-        cur = call(models, uid, "product.template", "read", [[tmpl_id], list(want) + ["taxes_id"]])[0]
+        cur = call(models, uid, "product.template", "read", [[tmpl_id], list(want) + ["taxes_id", "categ_id"]])[0]
         drift = {k: v for k, v in want.items() if cur.get(k) != v}
         # Sale taxes are a m2m; reconcile them to the resolved set if they differ
         # (an existing fixture created outside this script may lack them).
         if sorted(cur.get("taxes_id", [])) != sorted(tax_ids):
             drift["taxes_id"] = [(6, 0, tax_ids)]
+        # categ_id is a m2o (read returns [id, name] or False). Only the
+        # ``plants`` fixture reconciles it; the others leave it untouched so an
+        # unset non-qualifying fixture is never silently pulled into Plants.
+        if categ_id is not None and (cur.get("categ_id") or [None])[0] != categ_id:
+            drift["categ_id"] = categ_id
         if DRY_RUN:
             print(f"  = fixture exists (id={tmpl_id}); would reconcile {drift or 'nothing'}")
             # Read-only dry run: skip the variant default_code write + apply_stock
@@ -385,9 +475,12 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
         else:
             print(f"  = fixture converged (id={tmpl_id}); nothing to reconcile")
     elif DRY_RUN:
+        categ_note = (
+            f", categ_id={categ_id} (qualifying plant)" if categ_id is not None else ", no categ (non-qualifying)"
+        )
         print(
             f"  + WOULD CREATE template {sku!r} ({spec['name']!r}) "
-            f"[{spec['format_value']}-only, tier={spec['shipping_tier']}] @ ${E2E_PRICE:.2f}"
+            f"[{spec['format_value']}-only, tier={spec['shipping_tier']}{categ_note}] @ ${E2E_PRICE:.2f}"
         )
         return
     else:
@@ -416,6 +509,13 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
         }
         if spec["tree_length"] is not None:
             vals["grove_tree_length"] = spec["tree_length"]
+        if categ_id is not None:
+            # Under the Plants root -> a qualifying plant for the promo/volume tiers.
+            vals["categ_id"] = categ_id
+        if spec.get("gate_exempt"):
+            # Set in the SAME create as is_published so the listing-content gate
+            # sees the exemption and lets a botanical-field-less fixture publish.
+            vals["grove_gate_exempt"] = True
         tmpl_id = call(models, uid, "product.template", "create", [vals], ctx)
         print(f"  + created template {sku} -> id={tmpl_id}")
 
