@@ -20,9 +20,13 @@ The cron drains oldest-first and STOPS at the first job that would not fit the
 remaining budget (it does not skip ahead to a cheaper job — oldest-first is the
 contract). Each real HTTP call increments the counter via the provider's
 ``on_call`` hook, so the count reflects reality even when a lookup fails partway
-through. HTTP 429 marks the whole day exhausted and requeues the job for the
-next UTC day; any other error is retried once, then the job fails with the HTTP
-status recorded in ``note``.
+through. A genuine HTTP 429 (daily quota) marks the whole day exhausted and
+requeues the job for the next UTC day. A 429 with an ``Upgrade Plan`` body is a
+*per-species paywall*, not day-exhaustion: that job fails alone, the counter is
+left untouched, and the drain continues to the next queued job (otherwise a
+single paid-plan species would head-of-line-block the whole catalog every day).
+Any other error is retried once, then the job fails with the HTTP status
+recorded in ``note``.
 """
 
 from datetime import datetime, timezone
@@ -30,7 +34,7 @@ from datetime import datetime, timezone
 from odoo import api, fields, models
 
 from ..services.plant_data import mapping
-from ..services.plant_data.perenual import PerenualProvider, PerenualRateLimited
+from ..services.plant_data.perenual import PerenualPlanGated, PerenualProvider, PerenualRateLimited
 
 # ir.config_parameter key for the daily Perenual call budget. Seeded to 100 by
 # data/grove_config_params.xml (noupdate) so an admin can raise/lower it in
@@ -130,13 +134,16 @@ class GroveEnrichJob(models.Model):
             outcome = job._process_one(key, budget)
             if outcome == "rate_limited":
                 break  # day exhausted mid-run — leave the rest queued
+            # "plan_gated" (paid-plan species) and "failed"/"requeued"/"done"
+            # all fall through: only a genuine quota 429 stops the drain.
 
     # ── Single job ──────────────────────────────────────────────────────────
     def _process_one(self, counter_key, budget):
         """Run one Perenual lookup, apply facts, update job state.
 
-        Returns one of ``done`` / ``failed`` / ``requeued`` / ``rate_limited``.
-        Never raises: every provider error is folded into the job note.
+        Returns one of ``done`` / ``failed`` / ``requeued`` / ``rate_limited`` /
+        ``plan_gated``. Never raises: every provider error is folded into the
+        job note.
         """
         self.ensure_one()
         self.state = "running"
@@ -149,15 +156,35 @@ class GroveEnrichJob(models.Model):
         provider = self._perenual_provider(on_call)
         try:
             facts = provider.lookup(tmpl.grove_botanical_name, cached_id=tmpl.grove_perenual_id or None)
-            tmpl._grove_apply_facts(facts, "perenual")
+            applied = tmpl._grove_apply_facts(facts, "perenual")
             if facts.resolved_id and not tmpl.grove_perenual_id:
                 try:
                     tmpl.grove_perenual_id = int(facts.resolved_id)
                 except (TypeError, ValueError):
                     pass
             self.state = "done"
-            self.note = self._summary(facts)
+            self.note = self._summary(facts, applied)
             return "done"
+        except PerenualPlanGated as exc:
+            # 429 with an "Upgrade Plan" body: this SPECIES is behind a paid
+            # Perenual plan (a permanent paywall, not day-exhaustion). Fail just
+            # this job WITHOUT touching the day counter, and let the cron drain
+            # the next queued job — one paid-plan species must not stall the
+            # whole catalog. Any real calls already made were counted via
+            # on_call, so today's spend stays honest.
+            self.attempts += 1
+            self.state = "failed"
+            if exc.species_id and not tmpl.grove_perenual_id:
+                # cache the resolved id so a re-press skips the species-list call
+                try:
+                    tmpl.grove_perenual_id = int(exc.species_id)
+                except (TypeError, ValueError):
+                    pass
+            self.note = (
+                "Perenual plan-gated: this species requires a paid Perenual plan "
+                f"(HTTP 429 Upgrade Plan). Not a rate limit; other jobs continue. {exc}"
+            )
+            return "plan_gated"
         except PerenualRateLimited as exc:
             # 429: the day's budget is spent. Exhaust the counter so no other job
             # is attempted today, and requeue this one for the next UTC day.
@@ -180,8 +207,11 @@ class GroveEnrichJob(models.Model):
             return "requeued"
 
     @staticmethod
-    def _summary(facts):
-        filled = ", ".join(sorted(facts.fields)) or "no empty fields to fill"
+    def _summary(facts, applied):
+        # ``applied`` is what _grove_apply_facts actually WROTE (provider was
+        # authoritative-first AND the field was empty), not facts.fields — the
+        # provider's raw proposals, most of which are usually skipped.
+        filled = ", ".join(sorted(applied)) or "no empty fields to fill"
         parts = [f"Perenual applied: {filled}."]
         if facts.hints:
             parts.append("Notes: " + " | ".join(facts.hints))

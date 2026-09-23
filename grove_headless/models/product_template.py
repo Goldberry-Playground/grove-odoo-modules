@@ -660,7 +660,10 @@ class ProductTemplate(models.Model):
         is recorded in grove_facts_provenance and echoed to chatter one line per
         field; hints/candidates are chatter-only. Writing provenance alongside a
         content field clears the human "Facts reviewed" sign-off (see write()).
-        Returns True when at least one field was filled.
+        Returns the sorted list of field names actually written (empty list when
+        none) — a truthy/falsy list, so existing boolean callers still work, and
+        the enrich-job note can report what was really filled rather than the
+        provider's raw proposals.
         """
         self.ensure_one()
         writes = {}
@@ -693,8 +696,9 @@ class ProductTemplate(models.Model):
                 )
             )
         if not writes:
-            return False
+            return []
 
+        applied = sorted(writes)  # content field names only (provenance not yet added)
         writes["grove_facts_provenance"] = provenance
         self.write(writes)
         self.message_post(
@@ -702,7 +706,7 @@ class ProductTemplate(models.Model):
                 len(lines), provider_name.upper(), Markup("<br/>").join(Markup(line) for line in lines)
             )
         )
-        return True
+        return applied
 
     # ── Request content draft (GOL-2384/C) ──────────────────────────────
     def action_request_draft(self):

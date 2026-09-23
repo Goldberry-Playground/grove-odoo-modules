@@ -5,8 +5,15 @@ Never called directly by the Fetch button — the button enqueues a
 comes from ``PERENUAL_API_KEY`` in the container env (never the repo/db).
 
 ``on_call`` is invoked once immediately before each HTTP call so the budgeted
-job can increment its per-UTC-day counter exactly per real call. HTTP 429 is
-raised as ``PerenualRateLimited`` so the job can mark the day exhausted.
+job can increment its per-UTC-day counter exactly per real call.
+
+HTTP 429 is ambiguous on Perenual's free tier and must be classified by body:
+
+  * a genuine daily-quota exhaustion -> ``PerenualRateLimited`` so the job marks
+    the whole day spent and requeues for the next UTC day, and
+  * an ``Upgrade Plan`` body (a *permanent* per-species paywall — a paid-plan
+    species, not a rate limit) -> ``PerenualPlanGated`` so the job can fail just
+    that species without poisoning the rest of the day's queue.
 """
 
 from __future__ import annotations
@@ -35,7 +42,47 @@ TIMEOUT = 10
 
 
 class PerenualRateLimited(RuntimeError):
-    """HTTP 429 — the day's budget is spent."""
+    """HTTP 429 — the day's budget is spent (clears at UTC midnight)."""
+
+
+class PerenualPlanGated(RuntimeError):
+    """HTTP 429 with an ``Upgrade Plan`` body — this *species* is behind a paid
+    Perenual plan. A permanent per-species paywall, NOT a rate limit: it does
+    not clear at UTC midnight and must not exhaust the day's counter.
+
+    ``species_id`` is the resolved Perenual id when known, so the caller can
+    cache it and skip the species-list call on a re-press.
+    """
+
+    def __init__(self, message, species_id=None):
+        super().__init__(message)
+        self.species_id = species_id
+
+
+def _response_body_text(resp) -> str:
+    """Best-effort string of a response body, for classifying a 429.
+
+    Real ``requests.Response`` exposes ``.text``; test fakes may only expose
+    ``.json()``. Fall back through both so the discriminator works either way.
+    """
+    text = getattr(resp, "text", None)
+    if isinstance(text, str) and text:
+        return text
+    try:
+        body = resp.json()
+    except Exception:  # noqa: BLE001 — a body we cannot parse is simply "not plan-gated"
+        return ""
+    if isinstance(body, str):
+        return body
+    if isinstance(body, dict):
+        return " ".join(str(v) for v in body.values())
+    return str(body)
+
+
+def _is_plan_gated(resp) -> bool:
+    """A 429 whose body references the paid plan is a per-species paywall."""
+    body = _response_body_text(resp).lower()
+    return "upgrade plan" in body or "subscription-api-pricing" in body
 
 
 class PerenualProvider:
@@ -62,6 +109,8 @@ class PerenualProvider:
         params = dict(params, key=self._key)
         resp = self._get(f"{self._base}/{path}", params=params, timeout=TIMEOUT)
         if getattr(resp, "status_code", None) == 429:
+            if _is_plan_gated(resp):
+                raise PerenualPlanGated("Perenual returned HTTP 429 (Upgrade Plan — species is plan-gated)")
             raise PerenualRateLimited("Perenual returned HTTP 429 (daily budget spent)")
         resp.raise_for_status()
         return resp.json()
@@ -85,7 +134,13 @@ class PerenualProvider:
                 )
             species_id = match.get("id")
 
-        details = self._fetch(f"species/details/{species_id}", {})
+        try:
+            details = self._fetch(f"species/details/{species_id}", {})
+        except PerenualPlanGated as exc:
+            # attach the id we already resolved so the queue can cache it and
+            # skip re-discovering the paywall (a wasted species-list call).
+            exc.species_id = species_id
+            raise
         ref = f"{self._base}/species/details/{species_id}"
         facts = mapping.map_perenual(details or {}, ref)
         facts.hints.insert(0, f"Perenual matched species id {species_id}")
