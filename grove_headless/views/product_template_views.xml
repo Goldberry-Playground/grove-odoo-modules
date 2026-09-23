@@ -22,7 +22,7 @@
                 <page string="Grove Headless" name="grove_headless">
                     <!-- Listing-content gate readiness banner (GOL-2382). -->
                     <div class="alert alert-success" role="alert" invisible="grove_listing_missing" colspan="2">
-                        <i class="fa fa-check-circle" /> <b>Listing complete</b> — this plant meets the
+                        <i class="fa fa-check-circle" title="Listing complete" role="img" /> <b>Listing complete</b> — this plant meets the
                         publish gate (all required facts, storefront description, approved care guide, facts reviewed).
                     </div>
                     <div
@@ -129,7 +129,7 @@
                                       least one fetched fact — run Fetch facts first."
                             />
                             <span class="text-muted ms-2" invisible="grove_draft_state != 'requested'">
-                                <i class="fa fa-hourglass-half" /> Draft requested — waiting on the content-drafter routine.
+                                <i class="fa fa-hourglass-half" title="Draft requested" role="img" /> Draft requested — waiting on the content-drafter routine.
                             </span>
                         </div>
                         <group string="Facts provenance" colspan="2">

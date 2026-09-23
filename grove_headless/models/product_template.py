@@ -68,6 +68,27 @@ _GROVE_LABEL_DESCRIPTION = "Description"
 _GROVE_LABEL_GUIDE = "Care guide approval"
 _GROVE_LABEL_REVIEWED = "Facts reviewed"
 
+# Trigger fields for both listing-status computes; shared so the stored
+# `complete` flag and the display-only `missing` string stay in lock-step.
+_GROVE_LISTING_DEPENDS = (
+    "grove_botanical_name",
+    "grove_zone_min",
+    "grove_zone_max",
+    "grove_layer",
+    "grove_sun",
+    "grove_mature_size",
+    "grove_mature_spread",
+    "grove_spacing",
+    "grove_soil",
+    "grove_pollination",
+    "grove_years_to_fruit",
+    "grove_chill_hours",
+    "description_ecommerce",
+    "website_description",
+    "grove_guide_ready",
+    "grove_facts_reviewed",
+)
+
 
 def _html_is_blank(value):
     """True when an HTML field has no visible text after stripping tags.
@@ -519,41 +540,33 @@ class ProductTemplate(models.Model):
     )
     grove_listing_complete = fields.Boolean(
         string="Listing complete",
-        compute="_compute_grove_listing_status",
+        compute="_compute_grove_listing_complete",
         store=True,
+        compute_sudo=True,
         help="True when every required fact, the storefront description, the "
         "approved care guide and the Facts Reviewed sign-off are present.",
     )
     grove_listing_missing = fields.Char(
         string="Missing for storefront",
-        compute="_compute_grove_listing_status",
+        compute="_compute_grove_listing_missing",
+        compute_sudo=True,
         help="Human-readable list of the items still needed before this plant can "
         "be published; empty when the listing is complete.",
     )
 
-    @api.depends(
-        "grove_botanical_name",
-        "grove_zone_min",
-        "grove_zone_max",
-        "grove_layer",
-        "grove_sun",
-        "grove_mature_size",
-        "grove_mature_spread",
-        "grove_spacing",
-        "grove_soil",
-        "grove_pollination",
-        "grove_years_to_fruit",
-        "grove_chill_hours",
-        "description_ecommerce",
-        "website_description",
-        "grove_guide_ready",
-        "grove_facts_reviewed",
-    )
-    def _compute_grove_listing_status(self):
+    # Both halves derive from _grove_missing_items(), but they are computed by
+    # separate methods so Odoo does not warn about the store/compute_sudo mismatch
+    # between the stored `complete` flag (used in domain searches) and the
+    # display-only `missing` string (GOL-2481). compute_sudo is pinned identically.
+    @api.depends(*_GROVE_LISTING_DEPENDS)
+    def _compute_grove_listing_complete(self):
         for record in self:
-            missing = record._grove_missing_items()
-            record.grove_listing_missing = ", ".join(missing)
-            record.grove_listing_complete = not missing
+            record.grove_listing_complete = not record._grove_missing_items()
+
+    @api.depends(*_GROVE_LISTING_DEPENDS)
+    def _compute_grove_listing_missing(self):
+        for record in self:
+            record.grove_listing_missing = ", ".join(record._grove_missing_items())
 
     def _grove_missing_items(self):
         """Ordered list of human labels for every unmet completeness requirement.
