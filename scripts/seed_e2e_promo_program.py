@@ -309,16 +309,20 @@ def main() -> None:
     )
     existing_program_id = 0
     if rule_ids:
-        existing_program_id = call(
-            models, uid, "loyalty.rule", "read", [[rule_ids[0]], ["program_id"]]
-        )[0]["program_id"][0]
+        existing_program_id = call(models, uid, "loyalty.rule", "read", [[rule_ids[0]], ["program_id"]])[0][
+            "program_id"
+        ][0]
         print(f"  = with_code rule {PROMO_CODE!r} exists (rule id={rule_ids[0]}, program id={existing_program_id})")
 
     if DRY_RUN:
         if existing_program_id:
-            print(f"  + WOULD RECONCILE loyalty.program id={existing_program_id} ('{PROGRAM_NAME}') on company {company_id}")
+            print(
+                f"  + WOULD RECONCILE loyalty.program id={existing_program_id} ('{PROGRAM_NAME}') on company {company_id}"
+            )
         else:
-            print(f"  + WOULD CREATE loyalty.program '{PROGRAM_NAME}' (with_code '{PROMO_CODE}', ${PROMO_AMOUNT:.0f}/order) on company {company_id}")
+            print(
+                f"  + WOULD CREATE loyalty.program '{PROGRAM_NAME}' (with_code '{PROMO_CODE}', ${PROMO_AMOUNT:.0f}/order) on company {company_id}"
+            )
         print("\nDry run — no writes performed. Re-run with DRY_RUN=0 against QA to apply.")
         return
 
