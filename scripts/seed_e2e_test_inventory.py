@@ -141,7 +141,15 @@ FORCE_FLAG = "--force-i-know-this-is-not-qa"
 FORCE_NOT_QA = FORCE_FLAG in sys.argv
 
 COMPANY_NAME = "At The Grove Nursery"
-SALE_TAXES = ["WV State Sales Tax 6%", "WV Municipal Tax 1%"]
+# State-only, to match the REAL nursery money path (GOL-2476). Post-#261
+# root/branch tax convergence, real nursery products carry ONLY the nursery's
+# "WV State Sales Tax 6%" (QA tax id 13) — proven live on order S01876
+# (GOL-2470, 6% state-only). The "WV Municipal Tax 1%" (QA id 12, on the
+# Goldberry Grove company) is NOT part of that path; carrying it here anchored
+# the e2e gate to a 7% (state+muni) total that no real product produces, a
+# latent way to mask/false-flag a WV-tax regression. Keep this list == the real
+# product tax set so gate fixtures track real behavior.
+SALE_TAXES = ["WV State Sales Tax 6%"]
 FORMAT_ATTR = "Format"
 
 E2E_PRICE = float(os.getenv("E2E_PRICE", "42.00"))
