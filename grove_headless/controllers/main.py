@@ -163,6 +163,21 @@ def _available_fields(model, fields):
     return [f for f in fields if f in model._fields]
 
 
+def _list_in_stock(product):
+    """Live stock signal for a grid card (GOL-2517).
+
+    ``True`` when any variant has sellable on-hand quantity. Pool-aware — reads
+    ``variant.grove_shared_pool_qty("qty_available")`` (the same source the PDP
+    variant display uses, GOL-2237) so a Bareroot placeholder with zero own
+    stock but stocked potted siblings is not falsely shown sold out. Caller
+    guards on the ``stock`` module being installed; invoke on a
+    ``with_company()`` record so ``qty_available`` reads the right company.
+    """
+    return any(
+        v.grove_shared_pool_qty("qty_available") > 0 for v in product.product_variant_ids
+    )
+
+
 def _json_response(data, status=200):
     """Return a plain JSON HTTP response (not Odoo JSON-RPC)."""
     body = json.dumps(data, default=str)
@@ -589,6 +604,18 @@ class GroveHeadlessAPI(http.Controller):
         # the derived flag must ride every card the grid can show.
         products.mapped("grove_preorder_cap_reached")
 
+        # GOL-2517: the grid needs a live stock signal or it can never show a
+        # sell-out — until now the list payload carried no availability at all,
+        # so `/shop` read "In stock" forever after an item zeroed out while the
+        # (force-dynamic) PDP flipped correctly. Only when the `stock` module is
+        # installed (mirrors the detail path's OPTIONAL_STOCK_FIELDS guard);
+        # otherwise the card falls back to website_published in the normalizer.
+        # Warm qty_available across every variant on the page in one batch to
+        # keep the per-card read a cache hit rather than an N+1.
+        has_stock_field = "qty_available" in request.env["product.product"]._fields
+        if has_stock_field:
+            products.product_variant_ids.mapped("qty_available")
+
         items = []
         for product in products:
             data = _serialize_product(product, PRODUCT_LIST_FIELDS)
@@ -596,6 +623,8 @@ class GroveHeadlessAPI(http.Controller):
                 data["image_url"] = _image_url("product.template", product, "image_128")
                 data["slug"] = data.pop("grove_slug", "") or ""
                 data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
+                if has_stock_field:
+                    data["in_stock"] = _list_in_stock(product)
                 data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
                 data["categories"] = [
                     {"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids
