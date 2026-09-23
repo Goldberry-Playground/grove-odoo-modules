@@ -99,6 +99,52 @@ class TestListingGate(GroveTaxFixtureMixin, TransactionCase):
         plant.website_description = "<p><br></p>"
         self.assertIn("Care guide approval", plant.grove_listing_missing)
 
+    def test_reading_missing_does_not_write_stored_gate(self):
+        """Reading the non-stored banner must not recompute/write the stored gate.
+
+        grove_listing_complete (stored, the hard publish gate) and
+        grove_listing_missing (non-stored banner text) once shared one compute
+        method, so *reading* the banner rewrote the stored flag as a side effect
+        (GOL-2471). They now have distinct computes; prove the read is
+        side-effect-free by poking the stored column to a value the compute would
+        NOT produce, reading only the banner, then confirming the column is
+        untouched on flush.
+        """
+        plant = self._complete_plant()
+        plant.flush_recordset()
+        self.assertTrue(plant.grove_listing_complete)
+
+        # Set the stored flag to a value the compute would never produce for this
+        # complete plant, straight in the DB so no recompute is scheduled.
+        self.env.cr.execute(
+            "UPDATE product_template SET grove_listing_complete = FALSE WHERE id = %s",
+            (plant.id,),
+        )
+        plant.invalidate_recordset()
+
+        # Touch ONLY the non-stored banner. Under the old shared compute this
+        # recomputed grove_listing_complete=True and flushed it back.
+        self.assertFalse(plant.grove_listing_missing)
+        plant.flush_recordset()
+
+        plant.invalidate_recordset()
+        self.env.cr.execute(
+            "SELECT grove_listing_complete FROM product_template WHERE id = %s",
+            (plant.id,),
+        )
+        self.assertFalse(
+            self.env.cr.fetchone()[0],
+            "reading grove_listing_missing recomputed and rewrote the stored gate",
+        )
+
+    def test_stored_gate_still_computes_on_fact_change(self):
+        """The split must not weaken the gate: it still recomputes on its deps."""
+        plant = self._complete_plant()
+        self.assertTrue(plant.grove_listing_complete)
+        plant.grove_facts_reviewed = False
+        self.assertFalse(plant.grove_listing_complete)
+        self.assertIn("Facts reviewed", plant.grove_listing_missing)
+
     # ── Publish gate ────────────────────────────────────────────────────
 
     def test_publish_complete_plant_succeeds(self):

@@ -68,6 +68,30 @@ _GROVE_LABEL_DESCRIPTION = "Description"
 _GROVE_LABEL_GUIDE = "Care guide approval"
 _GROVE_LABEL_REVIEWED = "Facts reviewed"
 
+# Dependencies shared by the two listing-status computes. grove_listing_complete
+# (stored, the publish gate) and grove_listing_missing (non-stored banner text)
+# both derive from _grove_missing_items(), but they use SEPARATE compute methods
+# so that *reading* the non-stored banner never triggers a write to the stored
+# gate flag (GOL-2471). Kept as one tuple so the two @api.depends can't drift.
+_GROVE_LISTING_STATUS_DEPENDS = (
+    "grove_botanical_name",
+    "grove_zone_min",
+    "grove_zone_max",
+    "grove_layer",
+    "grove_sun",
+    "grove_mature_size",
+    "grove_mature_spread",
+    "grove_spacing",
+    "grove_soil",
+    "grove_pollination",
+    "grove_years_to_fruit",
+    "grove_chill_hours",
+    "description_ecommerce",
+    "website_description",
+    "grove_guide_ready",
+    "grove_facts_reviewed",
+)
+
 
 def _html_is_blank(value):
     """True when an HTML field has no visible text after stripping tags.
@@ -519,41 +543,35 @@ class ProductTemplate(models.Model):
     )
     grove_listing_complete = fields.Boolean(
         string="Listing complete",
-        compute="_compute_grove_listing_status",
+        compute="_compute_grove_listing_complete",
         store=True,
+        compute_sudo=True,
         help="True when every required fact, the storefront description, the "
         "approved care guide and the Facts Reviewed sign-off are present.",
     )
     grove_listing_missing = fields.Char(
         string="Missing for storefront",
-        compute="_compute_grove_listing_status",
+        compute="_compute_grove_listing_missing",
+        compute_sudo=False,
         help="Human-readable list of the items still needed before this plant can "
         "be published; empty when the listing is complete.",
     )
 
-    @api.depends(
-        "grove_botanical_name",
-        "grove_zone_min",
-        "grove_zone_max",
-        "grove_layer",
-        "grove_sun",
-        "grove_mature_size",
-        "grove_mature_spread",
-        "grove_spacing",
-        "grove_soil",
-        "grove_pollination",
-        "grove_years_to_fruit",
-        "grove_chill_hours",
-        "description_ecommerce",
-        "website_description",
-        "grove_guide_ready",
-        "grove_facts_reviewed",
-    )
-    def _compute_grove_listing_status(self):
+    @api.depends(*_GROVE_LISTING_STATUS_DEPENDS)
+    def _compute_grove_listing_complete(self):
+        # Stored publish-gate flag. Kept in a compute method of its own so that
+        # reading the sibling grove_listing_missing banner cannot write it
+        # (GOL-2471). compute_sudo=True: the gate is evaluated with full access
+        # regardless of who triggers the recompute.
         for record in self:
-            missing = record._grove_missing_items()
-            record.grove_listing_missing = ", ".join(missing)
-            record.grove_listing_complete = not missing
+            record.grove_listing_complete = not record._grove_missing_items()
+
+    @api.depends(*_GROVE_LISTING_STATUS_DEPENDS)
+    def _compute_grove_listing_missing(self):
+        # Non-stored banner text. Read-only side-effect-free view of the same
+        # requirements — it must never touch the stored gate flag.
+        for record in self:
+            record.grove_listing_missing = ", ".join(record._grove_missing_items())
 
     def _grove_missing_items(self):
         """Ordered list of human labels for every unmet completeness requirement.
