@@ -376,9 +376,26 @@ class TestPerenualProvider(unittest.TestCase):
         self.assertFalse(any(u.endswith("/species-list") for u in calls))
 
     def test_429_raises_rate_limited(self):
+        # a 429 with no "Upgrade Plan" body is genuine day-exhaustion
         prov = perenual.PerenualProvider(get=self._router(status=429), api_key="k")
         with self.assertRaises(perenual.PerenualRateLimited):
             prov.lookup("Ficus carica")
+
+    def test_429_upgrade_plan_raises_plan_gated(self):
+        # a 429 whose body references the paid plan is a per-species paywall,
+        # NOT a rate limit — and it must carry the resolved id for caching.
+        def get(url, params=None, timeout=None):
+            if url.endswith("/species-list"):
+                return _Resp(_fx("perenual_ficus_carica_list.json"))
+            return _Resp(
+                {"X-Response": "[429] Please Upgrade Plan - https://perenual.com/subscription-api-pricing - Sorry"},
+                status_code=429,
+            )
+
+        prov = perenual.PerenualProvider(get=get, api_key="k")
+        with self.assertRaises(perenual.PerenualPlanGated) as cm:
+            prov.lookup("Ficus carica")
+        self.assertEqual(cm.exception.species_id, 3)
 
     def test_no_match_candidates(self):
         def get(url, params=None, timeout=None):

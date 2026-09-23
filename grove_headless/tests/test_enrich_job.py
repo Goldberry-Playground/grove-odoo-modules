@@ -73,6 +73,17 @@ def _details_500(url, params=None, timeout=None):
     return _Resp({"error": "boom"}, 500)
 
 
+def _details_plan_gated(url, params=None, timeout=None):
+    # species-list resolves; the details call is 429 with an "Upgrade Plan"
+    # body — a per-species paywall, not day-exhaustion.
+    if url.endswith("species-list"):
+        return _Resp(_LIST)
+    return _Resp(
+        {"X-Response": "[429] Please Upgrade Plan - https://perenual.com/subscription-api-pricing - Sorry"},
+        429,
+    )
+
+
 @tagged("post_install", "-at_install")
 class TestEnrichJob(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
@@ -114,6 +125,10 @@ class TestEnrichJob(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(tmpl.grove_perenual_id, 3)
         # provenance stamped for a written field
         self.assertEqual((tmpl.grove_facts_provenance or {}).get("grove_zone_min", {}).get("source"), "perenual")
+        # the note reports the fields ACTUALLY written (== provenance keys), not
+        # the provider's raw proposals (GOL-2512 cosmetic).
+        written = sorted(tmpl.grove_facts_provenance or {})
+        self.assertIn(f"Perenual applied: {', '.join(written)}.", job.note)
 
     def test_does_not_overwrite_existing_fields(self):
         tmpl = self._product()
@@ -164,6 +179,25 @@ class TestEnrichJob(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(j2.attempts, 0)
         # day marked exhausted: counter clamped to the full budget
         self.assertEqual(self._counter(), 100)
+
+    def test_plan_gated_species_fails_alone_and_queue_continues(self):
+        # A paid-plan (429 "Upgrade Plan") species must NOT slam the day counter
+        # or break the drain: it fails alone, the day is left un-exhausted, and
+        # the next queued job is still attempted. (Regression: GOL-2512 — one
+        # paywalled species used to head-of-line-block the whole catalog.)
+        self.ICP.set_param(PERENUAL_BUDGET_PARAM, "100")
+        t1, t2 = self._product(), self._product()
+        j1, j2 = self._queue(t1), self._queue(t2)
+        self._run(_details_plan_gated)
+        # head-of-line job failed (terminal, not requeued) with the right reason
+        self.assertEqual(j1.state, "failed")
+        self.assertIn("plan-gated", j1.note.lower())
+        # the drain CONTINUED to the younger job (would stay "queued" under the bug)
+        self.assertEqual(j2.state, "failed")
+        # counter reflects only the real calls made (2 per job), never the budget
+        self.assertEqual(self._counter(), 4)
+        # resolved id cached so a re-press skips the wasted species-list call
+        self.assertEqual(t1.grove_perenual_id, 3)
 
     def test_unkeyed_leaves_jobs_queued(self):
         # No PERENUAL_API_KEY -> the cron must NOT drain the backlog into a

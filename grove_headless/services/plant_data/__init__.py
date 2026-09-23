@@ -16,7 +16,7 @@ from .mapping import (
     resolve_binomial,
     under_budget,
 )
-from .perenual import PerenualProvider, PerenualRateLimited
+from .perenual import PerenualPlanGated, PerenualProvider, PerenualRateLimited
 from .usda import USDAProvider
 
 __all__ = [
@@ -33,4 +33,5 @@ __all__ = [
     "USDAProvider",
     "PerenualProvider",
     "PerenualRateLimited",
+    "PerenualPlanGated",
 ]
