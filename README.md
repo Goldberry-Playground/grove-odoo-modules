@@ -531,6 +531,7 @@ Operational helpers in `scripts/` for bootstrapping a fresh tenant. Each script 
 | `seed_payment_journals.py` | Cash, Card, Check, Online Payment, Invoice (Net 30) journals |
 | `seed_sales_teams.py` | Farmer's Market, Direct to Nursery, Online sales teams |
 | `seed_e2e_test_inventory.py` | **QA Playwright E2E test-inventory fixtures** (GOL-1148 + GOL-1154). TWO idempotent single-Format, in-stock products so the nursery checkout suite's `findProductByCta("Add to Cart")` finds purchasable lines on first paint: a **Potted-only pickup** fixture (`E2E-POTTED-INSTOCK`) and a **Bareroot-only shippable** fixture (`E2E-BAREROOT-INSTOCK`, needed by the `@stripe` ship-flow specs since a potted line 400s on ship). Real dual-format products default to Bareroot (0 on hand in preorder season) and render "Reserve", so the suite otherwise sees zero Add-to-Cart CTAs. Knobs: `FIXTURE` (`potted`/`bareroot`/both) / `E2E_PRICE` / `E2E_QTY` / `E2E_TREE_LENGTH`. |
+| `seed_e2e_promo_program.py` | **QA Playwright E2E promo-code fixture** (GOL-2478). Idempotent `with_code` promotion `loyalty.program` on company 9 (At The Grove Nursery) — code `FLATWOODS`, flat $10 per-order discount — so the nursery `checkout-promo-code.spec.ts` `@promo` reconcile spec resolves the code instead of skipping on a `400 "This code is invalid"`. Same QA-guard + dry-run-default as `seed_e2e_test_inventory.py`. Knobs: `E2E_PROMO_CODE` (keep in lockstep with the gate env) / `E2E_PROMO_AMOUNT`. |
 | `setup_ghost_integration.py` | Bootstraps Ghost admin + creates a Custom Integration, prints `GHOST_CONTENT_KEY=...` |
 
 Run against a live Odoo instance:
@@ -599,6 +600,8 @@ grove-odoo-modules/
 │   ├── seed_payment_journals.py
 │   ├── seed_sales_teams.py
 │   ├── seed_kit_boms.py              # Kit BOMs for bundled nursery products
+│   ├── seed_e2e_test_inventory.py    # QA E2E in-stock product fixtures (GOL-1148/1154)
+│   ├── seed_e2e_promo_program.py     # QA E2E with_code promo program (GOL-2478)
 │   ├── setup_ghost_integration.py
 │   ├── build_zip_zone_matrix.py      # Rebuilds data/zip_usda_zone.csv from PHZM source
 │   └── rate_check/
