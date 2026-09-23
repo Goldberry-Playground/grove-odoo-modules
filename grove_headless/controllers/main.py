@@ -173,9 +173,7 @@ def _list_in_stock(product):
     guards on the ``stock`` module being installed; invoke on a
     ``with_company()`` record so ``qty_available`` reads the right company.
     """
-    return any(
-        v.grove_shared_pool_qty("qty_available") > 0 for v in product.product_variant_ids
-    )
+    return any(v.grove_shared_pool_qty("qty_available") > 0 for v in product.product_variant_ids)
 
 
 def _json_response(data, status=200):
