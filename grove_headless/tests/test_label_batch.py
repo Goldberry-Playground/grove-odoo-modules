@@ -305,7 +305,8 @@ class TestLabelBatch(GroveTaxFixtureMixin, TransactionCase):
             {
                 "name": "Fulfillment User",
                 "login": "gol2481_fulfil",
-                "groups_id": [(6, 0, [self.env.ref("sales_team.group_sale_salesman").id])],
+                # Odoo 19 renamed res.users.groups_id -> group_ids (GOL-2014).
+                "group_ids": [(6, 0, [self.env.ref("sales_team.group_sale_salesman").id])],
             }
         )
         wiz = (
@@ -319,7 +320,7 @@ class TestLabelBatch(GroveTaxFixtureMixin, TransactionCase):
             {
                 "name": "Plain User",
                 "login": "gol2481_plain",
-                "groups_id": [(6, 0, [self.env.ref("base.group_user").id])],
+                "group_ids": [(6, 0, [self.env.ref("base.group_user").id])],
             }
         )
         with self.assertRaises(AccessError):
