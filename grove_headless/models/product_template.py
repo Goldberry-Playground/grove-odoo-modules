@@ -596,10 +596,13 @@ class ProductTemplate(models.Model):
     def action_fetch_facts(self):
         """Form button: fill empty growing facts from USDA now, queue Perenual.
 
-        USDA (free, no key) runs synchronously and writes only the empty fields
-        it is authoritative-first for; its zone/spacing hints are posted to
-        chatter, never written. Perenual owns the rest but is rate-limited, so it
-        is enqueued as a grove.enrich.job and drained by the budgeted cron.
+        USDA (free, no key) runs synchronously and fills every empty field it can
+        (Josh ruling 2026-09-23, GOL-2542) — including the ones Perenual is
+        preferred for (sun/soil/watering/harvest/wildlife, provenance ``usda``),
+        the zones derived from minimum temperature (``usda_temp``) and the spacing
+        derived from planting density (``usda_density``). Perenual, drained later
+        by the budgeted cron, overwrites the fields it owns when it answers; if it
+        fails or has no match the USDA values stand.
         """
         for record in self:
             record._grove_fetch_facts_sync()
@@ -652,18 +655,39 @@ class ProductTemplate(models.Model):
             return not value
         return not str(value or "").strip()
 
-    def _grove_apply_facts(self, facts, provider_name):
-        """Apply a provider's PlantFacts to this template, conservatively.
+    def _grove_should_autofill(self, name, incoming_source, provenance):
+        """Whether an auto-fill/enrichment write should land on ``name``.
 
-        A field is written only when (a) this provider is authoritative-FIRST for
-        it in FIELD_PRECEDENCE and (b) the field is currently empty. Every write
-        is recorded in grove_facts_provenance and echoed to chatter one line per
-        field; hints/candidates are chatter-only. Writing provenance alongside a
-        content field clears the human "Facts reviewed" sign-off (see write()).
+        Josh ruling 2026-09-23 (GOL-2542): fill every field a source can, but
+        never clobber a human. An empty field is always filled. A field already
+        holding a machine value (provenance source in MACHINE_SOURCES) is upgraded
+        only by a strictly-preferred source — so USDA fills the Perenual-preferred
+        fields as a fallback, Perenual later overwrites those specific usda/agent
+        values, and a re-run of the same source is a no-op. A value with no machine
+        provenance (human form edit, data import, seed) is protected.
+        """
+        self.ensure_one()
+        if self._grove_field_empty(name):
+            return True
+        existing_source = (provenance.get(name) or {}).get("source")
+        if existing_source not in plant_mapping.MACHINE_SOURCES:
+            return False  # human / manual / imported value — never auto-overwrite
+        return plant_mapping.source_outranks(name, incoming_source, existing_source)
+
+    def _grove_apply_facts(self, facts, provider_name):
+        """Apply a provider's PlantFacts to this template (GOL-2542 auto-fill).
+
+        A field is written when it is empty, or when the value's source strictly
+        outranks the machine source that filled it before (see
+        _grove_should_autofill); human/unstamped values are never touched. Every
+        write is recorded in grove_facts_provenance and echoed to chatter one line
+        per field; hints/candidates are chatter-only. Writing provenance alongside
+        a content field clears the human "Facts reviewed" sign-off (see write()).
         Returns the sorted list of field names actually written (empty list when
         none) — a truthy/falsy list, so existing boolean callers still work, and
         the enrich-job note can report what was really filled rather than the
-        provider's raw proposals.
+        provider's raw proposals. ``provider_name`` labels the chatter block; the
+        per-field provenance uses each value's own source.
         """
         self.ensure_one()
         writes = {}
@@ -671,11 +695,10 @@ class ProductTemplate(models.Model):
         provenance = dict(self.grove_facts_provenance or {})
         now_iso = fields.Datetime.now().isoformat()
         for name, fv in facts.fields.items():
-            order = plant_mapping.FIELD_PRECEDENCE.get(name, ())
-            if not order or order[0] != provider_name:
-                continue  # this provider is not authoritative-first for the field
-            if not self._grove_field_empty(name):
-                continue  # never overwrite an existing value
+            if name not in self._fields:
+                continue  # provider proposed a field this model does not have
+            if not self._grove_should_autofill(name, fv.source, provenance):
+                continue
             writes[name] = fv.value
             provenance[name] = {"source": fv.source, "ref": fv.ref, "at": now_iso}
             lines.append(f"{escape(self._fields[name].string)}: {escape(str(fv.value))} (source: {escape(fv.source)})")
