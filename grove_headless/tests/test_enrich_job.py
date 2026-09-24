@@ -324,19 +324,42 @@ class TestEnrichJob(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual((tmpl.grove_facts_provenance or {})["grove_zone_min"]["source"], "usda_temp")
 
     def test_human_value_never_overwritten(self):
-        # A field a human set by hand (no machine provenance) is protected from
-        # both the USDA pass and the Perenual drain.
+        # A field a human set by hand is protected from both the USDA pass and
+        # the Perenual drain. A manual form edit stamps `human` provenance
+        # (GOL-2543) so the guard recognises it as human-owned.
         from odoo.addons.grove_headless.services.plant_data.mapping import FactValue
 
         tmpl = self._product()  # "Ficus carica"
-        tmpl.grove_sun = "shade"  # manual form edit -> no provenance stamped
+        tmpl.grove_sun = "shade"  # manual form edit -> stamped human provenance
+        self.assertEqual((tmpl.grove_facts_provenance or {})["grove_sun"]["source"], "human")
         self._fetch_with_fake_usda(tmpl, {"grove_sun": FactValue("partial", "usda", "usda://TEST")})
         self.assertEqual(tmpl.grove_sun, "shade")  # USDA did not clobber the human value
-        self.assertNotIn("grove_sun", tmpl.grove_facts_provenance or {})
+        self.assertEqual((tmpl.grove_facts_provenance or {})["grove_sun"]["source"], "human")
 
         self._run(_ok_get)  # Perenual would say "full"
         self.assertEqual(tmpl.grove_sun, "shade")  # still protected
-        self.assertNotIn("grove_sun", tmpl.grove_facts_provenance or {})
+        self.assertEqual((tmpl.grove_facts_provenance or {})["grove_sun"]["source"], "human")
+
+    def test_human_correction_of_machine_field_never_overwritten(self):
+        # GOL-2543 regression: USDA fallback fills a Perenual-preferred field, a
+        # human then corrects it in the form; the Perenual drain (a strictly
+        # preferred source) must NOT overwrite the human's correction, nor blank
+        # it. Before the fix, the field still carried source "usda" after the
+        # human edit, so source_outranks("perenual","usda") let Perenual clobber.
+        from odoo.addons.grove_headless.services.plant_data.mapping import FactValue
+
+        tmpl = self._product()  # "Ficus carica" -> matches the Perenual fixture
+        # 1. USDA fallback fills grove_sun (machine provenance "usda").
+        self._fetch_with_fake_usda(tmpl, {"grove_sun": FactValue("partial", "usda", "usda://TEST")})
+        self.assertEqual(tmpl.grove_sun, "partial")
+        self.assertEqual((tmpl.grove_facts_provenance or {})["grove_sun"]["source"], "usda")
+        # 2. Human corrects the machine-filled field in the form.
+        tmpl.grove_sun = "shade"
+        self.assertEqual((tmpl.grove_facts_provenance or {})["grove_sun"]["source"], "human")
+        # 3. Perenual drains and would say "full" (strictly preferred over usda).
+        self._run(_ok_get)
+        self.assertEqual(tmpl.grove_sun, "shade")  # human correction survived
+        self.assertEqual((tmpl.grove_facts_provenance or {})["grove_sun"]["source"], "human")
 
     def test_second_failure_fails_with_http_status(self):
         self.ICP.set_param(PERENUAL_BUDGET_PARAM, "100")

@@ -162,11 +162,9 @@ class ProductTemplate(models.Model):
         # fact it wrote; that invalidates the human "Facts reviewed" sign-off
         # unless the write is itself (re)setting the flag. Human form edits never
         # touch provenance, so their sign-off survives.
-        if (
-            "grove_facts_reviewed" not in vals
-            and "grove_facts_provenance" in vals
-            and _GROVE_CONTENT_FACT_FIELDS.intersection(vals)
-        ):
+        fact_fields_written = _GROVE_CONTENT_FACT_FIELDS.intersection(vals)
+        machine_write = "grove_facts_provenance" in vals
+        if "grove_facts_reviewed" not in vals and machine_write and fact_fields_written:
             vals = dict(vals, grove_facts_reviewed=False)
         if self._GROVE_AVAILABILITY_FIELDS.intersection(vals):
             self.env["grove.publish.event"].sudo().note_availability_candidates(self)
@@ -178,6 +176,25 @@ class ProductTemplate(models.Model):
         publishing = vals.get("website_published") or vals.get("is_published")
         transitioning = self.filtered(lambda r: not r.website_published) if publishing else self.browse()
         res = super().write(vals)
+        # GOL-2543: a human/manual edit of a content-fact field carries no
+        # grove_facts_provenance write alongside it. Without a provenance stamp,
+        # that field keeps whatever machine source (usda/perenual/agent) filled it
+        # first, and _grove_should_autofill would later treat the human's edit as
+        # an upgradeable machine value — letting a strictly-preferred source
+        # overwrite the human's correction. Stamp the edited fields `human` so
+        # they are protected. Done per-record (provenance is per-record) via
+        # super().write to avoid recursing into this override.
+        if fact_fields_written and not machine_write:
+            now_iso = fields.Datetime.now().isoformat()
+            for record in self:
+                provenance = dict(record.grove_facts_provenance or {})
+                changed = False
+                for name in fact_fields_written:
+                    if (provenance.get(name) or {}).get("source") != "human":
+                        provenance[name] = {"source": "human", "at": now_iso}
+                        changed = True
+                if changed:
+                    super(ProductTemplate, record).write({"grove_facts_provenance": provenance})
         for record in transitioning:
             record._grove_check_publish_gate()
         return res
