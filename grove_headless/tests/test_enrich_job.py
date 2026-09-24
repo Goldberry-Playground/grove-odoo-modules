@@ -145,7 +145,13 @@ class TestEnrichJob(GroveTaxFixtureMixin, TransactionCase):
         self._queue(tmpl)
         self._run(_ok_get)
         self.assertEqual(tmpl.grove_zone_min, 4)  # untouched
-        self.assertNotIn("grove_zone_min", tmpl.grove_facts_provenance or {})
+        # GOL-2543: a bare manual write now stamps `human` provenance, and it is
+        # protected *because* it is human-owned — not by the old emptiness
+        # heuristic. Perenual (a machine source) can never overwrite it.
+        self.assertEqual(
+            (tmpl.grove_facts_provenance or {}).get("grove_zone_min", {}).get("source"),
+            "human",
+        )
 
     def test_drains_to_cap_then_stops(self):
         self.ICP.set_param(PERENUAL_BUDGET_PARAM, "5")  # room for 2 jobs (2 calls each), not a 3rd
