@@ -46,6 +46,11 @@ jobs:
               '**/tests/**',
               '**/test_*.py',
               '**/*_test.py',
+              // GOL-2524: `scripts/ci/*.test.mjs` is a LIVE gate in this repo (the
+              // `CI scripts` job, GOL-1919), but it was not listed here — so a
+              // fix whose only regression test was an .mjs one was reported as
+              // having no test at all.
+              '**/*.test.mjs',
             ];
 
             const { owner, repo } = context.repo;
