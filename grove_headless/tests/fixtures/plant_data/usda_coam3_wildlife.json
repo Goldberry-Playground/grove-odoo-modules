@@ -1,0 +1,30 @@
+{
+  "Food": [
+    {
+      "Source": "Martin, A.C., H.S. Zim, and A.L. Nelson",
+      "LargeMammals": "Low",
+      "SmallMammals": "Medium",
+      "WaterBirds": "",
+      "TerrestrialBirds": "High"
+    }
+  ],
+  "Cover": [
+    {
+      "Source": "Martin, A.C., H.S. Zim, and A.L. Nelson",
+      "LargeMammals": "Low",
+      "SmallMammals": "Medium",
+      "WaterBirds": "",
+      "TerrestrialBirds": "Low"
+    }
+  ],
+  "Sources": [
+    {
+      "AuthorName": "Martin, A.C., H.S. Zim, and A.L. Nelson",
+      "PublisherName": "Dover Publications",
+      "PublicationPlace": "New York",
+      "Title": "American wildlife and plants: a guide to wildlife food habits",
+      "PublicationYear": 1951,
+      "PublicationURL": ""
+    }
+  ]
+}
