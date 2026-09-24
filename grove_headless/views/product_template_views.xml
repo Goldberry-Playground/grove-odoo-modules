@@ -103,6 +103,49 @@
                             <field name="grove_years_to_fruit" />
                             <field name="grove_chill_hours" />
                         </group>
+                        <!-- Enrichment status panel (GOL-2541): what ran, how far
+                             along, and did it succeed/fail — from the latest
+                             grove.enrich.job, provenance, the drain cron and the
+                             daily budget counter. -->
+                        <field name="grove_enrich_failed" invisible="1" />
+                        <field name="grove_draft_stale" invisible="1" />
+                        <div
+                            class="alert alert-danger"
+                            role="alert"
+                            colspan="2"
+                            invisible="not grove_enrich_failed"
+                        >
+                            <i class="fa fa-exclamation-triangle" title="Enrichment failed" role="img" />
+                            <b>Perenual enrichment failed.</b>
+                            <field name="grove_enrich_failed_note" class="oe_inline" nolabel="1" readonly="1" />
+                            <button
+                                name="action_retry_enrich"
+                                type="object"
+                                string="Retry"
+                                class="btn-danger btn-sm ms-2"
+                                icon="fa-refresh"
+                            />
+                        </div>
+                        <group string="Enrichment status" name="grove_enrich_status" colspan="2">
+                            <field name="grove_enrich_status_usda" readonly="1" />
+                            <field
+                                name="grove_enrich_usda_fields"
+                                readonly="1"
+                                invisible="not grove_enrich_usda_fields"
+                            />
+                            <field name="grove_enrich_status_perenual" readonly="1" />
+                            <field
+                                name="grove_enrich_perenual_fields"
+                                readonly="1"
+                                invisible="not grove_enrich_perenual_fields"
+                            />
+                            <field
+                                name="grove_enrich_hints_display"
+                                string="Notes"
+                                readonly="1"
+                                invisible="not grove_enrich_hints_display"
+                            />
+                        </group>
                         <div colspan="2">
                             <button
                                 name="action_fetch_facts"
@@ -128,10 +171,21 @@
                                       ready' for a human to review. Requires a botanical name and at
                                       least one fetched fact — run Fetch facts first."
                             />
-                            <span class="text-muted ms-2" invisible="grove_draft_state != 'requested'">
-                                <i class="fa fa-hourglass-half" title="Draft requested" role="img" /> Draft requested — waiting on the content-drafter routine.
-                            </span>
                         </div>
+                        <!-- Draft status panel + stalled banner (GOL-2541). -->
+                        <div
+                            class="alert alert-warning"
+                            role="alert"
+                            colspan="2"
+                            invisible="not grove_draft_stale"
+                        >
+                            <i class="fa fa-clock-o" title="Draft stalled" role="img" />
+                            <b>Draft has not arrived.</b> This request has been pending for over an
+                            hour — confirm the content-drafter routine is running (see the status below).
+                        </div>
+                        <group string="Content draft status" name="grove_draft_status_panel" colspan="2">
+                            <field name="grove_draft_status" nolabel="1" readonly="1" />
+                        </group>
                         <group string="Facts provenance" colspan="2">
                             <field name="grove_usda_symbol" />
                             <field name="grove_perenual_id" />
