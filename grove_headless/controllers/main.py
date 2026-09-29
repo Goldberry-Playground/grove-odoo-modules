@@ -396,6 +396,21 @@ def _serialize_facts(product):
     }
 
 
+def _fulfillment_flags(product):
+    """Storefront fulfillment/compliance flags for a template (GOL-2587).
+
+    ``pickup_only`` lets the storefront reuse the existing potted pickup-only UI
+    for a product forced to farm pickup regardless of shipping tier;
+    ``compliance_exempt`` lets it hide the per-state plant-health notice for a
+    product Josh has cleared by hand. Both list + detail carry them (Iris wires
+    the render — GOL twin).
+    """
+    return {
+        "pickup_only": bool(product.grove_pickup_only),
+        "compliance_exempt": bool(product.grove_compliance_exempt),
+    }
+
+
 def _gate_guide_fields(product, data):
     """Withhold the species-guide body until Wes has approved it.
 
@@ -629,6 +644,10 @@ class GroveHeadlessAPI(http.Controller):
                 ]
                 data["variant_count"] = len(product.product_variant_ids)
                 data["cultivar_count"] = _cultivar_count(product)
+                # GOL-2587: fulfillment/compliance flags so the storefront can
+                # hide the state notice (exempt) and reuse the potted pickup-only
+                # UI (pickup_only). Iris follow-up wires the render.
+                data.update(_fulfillment_flags(product))
                 data["price_min"] = min(product.product_variant_ids.mapped("lst_price"), default=product.list_price)
                 items.append(data)
 
@@ -690,6 +709,8 @@ class GroveHeadlessAPI(http.Controller):
         template_rootstock = _template_rootstock(product)
         data["variants"] = [_structure_variant(v, template_rootstock) for v in _ordered_variants(product)]
         data["facts"] = _serialize_facts(product)
+        # GOL-2587 fulfillment/compliance flags (see product_list).
+        data.update(_fulfillment_flags(product))
         # Storefront marketing description now lives in description_ecommerce
         # (GOL-2382); expose it as description_html (raw HTML — grove-sites
         # sanitizes on render). description_sale stays in the payload above until
@@ -2222,6 +2243,31 @@ def _stamp_bundle_substitution(kit_line, kit_bom, variant, dest, state_label):
     order.grove_substitution_note = (prior + "\n\n" + note) if prior else note
 
 
+def _stamp_exempt_bundle_note(kit_line, state_label):
+    """Manual-verify packing note for an exempt bundle with no kit BoM (GOL-2587).
+
+    An admin-exempt "Bundle: …" line skips the per-line carve-out gate and has
+    no phantom BOM on prod, so the GOL-2237 substitution engine can't tell the
+    packer which components to swap for the destination state. Post a chatter
+    note and a printed ``line_note`` under the kit line so whoever packs it
+    verifies the components for ``state_label`` by hand. No-op-on-error is the
+    caller's concern (best-effort).
+    """
+    note = f"COMPLIANCE: verify components for {state_label} by hand (no kit BoM)"
+    order = kit_line.order_id
+    order.message_post(body="<b>📦 Compliance check</b><br/>" + html.escape(note))
+    order.order_line.create(
+        {
+            "order_id": order.id,
+            "display_type": "line_note",
+            "name": note,
+            "sequence": (kit_line.sequence or 10) + 1,
+        }
+    )
+    prior = order.grove_substitution_note or ""
+    order.grove_substitution_note = (prior + "\n\n" + note) if prior else note
+
+
 def _create_draft_order(website, env, payload, discount_out=None):
     """Build a draft sale.order from a posted cart payload.
 
@@ -2446,6 +2492,29 @@ def _create_draft_order(website, env, payload, discount_out=None):
             order.unlink()
             return None, _json_response({"error": reason}, status=400)
 
+        # (2a) Farm-pickup-only lines block the ship-to order (GOL-2587). This is
+        # an explicit per-product override, independent of the shipping tier: a
+        # Bareroot product that would otherwise ship can still be pickup-only.
+        # Same plain-English 400 as the potted gate — pick the first offender.
+        pickup_only_line = next(
+            (
+                line
+                for line in order.order_line
+                if not line.display_type
+                and line.product_id
+                and line.product_id.product_tmpl_id.grove_pickup_only
+                and float(line.product_uom_qty or 0) > 0
+            ),
+            None,
+        )
+        if pickup_only_line:
+            name = pickup_only_line.product_id.display_name
+            order.unlink()
+            return None, _json_response(
+                {"error": f"{name} is farm pickup only — choose farm pickup or remove it."},
+                status=400,
+            )
+
         # (2b) Per-product genus/species compliance carve-out (GOL-2132). Even on
         # a green-list destination, specific taxa are restricted into specific
         # states (NPB Oct-2025). Evaluate every standalone line against the
@@ -2458,11 +2527,35 @@ def _create_draft_order(website, env, payload, discount_out=None):
         # is logged loudly (never guessed, never a silent drop).
         bom_model = env["mrp.bom"] if "mrp.bom" in env.registry else None
         bundle_lines = []  # (line, kit_bom, variant) — stamped after the loop
+        exempt_bundle_lines = []  # line — packing note stamped after the loop (GOL-2587)
         for line in order.order_line:
             if line.display_type or not line.product_id:
                 continue
             variant = line.product_id
             if variant.product_tmpl_id.type == "service" or float(line.product_uom_qty or 0) <= 0:
+                continue
+            # (2b-i) Admin compliance exemption (GOL-2587). Prod has no kit BoMs,
+            # so a bundle looks like a standalone line to `_bom_find` and the
+            # fail-safe below blocks it into every regulated state. When Josh has
+            # cleared the components by hand he ticks grove_compliance_exempt;
+            # skip the carve-out evaluation entirely (ships anywhere on the green
+            # list). Log at INFO with the note so the bypass is auditable, and —
+            # for a "Bundle: …" line with no kit BoM — stamp a packing note so
+            # the packer still verifies the components for the destination state.
+            template = variant.product_tmpl_id
+            if template.grove_compliance_exempt:
+                _logger.info(
+                    "GOL-2587 compliance exemption: variant %s (%s) skipped carve-out gate into %s — note: %s",
+                    variant.id,
+                    variant.display_name,
+                    dest,
+                    template.grove_compliance_note or "(no note)",
+                )
+                botanical = template.grove_botanical_name or ""
+                if botanical.strip().lower().startswith("bundle:"):
+                    # Defer the line-note create to after the loop — mutating
+                    # order.order_line while iterating it would skip entries.
+                    exempt_bundle_lines.append(line)
                 continue
             kit_bom = bom_model._bom_find(variant, bom_type="phantom").get(variant) if bom_model is not None else None
             if kit_bom:
@@ -2485,6 +2578,21 @@ def _create_draft_order(website, env, payload, discount_out=None):
                     )
                 order.unlink()
                 return None, _json_response({"error": block_msg}, status=400)
+
+        # (2b-ii) Exempt bundle packing note (GOL-2587). An exempt "Bundle: …"
+        # line has no kit BoM on prod, so the GOL-2237 substitution engine can't
+        # run — stamp a manual-verify note so the packer checks the components
+        # for the destination state by hand. Best-effort: never break checkout.
+        for line in exempt_bundle_lines:
+            try:
+                _stamp_exempt_bundle_note(line, ship_state)
+            except Exception:  # noqa: BLE001 — packing signal is best-effort
+                _logger.warning(
+                    "GOL-2587 exempt-bundle packing note failed for variant %s into %s",
+                    line.product_id.id,
+                    dest,
+                    exc_info=True,
+                )
 
         # (2c) Bundle per-state component substitution (GOL-2237). Bundles never
         # block; where a component's taxon is restricted into the destination we

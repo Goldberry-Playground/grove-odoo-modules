@@ -4,6 +4,7 @@ from odoo.addons.grove_headless.controllers.main import (
     PRODUCT_DETAIL_FIELDS,
     PRODUCT_LIST_FIELDS,
     _cultivar_count,
+    _fulfillment_flags,
     _gate_guide_fields,
     _image_url,
     _ordered_variants,
@@ -48,6 +49,17 @@ class TestDetailSerialization(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(facts["botanical_name"], "Pyrus communis")
         self.assertEqual(facts["zone_min"], 5)
         self.assertEqual(facts["layer"], "")
+
+    def test_fulfillment_flags_default_and_set(self):
+        """GOL-2587: pickup_only + compliance_exempt serialize as plain bools on
+        both list and detail. Default False; reflect the template flags when set."""
+        flags = _fulfillment_flags(self.tmpl)
+        self.assertEqual(flags, {"pickup_only": False, "compliance_exempt": False})
+        self.tmpl.grove_pickup_only = True
+        self.tmpl.grove_compliance_exempt = True
+        flags = _fulfillment_flags(self.tmpl)
+        self.assertIs(flags["pickup_only"], True)
+        self.assertIs(flags["compliance_exempt"], True)
 
     def test_structured_variant(self):
         bareroot = self.tmpl.product_variant_ids.filtered(

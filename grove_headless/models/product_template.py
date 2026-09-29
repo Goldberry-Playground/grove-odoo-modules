@@ -438,6 +438,41 @@ class ProductTemplate(models.Model):
         'long; a tree over 24" has no box and cannot ship until one is restocked.',
     )
 
+    # ── Compliance & fulfillment overrides (GOL-2587 hotfix) ─────────────────
+    # Prod has ZERO mrp.bom records, so the GOL-2132 checkout gate can't tell a
+    # bundle (phantom kit) from a standalone line and fail-safe blocks every
+    # bundle into all 9 regulated states. This admin escape hatch lets Josh mark
+    # a template as cleared for the whole green list by hand, bypassing the
+    # per-line botanical carve-out evaluation at checkout.
+    grove_compliance_exempt = fields.Boolean(
+        string="Exempt from state plant-health carve-outs",
+        default=False,
+        tracking=True,
+        help="Skip the per-line genus/species carve-out gate for this product at "
+        "checkout — it ships anywhere on the green list. Use only when the "
+        "components have been cleared by hand (e.g. a bundle with no kit BoM). "
+        "Record why in the note below.",
+    )
+    grove_compliance_note = fields.Char(
+        string="Compliance exemption note",
+        tracking=True,
+        help="Why this product is exempt from the plant-health carve-out gate "
+        "(who cleared it, when, for which components). Logged at checkout.",
+    )
+    # Farm-pickup-only override, independent of the shipping tier. A Bareroot
+    # product (which normally ships) can still be pickup-only for reasons the
+    # tier doesn't capture (e.g. a large potted specimen, live-dig stock). The
+    # checkout gate rejects any ship order containing such a line, same 400
+    # pattern as the potted gate.
+    grove_pickup_only = fields.Boolean(
+        string="Farm pickup only",
+        default=False,
+        tracking=True,
+        help="This product can only be collected at the farm — the checkout "
+        "rejects any shipping order that contains it, regardless of shipping "
+        "tier. The customer must choose farm pickup or remove it.",
+    )
+
     # ── Growing facts (2026-07-13 catalog spec) ─────────────────────────
     # Filterable facts live here (typed); display-only facts stay Char.
     # Narrative content deliberately does NOT live in Odoo (Ghost, keyed
