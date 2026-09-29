@@ -1,0 +1,7 @@
+{
+  "errors": [
+    {
+      "message": "This server only executes persisted queries."
+    }
+  ]
+}

@@ -65,3 +65,74 @@ an App identity for bot PRs (the org already uses `agenticos-developer[bot]`).
    `event=pull_request` and `conclusion=success` (not `action_required`), and the
    required checks report. `gh pr checks chore/rate-check -R Goldberry-Playground/grove-odoo-modules`.
 3. The PR should reach `mergeable_state: clean` without any manual re-trigger.
+
+## Quote source refused the query (GOL-2605)
+
+**Symptom.** Every morning's run fails in the `Run rate-checker` step with a
+wall of identical lines and then the all-missing guard:
+
+```
+pirateship error for zone_1/small @ Wilmington,NC: pirateship graphql errors:
+  [{'message': 'This server only executes persisted queries.'}]
+  ... (once per zone x box x corner)
+Service visibility — allowlisted ground rates returned by Pirate Ship:
+  UPS 03 (UPS Ground): 0/20 probe(s)  <-- NEVER RETURNED
+```
+
+**What it means.** Pirate Ship switched `https://ship.pirateship.com/api/graphql`
+to Apollo's *persisted-queries-only* mode on **2026-09-29**. The endpoint answers
+HTTP **200** and refuses any query document it has not pre-registered — which is
+every document a third party can send, including the `RatesQuery` this checker
+reverse-engineered from the web app (see the `RATES_QUERY` comment). The checker
+now detects this class (`is_source_closed`) and says so explicitly:
+
+```
+::error::Pirate Ship REFUSED the RatesQuery document on N probe corner(s) ...
+```
+
+**This is not a transient and not a workflow fault.** Verified reproducible from
+outside CI with a bare `POST` to the same URL. There is nothing to retry:
+
+- a persisted-query allowlist is a *deliberate* block on third-party queries;
+- replaying the web app's persisted-query hash would be defeating that control
+  and would break again on Pirate Ship's next front-end deploy. **Do not do it** —
+  it needs a business/vendor decision, not a code change.
+
+**Blast radius while it is down.** None today, growing with time:
+
+- `grove_headless/data/shipping_rates.json` is **left untouched** — the run exits
+  1 *before* any rewrite, so published rates stay the last real probed values
+  (last rewritten `2026-09-21`, commit `4a6ace5`). Checkout is orders-of-magnitude
+  safer than a zeroed or partially-published table.
+- Rates **fossilize** from here. A UPS/USPS increase silently under-bills every
+  ship-to order, which is the exact failure GOL-1312's guard exists to surface.
+  Treat weeks-scale staleness as a pricing incident, not a CI annoyance.
+
+**Do not "fix" the red by silencing it.** Exit 1 here *is* the alarm. Likewise do
+not pause the `schedule:` cron: the CI failure router dedupes on
+`<!-- d3-ci-failure:rate-check:main -->`, so a still-broken source only adds a
+"Failed again." comment to the one open issue, and the router auto-closes that
+issue the moment a run goes green. The daily run is the cheapest possible probe
+for "is the source back?".
+
+**Restoring automation requires a replacement quote source** (board decision —
+money path). The three live options, with the trade-off that matters:
+
+| Option | Cost / effort | Catch |
+|---|---|---|
+| Quote via **Shippo** again (`SHIPPO_API_KEY` is already provisioned in this repo) | Lowest — the pre-`GOL-2270` quote path is `git show 1207093^:scripts/rate_check/rate_check.py` | Reintroduces quote/purchase divergence: labels are bought on Pirate Ship, so a Shippo quote is no longer the rate we pay (the whole reason GOL-2270 moved quoting) |
+| Carrier APIs direct (**UPS** + **USPS** developer APIs) | Highest — two auth flows, two rate schemas, new secrets | Published carrier rates, not Pirate Ship's discounted rates → quotes come out *high*, overcharging unless a discount factor is modelled |
+| Ask Pirate Ship for sanctioned API / rate-card access | Unknown — a support request | Historically no public API; may be a flat "no". Cheapest to *ask* and it is the only option with no divergence |
+
+Until one lands, the rate table is maintained by hand: probe pirateship.com in a
+browser and edit `shipping_rates.json` through a normal PR (the monotonicity and
+zone invariants still gate it via `scripts/rate_check/tests/`).
+
+**Verify a candidate fix offline, no vendor calls:**
+
+```bash
+python3 -m pytest grove_headless/tests/ scripts/rate_check/tests/ -q
+python3 scripts/rate_check/rate_check.py --fixture \
+  scripts/rate_check/fixtures/pirateship_rates_persisted_only.json ; echo "exit=$?"
+# expect exit=1 plus the ::error:: refusal annotation (never a rewrite)
+```
