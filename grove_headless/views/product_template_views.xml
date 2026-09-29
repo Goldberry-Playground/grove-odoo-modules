@@ -154,6 +154,11 @@
                         </div>
                         <field name="grove_shipping_tier" />
                         <field name="grove_tree_length" />
+                        <field name="grove_pickup_only" />
+                        <field name="grove_compliance_exempt" />
+                        <field name="grove_compliance_note"
+                               invisible="not grove_compliance_exempt"
+                               placeholder="Who cleared it, when, for which components" />
                         <separator string="Effective Shipping Tier per variant" colspan="2" />
                         <field name="product_variant_ids" nolabel="1" colspan="2" readonly="1">
                             <list string="Variants" create="false" delete="false">
