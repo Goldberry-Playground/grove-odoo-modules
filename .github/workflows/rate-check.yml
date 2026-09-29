@@ -18,6 +18,36 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
+      - name: Ops-alerting preflight
+        # GOL-2642: both ops integrations below fail SILENTLY when their secret is
+        # absent — the Discord steps short-circuit, and checkout / PR-create fall
+        # back to `github.token`. Until now those short-circuits logged
+        # `::notice::`, which does NOT surface in the run summary, so the alerting
+        # layer for a MONEY-PATH signal ("rates drifted", "regenerated table failed
+        # its invariants", "the quote source is gone") was itself invisible: the
+        # step ran, printed a notice nobody sees, and reported success.
+        # Report a missing secret as a `::warning::` + a run-summary line instead,
+        # and NEVER fail on it: a missing ops secret must not take down the rate
+        # check itself. Emptiness is all we test — no secret value is ever echoed,
+        # and the warning self-clears the moment the secret is provisioned.
+        env:
+          HAS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK_URL != '' }}
+          HAS_PR_TOKEN: ${{ secrets.RATE_CHECK_PR_TOKEN != '' }}
+        run: |
+          missing=0
+          if [ "$HAS_WEBHOOK" != "true" ]; then
+            missing=1
+            echo "::warning title=No Discord ops webhook::DISCORD_OPS_WEBHOOK_URL is not set in this repo - every rate-check Discord alert (drift / invariants-failed / run-failure) is a silent no-op. See scripts/rate_check/RUNBOOK.md, GOL-2642."
+            echo "- :warning: **DISCORD_OPS_WEBHOOK_URL is missing** - rate-drift, invariant-failure and run-failure Discord alerts are no-ops (GOL-2642)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$HAS_PR_TOKEN" != "true" ]; then
+            missing=1
+            echo "::warning title=No rate-check PR token::RATE_CHECK_PR_TOKEN is not set - the rates PR is pushed/opened with github.token, so its required checks stay at action_required until a human re-triggers them. See scripts/rate_check/RUNBOOK.md, GOL-2114."
+            echo "- :warning: **RATE_CHECK_PR_TOKEN is missing** - the rates PR will wedge at action_required (GOL-2114)." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ "$missing" = "0" ]; then
+            echo "ops alerting fully configured (Discord webhook + rate-check PR token both present)"
+          fi
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           # GOL-2114: persist a NON-GITHUB_TOKEN identity so the later
@@ -143,7 +173,14 @@ jobs:
           # knows a human must look — a held PR will NOT merge on its own.
           INVARIANTS_OK: ${{ steps.invariants.outputs.ok }}
         run: |
-          [ -z "$WEBHOOK" ] && { echo "::notice::no Discord webhook configured"; exit 0; }
+          # GOL-2642: fail LOUD-but-green when the webhook is missing. A `::notice::`
+          # here was invisible in the run summary, so a drifted-rates alert that was
+          # never delivered looked identical to one that was.
+          if [ -z "$WEBHOOK" ]; then
+            echo "::warning title=Rate-drift alert NOT delivered::Shipping rates drifted and a PR was opened, but DISCORD_OPS_WEBHOOK_URL is not configured - no Discord alert was sent. GOL-2642."
+            echo "- :warning: **Rate-drift Discord alert NOT sent** - no DISCORD_OPS_WEBHOOK_URL in this repo (GOL-2642). Review the rate-check PR manually." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           body=$(head -c 1800 scripts/rate_check/out/summary.md)
           # NB: \$1 is a literal dollar amount (double quotes → escaped $ stays literal); keep it escaped so shellcheck (SC2016) stays clean.
           if [ "$INVARIANTS_OK" = "false" ]; then
@@ -158,6 +195,12 @@ jobs:
         env:
           WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK_URL }}
         run: |
-          [ -z "$WEBHOOK" ] && { echo "::notice::no Discord webhook configured"; exit 0; }
+          # GOL-2642: see the drift alert above - a missing webhook must be visible,
+          # and this step is the one that fires when the quote source is gone.
+          if [ -z "$WEBHOOK" ]; then
+            echo "::warning title=Rate-check failure alert NOT delivered::rate-check FAILED and rates were not updated, but DISCORD_OPS_WEBHOOK_URL is not configured - no Discord alert was sent. GOL-2642."
+            echo "- :warning: **rate-check failure Discord alert NOT sent** - no DISCORD_OPS_WEBHOOK_URL in this repo (GOL-2642). Rates were NOT updated." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           payload=$(python3 -c "import json;print(json.dumps({'content':'⚠️ rate-check failed — Pirate Ship quote error or workflow fault; rates NOT updated'}))")
           curl -sS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK"
