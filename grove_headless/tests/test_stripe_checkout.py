@@ -908,8 +908,11 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         )
         self.assertEqual(forced, frozenset({self.product.id}))
         # ...but it no longer feeds the charge: an in-stock, pre-cutover order is
-        # a full charge regardless of the ship calendar.
-        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        # a full charge regardless of the ship calendar. Under Stripe Tax
+        # (flag ON) the WV line is dropped — Stripe adds destination tax on top.
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(
+            order, today=self.BEFORE_CUTOVER, tax_enabled=True
+        )
         self.assertEqual(preorder_ids, [])
         goods = next(li for li in line_items if li["name"] == self.product.display_name)
         self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(25.0))
@@ -1276,7 +1279,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
                 "breakdown": {"taxes": [{"jurisdiction": {"display_name": "West Virginia"}, "amount": 354}]},
             },
         }
-        result = grove_main._handle_session_completed(self.env, session)
+        # Write-back only runs under the Stripe Tax cutover flag (GOL-2568); with
+        # the flag OFF Odoo's own WV tax stands and nothing is recorded here.
+        with mock.patch.object(grove_main, "_stripe_tax_enabled", return_value=True):
+            result = grove_main._handle_session_completed(self.env, session)
         self.assertEqual(result, "paid")
         self.assertEqual(order.grove_stripe_tax_amount, 3.54)
         self.assertIn("West Virginia", order.grove_stripe_tax_jurisdictions or "")
