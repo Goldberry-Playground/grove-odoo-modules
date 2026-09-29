@@ -524,7 +524,8 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         """GOL-2450: the reward surfaces as a SINGLE negative `discount` line at
         pre-tax face value ($10), which is exactly the amount that becomes the
         one-time Stripe coupon; the charged-today total equals the order's
-        discounted grand total (Stripe collects exactly `amount_total`)."""
+        discounted PRE-TAX subtotal (GOL-2568: Stripe Tax adds tax on top, so the
+        line-item sum is untaxed, not the grand total)."""
         self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
         self._set_stock(self.product, 5)
         plain = self._make_order(qty=2)
@@ -540,11 +541,11 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(discounts[0]["amount_cents"], -stripe_gateway.to_cents(10.0))
         self.assertEqual(preorder_ids, [])
         # charged is the sum over the itemized lines (the review page renders the
-        # same array) and matches Odoo's discounted grand total to the cent — the
-        # reward's own negative tax nets the WV tax line, so no over/under-charge.
+        # same array) and matches Odoo's discounted PRE-TAX subtotal to the cent;
+        # Stripe adds destination tax on top on its hosted page (GOL-2568).
         self.assertEqual(charged, sum(li["amount_cents"] * li["quantity"] for li in line_items))
-        self.assertEqual(charged, stripe_gateway.to_cents(order.amount_total))
-        # And it is strictly below the undiscounted cart (goods + full tax).
+        self.assertEqual(charged, stripe_gateway.to_cents(order.amount_untaxed))
+        # And it is strictly below the undiscounted cart (goods, pre-tax).
         self.assertLess(charged, full_charged)
 
     def test_promo_code_rejected_on_preorder_cart(self):

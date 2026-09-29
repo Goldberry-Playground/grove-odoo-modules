@@ -3342,7 +3342,7 @@ def settle_order_at_ship(env, order):
                 line_items=tax_line_items,
                 address=_stripe_ship_address(env, order),
             )
-        except stripe_gateway.StripeError as exc:
+        except Exception as exc:  # noqa: BLE001 — tax calc is best-effort; a gateway/network error must not break settlement
             _logger.warning("Ship-time Stripe Tax calc failed for %s; using Odoo tax: %s", order.name, exc)
 
     if tax_calc:
@@ -3421,7 +3421,7 @@ def settle_order_at_ship(env, order):
     if tax_calc and tax_calc.get("id"):
         try:
             stripe_gateway.create_tax_transaction(secret_key, calculation=tax_calc["id"], reference=order.name)
-        except stripe_gateway.StripeError as exc:
+        except Exception as exc:  # noqa: BLE001 — reporting record is best-effort; the charge already succeeded
             _logger.warning("Ship-time tax transaction record failed for %s: %s", order.name, exc)
 
     order.write(
