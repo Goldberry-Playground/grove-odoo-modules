@@ -1,0 +1,15 @@
+{
+  "Id": 22114,
+  "Symbol": "COAM3",
+  "ScientificName": "<i>Corylus americana</i> Walter",
+  "ScientificNameWithoutAuthor": null,
+  "Rank": "Species",
+  "CommonName": "American hazelnut",
+  "GrowthHabits": [
+    "Shrub"
+  ],
+  "Durations": [
+    "Perennial"
+  ],
+  "HasCharacteristics": true
+}

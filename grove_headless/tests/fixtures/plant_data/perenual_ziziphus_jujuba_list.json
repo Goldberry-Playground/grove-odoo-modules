@@ -1,0 +1,26 @@
+{
+  "data": [
+    {
+      "id": 8402,
+      "common_name": "buffalo thorn",
+      "scientific_name": [
+        "Ziziphus mucronata"
+      ],
+      "other_name": []
+    },
+    {
+      "id": 6631,
+      "common_name": "Indian jujube",
+      "scientific_name": [
+        "Ziziphus mauritiana"
+      ],
+      "other_name": []
+    }
+  ],
+  "to": 2,
+  "per_page": 30,
+  "current_page": 1,
+  "from": 1,
+  "last_page": 1,
+  "total": 2
+}

@@ -150,9 +150,15 @@ class TestMapUsda(unittest.TestCase):
     def test_watering_medium_to_moderate(self):
         self.assertEqual(self._val("grove_watering"), "moderate")
 
-    def test_zones_never_from_usda(self):
-        self.assertNotIn("grove_zone_min", self.facts.fields)
-        self.assertNotIn("grove_zone_max", self.facts.fields)
+    def test_zones_from_usda_temp_fallback(self):
+        # GOL-2542: USDA derives a conservative zone from the minimum temperature
+        # (-21 °F -> 4b -> 5) with the distinct source usda_temp; Perenual still
+        # overwrites it when it answers (see the apply-handler tests).
+        zmin = self.facts.fields["grove_zone_min"]
+        self.assertEqual(zmin.value, 5)
+        self.assertEqual(zmin.source, "usda_temp")
+        self.assertEqual(self.facts.fields["grove_zone_max"].value, 10)
+        self.assertEqual(self.facts.fields["grove_zone_max"].source, "usda_temp")
 
     def test_wildlife_all_low_yields_nothing(self):
         # DIVI5 wildlife ratings are all "Low" (< Medium) -> no wildlife field
@@ -161,12 +167,18 @@ class TestMapUsda(unittest.TestCase):
     def test_zone_hint_present(self):
         self.assertTrue(any("zone 4b" in h for h in self.facts.hints))
 
-    def test_spacing_hint_not_a_field(self):
-        self.assertNotIn("grove_spacing", self.facts.fields)
+    def test_spacing_from_usda_density_fallback(self):
+        # GOL-2542: spacing derived from planting density (300–700/acre ->
+        # sqrt(43560/700)=8 .. sqrt(43560/300)=12), source usda_density.
+        spacing = self.facts.fields["grove_spacing"]
+        self.assertEqual(spacing.value, "8–12 ft")
+        self.assertEqual(spacing.source, "usda_density")
         self.assertTrue(any("density" in h.lower() for h in self.facts.hints))
 
-    def test_all_source_usda(self):
-        self.assertTrue(all(fv.source == "usda" for fv in self.facts.fields.values()))
+    def test_all_sources_are_usda_flavoured(self):
+        # Every USDA-mapped value carries a usda* source (usda, usda_temp for the
+        # derived zones, usda_density for the derived spacing).
+        self.assertTrue(all(fv.source.startswith("usda") for fv in self.facts.fields.values()))
 
     def test_wildlife_medium_rating_included(self):
         wl = {"Food": [{"Source": "x", "TerrestrialBirds": "Medium", "SmallMammals": "High"}], "Cover": []}
@@ -203,6 +215,109 @@ class TestTempToZone(unittest.TestCase):
         self.assertEqual(mapping.temp_to_zone(-20), "5a")
         self.assertEqual(mapping.temp_to_zone(-60), "1a")
         self.assertEqual(mapping.temp_to_zone(-55), "1b")
+
+
+class TestTempToZoneMin(unittest.TestCase):
+    def test_josh_example_minus_33_rounds_up_to_4(self):
+        # -33 °F -> half-zone 3b -> conservative whole zone 4 (Josh ruling).
+        self.assertEqual(mapping.temp_to_zone_min(-33), 4)
+
+    def test_b_half_rounds_up_a_half_stays(self):
+        self.assertEqual(mapping.temp_to_zone_min(-21), 5)  # 4b -> 5
+        self.assertEqual(mapping.temp_to_zone_min(-20), 5)  # 5a -> 5
+        self.assertEqual(mapping.temp_to_zone_min(-60), 1)  # 1a -> 1
+
+
+class TestSpacingFromDensity(unittest.TestCase):
+    def test_range(self):
+        # sqrt(43560/1700)=5.06 -> 5; sqrt(43560/700)=7.89 -> 8.
+        self.assertEqual(mapping._spacing_from_density("700", "1700"), "5–8 ft")
+
+    def test_single_when_equal(self):
+        self.assertEqual(mapping._spacing_from_density("680", "680"), "8 ft")
+
+    def test_one_density_only(self):
+        self.assertEqual(mapping._spacing_from_density("700", None), "8 ft")
+
+    def test_missing_or_zero_returns_none(self):
+        self.assertIsNone(mapping._spacing_from_density(None, None))
+        self.assertIsNone(mapping._spacing_from_density("0", "0"))
+
+
+class TestSourceOutranks(unittest.TestCase):
+    def test_perenual_upgrades_usda_temp_zone(self):
+        # zone min/max are Perenual-preferred, so Perenual beats the usda_temp
+        # fallback; the reverse never happens.
+        self.assertTrue(mapping.source_outranks("grove_zone_min", "perenual", "usda_temp"))
+        self.assertFalse(mapping.source_outranks("grove_zone_min", "usda_temp", "perenual"))
+
+    def test_perenual_upgrades_usda_fallback_field(self):
+        self.assertTrue(mapping.source_outranks("grove_sun", "perenual", "usda"))
+        self.assertFalse(mapping.source_outranks("grove_sun", "usda", "perenual"))
+
+    def test_usda_wins_its_own_fields(self):
+        # mature size / bloom / growth rate are USDA-preferred; Perenual cannot
+        # displace a usda value there.
+        self.assertFalse(mapping.source_outranks("grove_mature_size", "perenual", "usda"))
+        self.assertTrue(mapping.source_outranks("grove_mature_size", "usda", "perenual"))
+
+    def test_same_source_is_not_an_upgrade(self):
+        self.assertFalse(mapping.source_outranks("grove_sun", "usda", "usda"))
+        self.assertFalse(mapping.source_outranks("grove_spacing", "usda_density", "usda_density"))
+
+    def test_listed_provider_beats_agent(self):
+        self.assertTrue(mapping.source_outranks("grove_watering", "perenual", "agent"))
+
+
+class TestMapUsdaFallbackFields(unittest.TestCase):
+    """GOL-2542: USDA fills the Perenual-preferred fields + derives zones/spacing.
+
+    COAM3 (American hazelnut) is the fixture from Josh's QA-191 observation.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.facts = mapping.map_usda(
+            _fx("usda_coam3_profile.json"),
+            _fx("usda_coam3_characteristics.json"),
+            _fx("usda_coam3_wildlife.json"),
+            ref="usda://COAM3",
+        )
+
+    def _fv(self, name):
+        return self.facts.fields[name]
+
+    def test_sun_from_shade_tolerance_medium(self):
+        self.assertEqual(self._fv("grove_sun").value, "partial")
+        self.assertEqual(self._fv("grove_sun").source, "usda")
+
+    def test_soil_medium_and_fine(self):
+        soil = self._fv("grove_soil").value
+        self.assertIn("Medium and fine textures", soil)
+        self.assertIn("pH 5.0–7.5", soil)
+
+    def test_watering_medium(self):
+        self.assertEqual(self._fv("grove_watering").value, "moderate")
+
+    def test_harvest_summer_to_fall(self):
+        self.assertEqual(self._fv("grove_harvest_season").value, "Summer–Fall")
+
+    def test_wildlife_from_food_and_cover(self):
+        wl = self._fv("grove_wildlife").value
+        self.assertIn("small mammals", wl)
+        self.assertIn("terrestrial birds", wl)
+
+    def test_layer_shrub(self):
+        self.assertEqual(self._fv("grove_layer").value, "shrub")
+
+    def test_zone_from_minus_33(self):
+        self.assertEqual(self._fv("grove_zone_min").value, 4)
+        self.assertEqual(self._fv("grove_zone_min").source, "usda_temp")
+        self.assertEqual(self._fv("grove_zone_max").value, 9)
+
+    def test_spacing_5_to_8(self):
+        self.assertEqual(self._fv("grove_spacing").value, "5–8 ft")
+        self.assertEqual(self._fv("grove_spacing").source, "usda_density")
 
 
 # ── USDA provider (HTTP) ──────────────────────────────────────────────────────

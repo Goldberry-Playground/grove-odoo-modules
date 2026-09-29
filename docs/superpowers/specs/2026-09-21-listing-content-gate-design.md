@@ -137,25 +137,33 @@ Base `https://perenual.com/api/v2/`, key from env `PERENUAL_API_KEY` via the exi
 
 **Budget:** `ir.config_parameter` `grove_headless.perenual_daily_budget` (default 100) and a counter `grove_headless.perenual_calls.<YYYY-MM-DD UTC>` incremented per HTTP call. The Fetch button never calls Perenual directly; it creates a `grove.enrich.job` (`product_tmpl_id`, `provider='perenual'`, `state` queued/running/done/failed, `attempts`, `note`). Cron `grove_headless.process_enrich_jobs` runs every 10 minutes, drains jobs oldest-first while `counter + calls_needed <= budget`, and stops otherwise; remaining jobs wait for the next UTC day. The chatter note on enqueue states the queue position and the reset time. A job failing twice is marked failed with the HTTP status in `note`. HTTP 429 counts as budget exhausted for the day.
 
-### Mapping rules (conservative; every write is a draft)
+### Mapping rules (maximise auto-fill; every write is a draft)
 
-Only **empty** fields are written. Each write records provenance and clears `grove_facts_reviewed`. One chatter message per fetch lists field → value → source.
+> **Josh ruling 2026-09-23 (GOL-2542, QA product 191 American Hazelnut): "All this should be autofilled if it can be."** This supersedes the original conservative rules below (which left sun/soil/watering/harvest/wildlife blank on the USDA pass and only ever wrote zones/spacing as chatter hints). The "Rule" column still names the **preferred** source; the change is that the *non-preferred* source now fills a field as a **fallback** when it would otherwise be blank, and USDA additionally **derives** zones and spacing.
 
-| Target | USDA PLANTS | Perenual | Rule |
+**Write policy (product_template `_grove_should_autofill` + mapping `source_outranks`):**
+- An **empty** field is filled by whichever source runs and can supply it (USDA runs first, synchronously; Perenual drains later).
+- A field already holding a **machine** value (`usda` / `usda_temp` / `usda_density` / `agent`) is **overwritten only by a strictly-preferred source** for that field — so Perenual overwrites the USDA fallback on the fields it owns; a re-run of the same source is a no-op.
+- A **human** value — or any value with no machine provenance (a manual form edit, data import, seed) — is **never** auto-overwritten.
+- Net: nothing any source knows stays blank, and Perenual failing / no-match / unkeyed leaves the USDA fallback standing.
+
+Each write records provenance and clears `grove_facts_reviewed`. One chatter message per fetch lists field → value → source.
+
+| Target | USDA PLANTS | Perenual | Preferred / provenance |
 |---|---|---|---|
-| zone min/max | never (hint only: "USDA minimum temperature −21 °F ≈ zone 4b") | `hardiness.min/max` | Perenual only; survival temperatures run colder than nursery practice |
-| sun | Shade Tolerance Low → `full`, Medium/High → `partial` | `sunlight` list: only "full sun" → `full`; contains "part shade" → `partial`; only shade → `shade` | Perenual wins when both present; USDA never yields `shade` |
+| zone min/max | **fallback**: derive `zone_min` from Temperature, Minimum (°F) — USDA half-zone rounded **up** to the warmer whole zone (−33 °F → 3b → **4**), `zone_max = zone_min + 5`; provenance `usda_temp`; chatter "derived from minimum temperature, conservative" | `hardiness.min/max` | Perenual preferred; USDA fallback stands if Perenual gives no hardiness |
+| sun | Shade Tolerance Low → `full`, Medium/High → `partial` | `sunlight` list: only "full sun" → `full`; contains "part shade" → `partial`; only shade → `shade` | Perenual preferred; **USDA fallback** when Perenual absent; USDA never yields `shade` |
 | layer | Growth Habit Tree + Height ≥ 40 ft → `canopy`; Tree < 40 → `understory`; Shrub → `shrub`; Vine → `vine`; Forb/Herb/Graminoid → `ground` | — | USDA only |
-| mature size | "up to N ft" from Height, Mature (feet) | `dimensions` min–max + unit | USDA wins |
-| mature spread | — | — | never auto-filled (no source) |
-| spacing | never (hint: range derived from Planting Density per Acre, forestry spacing) | — | never auto-filled |
-| soil | texture adaptations joined + "pH a–b" | `soil` list joined | Perenual wins |
-| growth rate | Slow/Moderate/Rapid → slow/moderate/fast | Low/Moderate/High → same | USDA wins |
-| bloom season | Bloom Period | `flowering_season` | USDA wins |
-| harvest season | Fruit/Seed Period Begin–End | `harvest_season` | Perenual wins |
-| watering | Moisture Use Low/Medium/High → low/moderate/high | `watering` Minimum/Average/Frequent → same | Perenual wins |
-| wildlife | PlantWildlife Food/Cover animal groups rated ≥ Medium | `attracts` list → "Attracts bees, birds" | Perenual wins |
-| chill hours, pollination, years to fruit | — | — | never auto-filled |
+| mature size | "up to N ft" from Height, Mature (feet) | `dimensions` min–max + unit | USDA preferred |
+| mature spread | — | — | never auto-filled (no source) — content drafter, provenance `agent` |
+| spacing | **fallback**: `sqrt(43560 / density)` per acre (max density → min spacing) rounded to whole ft → "5–8 ft"; provenance `usda_density`; chatter "forestry density, adjust for orchard"; written only when empty | — | USDA fallback only (no API preferred source) |
+| soil | texture adaptations joined + "pH a–b" | `soil` list joined | Perenual preferred; **USDA fallback** |
+| growth rate | Slow/Moderate/Rapid → slow/moderate/fast | Low/Moderate/High → same | USDA preferred |
+| bloom season | Bloom Period | `flowering_season` | USDA preferred |
+| harvest season | Fruit/Seed Period Begin–End | `harvest_season` | Perenual preferred; **USDA fallback** |
+| watering | Moisture Use Low/Medium/High → low/moderate/high | `watering` Minimum/Average/Frequent → same | Perenual preferred; **USDA fallback** |
+| wildlife | PlantWildlife Food/Cover animal groups rated ≥ Medium | `attracts` list → "Attracts bees, birds" | Perenual preferred; **USDA fallback** |
+| chill hours, pollination, years to fruit | — | — | never auto-filled — content drafter, provenance `agent` |
 
 ---
 

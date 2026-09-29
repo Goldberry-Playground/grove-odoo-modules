@@ -10,13 +10,25 @@ turns raw USDA / Perenual JSON into ``FactValue`` objects keyed by the real
 follow-up PR) can apply the conservative "write only empty fields" policy and
 record provenance without re-deriving anything.
 
-The precedence table below encodes the spec's "wins" column verbatim. It is the
-single source of truth for *which provider owns a field*, so the async
-architecture stays correct: USDA runs synchronously from the button and writes
-only the fields it is authoritative-first for; Perenual runs later from the
-budgeted job and fills the fields it owns. ``merge()`` combines two already-
-mapped ``PlantFacts`` (e.g. in a test or a backfill that has both in hand)
-applying the same precedence.
+The precedence table below encodes the spec's "wins" column. It is the single
+source of truth for *which provider is preferred for a field*, so the async
+architecture stays correct: USDA runs synchronously from the button and fills
+every empty field it can (Josh ruling 2026-09-23 — "all this should be autofilled
+if it can be"), including the ones Perenual is *preferred* for; Perenual runs
+later from the budgeted job and OVERWRITES those specific fields when it answers,
+because it remains the preferred source. If Perenual fails / no match / unkeyed,
+the USDA values stand — nothing any source knows stays blank. The apply handler
+(product_template._grove_apply_facts) enforces this with ``source_outranks()``:
+a machine value is upgraded only by a strictly-preferred source, and a human
+value is never touched.
+
+USDA also derives two fallbacks no live provider owns: ``grove_zone_min/max``
+from the minimum survival temperature (source ``usda_temp``, beaten by Perenual
+``hardiness``) and ``grove_spacing`` from the forestry planting density (source
+``usda_density``, beaten by nothing but a human). ``merge()`` combines two
+already-mapped ``PlantFacts`` (e.g. in a test or a backfill that has both in
+hand) applying the same precedence, then surfaces any fallback field no listed
+provider owns.
 """
 
 from __future__ import annotations
@@ -175,6 +187,25 @@ def temp_to_zone(temp_f: float) -> str:
     return f"{zone_num}{letter}"
 
 
+# Whole-zone width added to a derived zone_min for the zone_max fallback
+# (spec GOL-2542: "zone_max = zone_min + 5 unless a better source exists").
+ZONE_SPAN = 5
+
+
+def temp_to_zone_min(temp_f: float) -> int:
+    """Conservative whole USDA zone from a minimum survival temperature (GOL-2542).
+
+    Rounds the half-zone UP to the warmer whole zone (``3b`` → ``4``, ``3a`` →
+    ``3``): the ``b`` half is the warmer part of its zone, so a plant whose
+    coldest survivable temperature lands there is only safely rated to the next
+    whole zone up. Used as the USDA fallback for ``grove_zone_min`` when Perenual
+    supplies no hardiness. (-33 °F → 3b → 4.)
+    """
+    zone = temp_to_zone(temp_f)
+    num = int(zone[:-1])
+    return num + 1 if zone.endswith("b") else num
+
+
 # ── USDA characteristic mapping ─────────────────────────────────────────────
 
 _USDA_SHADE_SUN = {"low": "full", "medium": "partial", "high": "partial", "intolerant": "full"}
@@ -270,22 +301,70 @@ def map_usda(profile: dict, characteristics: list[dict], wildlife: dict, ref: st
     # wildlife — animal groups rated >= Medium in Food/Cover
     put("grove_wildlife", _usda_wildlife(wildlife))
 
-    # hints (chatter-only): zone from min temperature, spacing from density
+    # zones — USDA fallback from the minimum survival temperature. Perenual owns
+    # hardiness, so these carry the distinct source "usda_temp": the apply handler
+    # lets Perenual overwrite them the moment it answers, but if Perenual never
+    # does they stand (GOL-2542, Josh ruling 2026-09-23). The chatter hint stays.
     min_temp = ch.get("Temperature, Minimum (°F)")
     if min_temp not in (None, ""):
         try:
             t = float(min_temp)
-            facts.hints.append(
-                f"USDA minimum temperature {int(t) if t == int(t) else t} °F "
-                f"≈ zone {temp_to_zone(t)} (zones written from Perenual only)"
-            )
         except (TypeError, ValueError):
-            pass
-    d_min, d_max = ch.get("Planting Density per Acre, Minimum"), ch.get("Planting Density per Acre, Maximum")
-    if d_min and d_max:
-        facts.hints.append(f"USDA planting density {d_min}–{d_max}/acre (forestry spacing; set spacing by hand)")
+            t = None
+        if t is not None:
+            zmin = temp_to_zone_min(t)
+            facts.fields["grove_zone_min"] = FactValue(value=zmin, source="usda_temp", ref=ref)
+            facts.fields["grove_zone_max"] = FactValue(value=zmin + ZONE_SPAN, source="usda_temp", ref=ref)
+            shown = int(t) if t == int(t) else t
+            facts.hints.append(
+                f"USDA minimum temperature {shown} °F ≈ zone {temp_to_zone(t)}; "
+                f"zones {zmin}–{zmin + ZONE_SPAN} derived from minimum temperature, "
+                "conservative (Perenual hardiness preferred when available)"
+            )
+
+    # spacing — USDA fallback from forestry planting density. grove_spacing has no
+    # preferred live API source, so this "usda_density" value is beaten by nothing
+    # but a human edit; written only when the field is empty (GOL-2542).
+    d_min = ch.get("Planting Density per Acre, Minimum")
+    d_max = ch.get("Planting Density per Acre, Maximum")
+    spacing = _spacing_from_density(d_min, d_max)
+    if spacing:
+        facts.fields["grove_spacing"] = FactValue(value=spacing, source="usda_density", ref=ref)
+        dens = f"{d_min}–{d_max}" if d_min and d_max else (d_min or d_max)
+        facts.hints.append(
+            f"USDA planting density {dens}/acre → spacing {spacing}; forestry density, adjust for orchard"
+        )
 
     return facts
+
+
+def _spacing_from_density(d_min, d_max) -> str | None:
+    """Forestry on-center spacing range (whole ft) from USDA planting density/acre.
+
+    ``sqrt(43560 / density)`` is the square-grid spacing for that density; the
+    higher (max) density gives the tighter (min) spacing. Renders "5–8 ft" (or
+    "N ft" when the two ends coincide or only one density is known). USDA fallback
+    for ``grove_spacing`` (GOL-2542).
+    """
+
+    def ft(density):
+        try:
+            dv = float(density)
+        except (TypeError, ValueError):
+            return None
+        if dv <= 0:
+            return None
+        return round(math.sqrt(43560.0 / dv))
+
+    lo = ft(d_max)  # densest planting -> smallest spacing
+    hi = ft(d_min)  # sparsest planting -> largest spacing
+    if lo is None and hi is None:
+        return None
+    if lo is None or hi is None:
+        return f"{lo if lo is not None else hi} ft"
+    if lo == hi:
+        return f"{lo} ft"
+    return f"{lo}–{hi} ft"
 
 
 def _usda_wildlife(wildlife: dict) -> str | None:
@@ -395,6 +474,33 @@ def _perenual_dimensions(dimensions) -> str | None:
     return None
 
 
+# ── Source precedence (used by the apply handler) ───────────────────────────
+
+# Machine-written provenance sources. A stored fact whose provenance source is
+# one of these was auto-filled and may be upgraded by a strictly-preferred source
+# (below); anything else — "human", or no provenance at all (a manual form edit,
+# data import or seed) — is protected and never auto-overwritten.
+MACHINE_SOURCES: frozenset[str] = frozenset({"usda", "usda_temp", "usda_density", "perenual", "agent"})
+
+
+def source_outranks(field: str, incoming: str, existing: str) -> bool:
+    """True when ``incoming`` is a strictly-preferred source than ``existing`` for a field.
+
+    Ranking follows FIELD_PRECEDENCE (best provider first). Sources not listed for
+    the field — the derived fallbacks ``usda_temp`` / ``usda_density`` and the
+    drafter's ``agent`` — rank after every listed provider, so a listed provider
+    (e.g. Perenual for zones) upgrades a derived value while a re-run of the same
+    source never re-writes an equal-rank value. ``human`` never reaches here (the
+    caller protects human/unstamped values before comparing).
+    """
+    order = FIELD_PRECEDENCE.get(field, ())
+
+    def rank(src: str) -> int:
+        return order.index(src) if src in order else len(order)
+
+    return rank(incoming) < rank(existing)
+
+
 # ── Merge (both providers in hand) ──────────────────────────────────────────
 
 
@@ -419,6 +525,11 @@ def merge(*sources: PlantFacts) -> PlantFacts:
             if fv is not None:
                 merged.fields[name] = fv
                 break
+    # Fallback: fields no listed provider owns (derived usda_temp zones,
+    # usda_density spacing) still surface so nothing a source knows stays blank.
+    for s in sources:
+        for name, fv in s.fields.items():
+            merged.fields.setdefault(name, fv)
     return merged
 
 
