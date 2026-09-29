@@ -450,6 +450,217 @@ class TestNoGroundHandling(unittest.TestCase):
             self.assertEqual(fh.read(), rates_before)
 
 
+def _manual_doc(quoted_on="2026-09-29", **overrides):
+    """A COMPLETE hand-quote file: every zone x box cell, ascending by box size
+    so the monotonicity guard passes."""
+    order = {"small": 9.0, "large": 15.0, "p24x10x4": 12.0, "p24x10x6": 20.0}
+    doc = {"_quoted_on": quoted_on}
+    for i, zone in enumerate(rc.REFERENCE_ZIPS):
+        doc[zone] = {
+            box_id: {
+                "quote": order[box_id] + i,
+                "carrier": "UPS",
+                "service": "03",
+                "service_title": "UPS Ground",
+            }
+            for box_id in rc.PARCELS
+        }
+    doc.update(overrides)
+    return doc
+
+
+def _write_json(doc):
+    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+        json.dump(doc, fh)
+        return fh.name
+
+
+class TestManualQuoteLoader(unittest.TestCase):
+    """GOL-2641: the no-network refresh path. It must reject anything it cannot
+    publish honestly rather than guess — a hand refresh writes money."""
+
+    def _load(self, doc):
+        path = _write_json(doc)
+        try:
+            return rc.load_manual_quotes(path)
+        finally:
+            os.unlink(path)
+
+    def test_loads_raw_quotes_and_the_quote_date(self):
+        quotes, quoted_on = self._load(_manual_doc())
+        self.assertEqual(quoted_on, date(2026, 9, 29))
+        cell = quotes["zone_1"]["small"]
+        self.assertEqual(cell["price"], 9.0)
+        self.assertEqual(cell["carrier"], "UPS")
+        self.assertEqual(cell["service_title"], "UPS Ground")
+
+    def test_quoted_on_is_required(self):
+        doc = _manual_doc()
+        del doc["_quoted_on"]
+        with self.assertRaises(ValueError) as cm:
+            self._load(doc)
+        self.assertIn("_quoted_on", str(cm.exception))
+
+    def test_unparsable_quoted_on_raises(self):
+        with self.assertRaises(ValueError):
+            self._load(_manual_doc(_quoted_on="09/29/2026"))
+
+    def test_unknown_zone_raises(self):
+        with self.assertRaises(ValueError) as cm:
+            self._load(_manual_doc(zone_99={"small": {"quote": 1.0}}))
+        self.assertIn("zone_99", str(cm.exception))
+
+    def test_unknown_box_id_raises(self):
+        doc = _manual_doc()
+        doc["zone_1"]["enormous"] = {"quote": 5.0, "carrier": "UPS", "service": "03", "service_title": "t"}
+        with self.assertRaises(ValueError) as cm:
+            self._load(doc)
+        self.assertIn("enormous", str(cm.exception))
+
+    def test_carrier_provenance_is_required_per_cell(self):
+        # schema 3 exists so "which carrier set this rate" is always answerable,
+        # and rate_feed shows service_title in storefront copy.
+        for key in ("carrier", "service", "service_title"):
+            doc = _manual_doc()
+            del doc["zone_1"]["small"][key]
+            with self.assertRaises(ValueError) as cm:
+                self._load(doc)
+            self.assertIn(key, str(cm.exception))
+
+    def test_bare_number_cell_is_rejected(self):
+        doc = _manual_doc()
+        doc["zone_1"]["small"] = 12.0
+        with self.assertRaises(ValueError):
+            self._load(doc)
+
+    def test_non_positive_quote_is_rejected(self):
+        for bad in (0, -3.0):
+            doc = _manual_doc()
+            doc["zone_1"]["small"]["quote"] = bad
+            with self.assertRaises(ValueError) as cm:
+                self._load(doc)
+            self.assertIn("positive", str(cm.exception))
+
+
+class TestManualRefreshRun(unittest.TestCase):
+    def _run(self, doc, extra_argv=(), current=None):
+        manual_path = _write_json(doc)
+        rates_path = _write_json(current if current is not None else {"_comment": "seed", "_schema": 3})
+        out_dir = tempfile.mkdtemp()
+        try:
+            argv = ["--manual-quotes", manual_path] + list(extra_argv)
+            with mock.patch.object(rc, "RATES_PATH", rates_path), mock.patch.object(rc, "OUT_DIR", out_dir):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    code = rc.main(argv)
+            with open(rates_path, encoding="utf-8") as fh:
+                written = fh.read()
+            return code, out.getvalue(), err.getvalue(), written
+        finally:
+            os.unlink(manual_path)
+            os.unlink(rates_path)
+
+    def test_hand_refresh_writes_the_table_with_provenance(self):
+        code, _, err, written = self._run(_manual_doc())
+        self.assertEqual(code, 3)  # rewritten
+        doc = json.loads(written)
+        self.assertEqual(doc["_rates_verified_on"], "2026-09-29")
+        self.assertEqual(doc["_rates_source"], "manual")
+        self.assertEqual(doc["_schema"], 3)
+        # No quote source was contacted, and the log says so.
+        self.assertIn("HAND-QUOTED", err)
+        self.assertNotIn("Service visibility", err)
+
+    def test_hand_quotes_go_through_the_same_target_formula(self):
+        # small: ceil(9.00 + 3.50 packaging + 2.00 buffer) = 15 — NOT the raw
+        # quote. Hand-editing shipping_rates.json is what skips this.
+        _, _, _, written = self._run(_manual_doc())
+        cell = json.loads(written)["zone_1"]["small"]
+        self.assertEqual(cell["base"], float(rc.target_rate(9.0, "small")))
+        self.assertEqual(cell["base"], 15.0)
+        self.assertEqual(set(cell), {"base", "carrier", "service", "service_title"})
+
+    def test_incomplete_hand_refresh_is_refused(self):
+        # A dropped cell falls back in the Odoo loader -> under-charge. Exit 2,
+        # and the table must be untouched.
+        doc = _manual_doc()
+        del doc["zone_1"]["small"]
+        real = {"_comment": "x", "_schema": 3, "zone_1": {"small": {"base": 18.0}}}
+        before = json.dumps(real)
+        code, _, err, written = self._run(doc, current=real)
+        self.assertEqual(code, 2)
+        self.assertIn("zone_1/small", err)
+        self.assertIn("incomplete", err)
+        self.assertEqual(json.loads(written), json.loads(before))
+
+    def test_manual_still_honours_the_monotonicity_guard(self):
+        # A bigger box cheaper than a smaller one inside a zone is cart-gaming;
+        # the hand path must not be a way around the guard (exit 4).
+        doc = _manual_doc()
+        doc["zone_1"]["large"]["quote"] = 1.0
+        code, _, err, _ = self._run(doc)
+        self.assertEqual(code, 4)
+        self.assertIn("monotonicity", err)
+
+    def test_manual_dry_run_does_not_write(self):
+        real = {"_comment": "x", "_schema": 3, "zone_1": {"small": {"base": 18.0}}}
+        before = json.dumps(real)
+        code, _, _, written = self._run(_manual_doc(), extra_argv=["--dry-run"], current=real)
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(written), json.loads(before))
+
+    def test_manual_reports_no_drift_when_the_table_already_matches(self):
+        # Re-confirming unchanged rates is the common case; it must be a clean
+        # exit 0, not a spurious rewrite.
+        _, _, _, written = self._run(_manual_doc())
+        current = json.loads(written)
+        code, out, _, again = self._run(_manual_doc(), current=current)
+        self.assertEqual(code, 0)
+        self.assertIn("no material drift", out)
+
+    def test_malformed_file_is_an_exit_2_message_not_a_traceback(self):
+        doc = _manual_doc(_quoted_on="YYYY-MM-DD")
+        code, _, err, _ = self._run(doc)
+        self.assertEqual(code, 2)
+        self.assertIn("--manual-quotes rejected", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_shipped_template_is_complete_but_not_applyable(self):
+        # The template must cover every cell (so it is a usable starting point)
+        # while being IMPOSSIBLE to apply verbatim — otherwise it would be a way
+        # to stamp the table "fresh" with no real quotes behind it.
+        path = os.path.join(os.path.dirname(__file__), "..", "manual_quotes.example.json")
+        with open(path, encoding="utf-8") as fh:
+            tmpl = json.load(fh)
+        for zone in rc.REFERENCE_ZIPS:
+            self.assertEqual(sorted(tmpl[zone]), sorted(rc.PARCELS), f"{zone}: template must cover every box")
+        code, _, err, _ = self._run(tmpl)
+        self.assertEqual(code, 2, "the template must never be applyable as-is")
+        self.assertIn("--manual-quotes rejected", err)
+
+    def test_manual_quotes_refuses_to_combine_with_a_fixture(self):
+        code, _, err, _ = self._run(_manual_doc(), extra_argv=["--fixture", NO_GROUND_FIXTURE])
+        self.assertEqual(code, 2)
+        self.assertIn("cannot be combined", err)
+
+
+class TestProvenanceStampOnAutomatedRuns(unittest.TestCase):
+    def test_probe_run_stamps_the_probe_date_and_pirateship_source(self):
+        path = _write_json({"_comment": "seed", "_schema": 2})
+        out_dir = tempfile.mkdtemp()
+        try:
+            argv = ["--fixture-dir", _FX, "--probe-date", PROBE_DATE.isoformat()]
+            with mock.patch.object(rc, "RATES_PATH", path), mock.patch.object(rc, "OUT_DIR", out_dir):
+                with redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+                    code = rc.main(argv)
+            self.assertEqual(code, 3)
+            doc = json.load(open(path, encoding="utf-8"))
+            self.assertEqual(doc["_rates_verified_on"], PROBE_DATE.isoformat())
+            self.assertEqual(doc["_rates_source"], "pirateship")
+        finally:
+            os.unlink(path)
+
+
 class TestShippedRatesFile(unittest.TestCase):
     def test_shipped_rates_file_holds_real_published_rates(self):
         with open(rc.RATES_PATH, encoding="utf-8") as fh:
