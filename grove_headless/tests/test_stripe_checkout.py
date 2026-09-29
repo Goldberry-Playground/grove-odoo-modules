@@ -298,10 +298,12 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(25.0))
         self.assertEqual(goods["quantity"], 2)
         self.assertEqual(preorder_ids, [])
-        # Full-charge path bills goods + the WV tax line today (the fixture's
-        # company default tax, GroveTaxFixtureMixin) — no deposit, no deferral.
-        tax = next(li for li in line_items if li["kind"] == "tax")
-        self.assertEqual(charged, stripe_gateway.to_cents(50.0) + tax["amount_cents"])
+        # Stripe Tax now adds destination tax on the session (GOL-2568), so NO
+        # "Sales tax" line is emitted and charged_cents is the pre-tax goods
+        # amount; each goods line carries the general tangible-goods tax code.
+        self.assertFalse([li for li in line_items if li["kind"] == "tax"])
+        self.assertEqual(goods["tax_code"], stripe_gateway.TAX_CODE_GOODS)
+        self.assertEqual(charged, stripe_gateway.to_cents(50.0))
 
     def test_sold_out_bareroot_is_one_flat_ten_dollar_deposit(self):
         """Sold-out (zero free) bareroot → ONE flat $10 deposit for the order,
@@ -451,9 +453,11 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertFalse([li for li in line_items if li["kind"] in ("goods", "shipping", "tax")])
         self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
 
-    def test_in_stock_order_still_charges_shipping_and_tax_today(self):
+    def test_in_stock_order_charges_shipping_today_tax_via_stripe(self):
         """A fully-in-stock (non-deposit) order before the cutover ships now and
-        is UNCHANGED — shipping and WV tax ride the today-charge as before."""
+        still bills shipping today, but sales tax is NO LONGER an explicit line
+        (GOL-2568) — Stripe Tax adds it. The shipping line carries the Stripe
+        Shipping tax code so Stripe applies each state's shipping rule."""
         self._make_bareroot()
         self._seed_wv_tax()
         self._set_stock(self.product, 5)
@@ -461,8 +465,9 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self._add_shipping_line(order)
         line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
         self.assertEqual(preorder_ids, [])
-        self.assertTrue([li for li in line_items if li["kind"] == "shipping"])
-        self.assertTrue([li for li in line_items if li["kind"] == "tax"])
+        ship = next(li for li in line_items if li["kind"] == "shipping")
+        self.assertEqual(ship["tax_code"], stripe_gateway.TAX_CODE_SHIPPING)
+        self.assertFalse([li for li in line_items if li["kind"] == "tax"])
 
     def test_pickup_deposit_has_no_shipping_line_to_defer(self):
         """A farm-pickup deposit order never had a shipping line; the flat $10
@@ -665,9 +670,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         )
 
     def test_review_summary_exact_shape_and_order(self):
-        """The Review & pay summary renders EXACTLY Josh's 2026-09-22 ruling
-        (GOL-2450): goods, then Discount, then Shipping, then a WV 6% tax line on
-        the DISCOUNTED base — $70 / -$10 / $22 / $4.92 → $86.92 due today."""
+        """The Review & pay summary renders Josh's 2026-09-22 ruling order
+        (GOL-2450) MINUS the tax line (GOL-2568): goods, then Discount, then
+        Shipping — $70 / -$10 / $22 → $82 pre-tax. Stripe Tax adds destination
+        tax on top of these tax-exclusive lines on the hosted page."""
         tax = self._wv_state_tax()
         pear = self._taxed_plant("Pear (Magness, Potted)", 35.0, tax)
         self._set_stock(pear, 5)
@@ -678,20 +684,18 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
 
         line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
         self.assertEqual(preorder_ids, [])
-        # Order matters — the frontend renders this array verbatim.
-        self.assertEqual([li["kind"] for li in line_items], ["goods", "discount", "shipping", "tax"])
-        goods, discount, shipping, taxline = line_items
+        # Order matters — the frontend renders this array verbatim. No tax line.
+        self.assertEqual([li["kind"] for li in line_items], ["goods", "discount", "shipping"])
+        goods, discount, shipping = line_items
         self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(35.0))
         self.assertEqual(goods["quantity"], 2)  # frontend shows "x 2  $70.00"
+        self.assertEqual(goods["tax_code"], stripe_gateway.TAX_CODE_GOODS)
         self.assertEqual(discount["amount_cents"], -stripe_gateway.to_cents(10.0))
         self.assertEqual(discount["name"], "Discount (FLATWOODS)")
         self.assertEqual(shipping["amount_cents"], stripe_gateway.to_cents(22.0))
-        # 6% x (70 - 10 + 22) = 6% x 82 = 4.92
-        self.assertEqual(taxline["amount_cents"], stripe_gateway.to_cents(4.92))
-        self.assertEqual(taxline["name"], "WV Sales Tax (6%)")
-        # TOTAL DUE TODAY = 70 - 10 + 22 + 4.92 = 86.92
-        self.assertEqual(charged, stripe_gateway.to_cents(86.92))
-        self.assertEqual(charged, stripe_gateway.to_cents(order.amount_total))
+        self.assertEqual(shipping["tax_code"], stripe_gateway.TAX_CODE_SHIPPING)
+        # PRE-TAX DUE TODAY = 70 - 10 + 22 = 82; Stripe adds tax on top.
+        self.assertEqual(charged, stripe_gateway.to_cents(82.0))
 
     def test_percent_tier_single_line_and_label(self):
         """An automatic percent volume tier also collapses to ONE pre-tax line,
@@ -835,10 +839,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         goods = next(li for li in line_items if li["name"] == self.product.display_name)
         self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(25.0))
         self.assertEqual(goods["quantity"], 2)
-        # Goods + the WV tax line ride today's charge (company default tax from
-        # GroveTaxFixtureMixin); nothing is deferred on a full-charge order.
-        tax = next(li for li in line_items if li["kind"] == "tax")
-        self.assertEqual(charged, stripe_gateway.to_cents(50.0) + tax["amount_cents"])
+        # Goods ride today's charge pre-tax; Stripe Tax adds destination tax on
+        # top (GOL-2568) — no explicit tax line on a full-charge order.
+        self.assertFalse([li for li in line_items if li["kind"] == "tax"])
+        self.assertEqual(charged, stripe_gateway.to_cents(50.0))
 
     def test_calendar_gate_skips_pickup(self):
         """Farm pickup transfers at the WV farm, off the ship calendar — a
@@ -1183,6 +1187,25 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_stripe_payment_intent, "pi_paid")
         self.assertEqual(order.state, "sale")
 
+    def test_session_completed_writes_back_stripe_tax(self):
+        """GOL-2568: a paid session records Stripe's total_details.amount_tax (and
+        the per-jurisdiction breakdown) as the authoritative tax on the order."""
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=1)
+        order.grove_stripe_session_id = "cs_tax"
+        session = {
+            "id": "cs_tax",
+            "payment_intent": "pi_tax",
+            "total_details": {
+                "amount_tax": 354,
+                "breakdown": {"taxes": [{"jurisdiction": {"display_name": "West Virginia"}, "amount": 354}]},
+            },
+        }
+        result = grove_main._handle_session_completed(self.env, session)
+        self.assertEqual(result, "paid")
+        self.assertEqual(order.grove_stripe_tax_amount, 3.54)
+        self.assertIn("West Virginia", order.grove_stripe_tax_jurisdictions or "")
+
     def test_session_completed_deposit_paid_for_preorder(self):
         self._set_stock(self.product, 0)
         order = self._make_order(qty=1)
@@ -1248,11 +1271,28 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         )
         return order
 
+    def _fake_tax_calc(self, tax_cents):
+        """Patch the Stripe Tax calc + transaction so settlement never touches the
+        network and the returned tax is deterministic (GOL-2568). ``tax_cents`` is
+        Stripe's authoritative tax on the actual goods+shipping base."""
+        return (
+            mock.patch.object(
+                stripe_gateway,
+                "create_tax_calculation",
+                return_value={
+                    "id": "taxcalc_t",
+                    "tax_amount_exclusive": tax_cents,
+                    "tax_breakdown": [{"jurisdiction": {"display_name": "West Virginia"}, "amount": tax_cents}],
+                },
+            ),
+            mock.patch.object(stripe_gateway, "create_tax_transaction", return_value={"id": "taxtxn_t"}),
+        )
+
     def test_settlement_charges_balance_off_session(self):
-        """Acceptance 2/3: the deferred balance = recomputed total (ACTUAL
-        shipping + WV tax) − deposit already paid, captured off-session against
-        the saved card with an order-scoped Idempotency-Key."""
-        order = self._settleable_order()
+        """Acceptance 2/3: the deferred balance = actual goods + actual shipping +
+        Stripe Tax − deposit already paid, captured off-session against the saved
+        card with an order-scoped Idempotency-Key (GOL-2568: tax is Stripe's)."""
+        order = self._settleable_order()  # 2×$25 goods + $15 actual shipping = $65 base
         captured = {}
 
         def fake_pi(secret_key, **kwargs):
@@ -1260,8 +1300,11 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             captured["secret_key"] = secret_key
             return {"id": "pi_settled", "status": "succeeded"}
 
+        tax_calc_p, tax_txn_p = self._fake_tax_calc(390)  # $3.90 Stripe tax on $65
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            tax_calc_p,
+            tax_txn_p,
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
         ):
             result = grove_main.settle_order_at_ship(self.env, order)
@@ -1272,8 +1315,9 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_settlement_attempts, 1)
         # The quoted shipping line was rewritten to the ACTUAL bought cost.
         self.assertEqual(grove_main._settlement_shipping_line(order).price_unit, 15.0)
-        # Charged exactly recomputed total − the deposit already taken.
-        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents(order.amount_total - 20.0))
+        # Charged = $65 base + $3.90 Stripe tax − $20 deposit = $48.90.
+        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents(48.90))
+        self.assertEqual(order.grove_stripe_tax_amount, 3.90)
         self.assertEqual(captured["customer"], "cus_test")
         self.assertEqual(captured["payment_method"], "pm_test")
         self.assertTrue(captured["idempotency_key"].startswith("grove-settle-"))
@@ -1309,9 +1353,12 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
                 "declined", code="card_declined", decline_code="do_not_honor", payment_intent="pi_bad"
             )
 
+        tax_calc_p, tax_txn_p = self._fake_tax_calc(390)
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_decline),
             mock.patch.object(stripe_gateway, "create_checkout_session", return_value={"url": "https://pay.example/x"}),
+            tax_calc_p,
+            tax_txn_p,
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
             mute_logger("odoo.addons.mail.models.mail_mail"),
         ):
@@ -1340,11 +1387,14 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             captured.update(kwargs)
             return {"id": "pi_s"}
 
+        tax_calc_p, tax_txn_p = self._fake_tax_calc(390)
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
             mock.patch.object(
                 stripe_gateway, "retrieve_payment_intent", return_value={"customer": "cus_r", "payment_method": "pm_r"}
             ),
+            tax_calc_p,
+            tax_txn_p,
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
         ):
             self.assertEqual(grove_main.settle_order_at_ship(self.env, order), "settled")
@@ -1356,7 +1406,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
 
     def test_settlement_pickup_has_no_shipping_line(self):
         """Acceptance verification: a farm-pickup preorder settles the tree
-        balance + WV tax with no shipping line to rewrite."""
+        balance + Stripe (WV) tax with no shipping line to rewrite."""
         order = self._settleable_order(qty=1, charged_today=10.0, actual_shipping=0.0, ship=False)
         captured = {}
 
@@ -1364,14 +1414,18 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             captured.update(kwargs)
             return {"id": "pi_pickup"}
 
+        tax_calc_p, tax_txn_p = self._fake_tax_calc(150)  # $1.50 on the $25 tree
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            tax_calc_p,
+            tax_txn_p,
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
         ):
             self.assertEqual(grove_main.settle_order_at_ship(self.env, order), "settled")
 
         self.assertFalse(grove_main._settlement_shipping_line(order))
-        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents(order.amount_total - 10.0))
+        # $25 tree + $1.50 Stripe tax − $10 deposit = $16.50.
+        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents(16.50))
 
     def test_dunning_payment_settles_without_reconfirming(self):
         """A customer paying the dunning link (purpose=settlement) settles the
