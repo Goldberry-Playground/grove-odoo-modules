@@ -100,6 +100,23 @@ class GroveEnrichJob(models.Model):
         comes from the PERENUAL_API_KEY container env (never the repo/db)."""
         return PerenualProvider(on_call=on_call)
 
+    @api.model
+    def _provider_configured(self):
+        """True when Perenual has an API key (used by the product-form status)."""
+        return self._perenual_provider(lambda: None).configured
+
+    def _grove_queue_position(self):
+        """(position, total) of this job within the oldest-first queued backlog.
+
+        Position is 1-based; (0, total) when this job is not itself queued. The
+        search reuses the model _order (create_date asc, id asc), so the position
+        matches the exact order the drain cron will process (GOL-2541)."""
+        self.ensure_one()
+        queued_ids = self.search([("state", "=", "queued")]).ids
+        total = len(queued_ids)
+        pos = (queued_ids.index(self.id) + 1) if self.id in queued_ids else 0
+        return pos, total
+
     def _counter_key_today(self):
         """ir.config_parameter key for today's Perenual call counter (UTC).
 

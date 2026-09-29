@@ -43,4 +43,17 @@
         <field name="value">100</field>
     </record>
 
+    <!-- Login of the Odoo user the grove-content-drafter routine authenticates
+         as (GOL-2541). The product form reads this user's login_date to tell
+         whether the drafter is live; while it is blank (or points at a user that
+         does not exist), the Draft status panel says "Routine not configured" so
+         a Request-content-draft never sits forever with no indication that
+         nothing will pick it up. Set it in Settings / Technical / System
+         Parameters once the drafter user exists (QA has none today). noupdate="1"
+         so the operator's value survives module upgrades. -->
+    <record id="content_drafter_login_param" model="ir.config_parameter">
+        <field name="key">grove_headless.content_drafter_login</field>
+        <field name="value"></field>
+    </record>
+
 </odoo>
