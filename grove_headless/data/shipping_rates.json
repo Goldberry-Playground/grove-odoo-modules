@@ -1,6 +1,8 @@
 {
   "_comment": "Maintained by scripts/rate_check (morning rate-checker). Per-box rates (Box Engine v2): ceil(Pirate Ship least-cost allowlisted ground [UPS Ground / UPS Ground Saver / USPS Ground Advantage] at the box's representative billable weight + per-box packaging + 2.00 buffer). Each cell records the winning carrier/service (schema 3); the Odoo loader reads `base` only. Carries BOTH shippable catalogs (GOL-2199): bareroot small/large and potted/peat-and-bagged p24x10x4/p24x10x6. Design: spec 2026-09-09-pirateship-fulfillment-design.md (GOL-2270).",
   "_schema": 3,
+  "_rates_verified_on": "2026-09-21",
+  "_rates_source": "pirateship",
   "zone_1": {
     "large": {
       "base": 22.0,
