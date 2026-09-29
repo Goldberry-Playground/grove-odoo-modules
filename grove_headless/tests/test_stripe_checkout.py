@@ -292,7 +292,9 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self._make_bareroot()
         self._set_stock(self.product, 5)
         order = self._make_order(qty=2)
-        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(
+            order, today=self.BEFORE_CUTOVER, tax_enabled=True
+        )
         goods = next(li for li in line_items if li["name"] == self.product.display_name)
         self.assertEqual(goods["kind"], "goods")
         self.assertEqual(goods["amount_cents"], stripe_gateway.to_cents(25.0))
@@ -463,11 +465,79 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self._set_stock(self.product, 5)
         order = self._make_order(qty=2)
         self._add_shipping_line(order)
-        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        line_items, preorder_ids, _ = grove_main._build_stripe_line_items(
+            order, today=self.BEFORE_CUTOVER, tax_enabled=True
+        )
         self.assertEqual(preorder_ids, [])
         ship = next(li for li in line_items if li["kind"] == "shipping")
         self.assertEqual(ship["tax_code"], stripe_gateway.TAX_CODE_SHIPPING)
         self.assertFalse([li for li in line_items if li["kind"] == "tax"])
+
+    # ── GOL-2568 per-tenant cutover flag (spec §A.1) ─────────────────────────
+
+    def test_stripe_tax_flag_reads_per_tenant_env(self):
+        """`_stripe_tax_enabled` reads GROVE_STRIPE_TAX_{TENANT} keyed by the
+        order's storefront tenant slug, truthy on 1/true/yes/on. No website or an
+        unset var is OFF — the safe default and the rollback."""
+        from types import SimpleNamespace
+
+        nursery = SimpleNamespace(website_id=SimpleNamespace(grove_tenant_slug=lambda: "nursery"))
+        for truthy in ("1", "true", "YES", "on"):
+            with mock.patch.dict("os.environ", {"GROVE_STRIPE_TAX_NURSERY": truthy}, clear=False):
+                self.assertTrue(grove_main._stripe_tax_enabled(nursery), truthy)
+        with mock.patch.dict("os.environ", {"GROVE_STRIPE_TAX_NURSERY": ""}, clear=False):
+            self.assertFalse(grove_main._stripe_tax_enabled(nursery))
+        # A different tenant's flag must not leak across storefronts.
+        ggg = SimpleNamespace(website_id=SimpleNamespace(grove_tenant_slug=lambda: "ggg"))
+        with mock.patch.dict("os.environ", {"GROVE_STRIPE_TAX_NURSERY": "1"}, clear=False):
+            self.assertFalse(grove_main._stripe_tax_enabled(ggg))
+        # No storefront resolvable → OFF.
+        self.assertFalse(grove_main._stripe_tax_enabled(SimpleNamespace(website_id=None)))
+
+    def test_flag_off_line_items_are_byte_identical_to_pre_stripe_tax(self):
+        """Flag OFF (default / rollback): goods and shipping carry NO Stripe tax
+        code and an explicit WV tax line rides on the discounted base — exactly the
+        pre-GOL-2568 shape. charged_cents therefore INCLUDES that tax."""
+        self._make_bareroot()
+        self._seed_wv_tax()
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=2)
+        self._add_shipping_line(order)
+        line_items, _pre, charged = grove_main._build_stripe_line_items(
+            order, today=self.BEFORE_CUTOVER, tax_enabled=False
+        )
+        tax_lines = [li for li in line_items if li["kind"] == "tax"]
+        self.assertEqual(len(tax_lines), 1, "flag-off emits one explicit WV tax line")
+        self.assertGreater(tax_lines[0]["amount_cents"], 0)
+        self.assertIn("WV", tax_lines[0]["name"])
+        self.assertNotIn("tax_code", next(li for li in line_items if li["kind"] == "goods"))
+        self.assertNotIn("tax_code", next(li for li in line_items if li["kind"] == "shipping"))
+        # charged is the whole taxed total (the tax line is part of the array).
+        self.assertEqual(charged, sum(li["amount_cents"] * li["quantity"] for li in line_items))
+
+    def test_flag_off_settlement_uses_odoo_tax(self):
+        """Flag OFF: ship-time settlement never calls Stripe Tax; the balance is
+        Odoo's amount_total minus the deposit and grove_stripe_tax_amount is left
+        untouched (byte-identical to the pre-GOL-2568 settlement)."""
+        order = self._settleable_order()  # deposit_paid, WV-taxed, $20 deposit
+        captured = {}
+
+        def fake_pi(secret_key, **kwargs):
+            captured.update(kwargs)
+            return {"id": "pi_odoo", "status": "succeeded"}
+
+        with (
+            mock.patch.object(grove_main, "_stripe_tax_enabled", return_value=False),
+            mock.patch.object(stripe_gateway, "create_tax_calculation") as calc,
+            mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
+        ):
+            self.assertEqual(grove_main.settle_order_at_ship(self.env, order), "settled")
+
+        calc.assert_not_called()
+        # Balance is Odoo's own total less the deposit — Stripe Tax never ran.
+        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents((order.amount_total or 0.0) - 20.0))
+        self.assertFalse(order.grove_stripe_tax_amount)
 
     def test_pickup_deposit_has_no_shipping_line_to_defer(self):
         """A farm-pickup deposit order never had a shipping line; the flat $10
@@ -529,11 +599,13 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
         self._set_stock(self.product, 5)
         plain = self._make_order(qty=2)
-        _, _, full_charged = grove_main._build_stripe_line_items(plain, today=self.BEFORE_CUTOVER)
+        _, _, full_charged = grove_main._build_stripe_line_items(plain, today=self.BEFORE_CUTOVER, tax_enabled=True)
 
         order = self._make_order(qty=2)
         self.assertIsNone(grove_main._apply_promo_code(order, "TESTPROMO"))
-        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(
+            order, today=self.BEFORE_CUTOVER, tax_enabled=True
+        )
 
         discounts = [li for li in line_items if li["kind"] == "discount"]
         self.assertEqual(len(discounts), 1, "exactly one discount line item")
@@ -683,7 +755,9 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self._make_promo_program("FLATWOODS", min_qty=2, amount=10.0)
         self.assertIsNone(grove_main._apply_promo_code(order, "FLATWOODS"))
 
-        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(
+            order, today=self.BEFORE_CUTOVER, tax_enabled=True
+        )
         self.assertEqual(preorder_ids, [])
         # Order matters — the frontend renders this array verbatim. No tax line.
         self.assertEqual([li["kind"] for li in line_items], ["goods", "discount", "shipping"])
@@ -1275,8 +1349,12 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
     def _fake_tax_calc(self, tax_cents):
         """Patch the Stripe Tax calc + transaction so settlement never touches the
         network and the returned tax is deterministic (GOL-2568). ``tax_cents`` is
-        Stripe's authoritative tax on the actual goods+shipping base."""
+        Stripe's authoritative tax on the actual goods+shipping base. Also forces
+        the per-tenant cutover flag ON — these are the Stripe-Tax-enabled
+        settlement tests; the flag-OFF settlement path (Odoo tax) is covered
+        separately in ``test_flag_off_settlement_uses_odoo_tax``."""
         return (
+            mock.patch.object(grove_main, "_stripe_tax_enabled", return_value=True),
             mock.patch.object(
                 stripe_gateway,
                 "create_tax_calculation",
@@ -1301,9 +1379,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             captured["secret_key"] = secret_key
             return {"id": "pi_settled", "status": "succeeded"}
 
-        tax_calc_p, tax_txn_p = self._fake_tax_calc(390)  # $3.90 Stripe tax on $65
+        flag_p, tax_calc_p, tax_txn_p = self._fake_tax_calc(390)  # $3.90 Stripe tax on $65
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            flag_p,
             tax_calc_p,
             tax_txn_p,
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
@@ -1354,10 +1433,11 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
                 "declined", code="card_declined", decline_code="do_not_honor", payment_intent="pi_bad"
             )
 
-        tax_calc_p, tax_txn_p = self._fake_tax_calc(390)
+        flag_p, tax_calc_p, tax_txn_p = self._fake_tax_calc(390)
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_decline),
             mock.patch.object(stripe_gateway, "create_checkout_session", return_value={"url": "https://pay.example/x"}),
+            flag_p,
             tax_calc_p,
             tax_txn_p,
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
@@ -1388,12 +1468,13 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             captured.update(kwargs)
             return {"id": "pi_s"}
 
-        tax_calc_p, tax_txn_p = self._fake_tax_calc(390)
+        flag_p, tax_calc_p, tax_txn_p = self._fake_tax_calc(390)
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
             mock.patch.object(
                 stripe_gateway, "retrieve_payment_intent", return_value={"customer": "cus_r", "payment_method": "pm_r"}
             ),
+            flag_p,
             tax_calc_p,
             tax_txn_p,
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
@@ -1415,9 +1496,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             captured.update(kwargs)
             return {"id": "pi_pickup"}
 
-        tax_calc_p, tax_txn_p = self._fake_tax_calc(150)  # $1.50 on the $25 tree
+        flag_p, tax_calc_p, tax_txn_p = self._fake_tax_calc(150)  # $1.50 on the $25 tree
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            flag_p,
             tax_calc_p,
             tax_txn_p,
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),

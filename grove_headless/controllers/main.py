@@ -1434,7 +1434,12 @@ class GroveHeadlessAPI(http.Controller):
         # inside _build_stripe_line_items (stock + date), decoupled from the
         # dormancy ship-window gate (GOL-1906), which still governs WHEN bareroot
         # actually leaves the nursery.
-        line_items, preorder_ids, charged_cents = _build_stripe_line_items(order)
+        # Per-tenant Stripe Tax cutover flag (GOL-2568): decides here whether this
+        # session hands sales tax to Stripe (Customer + automatic_tax, no WV line)
+        # or keeps today's Odoo-computed WV tax line. OFF is byte-identical to the
+        # pre-GOL-2568 checkout and is the rollback.
+        tax_enabled = _stripe_tax_enabled(order)
+        line_items, preorder_ids, charged_cents = _build_stripe_line_items(order, tax_enabled=tax_enabled)
         if not line_items:
             order.unlink()
             return _json_response({"error": "Cart produced no chargeable line items"}, status=400)
@@ -1444,16 +1449,18 @@ class GroveHeadlessAPI(http.Controller):
         success_url += ("&" if "?" in success_url else "?") + "session_id={CHECKOUT_SESSION_ID}"
         cancel_url += ("&" if "?" in cancel_url else "?") + "session_id={CHECKOUT_SESSION_ID}"
 
-        # Stripe Tax (GOL-2568): the ships-now full-charge path lets Stripe compute
-        # destination tax on the session, so we attach a Customer carrying the
-        # ship-to (Josh's route — no shipping_address_collection). The deposit path
-        # charges a flat $10 with NO tax (all tax is deferred to the ship-time
-        # settlement's /v1/tax/calculations), so it keeps Tax OFF and lets Stripe
-        # auto-create the customer from customer_email + setup_future_usage.
+        # Stripe Tax (GOL-2568), only when the tenant flag is ON: the ships-now
+        # full-charge path lets Stripe compute destination tax on the session, so
+        # we attach a Customer carrying the ship-to (Josh's route — no
+        # shipping_address_collection). The deposit path charges a flat $10 with NO
+        # tax (all tax is deferred to the ship-time settlement's
+        # /v1/tax/calculations), so it keeps Tax OFF and lets Stripe auto-create the
+        # customer from customer_email + setup_future_usage. With the flag OFF, both
+        # paths keep customer_email + no automatic_tax — byte-identical to today.
         is_deposit = bool(preorder_ids)
-        automatic_tax = not is_deposit
+        automatic_tax = tax_enabled and not is_deposit
         try:
-            customer_id = None if is_deposit else _ensure_stripe_customer(request.env, order, secret_key)
+            customer_id = _ensure_stripe_customer(request.env, order, secret_key) if automatic_tax else None
             session = stripe_gateway.create_checkout_session(
                 secret_key,
                 line_items=line_items,
@@ -2236,6 +2243,25 @@ def _stripe_tax_code_for(product):
     return stripe_gateway.TAX_CODE_GOODS
 
 
+def _stripe_tax_enabled(order):
+    """True when Stripe Tax governs THIS order's sales tax (GOL-2568 cutover flag).
+
+    Reads the per-tenant env flag ``GROVE_STRIPE_TAX_{TENANT}`` (``1``/``true``),
+    keyed by the order's storefront tenant slug (``goldberry`` / ``ggg`` /
+    ``nursery``) exactly like the ``SHIPPO_API_KEY`` / ``GROVE_PUBLISH_*``
+    per-tenant env pattern. OFF is the default AND the rollback: every Stripe Tax
+    branch (Customer + ``automatic_tax`` on the session, the dropped WV tax line,
+    the webhook write-back, the settlement tax calculation) is skipped and the
+    order keeps today's Odoo-computed WV tax line, byte for byte. Nursery flips on
+    at Train #2 after the QA gate. An order with no resolvable tenant is treated
+    as OFF — the safe, unchanged path."""
+    tenant = order.website_id.grove_tenant_slug() if order.website_id else None
+    if not tenant:
+        return False
+    val = (os.environ.get(f"GROVE_STRIPE_TAX_{tenant.upper()}") or "").strip().lower()
+    return val in ("1", "true", "yes", "on")
+
+
 def _format_payment_note(payment_method):
     """Render the chosen payment method as a human-readable order note.
 
@@ -2933,12 +2959,42 @@ def _cart_has_preorder(env, order, payload=None, today=None):
     return _order_takes_deposit(order, today)
 
 
-def _build_stripe_line_items(order, today=None):
+def _wv_tax_label(order):
+    """The Review & pay summary's tax-line label, e.g. ``WV Sales Tax (6%)``
+    (GOL-2450). The percent is read off the account.tax records the goods lines
+    actually carry — summing a legacy group tax's children — so the label always
+    tells the truth about the rate charged, whatever the WV binding is set to.
+    Falls back to the plain label if nothing legible is found. Used only on the
+    Stripe-Tax-OFF path (GOL-2568), where Odoo still emits the explicit WV line."""
+    seen = order.env["account.tax"]
+    for line in order.order_line:
+        if line.display_type or not line.product_id or line.reward_id:
+            continue
+        if line.product_id.default_code == SHIPPING_PRODUCT_CODE:
+            continue
+        seen |= line.tax_ids
+    pct = 0.0
+    for tax in seen:
+        if tax.amount_type == "group":
+            pct += sum(child.amount for child in tax.children_tax_ids if child.amount_type == "percent")
+        elif tax.amount_type == "percent":
+            pct += tax.amount
+    return f"WV Sales Tax ({pct:g}%)" if pct else "Sales tax (WV)"
+
+
+def _build_stripe_line_items(order, today=None, tax_enabled=False):
     """Turn a draft order's lines into Stripe Checkout line items.
 
     Returns (line_items, preorder_variant_ids, charged_cents). ``today`` is
     injectable for tests (defaults to ``_date.today()``) so the season-cutover
     branch is deterministic regardless of the wall clock.
+
+    ``tax_enabled`` is the per-tenant Stripe Tax cutover flag (GOL-2568,
+    ``_stripe_tax_enabled``). When FALSE (today's behaviour and the rollback),
+    goods/shipping lines carry NO Stripe tax code and an explicit WV ``tax`` line
+    is appended on the discounted base — byte-identical to the pre-GOL-2568 path.
+    When TRUE, Stripe Tax computes destination tax on the session: each goods and
+    shipping line carries its Stripe tax code and no ``tax`` line is sent.
 
     GOL-2233 (ratified by Josh, 2026-09-07 release-train session): an order that
     triggers a deposit — sold-out bareroot OR placed after the season cutover
@@ -2994,16 +3050,19 @@ def _build_stripe_line_items(order, today=None):
     # Josh 2026-09-22): goods, then Discount, then Shipping. Each goods line
     # carries its Stripe tax code so Stripe applies the right per-line rule.
     goods_items = []
+    tax_today = 0.0
     for line in product_lines:
-        goods_items.append(
-            {
-                "name": line.product_id.display_name,
-                "kind": "goods",
-                "amount_cents": stripe_gateway.to_cents(line.price_unit),
-                "quantity": int(line.product_uom_qty),
-                "tax_code": _stripe_tax_code_for(line.product_id),
-            }
-        )
+        item = {
+            "name": line.product_id.display_name,
+            "kind": "goods",
+            "amount_cents": stripe_gateway.to_cents(line.price_unit),
+            "quantity": int(line.product_uom_qty),
+        }
+        if tax_enabled:
+            item["tax_code"] = _stripe_tax_code_for(line.product_id)
+        else:
+            tax_today += line.price_tax
+        goods_items.append(item)
     # Loyalty reward discount (GOL-2088 / GOL-2450): collapse EVERY reward line
     # into ONE negative `discount` line item at pre-tax face value.
     # promotions.normalize_reward_line already puts the whole face on a single
@@ -3025,6 +3084,8 @@ def _build_stripe_line_items(order, today=None):
         if not line.reward_id or line.display_type:
             continue
         discount_subtotal += line.price_subtotal  # negative, pre-tax face
+        if not tax_enabled:
+            tax_today += line.price_tax  # negative → reduces the WV tax owed today
         if discount_name is None or line.price_subtotal < discount_low:
             discount_low = line.price_subtotal
             discount_name = line.name or "Discount"
@@ -3041,21 +3102,35 @@ def _build_stripe_line_items(order, today=None):
         amount = stripe_gateway.to_cents(line.price_unit)
         if amount <= 0:
             continue
-        shipping_items.append(
+        ship_item = {
+            "name": line.product_id.display_name,
+            "kind": "shipping",
+            "amount_cents": amount,
+            "quantity": 1,
+        }
+        if tax_enabled:
+            # Shipping code so Stripe applies each state's shipping-taxability
+            # rule (GOL-2568). WV taxes shipping; some green-list states don't.
+            ship_item["tax_code"] = stripe_gateway.TAX_CODE_SHIPPING
+        else:
+            tax_today += line.price_tax
+        shipping_items.append(ship_item)
+    # Stripe Tax OFF (flag off / rollback): one WV tax line on the discounted base,
+    # emitted only when positive so an out-of-state (de-taxed) cart never sprouts a
+    # spurious line; the label reads the real applied rate (GOL-2450). Stripe Tax ON:
+    # no explicit tax line — Stripe adds destination tax on top of the tax-exclusive
+    # lines on the hosted page, so charged_cents is the pre-tax amount taken today.
+    tax_items = []
+    if not tax_enabled and tax_today > 0:
+        tax_items.append(
             {
-                "name": line.product_id.display_name,
-                "kind": "shipping",
-                "amount_cents": amount,
+                "name": _wv_tax_label(order),
+                "kind": "tax",
+                "amount_cents": stripe_gateway.to_cents(tax_today),
                 "quantity": 1,
-                # Shipping code so Stripe applies each state's shipping-taxability
-                # rule (GOL-2568). WV taxes shipping; some green-list states don't.
-                "tax_code": stripe_gateway.TAX_CODE_SHIPPING,
             }
         )
-    # No explicit tax line (GOL-2568): Stripe Tax adds destination tax on top of
-    # these tax-exclusive lines. charged_cents is therefore the pre-tax amount
-    # collected today; Stripe's tax is charged in addition on the hosted page.
-    line_items = goods_items + discount_items + shipping_items
+    line_items = goods_items + discount_items + shipping_items + tax_items
     charged_cents = sum(li["amount_cents"] * li["quantity"] for li in line_items)
     return line_items, [], charged_cents
 
@@ -3330,12 +3405,13 @@ def settle_order_at_ship(env, order):
     secret_key = _tenant_secret_key(tenant)
 
     # Ask Stripe Tax for the authoritative settlement tax on the ACTUAL shipped
-    # goods + real shipping (GOL-2568). Best-effort: a calc failure falls back to
-    # Odoo's amount_total so settlement still runs. The calc id is kept so a
-    # successful charge can record a tax/transaction for Stripe's reports.
+    # goods + real shipping (GOL-2568), only when the tenant flag is ON. Best-effort:
+    # a calc failure falls back to Odoo's amount_total so settlement still runs. With
+    # the flag OFF, tax_calc stays None and the balance is Odoo's amount_total minus
+    # the deposit — byte-identical to the pre-GOL-2568 settlement.
     tax_calc = None
     tax_line_items = _settlement_tax_line_items(order)
-    if secret_key and tax_line_items:
+    if _stripe_tax_enabled(order) and secret_key and tax_line_items:
         try:
             tax_calc = stripe_gateway.create_tax_calculation(
                 secret_key,
@@ -3554,11 +3630,12 @@ def _handle_session_completed(env, session):
         return "refunded_oversell" if refunded else "oversell_refund_failed"
 
     has_preorder = bool((order.grove_preorder_variant_ids or "").strip())
-    if not has_preorder:
+    if not has_preorder and _stripe_tax_enabled(order):
         # Stripe Tax write-back (GOL-2568): the ships-now session let Stripe
         # compute destination tax, so record what Stripe actually charged as the
         # authoritative figure. (A deposit order charged $0 tax; its tax lands at
-        # ship-time settlement, so there is nothing to write back here.)
+        # ship-time settlement, so there is nothing to write back here.) With the
+        # flag OFF the session carried no Stripe tax, so Odoo's own WV tax stands.
         _writeback_stripe_tax(env, order, session)
     vals["grove_checkout_status"] = "deposit_paid" if has_preorder else "paid"
     order.write(vals)
