@@ -287,6 +287,102 @@ class TestPromotions(GroveTaxFixtureMixin, TransactionCase):
         self.assertIn("BIGDEAL", result["message"])
         self.assertEqual(len(order.order_line.filtered("reward_id")), 1)
 
+    # ── per-tree automatic programs (prod "Mycoforestry 10+ - $25/tree") ──
+
+    def _per_tree_program(self, products, per_tree=10.0, min_qty=10, name="Mycoforestry 10+ - $25/tree"):
+        """The prod shape: automatic, 1 point per unit of ``products`` from
+        ``min_qty`` units, ``per_tree`` dollars off per point, discount limited to
+        those products."""
+        return (
+            self.env["loyalty.program"]
+            .with_company(self.company)
+            .create(
+                {
+                    "name": name,
+                    "program_type": "promotion",
+                    "trigger": "auto",
+                    "applies_on": "current",
+                    "company_id": self.company.id,
+                    "rule_ids": [
+                        (
+                            0,
+                            0,
+                            {
+                                "mode": "auto",
+                                "reward_point_mode": "unit",
+                                "reward_point_amount": 1.0,
+                                "minimum_qty": min_qty,
+                                "product_ids": [(6, 0, products.ids)],
+                            },
+                        )
+                    ],
+                    "reward_ids": [
+                        (
+                            0,
+                            0,
+                            {
+                                "reward_type": "discount",
+                                "discount": per_tree,
+                                "discount_mode": "per_point",
+                                "discount_applicability": "specific",
+                                "discount_product_ids": [(6, 0, products.ids)],
+                                "required_points": min_qty,
+                            },
+                        )
+                    ],
+                }
+            )
+        )
+
+    def _oaks_with_volume_tiers(self):
+        """An inoculated oak at $35 that ALSO counts toward the 5+/10+ volume tiers."""
+        oak = self._plant("White Oak, Mushroom-Inoculated", price=35.0)
+        volume = self._auto_volume_program()
+        volume.rule_ids.write({"product_ids": [(4, oak.id)]})
+        return oak
+
+    def test_per_tree_program_discounts_every_tree(self):
+        """10 oaks under a $10-per-tree program = $100 off, not a flat $10."""
+        oak = self._plant("White Oak, Mushroom-Inoculated", price=35.0)
+        self._per_tree_program(oak)
+        order = self._order([(oak, 10)])
+        result = promotions.resolve_discounts(order)
+        self.assertEqual(result["applied"], "tier")
+        self.assertEqual(result["discount_amount"], 100.0)
+        self.assertEqual(result["subtotal_after"], 250.0)
+        line = order.order_line.filtered("reward_id").filtered(lambda ln: ln.price_unit)
+        self.assertEqual(line.name, "Mycoforestry 10+ - $25/tree")
+        self.assertIn("Mycoforestry 10+", result["message"])
+        self.assertNotIn("tier", result)  # no "% for N+ trees" reading for a per-tree reward
+
+    def test_per_tree_program_beats_smaller_percent_tier(self):
+        """10 oaks ($350): $10/tree ($100) beats the 20% tier ($70) — the richer
+        automatic discount wins and the two never stack."""
+        oak = self._oaks_with_volume_tiers()
+        self._per_tree_program(oak)
+        order = self._order([(oak, 10)])
+        result = promotions.resolve_discounts(order)
+        self.assertEqual(result["discount_amount"], 100.0)
+        self.assertEqual(len(order.order_line.filtered(lambda ln: ln.reward_id and ln.price_unit)), 1)
+
+    def test_percent_tier_beats_smaller_per_tree_program(self):
+        """10 oaks ($350): the 20% tier ($70) beats a $1/tree program ($10)."""
+        oak = self._oaks_with_volume_tiers()
+        self._per_tree_program(oak, per_tree=1.0, name="Tiny per-tree")
+        order = self._order([(oak, 10)])
+        result = promotions.resolve_discounts(order)
+        self.assertEqual(result["discount_amount"], 70.0)
+        self.assertEqual(result["tier"], {"min_qty": 10, "percent": 20.0})
+        self.assertEqual(len(order.order_line.filtered(lambda ln: ln.reward_id and ln.price_unit)), 1)
+
+    def test_per_tree_program_below_minimum_falls_back_to_tier(self):
+        """9 oaks: the per-tree program needs 10, so the 10% tier applies."""
+        oak = self._oaks_with_volume_tiers()
+        self._per_tree_program(oak)
+        result = promotions.resolve_discounts(self._order([(oak, 9)]))
+        self.assertEqual(result["tier"], {"min_qty": 5, "percent": 10.0})
+        self.assertEqual(result["discount_amount"], 31.5)
+
     # ── coupon-specific shortfall messages ───────────────────────────────
 
     def test_shortfall_qty_message(self):
