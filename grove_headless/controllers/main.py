@@ -2632,6 +2632,12 @@ def _create_draft_order(website, env, payload, discount_out=None):
     err = _check_lengths(contact, contact_limits)
     if err:
         return None, _json_response({"error": f"contact.{err}"}, status=400)
+    # Phone is required on every checkout (Josh, 2026-09-30): it lands on the
+    # partner that shipping labels (label_batch) and pickup coordination read,
+    # and Stripe's hosted page never writes one back. Same rule as the BFF.
+    phone = contact.get("phone")
+    if not isinstance(phone, str) or not phone.strip():
+        return None, _json_response({"error": "contact.phone is required"}, status=400)
 
     address_limits = {
         "street": MAX_STREET,
