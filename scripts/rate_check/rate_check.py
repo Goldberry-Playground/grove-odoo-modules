@@ -40,7 +40,9 @@ Exit codes: 0 no material drift (or Pirate Ship returns no allowlisted ground
 rate for any probe AND the current table is the provisional placeholder — not
 ready, skipped cleanly) | 3 rates file rewritten | 1 a partial rate gap (some
 boxes quoted, some did not), or zero ground rates for every probe while real
-published rates exist | 4 proposed table failed the monotonicity guard | 2 bad
+published rates exist — including the GOL-2605 case where the endpoint REFUSED
+the query document (persisted-queries-only), which is reported distinctly because
+no retry can fix it | 4 proposed table failed the monotonicity guard | 2 bad
 ``--manual-quotes`` input (contradictory flags, or a hand refresh that does not
 cover every zone x box cell).
 
@@ -193,6 +195,29 @@ SERVICE_TITLES = {
 # allowlisted rate fits the ceiling the FASTEST known wins (ties break cheapest)
 # so a slow week never strands an order unshippable.
 MAX_TRANSIT_DAYS = 7
+
+# ── Quote-source availability (GOL-2605) ────────────────────────────────────
+# Error strings that mean the endpoint REFUSED our query document, as opposed to
+# "no ground rate for this parcel". Pirate Ship switched its public GraphQL
+# endpoint to Apollo's persisted-queries-only mode on 2026-09-29: it answers
+# HTTP 200 with exactly this message for every ad-hoc query, so every corner
+# raises and an all-missing run is indistinguishable from a carrier lapse. The
+# checker cannot repair this (the query document is reverse-engineered from the
+# web app and a persisted-query allowlist is a deliberate third-party block) —
+# but it CAN say so in one sentence instead of a 20-line wall of identical
+# errors, which is the whole cost of the morning triage.
+SOURCE_CLOSED_MARKERS = (
+    "only executes persisted queries",
+    "persistedquerynotfound",
+    "persistedquerynotsupported",
+)
+
+
+def is_source_closed(message) -> bool:
+    """True when a probe error means Pirate Ship refused the query document."""
+    text = str(message or "").lower()
+    return any(marker in text for marker in SOURCE_CLOSED_MARKERS)
+
 
 # "Estimated delivery [b]Wednesday 9/16 by 11:00 PM[/b] if shipped today"
 _DELIVERY_DATE_RE = re.compile(r"(\d{1,2})/(\d{1,2})")
@@ -398,7 +423,7 @@ def _request_rates(zip5: str, city: str, state: str, box_id: str, post=None) -> 
     return resp.json()
 
 
-def quote_zone_box(zone: str, box_id: str, probe_date, post=None):
+def quote_zone_box(zone: str, box_id: str, probe_date, post=None, diagnostics=None):
     """Winning ground rate for ``box_id`` at the WORST (max price) of the zone's
     reference corners, plus the union of allowlisted services seen across them.
 
@@ -415,6 +440,11 @@ def quote_zone_box(zone: str, box_id: str, probe_date, post=None):
             rates = rates_from_response(_request_rates(zip5, city, state, box_id, post=post))
         except (requests.RequestException, RuntimeError, ValueError) as exc:
             print(f"pirateship error for {zone}/{box_id} @ {city},{state}: {exc}", file=sys.stderr)
+            # GOL-2605: hand the raw error text to the caller so the all-missing
+            # branch can name WHY every corner failed. Optional (default None)
+            # so existing callers/tests are unaffected.
+            if diagnostics is not None:
+                diagnostics.append(str(exc))
             continue
         present |= present_services(rates, probe_date)
         winner = select_cheapest_ground(rates, probe_date)
@@ -505,6 +535,9 @@ def main(argv=None) -> int:
     missing = []
     seen_counts = {}
     probes = 0
+    # GOL-2605: raw probe-error texts, so an all-missing run can distinguish
+    # "the carrier stopped returning ground" from "the endpoint refused us".
+    probe_errors = []
     winners_log = []  # (zone, box_id, carrier, service, price)
     for zone in REFERENCE_ZIPS:
         proposed[zone] = {}
@@ -521,11 +554,12 @@ def main(argv=None) -> int:
                     rates = rates_from_response(payload)
                 except RuntimeError as exc:
                     print(f"pirateship graphql errors for {zone}/{box_id}: {exc}", file=sys.stderr)
+                    probe_errors.append(str(exc))
                     rates = []
                 present = present_services(rates, probe_date)
                 winner = select_cheapest_ground(rates, probe_date)
             else:
-                winner, present = quote_zone_box(zone, box_id, probe_date)
+                winner, present = quote_zone_box(zone, box_id, probe_date, diagnostics=probe_errors)
             for key in present:
                 seen_counts[key] = seen_counts.get(key, 0) + 1
             if winner is None:
@@ -573,6 +607,34 @@ def main(argv=None) -> int:
             # Real published rates exist yet Pirate Ship now returns zero ground
             # rates for EVERY probe: the quote source has failed. Fail loudly so
             # a fossilized table gets investigated (GOL-1312).
+            #
+            # GOL-2605: when every corner failed because the endpoint REFUSED the
+            # query document, say that instead of asking "quote source down?".
+            # The distinction changes who fixes it: a carrier lapse is a Pirate
+            # Ship account issue, a refusal means the public calculator is closed
+            # to third-party queries and rate automation needs a NEW SOURCE. The
+            # table is left untouched either way, so it fossilizes until then.
+            refusals = [e for e in probe_errors if is_source_closed(e)]
+            if refusals:
+                print(
+                    "::error::Pirate Ship REFUSED the RatesQuery document on "
+                    f"{len(refusals)} probe corner(s) across all {total} rate "
+                    "cell(s) — its public GraphQL endpoint now executes only "
+                    "persisted (first-party) queries. Rate automation is DOWN, "
+                    "not merely quiet: no retry and no workflow change can fix "
+                    "it, a replacement quote source is required. "
+                    "shipping_rates.json is UNCHANGED and still holds real "
+                    "published rates, so pricing is safe today but FREEZES from "
+                    "here. See scripts/rate_check/RUNBOOK.md "
+                    '"Quote source refused the query" (GOL-2605).'
+                )
+                print(
+                    f"pirateship refused the query document on {len(refusals)} "
+                    f"probe corner(s); all {total} rate cell(s) unpriced — "
+                    "quote source closed, not lapsed (see GOL-2605)",
+                    file=sys.stderr,
+                )
+                return 1
             print(
                 f"no ground rate for any of {total} probe(s) but "
                 "shipping_rates.json holds real published rates — "

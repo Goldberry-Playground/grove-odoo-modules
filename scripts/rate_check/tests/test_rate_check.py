@@ -21,6 +21,9 @@ P4_FIXTURE = os.path.join(_FX, "pirateship_rates_p24x10x4.json")
 P6_FIXTURE = os.path.join(_FX, "pirateship_rates_p24x10x6.json")
 # Calculator answered but returned no allowlisted ground rate (lapse / unpriced).
 NO_GROUND_FIXTURE = os.path.join(_FX, "pirateship_rates_no_ground.json")
+# GOL-2605: the verbatim body Pirate Ship's public endpoint returns (HTTP 200)
+# for every ad-hoc query since it switched to persisted-queries-only.
+PERSISTED_ONLY_FIXTURE = os.path.join(_FX, "pirateship_rates_persisted_only.json")
 
 # Fixed probe date the captured fixtures were quoted against (delivery dates in
 # them are 9/16, 9/17 — 2 and 3 days out), so transit math is deterministic.
@@ -448,6 +451,90 @@ class TestNoGroundHandling(unittest.TestCase):
         self.assertIn("Pirate Ship quote source down", err.getvalue())
         with open(rc.RATES_PATH, encoding="utf-8") as fh:
             self.assertEqual(fh.read(), rates_before)
+
+
+class TestQuoteSourceRefused(unittest.TestCase):
+    """GOL-2605 — "the endpoint refused our query" vs "the carrier went quiet".
+
+    Pirate Ship turned on Apollo persisted-queries-only on 2026-09-29, so every
+    probe corner raises and the run lands in the same all-missing branch a real
+    carrier lapse would. These pin the two apart: the refusal must be NAMED (no
+    retry or workflow change can fix it), and it must NOT invent an alarm while
+    the table is still the provisional placeholder."""
+
+    def test_is_source_closed_recognizes_persisted_query_refusals(self):
+        self.assertTrue(rc.is_source_closed("This server only executes persisted queries."))
+        self.assertTrue(rc.is_source_closed("PersistedQueryNotFound"))
+        self.assertTrue(rc.is_source_closed("PersistedQueryNotSupported"))
+
+    def test_is_source_closed_ignores_ordinary_quote_errors(self):
+        # A carrier/validation error is NOT a refusal — it must keep the
+        # existing "quote source down?" wording so the two never blur.
+        self.assertFalse(rc.is_source_closed("destinationZip is invalid"))
+        self.assertFalse(rc.is_source_closed("502 Bad Gateway"))
+        self.assertFalse(rc.is_source_closed(None))
+
+    def test_quote_zone_box_records_probe_errors_in_diagnostics(self):
+        def fake_post(url, json=None, timeout=None, headers=None):
+            class _R:
+                @staticmethod
+                def raise_for_status():
+                    pass
+
+                @staticmethod
+                def json():
+                    return {"errors": [{"message": "This server only executes persisted queries."}]}
+
+            return _R()
+
+        diagnostics = []
+        with mock.patch.object(rc.requests, "post", fake_post):
+            err = io.StringIO()
+            with redirect_stderr(err):
+                winner, present = rc.quote_zone_box("zone_2", "small", PROBE_DATE, diagnostics=diagnostics)
+        self.assertIsNone(winner)
+        self.assertEqual(present, set())
+        self.assertTrue(diagnostics, "the refusal text must reach the caller")
+        self.assertTrue(all(rc.is_source_closed(d) for d in diagnostics))
+
+    def _run_persisted_only_against(self, doc):
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False) as fh:
+            json.dump(doc, fh)
+            path = fh.name
+        try:
+            argv = ["--fixture", PERSISTED_ONLY_FIXTURE]
+            with mock.patch.object(rc, "RATES_PATH", path):
+                out, err = io.StringIO(), io.StringIO()
+                with redirect_stdout(out), redirect_stderr(err):
+                    code = rc.main(argv)
+            return code, out.getvalue(), err.getvalue(), open(path, encoding="utf-8").read()
+        finally:
+            os.unlink(path)
+
+    def test_refusal_against_real_rates_names_the_closed_source(self):
+        real = {"_comment": "x", "_schema": 3, "zone_1": {"small": {"base": 18.0}}}
+        before = json.dumps(real)
+        code, out, err, after = self._run_persisted_only_against(real)
+        self.assertEqual(code, 1)
+        # Annotated so the diagnosis is visible in the Actions run summary even
+        # with no Discord webhook provisioned.
+        self.assertIn("::error::", out)
+        self.assertIn("REFUSED", out)
+        self.assertIn("persisted", out)
+        self.assertIn("quote source closed, not lapsed", err)
+        # Never the misleading lapse wording, which would send triage at the
+        # Pirate Ship *account* instead of at the missing quote source.
+        self.assertNotIn("Pirate Ship quote source down", err)
+        # The money file is untouched — a refusal must never publish or zero.
+        self.assertEqual(after, before)
+
+    def test_refusal_against_provisional_table_still_skips_cleanly(self):
+        # No real published rates to protect => the pre-launch "not ready" state
+        # wins over the refusal alarm (GOL-1312 clean-skip preserved).
+        code, _out, _err, _after = self._run_persisted_only_against(
+            {"_comment": "x", "_schema": 3, "_provisional": True, "zone_1": {"small": {"base": 1.0}}}
+        )
+        self.assertEqual(code, 0)
 
 
 def _manual_doc(quoted_on="2026-09-29", **overrides):
