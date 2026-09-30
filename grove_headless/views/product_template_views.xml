@@ -34,6 +34,19 @@
                         <b>Not ready to publish.</b> Still needed:
                         <field name="grove_listing_missing" class="oe_inline" nolabel="1" readonly="1" />
                     </div>
+                    <!-- Growing guide review (2026-09-30). The storefront "Growing guide" is
+                         website_description, which Odoo 19 exposes only through the website
+                         builder, not the backend form, so there was nowhere to review a drafted
+                         guide before approving it. Show it here, directly above the approval
+                         checkbox, editable. -->
+                    <separator string="Growing guide (storefront)" />
+                    <field
+                        name="website_description"
+                        widget="html"
+                        nolabel="1"
+                        colspan="2"
+                        placeholder="No growing guide yet. Use Request content draft, or write one here."
+                    />
                     <group string="Listing Content Gate" name="grove_listing_gate">
                         <group>
                             <field name="grove_facts_reviewed" />
@@ -224,7 +237,7 @@
                     <group string="Storefront Guide" name="grove_guide">
                         <div class="text-muted" colspan="2">
                             The species guide shown on the storefront is the
-                            <b>Description for the website</b> field (Sales tab). It is drafted
+                            <b>Growing guide (storefront)</b> field above. It is drafted
                             automatically and stays hidden until you tick <b>Guide Approved
                             for Storefront</b>. Until then the storefront shows a "coming soon"
                             placeholder. To re-draft, clear the description first.
