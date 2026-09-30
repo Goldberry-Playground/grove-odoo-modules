@@ -56,7 +56,11 @@ so they sort FIRST under the ``/shop`` grid's ``name asc`` order.
      discount-summary row and volume-tier nudge specs (GOL-2432 / #800,
      GOL-2436) assert against it. Kept SEPARATE from #2 so 797 stays a
      deterministic non-qualifying gate fixture (do NOT mutate 797). Stocked
-     ``E2E_QTY`` (default 50) so both the 5+ (10%) and 10+ (20%) tiers fire.
+     ``E2E_PLANTS_QTY`` (default 500) — deep enough that the 5+ (10%) and 10+
+     (20%) tiers keep firing run after run. 50 (``E2E_QTY``) is enough for ONE
+     run but drains after ~5-10 confirmed tier orders, and a drained fixture
+     silently becomes a deposit cart, which reds the tier specs for a reason
+     that has nothing to do with tiers (GOL-2463, same trap as 797/GOL-2375).
      ``public_categ_ids`` is still left empty (like all three) so it does not
      inflate a storefront ``?cat=<slug>`` facet — the INTERNAL accounting
      ``categ_id`` is what `is_qualifying_plant()` reads, not the public categs.
@@ -111,14 +115,30 @@ Usage
 
     # Seed only one fixture: FIXTURE=potted | bareroot | plants.
 
+    # Verify the plants fixture really earns a volume tier, through the real
+    # storefront BFF (the GOL-2463 done-criterion). Runs after the seed,
+    # read-only, and FAILS the run on qualifyingUnits: 0:
+    E2E_TIERS_URL=https://nursery.qa.gatheringatthegrove.com/api/cart/tiers \\
+    DRY_RUN=0 ODOO_URL=... FIXTURE=plants python3 scripts/seed_e2e_test_inventory.py
+
 Knobs (env, all optional):
     DRY_RUN           default "1" (dry)      set "0" for a LIVE run (opt-out)
     FIXTURE           default "" (all)       "potted" | "bareroot" | "plants" to seed one
     E2E_POTTED_SKU    default "E2E-POTTED-INSTOCK"
     E2E_BAREROOT_SKU  default "E2E-BAREROOT-INSTOCK"
     E2E_PLANTS_SKU    default "E2E-PLANTS-INSTOCK"  (Plants-category qualifying, GOL-2464)
-    E2E_PRICE         default "42.00"        list_price (USD), both fixtures
-    E2E_QTY           default "50"           on-hand target, both fixtures
+    E2E_PRICE         default "42.00"        list_price (USD), all fixtures
+    E2E_QTY           default "50"           on-hand target, potted + bareroot
+    E2E_PLANTS_QTY    default "500"          on-hand target, plants fixture ONLY.
+                                             Deeper because each volume-tier run
+                                             buys 5-10 units and confirms them, so
+                                             a 50-deep fixture drains after ~5-10
+                                             runs, flips to a deposit cart and goes
+                                             false-red (GOL-2463 / GOL-2375).
+    E2E_TIERS_URL     default "" (skip)      storefront /api/cart/tiers endpoint. When
+                                             set, the plants fixture is probed after
+                                             seeding and a 0 qualifyingUnits FAILS.
+    E2E_TIERS_QTY     default "6"            cart qty used for that probe.
     E2E_TREE_LENGTH   default "20"           grove_tree_length for the bareroot
                                              (shippable) fixture: 16|20|32|46
 
@@ -164,6 +184,17 @@ FORMAT_ATTR = "Format"
 
 E2E_PRICE = float(os.getenv("E2E_PRICE", "42.00"))
 E2E_QTY = int(os.getenv("E2E_QTY", "50"))
+# The Plants fixture is stocked much DEEPER than the other two (GOL-2463). Every
+# volume-tier run buys 5-10 units of it and the gate's @stripe specs CONFIRM those
+# orders, so on-hand only ever ratchets down between seeds. At E2E_QTY=50 that is
+# ~5-10 runs before free_qty hits 0, the cart silently flips to a deposit cart and
+# the tier assertions go false-red — the exact trap that bit variant 797 (GOL-2375).
+E2E_PLANTS_QTY = int(os.getenv("E2E_PLANTS_QTY", "500"))
+
+# Optional post-seed verification through the real storefront BFF (GOL-2463's
+# done-criterion). Empty = skip; set it and a 0-qualifying-unit answer FAILS.
+E2E_TIERS_URL = os.getenv("E2E_TIERS_URL", "").strip()
+E2E_TIERS_QTY = int(os.getenv("E2E_TIERS_QTY", "6"))
 # grove_tree_length is a selection on product.template; only these ship (16|20|32|46).
 E2E_TREE_LENGTH = os.getenv("E2E_TREE_LENGTH", "20")
 
@@ -209,8 +240,11 @@ FIXTURES: list[dict[str, Any]] = [
         # trees. This is the fixture the promo Apply-preview, discount-summary row
         # and volume-tier nudge specs (GOL-2432/#800, GOL-2436) assert against.
         # Kept SEPARATE from the bareroot fixture (797) so Train #1 stays
-        # deterministic and Train #2 has qualifying units. Stock E2E_QTY (default
-        # 50) covers both the 5+ (10%) and 10+ (20%) tiers.
+        # deterministic and Train #2 has qualifying units. Stocked E2E_PLANTS_QTY
+        # (default 500) rather than E2E_QTY: 50 covers the 5+ (10%) and 10+ (20%)
+        # tiers for ONE run, but drains after ~5-10 confirmed tier runs and the
+        # drained cart then reads as a deposit cart -> false red (GOL-2463).
+        "qty": E2E_PLANTS_QTY,
         "categ_xmlid": "grove_headless.categ_trees",
         # Under Plants -> the listing-content publish gate (GOL-2382) would
         # demand the full botanical field set (botanical name, USDA zones, food-
@@ -346,6 +380,44 @@ def resolve_sale_taxes(models, uid, company_id: int) -> list[int]:
     return tax_ids
 
 
+def probe_volume_tiers(url: str, template_id: int, variant_id: int, qty: int) -> dict:
+    """POST one cart to the storefront BFF's ``/api/cart/tiers`` and return the body.
+
+    This is the GOL-2463 done-criterion, made executable. A fixture that is not
+    under the Plants root answers ``qualifyingUnits: 0`` no matter how many units
+    are in the cart — precisely the bug GOL-2463 reported against variant 797.
+    Read-only: the endpoint prices a hypothetical cart and creates nothing.
+    """
+    payload = {"items": [{"variantId": variant_id, "templateId": template_id, "quantity": qty}]}
+    req = _ureq.Request(url, data=_json.dumps(payload).encode(), headers={"Content-Type": "application/json"})
+    with _ureq.urlopen(req, timeout=30) as resp:
+        return _json.loads(resp.read())
+
+
+def verify_plant_tiers(tmpl_id: int, variant_id: int) -> None:
+    """Prove the Plants fixture really earns a tier, through the real storefront.
+
+    ``qualifyingUnits == 0`` means the fixture is still not counted as a plant
+    (wrong category, grove_headless not upgraded on the target, tier feed scoped
+    elsewhere). That is a FAILURE, not a warning: the volume-tier specs would
+    otherwise assert against a silently non-qualifying cart and "pass" for the
+    wrong reason.
+    """
+    print(f"\n\u2500\u2500 Volume-tier probe \u2500\u2500 POST {E2E_TIERS_URL} (qty {E2E_TIERS_QTY})")
+    try:
+        body = probe_volume_tiers(E2E_TIERS_URL, tmpl_id, variant_id, E2E_TIERS_QTY)
+    except Exception as exc:  # noqa: BLE001 - any failure here must be loud
+        fail(f"tier probe against {E2E_TIERS_URL} failed: {exc}")
+    units = body.get("qualifyingUnits")
+    print(f"  qualifyingUnits={units}  tiers={body.get('tiers')}")
+    if not units:
+        fail(
+            f"tier probe returned qualifyingUnits={units!r} for {E2E_TIERS_QTY} units of variant "
+            f"{variant_id}: the fixture is still NOT a qualifying plant (GOL-2463)."
+        )
+    print(f"  OK: {E2E_TIERS_QTY} units counted as {units} qualifying units.")
+
+
 def apply_stock(models, uid, ctx, variant_id: int, location_id: int, qty: float) -> None:
     """Idempotently set on-hand ``qty`` for ``variant_id`` at ``location_id``.
 
@@ -406,7 +478,7 @@ def apply_stock(models, uid, ctx, variant_id: int, location_id: int, qty: float)
         fail(f"action_apply_inventory jsonrpc error: {resp['error']}")
 
 
-def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, format_attr, spec) -> None:
+def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, format_attr, spec) -> tuple[int, int] | None:
     """Create or reconcile one single-Format fixture template + its stock."""
     sku = spec["sku"]
     print(f"\n════ Fixture: {spec['key']} ({sku!r}) ════")
@@ -544,7 +616,10 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
     else:
         print(f"  = variant {variant_id} default_code {sku} ok")
 
-    apply_stock(models, uid, ctx, variant_id, stock_location_id, float(E2E_QTY))
+    # Per-fixture on-hand target: the Plants/tier fixture carries its own (deeper)
+    # ``qty`` so a tier run can never drain it into a deposit cart (GOL-2463).
+    qty_target = spec.get("qty", E2E_QTY)
+    apply_stock(models, uid, ctx, variant_id, stock_location_id, float(qty_target))
 
     on_hand = call(models, uid, "product.product", "read", [[variant_id], ["qty_available"]])[0]["qty_available"]
     print(f"  stock: variant {sku} on hand = {on_hand} @ location {stock_location_id}")
@@ -554,6 +629,7 @@ def seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, forma
         f"  Done: {spec['key']} template id={tmpl_id}, variant id={variant_id} "
         f"({on_hand} on hand). /shop/{tmpl_id} should render an enabled 'Add to Cart'."
     )
+    return tmpl_id, variant_id
 
 
 def main() -> None:
@@ -599,10 +675,21 @@ def main() -> None:
         FORMAT_ATTR,
     )
 
+    seeded: dict[str, tuple[int, int]] = {}
     for spec in specs:
-        seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, format_attr, spec)
+        ids = seed_fixture(models, uid, ctx, company_id, tax_ids, stock_location_id, format_attr, spec)
+        if ids:
+            seeded[spec["key"]] = ids
 
     print(f"\nDone. Seeded {len(specs)} fixture(s): {[f['sku'] for f in specs]}")
+    for key, (tmpl_id, variant_id) in seeded.items():
+        # Printed so the ids paste straight into an e2e spec or an issue comment.
+        print(f"  ids: {key} templateId={tmpl_id} variantId={variant_id}")
+
+    if E2E_TIERS_URL and "plants" in seeded:
+        verify_plant_tiers(*seeded["plants"])
+    elif E2E_TIERS_URL:
+        print("E2E_TIERS_URL set but the plants fixture was not seeded this run — skipping the tier probe.")
 
 
 if __name__ == "__main__":

@@ -64,6 +64,12 @@
 #   - Only resolves github-code-quality threads, never human threads.
 #   - Agent PRs get approve + auto-merge; maintainer PRs get approve ONLY
 #     (no auto-merge) so the human decides when to merge.
+#   - GOL-2372 (Josh-approved 2026-09-29): a MAINTAINER PR on a PROTECTED path
+#     used to dead-end at the carve-out (no way to satisfy the distinct required
+#     review but a hand-typed APPROVE). It is now approvable — approve ONLY — once
+#     EVERY assigned `agent-review/*` twin (ada, plus iris for a frontend twin)
+#     is `success` on the head SHA. Fail-closed if no twin is present. AGENT PRs
+#     on protected paths stay hard-withheld.
 #   - Runs from the base-branch definition (workflow_run), so a PR cannot
 #     modify this file to approve itself.
 #
@@ -268,17 +274,67 @@ jobs:
           # generated from AgenticOS scripts/ci/gen-protected-paths-guard.py, so
           # they cannot drift). Fail-closed: if the check cannot run, withhold.
           PR_FILES=$(gh pr view "$PR" --repo "$REPO" --json files -q '.files[].path')
+          PROTECTED_HIT=0
           if REASON=$(PR_FILES="$PR_FILES" node scripts/ci/protected-paths-carveout.mjs); then
             :  # no protected path touched — proceed to approve
           else
-            echo "PR #$PR not auto-approved: $REASON"
-            exit 0
+            PROTECTED_HIT=1
+          fi
+
+          # ── GOL-2372: maintainer protected-path via Paperclip sign-off ──
+          # A MAINTAINER PR on a protected path used to dead-end at the carve-out:
+          # it withheld the bot approval, and GitHub blocks approving your own PR,
+          # so the ONLY distinct required review was an APPROVE the maintainer had
+          # to remember to hand-type in addition to closing the review twin. Josh
+          # approved (2026-09-29) accepting Paperclip's agent-review sign-off on
+          # the head SHA as that distinct review. AGENT PRs on protected paths are
+          # still hard-withheld (defense-in-depth, unchanged) — an agent must
+          # never clear a protected path on its own signal.
+          if [ "$PROTECTED_HIT" = "1" ]; then
+            if [ "$KIND" = "agent" ]; then
+              echo "PR #$PR not auto-approved: $REASON"
+              exit 0
+            fi
+            # KIND=maintainer: require EVERY assigned agent-review/* twin to be
+            # success on the CURRENT head SHA. That reviewer set is whatever the
+            # github-sync bridge actually opened (ada, plus iris when a frontend
+            # twin exists) — read straight off the head-SHA check-runs, so no
+            # reviewer login is hard-coded. STRICTER than the agent gate below
+            # (which needs only ONE success): here ALL present twins must be
+            # success and >=1 must be present. Fail-closed: absent / in_progress /
+            # any non-success => WITHHOLD, so this never approves while the review
+            # twin pipeline is down. Approve ONLY — the maintainer block further
+            # down still leaves the actual merge to the human.
+            echo "PR #$PR is a maintainer PR touching a protected path ($REASON); requiring every Paperclip agent-review/* sign-off on the head SHA before approving (GOL-2372)."
+            HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q '.headRefOid')
+            REVIEW_STATE=absent
+            for i in $(seq 1 30); do   # up to ~15 min (30 × 30s)
+              REVIEW_STATE=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+                -q '[.check_runs[] | select(.name | startswith("agent-review/"))]
+                     | if length==0 then "absent"
+                       elif all(.[]; .status=="completed" and .conclusion=="success") then "success"
+                       elif all(.[]; .status=="completed") then "completed-not-success"
+                       else "pending" end')
+              case "$REVIEW_STATE" in
+                success|completed-not-success) break ;;
+              esac
+              echo "maintainer protected-path agent-review/* on $HEAD_SHA: $REVIEW_STATE (poll $i/30)…"
+              sleep 30
+            done
+            if [ "$REVIEW_STATE" != "success" ]; then
+              echo "PR #$PR maintainer protected-path agent-review gate not satisfied on $HEAD_SHA (state: $REVIEW_STATE); not approving. Every assigned agent-review/* twin (ada, plus iris for frontend) must be success on the head SHA (GOL-2372)."
+              exit 0
+            fi
+            echo "All agent-review/* twins are success on $HEAD_SHA; approving the maintainer protected-path PR (approve only) — GOL-2372."
           fi
 
           # ── Unified agent-review gate (GOL-1734 / GOL-1738, Ada sign-off) ──
-          # AGENT PRs only. Maintainer PRs are exempt — a human reviews them by
-          # hand; the review-count gate is cleared by the github-actions[bot]
-          # approval below. The carve-out above still applied to both. (GOL-1854)
+          # AGENT PRs only. Maintainer PRs are exempt here — a human reviews them
+          # by hand; the review-count gate is cleared by the github-actions[bot]
+          # approval below. The carve-out above still runs for both, but a
+          # maintainer PR that hit a protected path was already gated by the
+          # GOL-2372 sign-off block above (agent PRs on protected paths exited
+          # there). (GOL-1854 / GOL-2372)
           if [ "$KIND" = "agent" ]; then
           # The github-sync plugin emits exactly one `agent-review/<reviewer>`
           # check-run per non-draft agent PR: seeded `in_progress` on open,

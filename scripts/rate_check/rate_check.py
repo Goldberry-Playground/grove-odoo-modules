@@ -42,9 +42,18 @@ ready, skipped cleanly) | 3 rates file rewritten | 1 a partial rate gap (some
 boxes quoted, some did not), or zero ground rates for every probe while real
 published rates exist — including the GOL-2605 case where the endpoint REFUSED
 the query document (persisted-queries-only), which is reported distinctly because
-no retry can fix it | 4 proposed table failed the monotonicity guard.
+no retry can fix it | 4 proposed table failed the monotonicity guard | 2 bad
+``--manual-quotes`` input (contradictory flags, or a hand refresh that does not
+cover every zone x box cell).
 
 No secret is required: the rate calculator is public.
+
+Every rewrite stamps ``_rates_verified_on`` / ``_rates_source`` into the table
+(GOL-2641). ``scripts/rate_check/staleness.py`` reads that stamp to answer the
+separate, source-independent question "how old are the numbers we are billing
+off" — when the quote source is unreachable this script is red every day and
+carries no new information, so freshness needs its own alarm. The no-network
+refresh path for that situation is ``--manual-quotes`` (see RUNBOOK.md).
 """
 
 import argparse
@@ -314,6 +323,67 @@ def target_rate(quote: float, box_id: str) -> int:
     return math.ceil(quote + PACKAGING[box_id] + BUFFER)
 
 
+def load_manual_quotes(path: str) -> tuple:
+    """Hand-probed carrier quotes -> ({zone: {box_id: winner}}, quoted_on) (GOL-2641).
+
+    The no-network refresh path for when the quote source is unavailable. The
+    file carries RAW CARRIER QUOTES, never finished rates, so the hand refresh
+    goes through the exact same ``target_rate`` (packaging + buffer + ceil),
+    monotonicity guard and drift gate as an automated run — hand-editing
+    shipping_rates.json directly bypasses all three.
+
+    Shape::
+
+        {"_quoted_on": "2026-09-29",
+         "zone_1": {"small": {"quote": 9.84, "carrier": "UPS", "service": "03",
+                              "service_title": "UPS Ground"}, ...}, ...}
+
+    ``carrier``/``service``/``service_title`` are REQUIRED per cell: schema 3
+    exists so "which carrier set this rate" is always answerable, and
+    ``rate_feed`` shows ``service_title`` in storefront copy. ``_quoted_on``
+    (required) becomes the ``_rates_verified_on`` stamp the freshness guard
+    reads — the refresh must state when the quotes were actually read, not when
+    the script happened to run."""
+    with open(path, encoding="utf-8") as fh:
+        doc = json.load(fh)
+
+    raw_date = doc.get("_quoted_on")
+    if not isinstance(raw_date, str):
+        raise ValueError(f"{path}: `_quoted_on` (YYYY-MM-DD, the date the quotes were read) is required")
+    quoted_on = date.fromisoformat(raw_date.strip())
+
+    out = {}
+    for zone, cells in doc.items():
+        if zone.startswith("_"):
+            continue
+        if zone not in REFERENCE_ZIPS:
+            raise ValueError(f"{path}: unknown zone {zone!r} (expected one of {sorted(REFERENCE_ZIPS)})")
+        out[zone] = {}
+        for box_id, cell in cells.items():
+            if box_id not in PARCELS:
+                raise ValueError(f"{path}: {zone}: unknown box id {box_id!r} (expected one of {sorted(PARCELS)})")
+            if not isinstance(cell, dict):
+                raise ValueError(
+                    f"{path}: {zone}/{box_id}: expected "
+                    '{"quote": <raw carrier quote>, "carrier": ..., "service": ..., "service_title": ...}'
+                )
+            # Presence, not truthiness: a `"quote": 0` is PRESENT and must be
+            # reported as a bad quote, not as a missing key.
+            missing_keys = [k for k in ("quote", "carrier", "service", "service_title") if cell.get(k) in (None, "")]
+            if missing_keys:
+                raise ValueError(f"{path}: {zone}/{box_id}: missing required key(s) {missing_keys}")
+            price = float(cell["quote"])
+            if price <= 0:
+                raise ValueError(f"{path}: {zone}/{box_id}: quote must be positive, got {price}")
+            out[zone][box_id] = {
+                "price": price,
+                "carrier": cell["carrier"],
+                "service": cell["service"],
+                "service_title": cell["service_title"],
+            }
+    return out, quoted_on
+
+
 def rates_from_response(payload: dict) -> list:
     """Extract the ``rates`` list from a RatesQuery response.
 
@@ -405,6 +475,12 @@ def main(argv=None) -> int:
         help="directory of pirateship_rates_<box_id>.json responses; used for every zone (offline dry-run)",
     )
     ap.add_argument(
+        "--manual-quotes",
+        help="JSON of hand-probed RAW carrier quotes (no network) — refreshes the table through the "
+        "same target/monotonicity/drift gates when the quote source is unavailable (GOL-2641). See "
+        "scripts/rate_check/RUNBOOK.md",
+    )
+    ap.add_argument(
         "--probe-date",
         help="YYYY-MM-DD anchor for transit-day math (testing: fixtures carry "
         "absolute delivery dates, so an offline run MUST pin the date the "
@@ -414,6 +490,39 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
 
     probe_date = date.fromisoformat(args.probe_date) if args.probe_date else date.today()
+
+    # A hand refresh and a canned-response run are different things; taking both
+    # would silently pick one and publish rates from a source the operator did
+    # not mean. Refuse instead.
+    manual_quotes = None
+    if args.manual_quotes:
+        if args.fixture or args.fixture_dir:
+            print("--manual-quotes cannot be combined with --fixture/--fixture-dir", file=sys.stderr)
+            return 2
+        try:
+            manual_quotes, probe_date = load_manual_quotes(args.manual_quotes)
+        except (ValueError, KeyError, TypeError, AttributeError) as exc:
+            # A malformed hand-quote file is operator input, not a crash: report
+            # it as the exit-2 input error with a message you can act on, never
+            # a traceback.
+            print(f"--manual-quotes rejected: {exc}", file=sys.stderr)
+            return 2
+        # A hand refresh must cover the WHOLE table. A partial file would drop
+        # the uncovered cells out of the rewrite, and since the Odoo loader
+        # falls back on a missing cell, a dropped cell is an under-charge.
+        gaps = [
+            f"{zone}/{box_id}"
+            for zone in REFERENCE_ZIPS
+            for box_id in PARCELS
+            if box_id not in manual_quotes.get(zone, {})
+        ]
+        if gaps:
+            print(
+                f"{args.manual_quotes}: incomplete — a hand refresh must quote every "
+                f"zone x box cell; missing {len(gaps)}: {', '.join(gaps)}",
+                file=sys.stderr,
+            )
+            return 2
 
     with open(RATES_PATH, encoding="utf-8") as fh:
         raw = json.load(fh)
@@ -434,7 +543,10 @@ def main(argv=None) -> int:
         proposed[zone] = {}
         for box_id in PARCELS:
             probes += 1
-            if args.fixture or args.fixture_dir:
+            if manual_quotes is not None:
+                winner = manual_quotes[zone][box_id]
+                present = [(winner["carrier"], winner["service"])]
+            elif args.fixture or args.fixture_dir:
                 path = args.fixture or os.path.join(args.fixture_dir, f"pirateship_rates_{box_id}.json")
                 with open(path, encoding="utf-8") as fh:
                     payload = json.load(fh)
@@ -467,7 +579,14 @@ def main(argv=None) -> int:
     # endpoint, then the winner (carrier/service) per cell so "which carrier set
     # this rate" is answered in the log. Emit before the missing/monotonicity
     # gates so the readout survives an early return.
-    print(visibility_report(seen_counts, probes), file=sys.stderr)
+    if manual_quotes is not None:
+        print(
+            f"Rates HAND-QUOTED from {args.manual_quotes}, read on {probe_date.isoformat()} "
+            f"({probes} cells) — no quote source was contacted (GOL-2641).",
+            file=sys.stderr,
+        )
+    else:
+        print(visibility_report(seen_counts, probes), file=sys.stderr)
     if winners_log:
         print("Winning service per cell (carrier service @ quoted price):", file=sys.stderr)
         for zone, box_id, carrier, service, price in winners_log:
@@ -566,6 +685,12 @@ def main(argv=None) -> int:
         "small/large and potted/peat-and-bagged p24x10x4/p24x10x6. "
         "Design: spec 2026-09-09-pirateship-fulfillment-design.md (GOL-2270).",
         "_schema": 3,
+        # Provenance the freshness guard reads (scripts/rate_check/staleness.py,
+        # GOL-2641): the date these numbers were actually quoted, and from where.
+        # Underscore keys are filtered by shipping_zones._load_rates, so neither
+        # can move a published rate.
+        "_rates_verified_on": probe_date.isoformat(),
+        "_rates_source": "manual" if manual_quotes is not None else "pirateship",
     }
     for zone in sorted(proposed):
         new_doc[zone] = {b: proposed[zone][b] for b in sorted(proposed[zone])}
