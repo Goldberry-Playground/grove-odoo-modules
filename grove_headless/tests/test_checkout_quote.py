@@ -280,7 +280,9 @@ class TestCheckoutQuoteEndpoint(_PoolFixture, GroveTaxFixtureMixin, HttpCase):
                 contact["phone"] = phone
             resp = self.url_open(
                 "/grove/api/v1/orders",
-                data=json.dumps({"contact": contact, "items": [{"variant_id": self.bareroot.id, "quantity": 1}]}).encode(),
+                data=json.dumps(
+                    {"contact": contact, "items": [{"variant_id": self.bareroot.id, "quantity": 1}]}
+                ).encode(),
                 headers={
                     "X-Odoo-Database": get_db_name(),
                     "X-Grove-Tenant": "goldberry",
