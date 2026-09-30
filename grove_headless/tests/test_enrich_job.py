@@ -214,6 +214,35 @@ class TestEnrichJob(GroveTaxFixtureMixin, TransactionCase):
         # resolved id cached so a re-press skips the wasted species-list call
         self.assertEqual(t1.grove_perenual_id, 3)
 
+    def test_cached_paywalled_id_skips_call_and_explains_reason(self):
+        # A product with a cached Perenual id above the free-tier cutoff (e.g.
+        # Black Walnut = id 4464) must be disposed of with ZERO HTTP calls, the
+        # note must explain the id-range reason (not a bare 429), and the drain
+        # must continue to the next queued job (GOL-2676).
+        from odoo.addons.grove_headless.models.grove_enrich_job import PERENUAL_PAYWALLED_COUNT_PARAM
+
+        self.ICP.set_param(PERENUAL_BUDGET_PARAM, "100")
+        t1 = self._product("Juglans nigra")
+        t1.grove_perenual_id = 4464  # above the free tier -> always 429 "Upgrade Plan"
+        t2 = self._product()  # Ficus carica, id 3 -> free tier, still drains
+        j1, j2 = self._queue(t1), self._queue(t2)
+
+        # The cached-id lookup short-circuits before any HTTP call; the zero
+        # calls it makes are proven by the final counter (only t2 spends).
+        self._run(_ok_get)
+
+        self.assertEqual(j1.state, "failed")
+        self.assertIn("plan-gated", j1.note.lower())
+        self.assertIn("1–3000", j1.note)  # says WHY: above the free-plan id range
+        self.assertIn("USDA", j1.note)  # points at the fallback that ran synchronously
+        self.assertEqual(t1.grove_perenual_id, 4464)  # id preserved
+        # the drain continued to the free-tier job, which succeeded
+        self.assertEqual(j2.state, "done")
+        # only the free-tier job's 2 calls counted; the paywalled one spent 0
+        self.assertEqual(self._counter(), 2)
+        # the paywalled-product count is refreshed for Josh (only t1 is > 3000)
+        self.assertEqual(self.ICP.get_param(PERENUAL_PAYWALLED_COUNT_PARAM), "1")
+
     def test_unkeyed_leaves_jobs_queued(self):
         # No PERENUAL_API_KEY -> the cron must NOT drain the backlog into a
         # no-op "done"; jobs stay queued so they enrich once the key lands.
