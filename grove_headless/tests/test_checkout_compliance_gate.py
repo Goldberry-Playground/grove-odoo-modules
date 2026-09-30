@@ -44,7 +44,7 @@ class TestCheckoutComplianceGate(GroveTaxFixtureMixin, TransactionCase):
 
     def _cart_payload(self, state, **extra):
         payload = {
-            "contact": {"name": "Ship Test", "email": "ship@example.com"},
+            "contact": {"name": "Ship Test", "email": "ship@example.com", "phone": "3045551212"},
             "items": [{"variant_id": self.product.id, "quantity": 1}],
             "shipping": {"street": "1 Rd", "city": "Town", "state": state, "zip": "10001"},
         }

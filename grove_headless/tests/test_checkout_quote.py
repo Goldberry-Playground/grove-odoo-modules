@@ -254,7 +254,7 @@ class TestCheckoutQuoteEndpoint(_PoolFixture, GroveTaxFixtureMixin, HttpCase):
         test_stripe_checkout.py so the money-path test file stays untouched.
         """
         body = {
-            "contact": {"name": "Quote Zero", "email": "quote-zero@example.com"},
+            "contact": {"name": "Quote Zero", "email": "quote-zero@example.com", "phone": "3045551212"},
             "items": [{"variant_id": self.bareroot.id, "quantity": 0}],
         }
         resp = self.url_open(
@@ -270,6 +270,27 @@ class TestCheckoutQuoteEndpoint(_PoolFixture, GroveTaxFixtureMixin, HttpCase):
         self.assertEqual(resp.status_code, 400, resp.text)
         # And no partial order was left behind by the rejected request.
         self.assertFalse(self.env["sale.order"].search_count([("partner_id.email", "=", "quote-zero@example.com")]))
+
+    def test_order_path_requires_a_phone(self):
+        """Phone is required on every checkout (2026-09-30): a missing, empty
+        or whitespace-only contact.phone is a 400 and leaves no draft order."""
+        for phone in (None, "", "   "):
+            contact = {"name": "No Phone", "email": "no-phone@example.com"}
+            if phone is not None:
+                contact["phone"] = phone
+            resp = self.url_open(
+                "/grove/api/v1/orders",
+                data=json.dumps({"contact": contact, "items": [{"variant_id": self.bareroot.id, "quantity": 1}]}).encode(),
+                headers={
+                    "X-Odoo-Database": get_db_name(),
+                    "X-Grove-Tenant": "goldberry",
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+            )
+            self.assertEqual(resp.status_code, 400, resp.text)
+            self.assertIn("contact.phone", resp.text)
+        self.assertFalse(self.env["sale.order"].search_count([("partner_id.email", "=", "no-phone@example.com")]))
 
     def test_requires_bearer_auth(self):
         resp = self._post({"items": [{"variant_id": self.bareroot.id, "quantity": 1}]}, authed=False)
