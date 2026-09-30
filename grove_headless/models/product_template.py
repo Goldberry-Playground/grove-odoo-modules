@@ -60,8 +60,10 @@ _GROVE_REQUIRED_FACTS = [
     ("grove_chill_hours", "char"),
 ]
 
-# Storefront-facing content fields. Every one gets tracking=True (chatter shows
-# who/what changed it) and a machine write to any of them — one that stamps
+# Scalar storefront fact fields. Every one gets tracking=True (chatter shows
+# who/what changed it) — safe here because these are Char/Integer/Selection, not
+# Html (see GOL-2677: html tracking raises at flush). A machine write to any of
+# them — one that stamps
 # grove_facts_provenance in the same vals, i.e. the enrichment (B) or drafter (C)
 # path — clears the human "Facts reviewed" sign-off, per the field's contract.
 _GROVE_CONTENT_FACT_FIELDS = frozenset(name for name, _kind in _GROVE_REQUIRED_FACTS) | frozenset(
@@ -569,14 +571,20 @@ class ProductTemplate(models.Model):
     )
     grove_wildlife = fields.Char(string="Wildlife", tracking=True, help='e.g. "Attracts bees, birds".')
 
-    # eCommerce marketing description + care guide are content fields too, so
-    # extend the inherited definitions to track changes in chatter. The
+    # eCommerce marketing description + care guide are content fields too. The
     # storefront description becomes description_ecommerce (the PDP renders it as
     # description_html); description_sale reverts to its Odoo quotation/invoice
     # role and is no longer the storefront copy. website_description carries the
     # care guide, gated on the storefront by grove_guide_ready as before.
-    description_ecommerce = fields.Html(tracking=True)
-    website_description = fields.Html(tracking=True)
+    #
+    # NOTE: no tracking=True on these two (GOL-2677). Odoo 19's
+    # mail.tracking.value._create_tracking_values raises NotImplementedError for
+    # html column types, so tracking here makes *every* write to them explode at
+    # flush on a mail-thread record — breaking the content drafter and manual
+    # admin edits alike. Provenance is not lost: the drafter/enrich paths post a
+    # chatter note recording their sources when they apply content.
+    description_ecommerce = fields.Html()
+    website_description = fields.Html()
 
     # ── Provenance and workflow (GOL-2382) ──────────────────────────────
     grove_facts_provenance = fields.Json(
