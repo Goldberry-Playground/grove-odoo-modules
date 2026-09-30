@@ -48,9 +48,36 @@ which on a $20–$27 parcel already clears the `$1` drift threshold. The value o
 this check is the **green → red transition on a dated deadline** — something a
 permanently-red `rate-check` cannot give you.
 
-> Wiring this into a scheduled workflow touches `.github/**` (Tier-0 protected,
-> needs SHA-bound human approval) and is tracked separately — see the GOL-2641
-> thread. Until then, run it by hand or from any existing green job.
+### Where it runs (GOL-2646)
+
+The daily `rate-check` job runs it, in two steps that bracket the probe:
+
+1. **`Rate table freshness (report)`** — the *first* step, before the Pirate Ship
+   probe. It needs no network and no secret, so it still produces a dated verdict
+   on the mornings the probe dies early. It records the exit code and **never
+   fails the job itself**, so the probe's exit code, its `chore/rate-check` PR and
+   its alerts are untouched.
+2. **`Rate table freshness (enforce)`** — the *last* step, `if: always()`. It
+   re-asserts the recorded verdict: `stale`/`unstamped` → the job is red. It is
+   last because every other step carries an implicit `success() &&` — failing
+   earlier would skip a legitimate drift PR, and a table can be stale *and*
+   drifted on the same day. A missing/blank verdict is treated as **BROKEN**
+   (red), never as fresh.
+
+**A red freshness verdict escalates through the CI failure router, not Discord.**
+`DISCORD_OPS_WEBHOOK_URL` does not exist in this repo (GOL-2642), so every Discord
+step in this workflow short-circuits to a no-op. The router files the red run as a
+GitHub issue, which reaches Paperclip. Note the dedupe key is
+`d3-ci-failure:rate-check:main`, which is shared with the quote-source failure — so
+while the source is down the freshness escalation lands as another comment on that
+same open issue. Read the run summary for which alarm actually fired.
+
+To check by hand at any time, without waiting for the schedule:
+
+```bash
+gh workflow run rate-check -f dry_run=true   # probe is read-only; freshness still reported
+python3 scripts/rate_check/staleness.py      # or just this, locally — no network
+```
 
 ## Refreshing the table without a quote source (GOL-2641)
 
