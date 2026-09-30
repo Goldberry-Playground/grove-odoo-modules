@@ -155,6 +155,10 @@ class TestMarkShipped(GroveTaxFixtureMixin, TransactionCase):
 
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            mock.patch.object(
+                stripe_gateway, "create_tax_calculation", return_value={"id": "taxcalc_s", "tax_amount_exclusive": 0}
+            ),
+            mock.patch.object(stripe_gateway, "create_tax_transaction", return_value={"id": "taxtxn_s"}),
             mock.patch.object(grove_main, "_notify_shipping_status"),
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
         ):
@@ -177,6 +181,10 @@ class TestMarkShipped(GroveTaxFixtureMixin, TransactionCase):
 
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            mock.patch.object(
+                stripe_gateway, "create_tax_calculation", return_value={"id": "taxcalc_s", "tax_amount_exclusive": 0}
+            ),
+            mock.patch.object(stripe_gateway, "create_tax_transaction", return_value={"id": "taxtxn_s"}),
             mock.patch.object(grove_main, "_notify_shipping_status"),
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
         ):
@@ -201,6 +209,10 @@ class TestMarkShipped(GroveTaxFixtureMixin, TransactionCase):
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_decline),
             mock.patch.object(stripe_gateway, "create_checkout_session", return_value={"url": "https://pay.example/x"}),
+            mock.patch.object(
+                stripe_gateway, "create_tax_calculation", return_value={"id": "taxcalc_s", "tax_amount_exclusive": 0}
+            ),
+            mock.patch.object(stripe_gateway, "create_tax_transaction", return_value={"id": "taxtxn_s"}),
             mock.patch.object(grove_main, "_notify_shipping_status"),
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
             mute_logger("odoo.addons.mail.models.mail_mail"),
