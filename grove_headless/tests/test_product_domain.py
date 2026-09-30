@@ -101,3 +101,34 @@ def test_cat_combines_with_zone_and_layer():
     assert ("public_categ_ids", "in", [3]) in dom
     assert ("grove_zone_min", "<=", 6) in dom
     assert ("grove_layer", "=", "vine") in dom
+
+
+# ── GOL-2744: department filter + cross-department search ────────────────────
+
+
+def test_dept_filter_scopes_to_department_category_ids():
+    dom = product_domain.build_product_domain({"dept": "mycoforestry"}, 7, dept_category_ids=[7, 20, 21])
+    assert ("public_categ_ids", "in", [7, 20, 21]) in dom
+
+
+def test_dept_unknown_slug_returns_empty_set_not_whole_catalog():
+    dom = product_domain.build_product_domain({"dept": "bogus"}, 7, dept_category_ids=[])
+    assert ("public_categ_ids", "in", [-1]) in dom
+
+
+def test_no_dept_kwarg_adds_no_dept_leaf():
+    dom = product_domain.build_product_domain({}, 7, dept_category_ids=[7])
+    # Only ?dept= present should add a department category leaf.
+    assert not any(leaf == ("public_categ_ids", "in", [7]) for leaf in dom)
+
+
+def test_q_search_matches_name_or_code_across_catalog():
+    dom = product_domain.build_product_domain({"q": "ginseng"}, 7)
+    assert "|" in dom
+    assert ("name", "ilike", "ginseng") in dom
+    assert ("default_code", "ilike", "ginseng") in dom
+
+
+def test_q_blank_adds_no_search_leaf():
+    dom = product_domain.build_product_domain({"q": "   "}, 7)
+    assert not any(isinstance(leaf, tuple) and leaf[0] == "name" for leaf in dom)

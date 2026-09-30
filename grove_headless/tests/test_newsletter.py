@@ -59,5 +59,51 @@ class TestNewsletterTagNames(unittest.TestCase):
         )
 
 
+class TestWaitlistTag(unittest.TestCase):
+    """GOL-2744: shop-coming-soon notify-me → readable ``Waitlist: <Dept>`` tag."""
+
+    def test_waitlist_interest_becomes_human_tag_with_resolved_name(self):
+        result = nl.newsletter_tag_names(
+            "nursery",
+            ["waitlist:mycoforestry"],
+            waitlist_names={"mycoforestry": "Mycoforestry"},
+        )
+        self.assertEqual(result, ["newsletter", "brand:nursery", "Waitlist: Mycoforestry"])
+
+    def test_waitlist_falls_back_to_humanized_slug_when_unresolved(self):
+        result = nl.newsletter_tag_names(None, ["waitlist:forest-farming"])
+        self.assertEqual(result, ["newsletter", "Waitlist: Forest Farming"])
+
+    def test_waitlist_exact_name_wins_over_humanized(self):
+        # "Seed & scion" can't be reproduced by title-casing a slug, so the
+        # resolved department name must win.
+        result = nl.newsletter_tag_names(
+            None,
+            ["waitlist:seed-and-scion"],
+            waitlist_names={"seed-and-scion": "Seed & scion"},
+        )
+        self.assertEqual(result, ["newsletter", "Waitlist: Seed & scion"])
+
+    def test_waitlist_and_regular_interests_coexist(self):
+        result = nl.newsletter_tag_names(
+            None,
+            ["fruit", "waitlist:mycoforestry"],
+            waitlist_names={"mycoforestry": "Mycoforestry"},
+        )
+        self.assertEqual(result, ["newsletter", "interest:fruit", "Waitlist: Mycoforestry"])
+
+    def test_empty_waitlist_slug_is_dropped(self):
+        result = nl.newsletter_tag_names(None, ["waitlist:"])
+        self.assertEqual(result, ["newsletter"])
+
+    def test_waitlist_tag_deduplicates(self):
+        result = nl.newsletter_tag_names(
+            None,
+            ["waitlist:mycoforestry", "waitlist:mycoforestry"],
+            waitlist_names={"mycoforestry": "Mycoforestry"},
+        )
+        self.assertEqual(result, ["newsletter", "Waitlist: Mycoforestry"])
+
+
 if __name__ == "__main__":
     unittest.main()
