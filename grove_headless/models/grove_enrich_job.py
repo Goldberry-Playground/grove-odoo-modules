@@ -129,11 +129,15 @@ class GroveEnrichJob(models.Model):
         These are the ones a paid Perenual plan would unlock — the free tier
         only serves ids 1–PERENUAL_FREE_TIER_MAX_ID (GOL-2676). Returns a
         product.template recordset (may be empty)."""
-        return self.env["product.template"].sudo().search(
-            [
-                ("active", "=", True),
-                ("grove_perenual_id", ">", mapping.PERENUAL_FREE_TIER_MAX_ID),
-            ]
+        return (
+            self.env["product.template"]
+            .sudo()
+            .search(
+                [
+                    ("active", "=", True),
+                    ("grove_perenual_id", ">", mapping.PERENUAL_FREE_TIER_MAX_ID),
+                ]
+            )
         )
 
     @api.model

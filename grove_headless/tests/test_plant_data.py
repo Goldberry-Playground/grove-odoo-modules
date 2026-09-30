@@ -532,9 +532,7 @@ class TestPerenualProvider(unittest.TestCase):
             calls.append(url)
             raise AssertionError(f"no HTTP call expected, got {url}")
 
-        prov = perenual.PerenualProvider(
-            get=get, api_key="k", on_call=lambda: n.__setitem__("c", n["c"] + 1)
-        )
+        prov = perenual.PerenualProvider(get=get, api_key="k", on_call=lambda: n.__setitem__("c", n["c"] + 1))
         with self.assertRaises(perenual.PerenualPlanGated) as cm:
             prov.lookup("Juglans nigra", cached_id=4464)
         self.assertEqual(cm.exception.species_id, 4464)
