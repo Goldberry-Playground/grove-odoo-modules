@@ -317,7 +317,8 @@ def main() -> None:
     if DRY_RUN:
         if existing_program_id:
             print(
-                f"  + WOULD RECONCILE loyalty.program id={existing_program_id} ('{PROGRAM_NAME}') on company {company_id}"
+                f"  + WOULD RECONCILE loyalty.program id={existing_program_id} "
+                f"('{PROGRAM_NAME}') on company {company_id}"
             )
         else:
             print(

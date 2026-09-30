@@ -20,17 +20,38 @@ The cron drains oldest-first and STOPS at the first job that would not fit the
 remaining budget (it does not skip ahead to a cheaper job — oldest-first is the
 contract). Each real HTTP call increments the counter via the provider's
 ``on_call`` hook, so the count reflects reality even when a lookup fails partway
-through. HTTP 429 marks the whole day exhausted and requeues the job for the
-next UTC day; any other error is retried once, then the job fails with the HTTP
-status recorded in ``note``.
+through. A genuine HTTP 429 (daily quota) marks the whole day exhausted and
+requeues the job for the next UTC day. A 429 with an ``Upgrade Plan`` body is a
+*per-species paywall*, not day-exhaustion: that job fails alone, the counter is
+left untouched, and the drain continues to the next queued job (otherwise a
+single paid-plan species would head-of-line-block the whole catalog every day).
+Any other error is retried once, then the job fails with the HTTP status
+recorded in ``note``.
+
+Perenual's free tier only serves species ids 1–``PERENUAL_FREE_TIER_MAX_ID`` —
+anything above always 429s "Upgrade Plan" (walnut, apple, most big fruit/nut
+species). When a product already has a cached id above that range the provider
+short-circuits with zero HTTP calls, so the drain disposes of it here BEFORE the
+budget gate (a known-paywalled species must never wait on, or consume, today's
+quota). The failure note explains the id-range reason and points at the USDA
+facts that ran synchronously, rather than surfacing a bare 429 (GOL-2676).
 """
 
+import logging
 from datetime import datetime, timezone
 
 from odoo import api, fields, models
 
 from ..services.plant_data import mapping
-from ..services.plant_data.perenual import PerenualProvider, PerenualRateLimited
+from ..services.plant_data.perenual import PerenualPlanGated, PerenualProvider, PerenualRateLimited
+
+_logger = logging.getLogger(__name__)
+
+# ir.config_parameter key holding the count of active products whose cached
+# Perenual id is above the free-tier cutoff — refreshed each drain so an admin
+# can read, in Settings, how many products a paid Perenual plan would unlock
+# (GOL-2676).
+PERENUAL_PAYWALLED_COUNT_PARAM = "grove_headless.perenual_paywalled_count"
 
 # ir.config_parameter key for the daily Perenual call budget. Seeded to 100 by
 # data/grove_config_params.xml (noupdate) so an admin can raise/lower it in
@@ -96,6 +117,58 @@ class GroveEnrichJob(models.Model):
         comes from the PERENUAL_API_KEY container env (never the repo/db)."""
         return PerenualProvider(on_call=on_call)
 
+    @api.model
+    def _provider_configured(self):
+        """True when Perenual has an API key (used by the product-form status)."""
+        return self._perenual_provider(lambda: None).configured
+
+    @api.model
+    def _grove_paywalled_products(self):
+        """Active products whose cached Perenual id is above the free-tier cutoff.
+
+        These are the ones a paid Perenual plan would unlock — the free tier
+        only serves ids 1–PERENUAL_FREE_TIER_MAX_ID (GOL-2676). Returns a
+        product.template recordset (may be empty)."""
+        return (
+            self.env["product.template"]
+            .sudo()
+            .search(
+                [
+                    ("active", "=", True),
+                    ("grove_perenual_id", ">", mapping.PERENUAL_FREE_TIER_MAX_ID),
+                ]
+            )
+        )
+
+    @api.model
+    def _refresh_paywalled_count(self):
+        """Store the paywalled-product count in a System Parameter (on change).
+
+        Gives Josh a live, readable number in Settings > Technical to size a
+        paid Perenual plan, without logging on every drain."""
+        count = len(self._grove_paywalled_products())
+        icp = self.env["ir.config_parameter"].sudo()
+        if icp.get_param(PERENUAL_PAYWALLED_COUNT_PARAM) != str(count):
+            icp.set_param(PERENUAL_PAYWALLED_COUNT_PARAM, str(count))
+            _logger.info(
+                "Perenual paywall: %d active product(s) have a species id above the free-tier cutoff (%d)",
+                count,
+                mapping.PERENUAL_FREE_TIER_MAX_ID,
+            )
+        return count
+
+    def _grove_queue_position(self):
+        """(position, total) of this job within the oldest-first queued backlog.
+
+        Position is 1-based; (0, total) when this job is not itself queued. The
+        search reuses the model _order (create_date asc, id asc), so the position
+        matches the exact order the drain cron will process (GOL-2541)."""
+        self.ensure_one()
+        queued_ids = self.search([("state", "=", "queued")]).ids
+        total = len(queued_ids)
+        pos = (queued_ids.index(self.id) + 1) if self.id in queued_ids else 0
+        return pos, total
+
     def _counter_key_today(self):
         """ir.config_parameter key for today's Perenual call counter (UTC).
 
@@ -122,6 +195,14 @@ class GroveEnrichJob(models.Model):
 
         jobs = self.search([("state", "=", "queued")])  # _order = oldest-first
         for job in jobs:
+            # A cached species id above the free-tier cutoff always 429s
+            # "Upgrade Plan". Dispose of it here WITHOUT consuming — or waiting
+            # on — today's budget: _process_one short-circuits with zero HTTP
+            # calls, so it never head-of-line-blocks the queue even on a
+            # budget-exhausted day (GOL-2676).
+            if mapping.perenual_free_tier_gated(job.product_tmpl_id.grove_perenual_id):
+                job._process_one(key, budget)
+                continue
             has_cached = bool(job.product_tmpl_id.grove_perenual_id)
             needed = mapping.calls_needed(has_cached)
             used = self._counter(key)
@@ -130,13 +211,20 @@ class GroveEnrichJob(models.Model):
             outcome = job._process_one(key, budget)
             if outcome == "rate_limited":
                 break  # day exhausted mid-run — leave the rest queued
+            # "plan_gated" (paid-plan species) and "failed"/"requeued"/"done"
+            # all fall through: only a genuine quota 429 stops the drain.
+
+        # Refresh the paywalled-product count so Josh has real numbers to size a
+        # paid Perenual plan (GOL-2676). Written only on change to stay quiet.
+        self._refresh_paywalled_count()
 
     # ── Single job ──────────────────────────────────────────────────────────
     def _process_one(self, counter_key, budget):
         """Run one Perenual lookup, apply facts, update job state.
 
-        Returns one of ``done`` / ``failed`` / ``requeued`` / ``rate_limited``.
-        Never raises: every provider error is folded into the job note.
+        Returns one of ``done`` / ``failed`` / ``requeued`` / ``rate_limited`` /
+        ``plan_gated``. Never raises: every provider error is folded into the
+        job note.
         """
         self.ensure_one()
         self.state = "running"
@@ -149,15 +237,47 @@ class GroveEnrichJob(models.Model):
         provider = self._perenual_provider(on_call)
         try:
             facts = provider.lookup(tmpl.grove_botanical_name, cached_id=tmpl.grove_perenual_id or None)
-            tmpl._grove_apply_facts(facts, "perenual")
+            applied = tmpl._grove_apply_facts(facts, "perenual")
             if facts.resolved_id and not tmpl.grove_perenual_id:
                 try:
                     tmpl.grove_perenual_id = int(facts.resolved_id)
                 except (TypeError, ValueError):
                     pass
             self.state = "done"
-            self.note = self._summary(facts)
+            self.note = self._summary(facts, applied)
             return "done"
+        except PerenualPlanGated as exc:
+            # 429 with an "Upgrade Plan" body: this SPECIES is behind a paid
+            # Perenual plan (a permanent paywall, not day-exhaustion). Fail just
+            # this job WITHOUT touching the day counter, and let the cron drain
+            # the next queued job — one paid-plan species must not stall the
+            # whole catalog. Any real calls already made were counted via
+            # on_call, so today's spend stays honest.
+            self.attempts += 1
+            self.state = "failed"
+            if exc.species_id and not tmpl.grove_perenual_id:
+                # cache the resolved id so a re-press skips the species-list call
+                try:
+                    tmpl.grove_perenual_id = int(exc.species_id)
+                except (TypeError, ValueError):
+                    pass
+            # Say WHY, not just "429". When the id is above the free-tier range
+            # that is the concrete, actionable reason; point at the USDA facts
+            # that already ran synchronously and the manual gaps that remain,
+            # so the form panel reads as an explanation not an error (GOL-2676).
+            sid = exc.species_id or tmpl.grove_perenual_id
+            if mapping.perenual_free_tier_gated(sid):
+                reason = f"species #{sid} is above the free plan's 1–{mapping.PERENUAL_FREE_TIER_MAX_ID} id range"
+            elif sid:
+                reason = f"species #{sid} requires a paid Perenual plan"
+            else:
+                reason = "this species requires a paid Perenual plan"
+            self.note = (
+                f"Perenual plan-gated: {reason}. Growing facts were filled from USDA "
+                "where available; any remaining gaps need manual entry. "
+                "(HTTP 429 Upgrade Plan — not a rate limit; other jobs continue.)"
+            )
+            return "plan_gated"
         except PerenualRateLimited as exc:
             # 429: the day's budget is spent. Exhaust the counter so no other job
             # is attempted today, and requeue this one for the next UTC day.
@@ -180,8 +300,11 @@ class GroveEnrichJob(models.Model):
             return "requeued"
 
     @staticmethod
-    def _summary(facts):
-        filled = ", ".join(sorted(facts.fields)) or "no empty fields to fill"
+    def _summary(facts, applied):
+        # ``applied`` is what _grove_apply_facts actually WROTE (provider was
+        # authoritative-first AND the field was empty), not facts.fields — the
+        # provider's raw proposals, most of which are usually skipped.
+        filled = ", ".join(sorted(applied)) or "no empty fields to fill"
         parts = [f"Perenual applied: {filled}."]
         if facts.hints:
             parts.append("Notes: " + " | ".join(facts.hints))

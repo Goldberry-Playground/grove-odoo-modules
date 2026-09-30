@@ -7,6 +7,7 @@ checkout full-charge gate, webhook oversell check), while a Potted variant
 never borrows from Bareroot. Runs under Odoo's --test-enable runner.
 """
 
+from odoo.addons.grove_headless.controllers.main import _list_in_stock
 from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 
@@ -109,3 +110,22 @@ class TestSharedPoolQty(GroveTaxFixtureMixin, TransactionCase):
         )
         self._stock(tmpl.product_variant_id, 7)
         self.assertEqual(tmpl.product_variant_id.grove_shared_pool_qty("qty_available"), 7)
+
+    # GOL-2517: the grid card's live stock signal. Before this the list payload
+    # carried no availability, so /shop read "In stock" forever after a sellout.
+    def test_list_in_stock_true_when_any_variant_stocked(self):
+        tmpl = self._template([self.c_meader.id])
+        self._stock(self._variant(tmpl, "Potted"), 5)
+        self.assertTrue(_list_in_stock(tmpl))
+
+    def test_list_in_stock_false_when_pool_empty(self):
+        tmpl = self._template([self.c_meader.id])
+        self.assertFalse(_list_in_stock(tmpl))
+
+    def test_list_in_stock_true_for_bareroot_backed_only_by_potted_pool(self):
+        # The defect's core case: a Bareroot variant with zero own stock but
+        # stocked potted siblings must read in stock, not sold out.
+        tmpl = self._template([self.c_meader.id])
+        self._stock(self._variant(tmpl, "Potted"), 4)
+        self.assertEqual(self._variant(tmpl, "Bareroot").qty_available, 0)
+        self.assertTrue(_list_in_stock(tmpl))

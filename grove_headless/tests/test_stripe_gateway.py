@@ -391,5 +391,147 @@ class TestWebhookSignature(unittest.TestCase):
             sg.verify_webhook_signature(b"{}", "garbage-no-equals", self.SECRET)
 
 
+# ── Stripe Tax on Checkout (GOL-2568) ────────────────────────────────────────
+
+
+class TestStripeTaxSession(unittest.TestCase):
+    """automatic_tax + tax codes + Customer on the Checkout Session."""
+
+    GOODS = [
+        {"name": "Pawpaw", "amount_cents": 2500, "quantity": 2, "tax_code": sg.TAX_CODE_GOODS},
+        {"name": "Shipping (WV)", "amount_cents": 900, "quantity": 1, "tax_code": sg.TAX_CODE_SHIPPING},
+    ]
+
+    def test_automatic_tax_off_by_default_no_tax_code_or_behavior(self):
+        # The deposit path builds the session with Tax OFF: the flat $10 is
+        # charged verbatim, no tax_code / tax_behavior leaks onto it.
+        params = sg.build_session_params(line_items=self.GOODS, success_url="a", cancel_url="b")
+        self.assertNotIn("automatic_tax[enabled]", params)
+        self.assertNotIn("line_items[0][price_data][tax_behavior]", params)
+        self.assertNotIn("line_items[0][price_data][product_data][tax_code]", params)
+
+    def test_automatic_tax_enables_and_stamps_codes_and_exclusive(self):
+        params = sg.build_session_params(line_items=self.GOODS, success_url="a", cancel_url="b", automatic_tax=True)
+        self.assertEqual(params["automatic_tax[enabled]"], "true")
+        # Goods carry the general tangible-goods code; shipping carries Shipping.
+        self.assertEqual(params["line_items[0][price_data][product_data][tax_code]"], "txcd_99999999")
+        self.assertEqual(params["line_items[1][price_data][product_data][tax_code]"], "txcd_92010001")
+        # Prices stay tax-exclusive (Josh 2026-09-29).
+        self.assertEqual(params["line_items[0][price_data][tax_behavior]"], "exclusive")
+        self.assertEqual(params["line_items[1][price_data][tax_behavior]"], "exclusive")
+
+    def test_customer_passed_with_shipping_auto_and_no_email(self):
+        # customer + customer_email are mutually exclusive in Stripe; customer
+        # wins and customer_update[shipping]=auto rides along.
+        params = sg.build_session_params(
+            line_items=self.GOODS,
+            success_url="a",
+            cancel_url="b",
+            customer="cus_123",
+            customer_email="j@x.com",
+            automatic_tax=True,
+        )
+        self.assertEqual(params["customer"], "cus_123")
+        self.assertEqual(params["customer_update[shipping]"], "auto")
+        self.assertNotIn("customer_email", params)
+
+    def test_email_used_only_without_customer(self):
+        params = sg.build_session_params(
+            line_items=self.GOODS, success_url="a", cancel_url="b", customer_email="j@x.com"
+        )
+        self.assertEqual(params["customer_email"], "j@x.com")
+        self.assertNotIn("customer", params)
+
+    def test_create_session_threads_customer_and_tax(self):
+        post = mock.Mock(return_value=_ok(200, {"id": "cs_1", "url": "https://pay/x"}))
+        sg.create_checkout_session(
+            "sk",
+            line_items=self.GOODS,
+            success_url="a",
+            cancel_url="b",
+            customer="cus_9",
+            automatic_tax=True,
+            post=post,
+        )
+        data = post.call_args.kwargs["data"]
+        self.assertEqual(data["customer"], "cus_9")
+        self.assertEqual(data["automatic_tax[enabled]"], "true")
+
+
+class TestStripeCustomer(unittest.TestCase):
+    SHIP = {
+        "name": "Jane Buyer",
+        "address": {"line1": "1 Elm", "city": "Summersville", "state": "WV", "postal_code": "26651", "country": "US"},
+    }
+
+    def test_create_customer_flattens_shipping(self):
+        post = mock.Mock(return_value=_ok(200, {"id": "cus_1"}))
+        out = sg.create_customer("sk", email="j@x.com", name="Jane Buyer", shipping=self.SHIP, post=post)
+        self.assertEqual(out["id"], "cus_1")
+        data = post.call_args.kwargs["data"]
+        self.assertEqual(data["email"], "j@x.com")
+        self.assertEqual(data["shipping[address][state]"], "WV")
+        self.assertEqual(data["shipping[address][postal_code]"], "26651")
+        self.assertTrue(post.call_args.args[0].endswith("/v1/customers"))
+
+    def test_ensure_customer_reuses_by_email_and_updates(self):
+        get = mock.Mock(return_value=_ok(200, {"data": [{"id": "cus_old"}]}))
+        post = mock.Mock(return_value=_ok(200, {"id": "cus_old"}))
+        out = sg.ensure_customer("sk", email="j@x.com", shipping=self.SHIP, post=post, get=get)
+        self.assertEqual(out["id"], "cus_old")
+        # Update hits the existing customer id, not a bare /v1/customers create.
+        self.assertTrue(post.call_args.args[0].endswith("/v1/customers/cus_old"))
+
+    def test_ensure_customer_creates_when_none_found(self):
+        get = mock.Mock(return_value=_ok(200, {"data": []}))
+        post = mock.Mock(return_value=_ok(200, {"id": "cus_new"}))
+        out = sg.ensure_customer("sk", email="j@x.com", shipping=self.SHIP, post=post, get=get)
+        self.assertEqual(out["id"], "cus_new")
+        self.assertTrue(post.call_args.args[0].endswith("/v1/customers"))
+        self.assertFalse(post.call_args.args[0].endswith("/cus_new"))
+
+    def test_find_customer_by_email_none_without_email(self):
+        self.assertIsNone(sg.find_customer_by_email("sk", ""))
+
+
+class TestStripeTaxCalculation(unittest.TestCase):
+    LINES = [
+        {"amount": 5000, "reference": "tree", "tax_code": sg.TAX_CODE_GOODS, "quantity": 2},
+        {"amount": 900, "reference": "ship", "tax_code": sg.TAX_CODE_SHIPPING},
+    ]
+    ADDR = {"line1": "1 Elm", "city": "Charleston", "state": "WV", "postal_code": "25301", "country": "US"}
+
+    def test_calculation_posts_lines_and_address(self):
+        post = mock.Mock(return_value=_ok(200, {"id": "taxcalc_1", "tax_amount_exclusive": 354}))
+        out = sg.create_tax_calculation("sk", line_items=self.LINES, address=self.ADDR, post=post)
+        self.assertEqual(out["id"], "taxcalc_1")
+        data = post.call_args.kwargs["data"]
+        self.assertEqual(data["currency"], "usd")
+        self.assertEqual(data["line_items[0][amount]"], 5000)
+        self.assertEqual(data["line_items[0][tax_code]"], "txcd_99999999")
+        self.assertEqual(data["line_items[0][tax_behavior]"], "exclusive")
+        self.assertEqual(data["line_items[1][tax_code]"], "txcd_92010001")
+        self.assertEqual(data["customer_details[address][state]"], "WV")
+        self.assertEqual(data["customer_details[address_source]"], "shipping")
+        self.assertTrue(post.call_args.args[0].endswith("/v1/tax/calculations"))
+
+    def test_calculation_missing_lines_raises(self):
+        with self.assertRaises(sg.StripeError):
+            sg.create_tax_calculation("sk", line_items=[], address=self.ADDR, post=mock.Mock())
+
+    def test_transaction_from_calculation(self):
+        post = mock.Mock(return_value=_ok(200, {"id": "tax_txn_1"}))
+        out = sg.create_tax_transaction("sk", calculation="taxcalc_1", reference="SO1234", post=post)
+        self.assertEqual(out["id"], "tax_txn_1")
+        data = post.call_args.kwargs["data"]
+        self.assertEqual(data["calculation"], "taxcalc_1")
+        self.assertEqual(data["reference"], "SO1234")
+        self.assertTrue(post.call_args.args[0].endswith("/v1/tax/transactions/create_from_calculation"))
+
+    def test_transaction_missing_calculation_raises(self):
+        with self.assertRaises(sg.StripeError):
+            sg.create_tax_transaction("sk", calculation="", reference="SO1", post=mock.Mock())
+
+
 if __name__ == "__main__":
     unittest.main()

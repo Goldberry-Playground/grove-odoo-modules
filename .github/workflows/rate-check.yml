@@ -33,6 +33,31 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
+      - name: Rate table freshness (report)
+        id: freshness
+        # GOL-2646 / GOL-2641: "can we reach a quote source right now" (the probe
+        # below) and "how old are the numbers we bill off" are DIFFERENT alarms.
+        # While a quote source is unavailable (GOL-2605) the probe is red EVERY
+        # morning and carries no new information, so a genuinely fossilizing rate
+        # table would hide inside a wall of identical failures. This guard needs no
+        # network and no secret, so it runs FIRST — before the probe can exit early
+        # — and it deliberately does NOT decide the job here: it only records a
+        # verdict that the final "enforce" step re-asserts. That leaves the probe's
+        # own exit code, its PR, and its alerts byte-for-byte as they are today.
+        run: |
+          set +e
+          out=$(python3 scripts/rate_check/staleness.py 2>&1)
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          # staleness.py emits its own ::warning:: / ::error:: prefix, so echoing the
+          # line verbatim is what puts the dated verdict on the run summary.
+          printf '%s\n' "$out"
+          {
+            echo "### Rate table freshness"
+            echo ""
+            printf '%s\n' "$out" | sed 's/^::[a-z]*:://'
+          } >> "$GITHUB_STEP_SUMMARY"
       - name: Run rate-checker
         id: check
         run: |
@@ -161,3 +186,32 @@ jobs:
           [ -z "$WEBHOOK" ] && { echo "::notice::no Discord webhook configured"; exit 0; }
           payload=$(python3 -c "import json;print(json.dumps({'content':'⚠️ rate-check failed — Pirate Ship quote error or workflow fault; rates NOT updated'}))")
           curl -sS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK"
+      - name: Rate table freshness (enforce)
+        # Runs LAST and always(), both on purpose:
+        #   * LAST, because every step above carries an implicit `success() && …`
+        #     in its `if:` — failing earlier would SKIP the drift PR and the drift
+        #     Discord alert, and a table can be stale and drifted on the same day.
+        #   * always(), because the probe above is red while the quote source is
+        #     closed, which would otherwise skip the freshness verdict entirely.
+        # Escalation for a red verdict is the CI failure router (red job → GitHub
+        # issue → Paperclip), NOT Discord: DISCORD_OPS_WEBHOOK_URL does not exist in
+        # this repo (GOL-2642), so every Discord step here short-circuits to a no-op.
+        if: always()
+        env:
+          # Empty when the report step never ran (cancelled job, failed checkout) —
+          # that lands in the catch-all below and reads as BROKEN, never as fresh.
+          RC: ${{ steps.freshness.outputs.rc }}
+        run: |
+          case "$RC" in
+            0)
+              echo "::notice::rate-table freshness OK — see the 'Rate table freshness (report)' step for the dated verdict"
+              ;;
+            1)
+              echo "::error::rate table is STALE or UNSTAMPED — failing the run so the CI failure router files it (GOL-2646). Refresh via scripts/rate_check/RUNBOOK.md -> 'Refreshing the table without a quote source'"
+              exit 1
+              ;;
+            *)
+              echo "::error::rate-table freshness guard did not run (exit '$RC') — treating as BROKEN, not as fresh"
+              exit 1
+              ;;
+          esac

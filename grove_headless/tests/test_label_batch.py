@@ -14,6 +14,7 @@ are stubbed in the label_batch module for a deterministic Committed Rate/Service
 default tax in the minimal chartless CI database (see tests/common.py).
 """
 
+import base64
 import csv
 import io
 from contextlib import contextmanager
@@ -23,6 +24,7 @@ from unittest.mock import patch
 from odoo.addons.grove_headless.models import label_batch as label_batch_module
 from odoo.addons.grove_headless.models import sale_order as sale_order_module
 from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
+from odoo.exceptions import AccessError
 from odoo.tests import TransactionCase, tagged
 
 _VALID_TRACK = ["1Z999AA10123456784", "1Z999AA10123456785", "9400111899223817200000"]
@@ -288,3 +290,40 @@ class TestLabelBatch(GroveTaxFixtureMixin, TransactionCase):
         )
         with self.assertRaisesRegex(label_batch_module.LabelBatchError, "neither a Grove Ref nor an Email"):
             batch.import_tracking(raw)
+
+    # ── Import-wizard ACL (GOL-2481) ────────────────────────────────────────
+    def test_import_wizard_acl_fulfillment_create_plain_user_denied(self):
+        """The manual import wizard ships an ir.model.access row so a `-u` no
+        longer warns 'grove.label.batch.import has no access rules'. A
+        fulfillment (salesperson) user can instantiate it; a plain internal
+        user, read-only on the model, cannot create it."""
+        self._paid_ship_order()
+        batch = self._build([_box(1)])
+        payload = base64.b64encode(b"Grove Ref,Tracking Number,Carrier,Cost\n")
+
+        salesman = self.env["res.users"].create(
+            {
+                "name": "Fulfillment User",
+                "login": "gol2481_fulfil",
+                # Odoo 19 renamed res.users.groups_id -> group_ids (GOL-2014).
+                "group_ids": [(6, 0, [self.env.ref("sales_team.group_sale_salesman").id])],
+            }
+        )
+        wiz = (
+            self.env["grove.label.batch.import"]
+            .with_user(salesman)
+            .create({"batch_id": batch.id, "data": payload, "filename": "track.csv"})
+        )
+        self.assertEqual(wiz.batch_id, batch)
+
+        plain = self.env["res.users"].create(
+            {
+                "name": "Plain User",
+                "login": "gol2481_plain",
+                "group_ids": [(6, 0, [self.env.ref("base.group_user").id])],
+            }
+        )
+        with self.assertRaises(AccessError):
+            self.env["grove.label.batch.import"].with_user(plain).create(
+                {"batch_id": batch.id, "data": payload, "filename": "track.csv"}
+            )

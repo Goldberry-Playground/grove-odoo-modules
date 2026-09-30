@@ -117,6 +117,16 @@ class SaleOrder(models.Model):
     grove_stripe_payment_method = fields.Char(readonly=True, copy=False)
     grove_settlement_payment_intent = fields.Char(readonly=True, copy=False)
     grove_settlement_attempts = fields.Integer(readonly=True, copy=False, default=0)
+    # Stripe Tax authoritative charge record (GOL-2568, Josh ruling 2026-09-29).
+    # Sales tax moved to Stripe Tax: Stripe computes destination tax on the
+    # Checkout Session (and on the ship-time /v1/tax/calculations), and we record
+    # what Stripe actually charged here so the order/invoice reflect the real
+    # charge rather than only Odoo's estimate. grove_stripe_tax_amount is the
+    # total tax Stripe collected; grove_stripe_tax_jurisdictions is the raw
+    # per-jurisdiction breakdown JSON (WV state 6% today; more once a 2nd state
+    # registers) for filing/audit.
+    grove_stripe_tax_amount = fields.Monetary(readonly=True, copy=False)
+    grove_stripe_tax_jurisdictions = fields.Text(readonly=True, copy=False)
     # ── Terminal fulfilment state machine (GOL-1981) ────────────────────────
     # Odoo is the system of record for "what is outstanding". Payment
     # (grove_checkout_status) and raw label substatus (grove_delivery_status)

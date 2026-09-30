@@ -210,18 +210,6 @@ def goods_subtotal(order):
     return round(total, 2)
 
 
-def _analytic_value(order, reward):
-    """A cheap, monotonic dollar estimate of a discount reward's worth, used only
-    to RANK candidates (the winning amount is always measured on the real order).
-    Percent-off scales with the untaxed order base; a fixed per-order discount is
-    its face amount capped at the order total."""
-    base = order.amount_untaxed
-    if reward.discount_mode == "percent":
-        return round((reward.discount or 0.0) / 100.0 * base, 2)
-    # per_order / per_point fixed amount
-    return round(min(reward.discount or 0.0, order.amount_total), 2)
-
-
 # ── promo-code failure explanation (coupon-specific messages) ─────────────────
 
 
@@ -421,14 +409,15 @@ def _goods_tax_ids(order):
 
 def _discount_line_name(reward, code):
     """The single discount line's label (GOL-2450). A code-applied reward reads
-    ``Discount (CODE)``; an automatic volume tier reads ``Volume discount N%``
-    (a non-percent tier, which we never configure, falls back to
-    ``Volume discount``)."""
+    ``Discount (CODE)``; an automatic volume tier reads ``Volume discount N%``;
+    any other automatic program (a fixed or per-tree amount, e.g. "Mycoforestry
+    10+ - $25/tree") reads as its program name, falling back to
+    ``Volume discount``."""
     if code:
         return f"Discount ({code.strip().upper()})"
     if reward.discount_mode == "percent":
         return f"Volume discount {_fmt_percent(reward.discount or 0.0)}"
-    return "Volume discount"
+    return reward.program_id.name or "Volume discount"
 
 
 def normalize_reward_line(order, reward, code=None):
@@ -447,7 +436,9 @@ def normalize_reward_line(order, reward, code=None):
       downstream ``reward_id`` filter (magnitude, Stripe coupon) still recognise
       it — the summary builder sums them into a single Discount item;
     * set ``price_unit`` to the negative pre-tax face — ``-amount`` for a fixed
-      reward, ``-percent x goods-subtotal`` for a percent tier (Josh: "$10 code
+      reward, ``-amount x points spent`` for a per-point reward ($10 per
+      qualifying tree x 10 trees -> -$100.00),
+      ``-percent x goods-subtotal`` for a percent tier (Josh: "$10 code
       -> -$10.00; a 10% tier -> -10% of the goods subtotal");
     * mirror the goods' taxes onto it so Odoo taxes ``(goods - discount +
       shipping)`` at the WV rate, and nothing out of state;
@@ -463,9 +454,18 @@ def normalize_reward_line(order, reward, code=None):
         if reward.discount_mode == "percent":
             amount = round((reward.discount or 0.0) / 100.0 * subtotal, 2)
         else:
-            # Fixed per-order/per-point face, capped at the goods subtotal so the
-            # discount never drives the taxable base negative.
-            amount = round(min(reward.discount or 0.0, subtotal), 2)
+            face = reward.discount or 0.0
+            if reward.discount_mode == "per_point":
+                # $X per point: sale_loyalty records the points the reward spent
+                # on its line(s) (1 point per qualifying tree), so 10 trees at $10
+                # = $100 — not a flat $10 per order. (An automatic program's
+                # coupon.points stays 0; the points live on the order.)
+                face *= sum(reward_lines.mapped("points_cost"))
+            if reward.discount_max_amount:
+                face = min(face, reward.discount_max_amount)
+            # Capped at the goods subtotal so the discount never drives the
+            # taxable base negative.
+            amount = round(min(face, subtotal), 2)
         survivor = reward_lines[:1]
         extras = reward_lines - survivor
         # Put the FULL pre-tax face on the survivor and mirror the goods' taxes,
@@ -565,12 +565,18 @@ def _best_auto_reward(order):
 
     "Best single discount wins" among tiers too: when both the 5+ and the 10+
     reward are claimable we keep only the richer one — lower tiers are never
-    stacked. Ranked by an analytic estimate (all tiers share the same order base,
-    so the ranking is exact even though the estimate isn't)."""
+    stacked. With more than one candidate each is MEASURED on the real order
+    (savepoint + rollback, see ``_measure``) rather than estimated: a per-point
+    fixed reward ($X off per qualifying unit, e.g. "Mycoforestry 10+ — $25/tree")
+    is worth X × units and a product-specific reward only discounts its own
+    lines, neither of which an order-level estimate captures — an estimate
+    ranked a $100 per-tree reward as $10 and let a $70 20%-tier win."""
     pairs = _claimable_auto_rewards(order)
     if not pairs:
         return None
-    return max(pairs, key=lambda rc: _analytic_value(order, rc[0]))
+    if len(pairs) == 1:
+        return pairs[0]
+    return max(pairs, key=lambda pair: _measure(order, lambda: _apply_reward(order, pair))[0])
 
 
 def _fmt_percent(value):
@@ -584,7 +590,12 @@ def _applied_message(applied, order, code, tier_value, code_value, reward=None):
     shown = code.upper() if code else None
     if applied == "tier":
         pct = _fmt_percent(reward.discount) if reward is not None and reward.discount_mode == "percent" else None
-        label = f"{pct} volume discount" if pct else "volume discount"
+        if pct:
+            label = f"{pct} volume discount"
+        elif reward is not None and reward.program_id.name:
+            label = reward.program_id.name
+        else:
+            label = "volume discount"
         if code and code_value > 0:
             return f"Your {label} is worth more than {shown}, so we applied that."
         return f"{label[:1].upper()}{label[1:]} applied."

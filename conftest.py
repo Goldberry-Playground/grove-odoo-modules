@@ -36,6 +36,7 @@ sys.modules.setdefault("grove_headless.tests", _stub_pkg("grove_headless.tests",
 # stay collected.
 collect_ignore_glob = [
     "grove_headless/tests/test_growing_facts.py",
+    "grove_headless/tests/test_html_field_tracking.py",
     "grove_headless/tests/test_effective_shipping_tier.py",
     "grove_headless/tests/test_detail_serialization.py",
     "grove_headless/tests/test_wv_taxes.py",
@@ -64,6 +65,8 @@ collect_ignore_glob = [
     "grove_headless/tests/test_listing_gate.py",
     "grove_headless/tests/test_listing_audit.py",
     "grove_headless/tests/test_enrich_job.py",
+    "grove_headless/tests/test_enrich_status.py",
     "grove_headless/tests/test_content_draft_request.py",
     "grove_headless/tests/test_promotions.py",
+    "grove_headless/tests/test_checkout_compliance_gate.py",
 ]

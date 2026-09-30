@@ -64,8 +64,40 @@
 #   - Only resolves github-code-quality threads, never human threads.
 #   - Agent PRs get approve + auto-merge; maintainer PRs get approve ONLY
 #     (no auto-merge) so the human decides when to merge.
+#   - GOL-2372 (Josh-approved 2026-09-29): a MAINTAINER PR on a PROTECTED path
+#     used to dead-end at the carve-out (no way to satisfy the distinct required
+#     review but a hand-typed APPROVE). It is now approvable — approve ONLY — once
+#     EVERY assigned `agent-review/*` twin (ada, plus iris for a frontend twin)
+#     is `success` on the head SHA. Fail-closed if no twin is present. AGENT PRs
+#     on protected paths stay hard-withheld.
 #   - Runs from the base-branch definition (workflow_run), so a PR cannot
 #     modify this file to approve itself.
+#
+# Merge-queue enqueue identity (GOL-2524) -- why this workflow does NOT enqueue
+# with the default token:
+#   GitHub never creates workflow runs for events triggered by `GITHUB_TOKEN`
+#   (the documented anti-recursion rule -- the same rule that wedged the daily
+#   rate-check PR in GOL-2114). A merge queue turns `gh pr merge --squash
+#   [--auto]` on an already-green PR into an ENQUEUE, and an enqueue performed
+#   by `GITHUB_TOKEN` produces a merge group that NO `merge_group` workflow ever
+#   reacts to: zero runs, zero check-runs. The entry sits at `AWAITING_CHECKS`
+#   until GitHub's 30-minute `checkResponseTimeout` expires and silently ejects
+#   the PR -- unmerged, with no red check and no notification.
+#
+#   The cruel part is that a PR only reaches the enqueue because the full-CI
+#   gate below already passed: the healthier the PR, the more likely it silently
+#   fails to merge. Proven by two same-day A/Bs on 2026-09-23 (odoocker #729,
+#   grove-odoo-modules #277): enqueued by `github-actions` -> 0 merge_group runs
+#   in 4-6 min; dequeued and re-enqueued as the agent App -> 5-6 runs within 30s
+#   and a clean merge, same commits, same required checks.
+#
+#   Fix: mint an App installation token for the enqueue (its events DO create
+#   workflow runs) and use it for that ONE call. Approval, thread resolution and
+#   every read stay on `GITHUB_TOKEN` -- least privilege, and the approving
+#   identity is deliberately unchanged. When the App secrets are not provisioned
+#   the enqueue degrades to `GITHUB_TOKEN` (same graceful shape as
+#   `RATE_CHECK_PR_TOKEN` in GOL-2114) and the wedge detector below turns the
+#   remaining failure from silent into loud.
 name: Auto-approve verified agent PRs
 
 on:
@@ -158,10 +190,34 @@ jobs:
           fi
           echo "PR=${PR}" >> "$GITHUB_ENV"
 
+      # GOL-2524: identity used for the merge-queue ENQUEUE only (see the header
+      # note). `vars.MERGE_QUEUE_APP_CLIENT_ID` is the switch: unset -> this step
+      # is skipped, `steps.enqueue-identity.outputs.token` is empty, and the
+      # enqueue falls back to GITHUB_TOKEN exactly as before (graceful
+      # degradation, same shape as RATE_CHECK_PR_TOKEN in GOL-2114). The App
+      # client id is not a secret (a repo/org *variable*), which is also what
+      # keeps this `if:` a plain expression.
+      #
+      # The minted token is scoped down to the two permissions the enqueue
+      # actually needs; the App's other installation permissions are NOT carried
+      # into this workflow. Provisioning: docs/merge-queue-enqueue-identity.md.
+      - name: Mint merge-queue enqueue identity (agent App)
+        id: enqueue-identity
+        if: vars.MERGE_QUEUE_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.MERGE_QUEUE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MERGE_QUEUE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Approve + resolve bot threads + merge (github-actions[bot])
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          # Empty unless the App identity above was minted. Consumed ONLY by the
+          # enqueue call; every other `gh` call keeps the default token. (GOL-2524)
+          ENQUEUE_TOKEN: ${{ steps.enqueue-identity.outputs.token }}
         run: |
           set -euo pipefail
 
@@ -218,17 +274,67 @@ jobs:
           # generated from AgenticOS scripts/ci/gen-protected-paths-guard.py, so
           # they cannot drift). Fail-closed: if the check cannot run, withhold.
           PR_FILES=$(gh pr view "$PR" --repo "$REPO" --json files -q '.files[].path')
+          PROTECTED_HIT=0
           if REASON=$(PR_FILES="$PR_FILES" node scripts/ci/protected-paths-carveout.mjs); then
             :  # no protected path touched — proceed to approve
           else
-            echo "PR #$PR not auto-approved: $REASON"
-            exit 0
+            PROTECTED_HIT=1
+          fi
+
+          # ── GOL-2372: maintainer protected-path via Paperclip sign-off ──
+          # A MAINTAINER PR on a protected path used to dead-end at the carve-out:
+          # it withheld the bot approval, and GitHub blocks approving your own PR,
+          # so the ONLY distinct required review was an APPROVE the maintainer had
+          # to remember to hand-type in addition to closing the review twin. Josh
+          # approved (2026-09-29) accepting Paperclip's agent-review sign-off on
+          # the head SHA as that distinct review. AGENT PRs on protected paths are
+          # still hard-withheld (defense-in-depth, unchanged) — an agent must
+          # never clear a protected path on its own signal.
+          if [ "$PROTECTED_HIT" = "1" ]; then
+            if [ "$KIND" = "agent" ]; then
+              echo "PR #$PR not auto-approved: $REASON"
+              exit 0
+            fi
+            # KIND=maintainer: require EVERY assigned agent-review/* twin to be
+            # success on the CURRENT head SHA. That reviewer set is whatever the
+            # github-sync bridge actually opened (ada, plus iris when a frontend
+            # twin exists) — read straight off the head-SHA check-runs, so no
+            # reviewer login is hard-coded. STRICTER than the agent gate below
+            # (which needs only ONE success): here ALL present twins must be
+            # success and >=1 must be present. Fail-closed: absent / in_progress /
+            # any non-success => WITHHOLD, so this never approves while the review
+            # twin pipeline is down. Approve ONLY — the maintainer block further
+            # down still leaves the actual merge to the human.
+            echo "PR #$PR is a maintainer PR touching a protected path ($REASON); requiring every Paperclip agent-review/* sign-off on the head SHA before approving (GOL-2372)."
+            HEAD_SHA=$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q '.headRefOid')
+            REVIEW_STATE=absent
+            for i in $(seq 1 30); do   # up to ~15 min (30 × 30s)
+              REVIEW_STATE=$(gh api "repos/$REPO/commits/$HEAD_SHA/check-runs?per_page=100" \
+                -q '[.check_runs[] | select(.name | startswith("agent-review/"))]
+                     | if length==0 then "absent"
+                       elif all(.[]; .status=="completed" and .conclusion=="success") then "success"
+                       elif all(.[]; .status=="completed") then "completed-not-success"
+                       else "pending" end')
+              case "$REVIEW_STATE" in
+                success|completed-not-success) break ;;
+              esac
+              echo "maintainer protected-path agent-review/* on $HEAD_SHA: $REVIEW_STATE (poll $i/30)…"
+              sleep 30
+            done
+            if [ "$REVIEW_STATE" != "success" ]; then
+              echo "PR #$PR maintainer protected-path agent-review gate not satisfied on $HEAD_SHA (state: $REVIEW_STATE); not approving. Every assigned agent-review/* twin (ada, plus iris for frontend) must be success on the head SHA (GOL-2372)."
+              exit 0
+            fi
+            echo "All agent-review/* twins are success on $HEAD_SHA; approving the maintainer protected-path PR (approve only) — GOL-2372."
           fi
 
           # ── Unified agent-review gate (GOL-1734 / GOL-1738, Ada sign-off) ──
-          # AGENT PRs only. Maintainer PRs are exempt — a human reviews them by
-          # hand; the review-count gate is cleared by the github-actions[bot]
-          # approval below. The carve-out above still applied to both. (GOL-1854)
+          # AGENT PRs only. Maintainer PRs are exempt here — a human reviews them
+          # by hand; the review-count gate is cleared by the github-actions[bot]
+          # approval below. The carve-out above still runs for both, but a
+          # maintainer PR that hit a protected path was already gated by the
+          # GOL-2372 sign-off block above (agent PRs on protected paths exited
+          # there). (GOL-1854 / GOL-2372)
           if [ "$KIND" = "agent" ]; then
           # The github-sync plugin emits exactly one `agent-review/<reviewer>`
           # check-run per non-draft agent PR: seeded `in_progress` on open,
@@ -358,6 +464,120 @@ jobs:
             exit 0
           fi
 
+          # ── GOL-2524: merge-queue dispatch check ─────────────────────────
+          # Everything here answers one question: did the merge group this PR
+          # was just put into actually get any workflow runs? A group with zero
+          # runs has no required check to wait for, so it will sit at
+          # AWAITING_CHECKS until GitHub's ~30-minute checkResponseTimeout
+          # ejects the PR -- unmerged, with no red check and no notification.
+          WEDGE_GRACE_SECONDS=180
+
+          # state \t enqueuedAt \t enqueuer \t mergeGroupCommit, or empty when
+          # the PR is not queued. Non-zero exit means "could not read".
+          queue_entry_tsv() {
+            # shellcheck disable=SC2016  # $owner/$name/$pr are GraphQL variables
+            gh api graphql \
+              -f query='query($owner:String!,$name:String!,$pr:Int!){
+                repository(owner:$owner,name:$name){
+                  pullRequest(number:$pr){
+                    mergeQueueEntry{
+                      state enqueuedAt enqueuer{login} headCommit{oid}
+                    }
+                  }
+                }
+              }' \
+              -f owner="$OWNER" -f name="$NAME" -F pr="$PR" \
+              --jq '.data.repository.pullRequest.mergeQueueEntry
+                    | if . == null then ""
+                      else [.state, .enqueuedAt, (.enqueuer.login // "?"),
+                            (.headCommit.oid // "")] | @tsv end' 2>/dev/null
+          }
+
+          # Count of workflow runs on a commit; empty when unreadable.
+          commit_run_count() {
+            gh api "repos/$REPO/actions/runs?head_sha=$1&per_page=1" -q '.total_count' 2>/dev/null || echo ""
+          }
+
+          # Prints a diagnosis and returns 0 ONLY on the dead-group signature:
+          # AWAITING_CHECKS, past the grace window, merge-group commit with zero
+          # workflow runs. Every other shape -- not queued, another state, still
+          # inside the window, any unreadable API -- returns 1 and says nothing.
+          # That bias is deliberate: firing FAILS the run, so a false positive
+          # would block a healthy PR's merge.
+          detect_queue_wedge() {
+            local entry state enq_at enqueuer group_sha enq_epoch age runs
+
+            entry=$(queue_entry_tsv) || return 1
+            [ -n "$entry" ] || return 1
+            state=$(printf '%s' "$entry" | cut -f1)
+            enq_at=$(printf '%s' "$entry" | cut -f2)
+            enqueuer=$(printf '%s' "$entry" | cut -f3)
+            group_sha=$(printf '%s' "$entry" | cut -f4)
+
+            # Only AWAITING_CHECKS can be wedged: QUEUED means the group has not
+            # formed yet, MERGEABLE means the checks already reported.
+            [ "$state" = "AWAITING_CHECKS" ] || return 1
+            [ -n "$group_sha" ] || return 1
+            # A group commit that IS the PR head means no merge commit was built;
+            # its runs would be the PR's own CI, not merge_group runs.
+            [ "$group_sha" != "$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q '.headRefOid')" ] || return 1
+
+            enq_epoch=$(date -u -d "$enq_at" +%s 2>/dev/null || echo "")
+            [ -n "$enq_epoch" ] || return 1
+            age=$(( $(date -u +%s) - enq_epoch ))
+            [ "$age" -ge "$WEDGE_GRACE_SECONDS" ] || return 1
+
+            runs=$(commit_run_count "$group_sha")
+            [ -n "$runs" ] || return 1
+            [ "$runs" -eq 0 ] || return 1
+
+            cat <<WEDGE
+          ::error title=Merge group wedged (GOL-2524)::PR #$PR is enqueued but its merge group has no workflow runs; it will be ejected unmerged.
+
+          PR #$PR merge-queue entry has been AWAITING_CHECKS for ${age}s and its merge-group
+          commit $group_sha has ZERO workflow runs. The required checks were never
+          dispatched, so the entry will sit until GitHub's ~30-minute checkResponseTimeout
+          ejects the PR -- unmerged, with no red check and no notification.
+
+            enqueued by : $enqueuer
+            group commit: $group_sha
+            queue       : https://github.com/$REPO/queue/main
+
+          Cause (GOL-2524): events triggered by GITHUB_TOKEN never create workflow runs.
+          If 'enqueued by' above is github-actions, this run enqueued with the default
+          token because the App identity is not provisioned in this repo. Provision the
+          repo/org variable MERGE_QUEUE_APP_CLIENT_ID and the secret
+          MERGE_QUEUE_APP_PRIVATE_KEY (agent App) -- runbook:
+          docs/merge-queue-enqueue-identity.md
+
+          Rescue now -- re-enqueue under a NON-GITHUB_TOKEN identity (bypasses no gate; it
+          makes the required checks actually run). PR node id:
+            gh pr view $PR --repo $REPO --json id -q .id
+          then, with an App/PAT token:
+            gh api graphql -f query='mutation{dequeuePullRequest(input:{id:"<NODE_ID>"}){mergeQueueEntry{state}}}'
+            gh api graphql -f query='mutation{enqueuePullRequest(input:{pullRequestId:"<NODE_ID>"}){mergeQueueEntry{position state enqueuer{login}}}}'
+          Confirm enqueuer.login is NOT github-actions, then check that
+            gh api "repos/$REPO/actions/runs?head_sha=<NEW_GROUP_SHA>" -q .total_count
+          is non-zero within ~60s.
+          WEDGE
+            return 0
+          }
+
+          # The healthy counterpart: 0 when the merge group has at least one
+          # workflow run. Used only to stop watching early, never to raise an
+          # alarm, so "not queued" and "cannot tell" both return 1 (keep looking).
+          queue_group_dispatched() {
+            local entry group_sha runs
+            entry=$(queue_entry_tsv) || return 1
+            [ -n "$entry" ] || return 1
+            group_sha=$(printf '%s' "$entry" | cut -f4)
+            [ -n "$group_sha" ] || return 1
+            runs=$(commit_run_count "$group_sha")
+            [ -n "$runs" ] || return 1
+            [ "$runs" -gt 0 ]
+          }
+          # ── end GOL-2524 merge-queue dispatch check ──────────────────────
+
           # Enable auto-merge (squash) and let the `merge-queue` ruleset own the
           # actual merge. Poll to re-resolve any late-arriving code-quality thread
           # so the queue is never blocked, and to exit promptly once merged.
@@ -375,12 +595,21 @@ jobs:
                 echo "PR #$PR merged."; exit 0 ;;
               OPEN:*)
                 # Idempotent: re-enabling auto-merge once it is set is a no-op.
-                if gh pr merge "$PR" --repo "$REPO" --squash --auto; then
+                # GOL-2524: on an already-green PR this call ENQUEUES, so it runs
+                # under the App identity when one was minted. Empty ENQUEUE_TOKEN
+                # -> GH_TOKEN keeps its step-level value (the default token).
+                if GH_TOKEN="${ENQUEUE_TOKEN:-$GH_TOKEN}" gh pr merge "$PR" --repo "$REPO" --squash --auto; then
                   echo "Auto-merge enabled for PR #$PR; the merge queue will squash-merge once required checks are green and threads resolved (head ref auto-deleted post-merge)."
                 else
                   echo "Could not enable auto-merge this pass (state $MS); will retry."
                 fi ;;
             esac
+            # Fail LOUD on a dead merge group rather than let the PR be ejected
+            # silently 30 minutes from now. (GOL-2524)
+            if WEDGE=$(detect_queue_wedge); then
+              printf '%s\n' "$WEDGE"
+              exit 1
+            fi
             sleep 20
           done
           echo "PR #$PR not merged within timeout; auto-merge is enabled and the approval stands, so the merge queue will complete it once required checks are green and all human review threads are resolved (or a maintainer can one-click)."

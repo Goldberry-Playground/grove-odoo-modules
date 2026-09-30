@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+from datetime import timedelta
 
 import requests
 from markupsafe import Markup, escape
@@ -25,6 +26,17 @@ _logger = logging.getLogger(__name__)
 PREORDER_CAP_PARAM = "grove_headless.preorder_cap_default"
 PREORDER_CAP_SEED = 50
 
+# ── Enrichment / draft status UX (GOL-2541) ──────────────────────────────
+# Login of the Odoo user the grove-content-drafter routine authenticates as.
+# We read that user's res.users.login_date to tell whether the routine is live;
+# an unset param (or a missing user) is surfaced on the form as "not configured"
+# so a request never silently sits forever (today QA has no drafter user).
+CONTENT_DRAFTER_LOGIN_PARAM = "grove_headless.content_drafter_login"
+# A "requested" draft older than this (minutes) shows an amber "stalled" banner.
+DRAFT_STALE_MINUTES = 60
+# The drafter counts as active only if it signed in within this many hours.
+DRAFTER_ACTIVE_HOURS = 24
+
 # ── Listing-content gate (GOL-2382, spec 2026-09-21) ─────────────────────
 # The 12 growing facts every plant listing must carry before it can be
 # published, in the order the missing-items banner and the form field group use.
@@ -48,8 +60,10 @@ _GROVE_REQUIRED_FACTS = [
     ("grove_chill_hours", "char"),
 ]
 
-# Storefront-facing content fields. Every one gets tracking=True (chatter shows
-# who/what changed it) and a machine write to any of them — one that stamps
+# Scalar storefront fact fields. Every one gets tracking=True (chatter shows
+# who/what changed it) — safe here because these are Char/Integer/Selection, not
+# Html (see GOL-2677: html tracking raises at flush). A machine write to any of
+# them — one that stamps
 # grove_facts_provenance in the same vals, i.e. the enrichment (B) or drafter (C)
 # path — clears the human "Facts reviewed" sign-off, per the field's contract.
 _GROVE_CONTENT_FACT_FIELDS = frozenset(name for name, _kind in _GROVE_REQUIRED_FACTS) | frozenset(
@@ -67,6 +81,27 @@ _GROVE_CONTENT_FACT_FIELDS = frozenset(name for name, _kind in _GROVE_REQUIRED_F
 _GROVE_LABEL_DESCRIPTION = "Description"
 _GROVE_LABEL_GUIDE = "Care guide approval"
 _GROVE_LABEL_REVIEWED = "Facts reviewed"
+
+# Trigger fields for both listing-status computes; shared so the stored
+# `complete` flag and the display-only `missing` string stay in lock-step.
+_GROVE_LISTING_DEPENDS = (
+    "grove_botanical_name",
+    "grove_zone_min",
+    "grove_zone_max",
+    "grove_layer",
+    "grove_sun",
+    "grove_mature_size",
+    "grove_mature_spread",
+    "grove_spacing",
+    "grove_soil",
+    "grove_pollination",
+    "grove_years_to_fruit",
+    "grove_chill_hours",
+    "description_ecommerce",
+    "website_description",
+    "grove_guide_ready",
+    "grove_facts_reviewed",
+)
 
 
 def _html_is_blank(value):
@@ -141,12 +176,15 @@ class ProductTemplate(models.Model):
         # fact it wrote; that invalidates the human "Facts reviewed" sign-off
         # unless the write is itself (re)setting the flag. Human form edits never
         # touch provenance, so their sign-off survives.
-        if (
-            "grove_facts_reviewed" not in vals
-            and "grove_facts_provenance" in vals
-            and _GROVE_CONTENT_FACT_FIELDS.intersection(vals)
-        ):
+        fact_fields_written = _GROVE_CONTENT_FACT_FIELDS.intersection(vals)
+        machine_write = "grove_facts_provenance" in vals
+        if "grove_facts_reviewed" not in vals and machine_write and fact_fields_written:
             vals = dict(vals, grove_facts_reviewed=False)
+        # When the content-drafter routine flips the state to 'drafted' (over
+        # XML-RPC), stamp who/when so the form can show "Drafted at <t> by <u>"
+        # (GOL-2541). An explicit stamp in vals (e.g. a data import) wins.
+        if vals.get("grove_draft_state") == "drafted" and "grove_drafted_at" not in vals:
+            vals = dict(vals, grove_drafted_at=fields.Datetime.now(), grove_drafted_by=self.env.uid)
         if self._GROVE_AVAILABILITY_FIELDS.intersection(vals):
             self.env["grove.publish.event"].sudo().note_availability_candidates(self)
         # Snapshot which records are crossing the publish transition BEFORE the
@@ -157,6 +195,25 @@ class ProductTemplate(models.Model):
         publishing = vals.get("website_published") or vals.get("is_published")
         transitioning = self.filtered(lambda r: not r.website_published) if publishing else self.browse()
         res = super().write(vals)
+        # GOL-2543: a human/manual edit of a content-fact field carries no
+        # grove_facts_provenance write alongside it. Without a provenance stamp,
+        # that field keeps whatever machine source (usda/perenual/agent) filled it
+        # first, and _grove_should_autofill would later treat the human's edit as
+        # an upgradeable machine value — letting a strictly-preferred source
+        # overwrite the human's correction. Stamp the edited fields `human` so
+        # they are protected. Done per-record (provenance is per-record) via
+        # super().write to avoid recursing into this override.
+        if fact_fields_written and not machine_write:
+            now_iso = fields.Datetime.now().isoformat()
+            for record in self:
+                provenance = dict(record.grove_facts_provenance or {})
+                changed = False
+                for name in fact_fields_written:
+                    if (provenance.get(name) or {}).get("source") != "human":
+                        provenance[name] = {"source": "human", "at": now_iso}
+                        changed = True
+                if changed:
+                    super(ProductTemplate, record).write({"grove_facts_provenance": provenance})
         for record in transitioning:
             record._grove_check_publish_gate()
         return res
@@ -417,6 +474,41 @@ class ProductTemplate(models.Model):
         'long; a tree over 24" has no box and cannot ship until one is restocked.',
     )
 
+    # ── Compliance & fulfillment overrides (GOL-2587 hotfix) ─────────────────
+    # Prod has ZERO mrp.bom records, so the GOL-2132 checkout gate can't tell a
+    # bundle (phantom kit) from a standalone line and fail-safe blocks every
+    # bundle into all 9 regulated states. This admin escape hatch lets Josh mark
+    # a template as cleared for the whole green list by hand, bypassing the
+    # per-line botanical carve-out evaluation at checkout.
+    grove_compliance_exempt = fields.Boolean(
+        string="Exempt from state plant-health carve-outs",
+        default=False,
+        tracking=True,
+        help="Skip the per-line genus/species carve-out gate for this product at "
+        "checkout — it ships anywhere on the green list. Use only when the "
+        "components have been cleared by hand (e.g. a bundle with no kit BoM). "
+        "Record why in the note below.",
+    )
+    grove_compliance_note = fields.Char(
+        string="Compliance exemption note",
+        tracking=True,
+        help="Why this product is exempt from the plant-health carve-out gate "
+        "(who cleared it, when, for which components). Logged at checkout.",
+    )
+    # Farm-pickup-only override, independent of the shipping tier. A Bareroot
+    # product (which normally ships) can still be pickup-only for reasons the
+    # tier doesn't capture (e.g. a large potted specimen, live-dig stock). The
+    # checkout gate rejects any ship order containing such a line, same 400
+    # pattern as the potted gate.
+    grove_pickup_only = fields.Boolean(
+        string="Farm pickup only",
+        default=False,
+        tracking=True,
+        help="This product can only be collected at the farm — the checkout "
+        "rejects any shipping order that contains it, regardless of shipping "
+        "tier. The customer must choose farm pickup or remove it.",
+    )
+
     # ── Growing facts (2026-07-13 catalog spec) ─────────────────────────
     # Filterable facts live here (typed); display-only facts stay Char.
     # Narrative content deliberately does NOT live in Odoo (Ghost, keyed
@@ -479,14 +571,20 @@ class ProductTemplate(models.Model):
     )
     grove_wildlife = fields.Char(string="Wildlife", tracking=True, help='e.g. "Attracts bees, birds".')
 
-    # eCommerce marketing description + care guide are content fields too, so
-    # extend the inherited definitions to track changes in chatter. The
+    # eCommerce marketing description + care guide are content fields too. The
     # storefront description becomes description_ecommerce (the PDP renders it as
     # description_html); description_sale reverts to its Odoo quotation/invoice
     # role and is no longer the storefront copy. website_description carries the
     # care guide, gated on the storefront by grove_guide_ready as before.
-    description_ecommerce = fields.Html(tracking=True)
-    website_description = fields.Html(tracking=True)
+    #
+    # NOTE: no tracking=True on these two (GOL-2677). Odoo 19's
+    # mail.tracking.value._create_tracking_values raises NotImplementedError for
+    # html column types, so tracking here makes *every* write to them explode at
+    # flush on a mail-thread record — breaking the content drafter and manual
+    # admin edits alike. Provenance is not lost: the drafter/enrich paths post a
+    # chatter note recording their sources when they apply content.
+    description_ecommerce = fields.Html()
+    website_description = fields.Html()
 
     # ── Provenance and workflow (GOL-2382) ──────────────────────────────
     grove_facts_provenance = fields.Json(
@@ -517,43 +615,67 @@ class ProductTemplate(models.Model):
         default="none",
         help="Tracks the Paperclip content-drafter workflow (GOL-2384/C).",
     )
+
+    # ── Enrichment / draft status UX (GOL-2541) ─────────────────────────
+    # Josh could not tell from the form whether Fetch-facts / Request-draft were
+    # running, how long they would take, or whether they succeeded. These fields
+    # surface that on the form (panels + banners), computed live from the latest
+    # grove.enrich.job, provenance, the drain cron's nextcall and the budget
+    # counter — none of it stored, so a form re-open always shows the truth.
+    grove_enrich_job_ids = fields.One2many("grove.enrich.job", "product_tmpl_id", string="Enrichment Jobs")
+    # USDA runs synchronously in the button, so its outcome is fully known then
+    # and persisted here (a candidates/no-match result leaves no job or
+    # provenance to reconstruct from later).
+    grove_usda_fetch_note = fields.Char(
+        string="USDA fetch result",
+        readonly=True,
+        help="Outcome of the last USDA fetch (filled N / matched / no match + candidates).",
+    )
+    # Zone/spacing hint lines each provider posts — persisted so they show inline
+    # on the form, not only in chatter. Shape: {"usda": [...], "perenual": [...]}.
+    grove_enrich_hints = fields.Json(string="Enrichment hints", readonly=True)
+    grove_draft_requested_at = fields.Datetime(string="Draft requested at", readonly=True)
+    grove_drafted_at = fields.Datetime(string="Drafted at", readonly=True)
+    grove_drafted_by = fields.Many2one("res.users", string="Drafted by", readonly=True)
+
+    grove_enrich_status_usda = fields.Char(string="USDA enrichment", compute="_compute_grove_enrich_status")
+    grove_enrich_status_perenual = fields.Char(string="Perenual enrichment", compute="_compute_grove_enrich_status")
+    grove_enrich_usda_fields = fields.Char(string="USDA filled fields", compute="_compute_grove_enrich_status")
+    grove_enrich_perenual_fields = fields.Char(string="Perenual filled fields", compute="_compute_grove_enrich_status")
+    grove_enrich_hints_display = fields.Char(string="Enrichment notes", compute="_compute_grove_enrich_status")
+    grove_enrich_failed = fields.Boolean(compute="_compute_grove_enrich_status")
+    grove_enrich_failed_note = fields.Char(compute="_compute_grove_enrich_status")
+    grove_draft_status = fields.Char(string="Draft status", compute="_compute_grove_draft_status")
+    grove_draft_stale = fields.Boolean(string="Draft stalled", compute="_compute_grove_draft_status")
     grove_listing_complete = fields.Boolean(
         string="Listing complete",
-        compute="_compute_grove_listing_status",
+        compute="_compute_grove_listing_complete",
         store=True,
+        compute_sudo=True,
         help="True when every required fact, the storefront description, the "
         "approved care guide and the Facts Reviewed sign-off are present.",
     )
     grove_listing_missing = fields.Char(
         string="Missing for storefront",
-        compute="_compute_grove_listing_status",
+        compute="_compute_grove_listing_missing",
+        compute_sudo=True,
         help="Human-readable list of the items still needed before this plant can "
         "be published; empty when the listing is complete.",
     )
 
-    @api.depends(
-        "grove_botanical_name",
-        "grove_zone_min",
-        "grove_zone_max",
-        "grove_layer",
-        "grove_sun",
-        "grove_mature_size",
-        "grove_mature_spread",
-        "grove_spacing",
-        "grove_soil",
-        "grove_pollination",
-        "grove_years_to_fruit",
-        "grove_chill_hours",
-        "description_ecommerce",
-        "website_description",
-        "grove_guide_ready",
-        "grove_facts_reviewed",
-    )
-    def _compute_grove_listing_status(self):
+    # Both halves derive from _grove_missing_items(), but they are computed by
+    # separate methods so Odoo does not warn about the store/compute_sudo mismatch
+    # between the stored `complete` flag (used in domain searches) and the
+    # display-only `missing` string (GOL-2481). compute_sudo is pinned identically.
+    @api.depends(*_GROVE_LISTING_DEPENDS)
+    def _compute_grove_listing_complete(self):
         for record in self:
-            missing = record._grove_missing_items()
-            record.grove_listing_missing = ", ".join(missing)
-            record.grove_listing_complete = not missing
+            record.grove_listing_complete = not record._grove_missing_items()
+
+    @api.depends(*_GROVE_LISTING_DEPENDS)
+    def _compute_grove_listing_missing(self):
+        for record in self:
+            record.grove_listing_missing = ", ".join(record._grove_missing_items())
 
     def _grove_missing_items(self):
         """Ordered list of human labels for every unmet completeness requirement.
@@ -579,42 +701,250 @@ class ProductTemplate(models.Model):
             missing.append(_GROVE_LABEL_REVIEWED)
         return missing
 
+    # ── Enrichment / draft status panels (GOL-2541) ──────────────────────
+    def _grove_latest_job(self, provider):
+        """Most-recent grove.enrich.job for this product+provider (or empty)."""
+        self.ensure_one()
+        jobs = self.grove_enrich_job_ids.filtered(lambda j: j.provider == provider)
+        # _order on the job model is create_date asc, id asc — take the last.
+        return jobs.sorted(key=lambda j: (j.create_date or fields.Datetime.now(), j.id))[-1:]
+
+    def _grove_provenance_fields(self, source):
+        """Sorted field names whose provenance was written by ``source``."""
+        prov = self.grove_facts_provenance or {}
+        return sorted(name for name, meta in prov.items() if isinstance(meta, dict) and meta.get("source") == source)
+
+    def _grove_provenance_latest_at(self, source):
+        """ISO timestamp of the most recent write by ``source`` (or None)."""
+        prov = self.grove_facts_provenance or {}
+        stamps = [
+            meta.get("at")
+            for meta in prov.values()
+            if isinstance(meta, dict) and meta.get("source") == source and meta.get("at")
+        ]
+        return max(stamps) if stamps else None
+
+    def _grove_enrich_cron_eta(self):
+        """(nextcall HH:MM in user tz, minutes-from-now) for the drain cron."""
+        cron = self.env.ref("grove_headless.process_enrich_jobs", raise_if_not_found=False)
+        if not cron or not cron.nextcall:
+            return None, None
+        delta = (cron.nextcall - fields.Datetime.now()).total_seconds()
+        minutes = max(0, int(round(delta / 60)))
+        local = fields.Datetime.context_timestamp(self, cron.nextcall)
+        return local.strftime("%H:%M"), minutes
+
+    def _grove_next_utc_midnight_local(self):
+        """The next UTC-midnight (budget rollover), formatted in the user tz."""
+        now = fields.Datetime.now()
+        midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        return fields.Datetime.context_timestamp(self, midnight).strftime("%Y-%m-%d %H:%M")
+
+    @api.depends(
+        "grove_facts_provenance",
+        "grove_usda_symbol",
+        "grove_usda_fetch_note",
+        "grove_enrich_hints",
+        "grove_enrich_job_ids",
+        "grove_enrich_job_ids.state",
+        "grove_enrich_job_ids.note",
+    )
+    def _compute_grove_enrich_status(self):
+        Job = self.env["grove.enrich.job"].sudo()
+        perenual_configured = Job._provider_configured()
+        for record in self:
+            # ── USDA (synchronous; persisted note is authoritative) ──
+            usda_fields = record._grove_provenance_fields("usda")
+            record.grove_enrich_usda_fields = ", ".join(usda_fields)
+            if record.grove_usda_fetch_note:
+                record.grove_enrich_status_usda = record.grove_usda_fetch_note
+            elif usda_fields:
+                at = record._grove_provenance_latest_at("usda")
+                sym = f" (symbol {record.grove_usda_symbol})" if record.grove_usda_symbol else ""
+                record.grove_enrich_status_usda = (
+                    f"Filled {len(usda_fields)} field(s) at {record._grove_fmt_dt(at)}{sym}."
+                )
+            else:
+                record.grove_enrich_status_usda = "Not run — press Fetch facts."
+
+            # ── Perenual (async queue) ──
+            perenual_fields = record._grove_provenance_fields("perenual")
+            record.grove_enrich_perenual_fields = ", ".join(perenual_fields)
+            job = record._grove_latest_job("perenual")
+            record.grove_enrich_failed = bool(job) and job.state == "failed"
+            record.grove_enrich_failed_note = job.note if record.grove_enrich_failed else False
+            record.grove_enrich_status_perenual = record._grove_perenual_status_text(
+                job, perenual_fields, perenual_configured, Job
+            )
+
+            # ── Hints (zone/spacing), persisted per provider ──
+            hints = record.grove_enrich_hints or {}
+            lines = []
+            for provider in ("usda", "perenual"):
+                for hint in hints.get(provider, []) or []:
+                    lines.append(f"{provider.upper()}: {hint}")
+            record.grove_enrich_hints_display = " · ".join(lines)
+
+    def _grove_perenual_status_text(self, job, perenual_fields, configured, Job):
+        """Human status line for the Perenual half, from its latest job."""
+        self.ensure_one()
+        if not job:
+            return "Not run — press Fetch facts to queue Perenual enrichment."
+        if job.state == "done":
+            at = self._grove_provenance_latest_at("perenual")
+            when = f" at {self._grove_fmt_dt(at)}" if at else ""
+            return f"Done — filled {len(perenual_fields)} field(s){when}."
+        if job.state == "running":
+            return "Running now…"
+        if job.state == "failed":
+            return f"Failed: {job.note or 'see chatter'}"
+        # queued
+        if not configured:
+            return "Waiting for API key — Perenual is unkeyed, so the queue is paused."
+        key = Job._counter_key_today()
+        if Job._counter(key) >= Job._budget():
+            return f"Budget exhausted — resumes at {self._grove_next_utc_midnight_local()} (00:00 UTC)."
+        pos, total = job._grove_queue_position()
+        nextcall, minutes = self._grove_enrich_cron_eta()
+        base = f"Queued — position {pos} of {total}"
+        if nextcall is not None:
+            base += f", next run at {nextcall} (~{minutes} min)"
+        return base + "."
+
+    @api.depends("grove_draft_state", "grove_draft_requested_at", "grove_drafted_at", "grove_drafted_by")
+    def _compute_grove_draft_status(self):
+        routine_note = self._grove_drafter_routine_note()  # env-wide, computed once
+        now = fields.Datetime.now()
+        for record in self:
+            stale = False
+            if record.grove_draft_state == "requested":
+                when = record.grove_draft_requested_at
+                text = (
+                    f"Requested at {record._grove_fmt_dt(when)} — the drafter polls every 15 min; "
+                    "expect a draft within ~20 min."
+                    if when
+                    else "Requested — the drafter polls every 15 min; expect a draft within ~20 min."
+                )
+                if routine_note:
+                    text = f"{text} {routine_note}"
+                # A requested draft with no timestamp predates this field; treat
+                # as stalled so the "sits forever" case is never invisible.
+                stale = (not when) or (now - when) > timedelta(minutes=DRAFT_STALE_MINUTES)
+            elif record.grove_draft_state == "drafted":
+                who = record.grove_drafted_by.name or "the content-drafter"
+                when = record.grove_drafted_at
+                text = f"Drafted at {record._grove_fmt_dt(when)} by {who}." if when else f"Drafted by {who}."
+            else:
+                text = "No draft requested."
+            record.grove_draft_status = text
+            record.grove_draft_stale = stale
+
+    def _grove_drafter_routine_note(self):
+        """Warning string when the content-drafter routine is not live, else ''.
+
+        Reads the drafter user's login_date. An unset param or missing user is
+        surfaced explicitly — that is the whole point (a request must never sit
+        with no indication that nothing will pick it up)."""
+        icp = self.env["ir.config_parameter"].sudo()
+        login = (icp.get_param(CONTENT_DRAFTER_LOGIN_PARAM) or "").strip()
+        if not login:
+            return (
+                "Routine not configured — no content-drafter login is set "
+                f"(System Parameter {CONTENT_DRAFTER_LOGIN_PARAM}), so requests will not be picked up."
+            )
+        user = self.env["res.users"].sudo().search([("login", "=", login)], limit=1)
+        if not user:
+            return (
+                f"Routine not configured — no content-drafter user '{login}' exists, so requests will not be picked up."
+            )
+        if not user.login_date or (fields.Datetime.now() - user.login_date) > timedelta(hours=DRAFTER_ACTIVE_HOURS):
+            return "Routine not active — the content-drafter has not signed in for over 24 h."
+        return ""
+
+    @staticmethod
+    def _grove_fmt_dt(value):
+        """Format an ISO string or datetime as 'YYYY-MM-DD HH:MM' (or '?')."""
+        if not value:
+            return "?"
+        if isinstance(value, str):
+            try:
+                value = fields.Datetime.from_string(value)
+            except (ValueError, TypeError):
+                return value
+        return fields.Datetime.to_string(value)[:16] if value else "?"
+
     # ── Fetch facts: USDA sync + enqueue Perenual (GOL-2391/B) ───────────
     def action_fetch_facts(self):
         """Form button: fill empty growing facts from USDA now, queue Perenual.
 
-        USDA (free, no key) runs synchronously and writes only the empty fields
-        it is authoritative-first for; its zone/spacing hints are posted to
-        chatter, never written. Perenual owns the rest but is rate-limited, so it
-        is enqueued as a grove.enrich.job and drained by the budgeted cron.
+        USDA (free, no key) runs synchronously and fills every empty field it can
+        (Josh ruling 2026-09-23, GOL-2542) — including the ones Perenual is
+        preferred for (sun/soil/watering/harvest/wildlife, provenance ``usda``),
+        the zones derived from minimum temperature (``usda_temp``) and the spacing
+        derived from planting density (``usda_density``). Perenual, drained later
+        by the budgeted cron, overwrites the fields it owns when it answers; if it
+        fails or has no match the USDA values stand.
         """
+        messages = []
         for record in self:
-            record._grove_fetch_facts_sync()
+            messages.append(record._grove_fetch_facts_sync())
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
             "params": {
                 "title": _("Fetch facts"),
-                "message": _(
-                    "USDA fields applied where empty (see the chatter). "
-                    "Perenual enrichment queued — it runs on the budgeted schedule."
-                ),
+                # Summarise the real result on click (GOL-2541): how many USDA
+                # fields filled and where Perenual sits in the queue, instead of
+                # a silent reload that hid whether anything happened.
+                "message": " ".join(messages) if len(self) > 1 else (messages[0] if messages else ""),
                 "type": "success",
+                "sticky": False,
                 "next": {"type": "ir.actions.act_window_close"},
             },
         }
 
     def _grove_fetch_facts_sync(self):
+        """Run USDA now, persist its outcome, queue Perenual. Return a summary line."""
         self.ensure_one()
         provider = USDAProvider()
         facts = provider.lookup(self.grove_botanical_name, cached_id=self.grove_usda_symbol or None)
         if facts.resolved_id and not self.grove_usda_symbol:
             self.grove_usda_symbol = facts.resolved_id
-        self._grove_apply_facts(facts, "usda")
-        self._grove_enqueue_perenual()
+        applied = self._grove_apply_facts(facts, "usda")
+        # Persist the USDA outcome: a no-match/candidates result leaves no job or
+        # provenance to reconstruct the status from later (GOL-2541).
+        if applied:
+            sym = f" (symbol {self.grove_usda_symbol})" if self.grove_usda_symbol else ""
+            usda_note = f"Filled {len(applied)} field(s) at {self._grove_fmt_dt(fields.Datetime.now())}{sym}."
+        elif self.grove_usda_symbol:
+            usda_note = f"Matched (symbol {self.grove_usda_symbol}) — no empty fields to fill."
+        elif facts.candidates:
+            usda_note = "No exact USDA match — candidates: " + ", ".join(facts.candidates)
+        else:
+            usda_note = "No USDA match."
+        self.grove_usda_fetch_note = usda_note
+
+        job = self._grove_enqueue_perenual()
+        return f"USDA: {usda_note} {self._grove_perenual_enqueue_summary(job)}"
+
+    def _grove_perenual_enqueue_summary(self, job):
+        """One-line 'where does Perenual stand now' summary for the click toast."""
+        self.ensure_one()
+        if not self.env["grove.enrich.job"].sudo()._provider_configured():
+            return "Perenual queued (waiting for API key)."
+        pos, total = job._grove_queue_position()
+        nextcall, _minutes = self._grove_enrich_cron_eta()
+        if pos and nextcall is not None:
+            return f"Perenual queued (#{pos} of {total} in line, next run {nextcall})."
+        if pos:
+            return f"Perenual queued (#{pos} of {total} in line)."
+        return "Perenual queued."
 
     def _grove_enqueue_perenual(self):
-        """Queue one Perenual enrich job for this product, unless one is pending."""
+        """Queue one Perenual enrich job for this product, reusing any pending one.
+
+        Returns the queued/running job (existing or freshly created) so callers
+        can report its queue position on click (GOL-2541)."""
         self.ensure_one()
         Job = self.env["grove.enrich.job"].sudo()
         existing = Job.search(
@@ -625,8 +955,9 @@ class ProductTemplate(models.Model):
             ],
             limit=1,
         )
-        if not existing:
-            Job.create({"product_tmpl_id": self.id, "provider": "perenual"})
+        if existing:
+            return existing
+        return Job.create({"product_tmpl_id": self.id, "provider": "perenual"})
 
     def _grove_field_empty(self, name):
         """True when a growing-fact field holds no usable value.
@@ -639,15 +970,39 @@ class ProductTemplate(models.Model):
             return not value
         return not str(value or "").strip()
 
-    def _grove_apply_facts(self, facts, provider_name):
-        """Apply a provider's PlantFacts to this template, conservatively.
+    def _grove_should_autofill(self, name, incoming_source, provenance):
+        """Whether an auto-fill/enrichment write should land on ``name``.
 
-        A field is written only when (a) this provider is authoritative-FIRST for
-        it in FIELD_PRECEDENCE and (b) the field is currently empty. Every write
-        is recorded in grove_facts_provenance and echoed to chatter one line per
-        field; hints/candidates are chatter-only. Writing provenance alongside a
-        content field clears the human "Facts reviewed" sign-off (see write()).
-        Returns True when at least one field was filled.
+        Josh ruling 2026-09-23 (GOL-2542): fill every field a source can, but
+        never clobber a human. An empty field is always filled. A field already
+        holding a machine value (provenance source in MACHINE_SOURCES) is upgraded
+        only by a strictly-preferred source — so USDA fills the Perenual-preferred
+        fields as a fallback, Perenual later overwrites those specific usda/agent
+        values, and a re-run of the same source is a no-op. A value with no machine
+        provenance (human form edit, data import, seed) is protected.
+        """
+        self.ensure_one()
+        if self._grove_field_empty(name):
+            return True
+        existing_source = (provenance.get(name) or {}).get("source")
+        if existing_source not in plant_mapping.MACHINE_SOURCES:
+            return False  # human / manual / imported value — never auto-overwrite
+        return plant_mapping.source_outranks(name, incoming_source, existing_source)
+
+    def _grove_apply_facts(self, facts, provider_name):
+        """Apply a provider's PlantFacts to this template (GOL-2542 auto-fill).
+
+        A field is written when it is empty, or when the value's source strictly
+        outranks the machine source that filled it before (see
+        _grove_should_autofill); human/unstamped values are never touched. Every
+        write is recorded in grove_facts_provenance and echoed to chatter one line
+        per field; hints/candidates are chatter-only. Writing provenance alongside
+        a content field clears the human "Facts reviewed" sign-off (see write()).
+        Returns the sorted list of field names actually written (empty list when
+        none) — a truthy/falsy list, so existing boolean callers still work, and
+        the enrich-job note can report what was really filled rather than the
+        provider's raw proposals. ``provider_name`` labels the chatter block; the
+        per-field provenance uses each value's own source.
         """
         self.ensure_one()
         writes = {}
@@ -655,16 +1010,21 @@ class ProductTemplate(models.Model):
         provenance = dict(self.grove_facts_provenance or {})
         now_iso = fields.Datetime.now().isoformat()
         for name, fv in facts.fields.items():
-            order = plant_mapping.FIELD_PRECEDENCE.get(name, ())
-            if not order or order[0] != provider_name:
-                continue  # this provider is not authoritative-first for the field
-            if not self._grove_field_empty(name):
-                continue  # never overwrite an existing value
+            if name not in self._fields:
+                continue  # provider proposed a field this model does not have
+            if not self._grove_should_autofill(name, fv.source, provenance):
+                continue
             writes[name] = fv.value
             provenance[name] = {"source": fv.source, "ref": fv.ref, "at": now_iso}
             lines.append(f"{escape(self._fields[name].string)}: {escape(str(fv.value))} (source: {escape(fv.source)})")
 
-        # Hints and candidates are chatter-only — never written to a field.
+        # Hints/candidates are never written to a growing-fact field, but the
+        # hint lines (zone/spacing) are persisted per provider so the form can
+        # show them inline, not only in chatter (GOL-2541).
+        if facts.hints:
+            stored = dict(self.grove_enrich_hints or {})
+            stored[provider_name] = list(facts.hints)
+            self.grove_enrich_hints = stored
         if facts.hints:
             self.message_post(
                 body=Markup("<b>{}</b> notes:<br/>{}").format(
@@ -680,8 +1040,9 @@ class ProductTemplate(models.Model):
                 )
             )
         if not writes:
-            return False
+            return []
 
+        applied = sorted(writes)  # content field names only (provenance not yet added)
         writes["grove_facts_provenance"] = provenance
         self.write(writes)
         self.message_post(
@@ -689,7 +1050,7 @@ class ProductTemplate(models.Model):
                 len(lines), provider_name.upper(), Markup("<br/>").join(Markup(line) for line in lines)
             )
         )
-        return True
+        return applied
 
     # ── Request content draft (GOL-2384/C) ──────────────────────────────
     def action_request_draft(self):
@@ -707,17 +1068,23 @@ class ProductTemplate(models.Model):
         """
         for record in self:
             record._grove_request_draft_one()
+        # Surface the drafter-routine health on click: if no drafter user is
+        # configured/active, the request would otherwise sit forever with no
+        # indication (GOL-2541) — warn instead of a plain success toast.
+        routine_note = self._grove_drafter_routine_note()
+        base = _(
+            "Draft requested. The content-drafter routine will pick this up on its next "
+            "run (every 15 min) and write the storefront description and care guide from the "
+            "recorded facts."
+        )
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
             "params": {
                 "title": _("Request content draft"),
-                "message": _(
-                    "Draft requested. The content-drafter routine will pick this "
-                    "up on its next run (every 15 min) and write the storefront "
-                    "description and care guide from the recorded facts."
-                ),
-                "type": "success",
+                "message": f"{base} {routine_note}" if routine_note else base,
+                "type": "warning" if routine_note else "success",
+                "sticky": bool(routine_note),
                 "next": {"type": "ir.actions.act_window_close"},
             },
         }
@@ -738,9 +1105,38 @@ class ProductTemplate(models.Model):
                 )
             )
         self.grove_draft_state = "requested"
+        # Stamp the request time so the form can show "Requested at <t>" and flag
+        # a stalled draft; clear any prior drafted-by attribution (GOL-2541).
+        self.grove_draft_requested_at = fields.Datetime.now()
+        self.grove_drafted_at = False
+        self.grove_drafted_by = False
         self.message_post(
             body=Markup("<b>Content draft requested.</b> Queued for the grove-content-drafter routine (GOL-2384/C).")
         )
+
+    def action_retry_enrich(self):
+        """Form button (failed banner): re-enqueue Perenual enrichment (GOL-2541)."""
+        queued = []
+        for record in self:
+            job = record._grove_latest_job("perenual")
+            if job and job.state == "failed":
+                new_job = record._grove_enqueue_perenual()
+                queued.append(record)
+                record.message_post(body=Markup("<b>Perenual enrichment re-queued</b> after a failure (GOL-2541)."))
+                new_job  # noqa: F841 — created for its side effect (queued row)
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": _("Retry enrichment"),
+                "message": _("Perenual enrichment re-queued — it runs on the next budgeted drain.")
+                if queued
+                else _("No failed enrichment to retry."),
+                "type": "success" if queued else "warning",
+                "sticky": False,
+                "next": {"type": "ir.actions.act_window_close"},
+            },
+        }
 
     # ── Publish gate (GOL-2382) ─────────────────────────────────────────
     def _grove_is_gated(self):

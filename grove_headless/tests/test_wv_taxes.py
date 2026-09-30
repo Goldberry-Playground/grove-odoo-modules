@@ -294,3 +294,89 @@ class TestPartnerStateResolution(TransactionCase):
         )
         state = self.env["res.country.state"].browse(vals.get("state_id"))
         self.assertEqual(state.code, "WV")
+
+
+@tagged("post_install", "-at_install")
+class TestBranchDuplicateTaxConvergence(GroveTaxFixtureMixin, TransactionCase):
+    """GOL-2449 prod incident (2026-09-23): a pre-existing per-BRANCH tax with
+    the same name as the root's makes the whole binder fail.
+
+    This is the shape TestBranchCompanyTaxBinding does not cover. On prod the
+    nursery owned its own "WV State Sales Tax 6%" (created 2026-08-08 by
+    data/grove_taxes.xml) while the hook created a second one on the root.
+    Odoo 19 scopes account.tax name-uniqueness to the hierarchy root AND
+    validates @api.constrains at FLUSH, so both rows landed and every later
+    flush raised "Tax names must be unique!" — swallowed per company, leaving
+    prod at "bound for only 1 of 3" with two companies on the demo 15%.
+
+    The binder must converge such a hierarchy to ONE root-owned record and bind
+    every company.
+    """
+
+    def setUp(self):
+        super().setUp()
+        self.root = self.env.ref("base.main_company")
+        self.branch = self.env.ref("grove_headless.company_nursery", raise_if_not_found=False) or self.env.ref(
+            "grove_headless.company_ggg"
+        )
+        self.assertTrue(self.branch.parent_id, "test company must be a branch, not the root")
+
+    def _subtree_state_taxes(self, env):
+        return env["account.tax"].search(
+            [
+                ("name", "=", WV_STATE_NAME),
+                ("company_id", "child_of", self.root.id),
+                ("type_tax_use", "=", "sale"),
+            ]
+        )
+
+    def test_binder_converges_a_branch_owned_duplicate_and_binds_every_company(self):
+        from odoo.addons.grove_headless.hooks import setup_wv_sales_tax
+
+        env = self.env(su=True)
+
+        # Reproduce prod: make the BRANCH own the state tax, with the root
+        # holding none. (Re-point an existing root record rather than creating a
+        # second one, which the constraint would reject outright.)
+        existing = self._subtree_state_taxes(env)
+        self.assertTrue(existing, "fixture must provide a WV state tax to relocate")
+        branch_tax = existing[0]
+        branch_tax.company_id = self.branch.id
+        env.flush_all()
+        self.assertEqual(branch_tax.company_id, self.branch, "precondition: branch owns the tax")
+
+        setup_wv_sales_tax(env)
+
+        # Exactly one record survives in the hierarchy, owned by the ROOT so
+        # every branch can use it (check_company is parent_of).
+        taxes = self._subtree_state_taxes(env)
+        self.assertEqual(len(taxes), 1, f"expected one shared WV state tax, got {taxes.mapped('company_id.name')}")
+        self.assertEqual(taxes.company_id, self.root, "the surviving tax must be owned by the hierarchy root")
+
+        # And every company is bound to it — the "1 of 3" regression.
+        for company in env["res.company"].search([]):
+            self.assertEqual(
+                company.account_sale_tax_id.name,
+                WV_STATE_NAME,
+                f"{company.name} must be bound to the WV 6% state tax, not the demo default",
+            )
+            self.assertEqual(company.account_sale_tax_id.amount, 6.0)
+
+    def test_convergence_preserves_the_oldest_record(self):
+        """The keeper is the oldest row, because it carries the product and
+        accounting history (on prod, 123 nursery templates referenced it)."""
+        from odoo.addons.grove_headless.hooks import _converge_root_wv_taxes
+
+        env = self.env(su=True)
+        existing = self._subtree_state_taxes(env)
+        self.assertTrue(existing)
+        oldest = min(existing, key=lambda t: t.id)
+        oldest_id = oldest.id
+        oldest.company_id = self.branch.id
+        env.flush_all()
+
+        _converge_root_wv_taxes(env, self.root)
+
+        taxes = self._subtree_state_taxes(env)
+        self.assertEqual(len(taxes), 1)
+        self.assertEqual(taxes.id, oldest_id, "convergence must keep the oldest record, not recreate a new one")

@@ -11,14 +11,17 @@ from . import (
     test_bundle_substitution,  # noqa: F401
     test_carrier_tracking,  # noqa: F401
     test_carrier_tracking_cron,  # noqa: F401
+    test_checkout_compliance_gate,  # noqa: F401
     test_checkout_quote,  # noqa: F401
     test_content_draft_request,  # noqa: F401
     test_detail_serialization,  # noqa: F401
     test_effective_shipping_tier,  # noqa: F401
     test_enrich_job,  # noqa: F401
+    test_enrich_status,  # noqa: F401
     test_fulfillment_pool_gate,  # noqa: F401
     test_fulfillment_state,  # noqa: F401
     test_growing_facts,  # noqa: F401
+    test_html_field_tracking,  # noqa: F401
     test_kit_boms,  # noqa: F401
     test_label_batch,  # noqa: F401
     test_listing_audit,  # noqa: F401
