@@ -537,6 +537,25 @@ def merge(*sources: PlantFacts) -> PlantFacts:
 
 DEFAULT_DAILY_BUDGET = 100
 
+# Perenual's free tier only serves species/details for species IDs at or below
+# this cutoff. Above it every species/details call returns HTTP 429 with an
+# "Upgrade Plan" body — a permanent per-species paywall, NOT a daily-quota limit
+# (verified live 2026-09-23, GOL-2511/GOL-2676: id 288 -> 200, id 8419 -> 429).
+# A single source of truth so the provider can skip the wasted call and the
+# queue can explain the reason and count how many products are paywalled.
+PERENUAL_FREE_TIER_MAX_ID = 3000
+
+
+def perenual_free_tier_gated(species_id) -> bool:
+    """True when a resolved Perenual species id is above the free-tier cutoff.
+
+    Non-numeric / missing ids are treated as not-gated (we only know a species
+    is paywalled once we have a real id above the cutoff)."""
+    try:
+        return int(species_id) > PERENUAL_FREE_TIER_MAX_ID
+    except (TypeError, ValueError):
+        return False
+
 
 def counter_key(utc_date: str) -> str:
     """ir.config_parameter key for the per-UTC-day Perenual call counter."""

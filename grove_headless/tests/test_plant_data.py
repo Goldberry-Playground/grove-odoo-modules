@@ -521,6 +521,41 @@ class TestPerenualProvider(unittest.TestCase):
         self.assertEqual(facts.fields, {})
         self.assertTrue(facts.candidates)
 
+    def test_cached_id_above_free_tier_skips_details_call(self):
+        # A cached id above the free-tier cutoff always 429s "Upgrade Plan";
+        # skip the wasted details call entirely — zero HTTP, and raise
+        # plan-gated carrying the id (GOL-2676).
+        calls = []
+        n = {"c": 0}
+
+        def get(url, params=None, timeout=None):
+            calls.append(url)
+            raise AssertionError(f"no HTTP call expected, got {url}")
+
+        prov = perenual.PerenualProvider(get=get, api_key="k", on_call=lambda: n.__setitem__("c", n["c"] + 1))
+        with self.assertRaises(perenual.PerenualPlanGated) as cm:
+            prov.lookup("Juglans nigra", cached_id=4464)
+        self.assertEqual(cm.exception.species_id, 4464)
+        self.assertEqual(calls, [])  # no details call
+        self.assertEqual(n["c"], 0)  # nothing counted against the daily budget
+
+    def test_fresh_match_above_free_tier_skips_details_call(self):
+        # species-list resolves to an id above the cutoff -> skip the details
+        # call (it would only rediscover the paywall), so exactly one HTTP call.
+        calls = []
+
+        def get(url, params=None, timeout=None):
+            calls.append(url)
+            if url.endswith("/species-list"):
+                return _Resp({"data": [{"id": 4464, "scientific_name": ["Juglans nigra"]}]})
+            raise AssertionError(f"details call should have been skipped, got {url}")
+
+        prov = perenual.PerenualProvider(get=get, api_key="k")
+        with self.assertRaises(perenual.PerenualPlanGated) as cm:
+            prov.lookup("Juglans nigra")
+        self.assertEqual(cm.exception.species_id, 4464)
+        self.assertEqual(len(calls), 1)  # species-list only, no details
+
 
 # ── merge precedence ──────────────────────────────────────────────────────────
 

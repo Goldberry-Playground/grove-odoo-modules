@@ -24,6 +24,16 @@ STRIPE_API_BASE = "https://api.stripe.com"
 CURRENCY = "usd"
 DEFAULT_TIMEOUT = 30
 
+# Stripe product tax codes (GOL-2568, Josh ruling 2026-09-29). The nursery
+# Stripe account's default is txcd_99999999 (General — Tangible Goods); we stamp
+# it explicitly on every goods line so the intent is legible in Stripe's
+# reports, tag the shipping line with the Shipping code so Stripe applies each
+# state's shipping-taxability rule, and tag gift cards with the gift-card code
+# (gift cards are non-taxable at sale; tax lands when the card is redeemed).
+TAX_CODE_GOODS = "txcd_99999999"  # General — Tangible Goods
+TAX_CODE_SHIPPING = "txcd_92010001"  # Shipping
+TAX_CODE_GIFT_CARD = "txcd_10401000"  # Gift card (non-taxable at sale)
+
 # Deposit rule (GOL-2233, ratified by Josh in the 2026-09-07 release-train
 # session): an order that triggers a deposit — sold-out bareroot OR any order
 # placed after the season cutover (default Oct 15) — is charged ONE flat $10
@@ -133,6 +143,30 @@ def _flatten(prefix, value, out):
     return out
 
 
+def _price_data(li, *, tax_enabled):
+    """price_data for one Stripe line item.
+
+    When Stripe Tax is on (GOL-2568) prices stay tax-EXCLUSIVE and every line
+    carries a Stripe tax code (`product_data[tax_code]`) so Stripe applies the
+    right destination rule per line — goods vs shipping vs gift card. When Tax is
+    off (the deposit path, where tax is deferred to ship-time settlement) the
+    tax_code/tax_behavior are omitted so the flat deposit is charged verbatim.
+    """
+    product_data = {"name": li["name"]}
+    if tax_enabled and li.get("tax_code"):
+        product_data["tax_code"] = li["tax_code"]
+    price_data = {
+        "currency": CURRENCY,
+        "unit_amount": int(li["amount_cents"]),
+        "product_data": product_data,
+    }
+    if tax_enabled:
+        # Grove prices are entered tax-exclusive; Stripe adds destination tax on
+        # top rather than backing it out of the shown price (Josh 2026-09-29).
+        price_data["tax_behavior"] = "exclusive"
+    return price_data
+
+
 def build_session_params(
     *,
     line_items,
@@ -140,18 +174,28 @@ def build_session_params(
     cancel_url,
     metadata=None,
     customer_email=None,
+    customer=None,
+    automatic_tax=False,
     setup_future_usage=False,
     discount_coupon_id=None,
 ):
     """Build the flat form params for POST /v1/checkout/sessions.
 
     `line_items` is a list of {"name": str, "amount_cents": int, "quantity": int}
-    already resolved through the charging matrix — all POSITIVE. Stripe Tax is
-    OFF; tax rides in as its own explicit line item built by the caller from
-    Odoo's amount_tax. A promo discount cannot be a negative line item (Stripe
-    rejects a negative `unit_amount`); it is applied via `discount_coupon_id` —
-    an existing one-time coupon id — which Stripe subtracts from the total
-    (GOL-2088).
+    (optionally "tax_code") already resolved through the charging matrix — all
+    POSITIVE. A promo discount cannot be a negative line item (Stripe rejects a
+    negative `unit_amount`); it is applied via `discount_coupon_id` — an existing
+    one-time coupon id — which Stripe subtracts from the total (GOL-2088).
+
+    Sales-tax handling (GOL-2568, Josh ruling 2026-09-29): when
+    ``automatic_tax`` is True, Stripe Tax computes destination tax on the session
+    (``automatic_tax[enabled]=true``) and we NO LONGER pass a "Sales tax" line —
+    each goods/shipping line carries its own tax code and stays tax-exclusive.
+    The ship-to lives on a Stripe Customer we build from the order's address, so
+    ``customer`` is passed with ``customer_update[shipping]=auto`` (never
+    ``shipping_address_collection`` — no double entry). ``customer`` and
+    ``customer_email`` are mutually exclusive in Stripe, so ``customer`` wins
+    when both are given.
     """
     nested = {
         "mode": "payment",
@@ -159,19 +203,23 @@ def build_session_params(
         "cancel_url": cancel_url,
         "line_items": [
             {
-                "price_data": {
-                    "currency": CURRENCY,
-                    "unit_amount": int(li["amount_cents"]),
-                    "product_data": {"name": li["name"]},
-                },
+                "price_data": _price_data(li, tax_enabled=automatic_tax),
                 "quantity": int(li.get("quantity", 1)),
             }
             for li in line_items
         ],
     }
+    if automatic_tax:
+        nested["automatic_tax"] = {"enabled": True}
     if discount_coupon_id:
         nested["discounts"] = [{"coupon": discount_coupon_id}]
-    if customer_email:
+    if customer:
+        # A Customer carrying the ship-to address is how Stripe Tax learns the
+        # destination without a second on-page address entry. customer_update
+        # [shipping]=auto lets the session reconcile/save that shipping address.
+        nested["customer"] = customer
+        nested["customer_update"] = {"shipping": "auto"}
+    elif customer_email:
         nested["customer_email"] = customer_email
     if metadata:
         nested["metadata"] = metadata
@@ -218,12 +266,18 @@ def create_checkout_session(
     cancel_url,
     metadata=None,
     customer_email=None,
+    customer=None,
+    automatic_tax=False,
     setup_future_usage=False,
     post=requests.post,
     timeout=DEFAULT_TIMEOUT,
 ):
     """Create a Stripe Checkout Session. Returns the parsed session dict
     (has `id`, `url`, `payment_intent`). Raises StripeError on any non-2xx.
+
+    ``customer`` + ``automatic_tax`` enable Stripe Tax on the session (GOL-2568):
+    Stripe computes destination tax from the Customer's shipping address instead
+    of an explicit "Sales tax" line item. See ``build_session_params``.
 
     A promo discount is passed in as one or more NEGATIVE-amount entries in
     `line_items` (kind "discount"). Stripe Checkout can't take a negative
@@ -254,6 +308,8 @@ def create_checkout_session(
         cancel_url=cancel_url,
         metadata=metadata,
         customer_email=customer_email,
+        customer=customer,
+        automatic_tax=automatic_tax,
         setup_future_usage=setup_future_usage,
         discount_coupon_id=coupon_id,
     )
@@ -369,6 +425,165 @@ def retrieve_payment_intent(secret_key, payment_intent_id, *, get=requests.get, 
         timeout=timeout,
     )
     return _parse(resp, "payment intent")
+
+
+# ── Customer (Stripe Tax address carrier) ───────────────────────────────────
+#
+# Stripe Tax needs the ship-to address to compute destination tax. Rather than
+# turn on Checkout's shipping_address_collection (which would make the shopper
+# re-type an address they already gave us), Josh's route (2026-09-29) is to put
+# the checkout form's ship-to on a Stripe Customer and pass that customer to the
+# session. Pickup orders carry the farm address (WV), matching Odoo's WV-nexus
+# rule. We reuse a Customer by email so a repeat buyer doesn't accumulate one
+# per order, refreshing its shipping to the address on THIS order.
+
+
+def find_customer_by_email(secret_key, email, *, get=requests.get, timeout=DEFAULT_TIMEOUT):
+    """Return the most recent existing Stripe Customer with ``email``, or None.
+
+    Stripe does not dedupe customers by email, so ``ensure_customer`` uses this
+    to reuse one we already made rather than pile up a customer per checkout.
+    Raises StripeError on a missing key or non-2xx."""
+    if not secret_key:
+        raise StripeError("Stripe secret key is not configured")
+    if not email:
+        return None
+    resp = get(
+        f"{STRIPE_API_BASE}/v1/customers",
+        params={"email": email, "limit": 1},
+        auth=(secret_key, ""),
+        timeout=timeout,
+    )
+    data = _parse(resp, "customer lookup")
+    items = data.get("data") or []
+    return items[0] if items else None
+
+
+def _customer_params(*, email, name, shipping):
+    nested = {}
+    if email:
+        nested["email"] = email
+    if name:
+        nested["name"] = name
+    if shipping:
+        # shipping = {"name": str, "address": {"line1","line2","city","state",
+        # "postal_code","country"}} — Stripe Tax reads customer.shipping.address.
+        nested["shipping"] = shipping
+    return nested
+
+
+def create_customer(secret_key, *, email=None, name=None, shipping=None, post=requests.post, timeout=DEFAULT_TIMEOUT):
+    """Create a Stripe Customer carrying the ship-to as shipping[name]+[address].
+    Returns the parsed customer dict (has `id`). Raises StripeError on non-2xx."""
+    if not secret_key:
+        raise StripeError("Stripe secret key is not configured")
+    resp = post(
+        f"{STRIPE_API_BASE}/v1/customers",
+        data=_flatten("", _customer_params(email=email, name=name, shipping=shipping), {}),
+        auth=(secret_key, ""),
+        timeout=timeout,
+    )
+    return _parse(resp, "customer")
+
+
+def update_customer(secret_key, customer_id, *, name=None, shipping=None, post=requests.post, timeout=DEFAULT_TIMEOUT):
+    """Refresh an existing Customer's name/shipping. Returns the parsed dict."""
+    if not secret_key:
+        raise StripeError("Stripe secret key is not configured")
+    if not customer_id:
+        raise StripeError("cannot update a customer without an id")
+    resp = post(
+        f"{STRIPE_API_BASE}/v1/customers/{customer_id}",
+        data=_flatten("", _customer_params(email=None, name=name, shipping=shipping), {}),
+        auth=(secret_key, ""),
+        timeout=timeout,
+    )
+    return _parse(resp, "customer")
+
+
+def ensure_customer(
+    secret_key, *, email, name=None, shipping=None, post=requests.post, get=requests.get, timeout=DEFAULT_TIMEOUT
+):
+    """Reuse the Customer for ``email`` (refreshing shipping) or create one.
+    Returns the parsed customer dict. Raises StripeError on non-2xx."""
+    existing = find_customer_by_email(secret_key, email, get=get, timeout=timeout) if email else None
+    if existing and existing.get("id"):
+        return update_customer(secret_key, existing["id"], name=name, shipping=shipping, post=post, timeout=timeout)
+    return create_customer(secret_key, email=email, name=name, shipping=shipping, post=post, timeout=timeout)
+
+
+# ── Stripe Tax calculation (ship-time settlement) ───────────────────────────
+#
+# The Checkout Session computes tax itself, but the off-session balance capture
+# at ship (GOL-2233/2053) is a raw PaymentIntent with no session, so it has to
+# ask Stripe Tax for the number directly: POST /v1/tax/calculations with the
+# same line items + address, charge the returned tax, then record a
+# tax/transaction from the calculation so Stripe's tax reports include it.
+
+
+def create_tax_calculation(
+    secret_key,
+    *,
+    line_items,
+    address,
+    address_source="shipping",
+    customer=None,
+    post=requests.post,
+    timeout=DEFAULT_TIMEOUT,
+):
+    """POST /v1/tax/calculations for a set of line items shipped to ``address``.
+
+    ``line_items`` is a list of {"amount": cents, "reference": str,
+    "tax_code": str, "quantity": int?} (amounts tax-exclusive, matching
+    checkout). ``address`` is {"line1","city","state","postal_code","country"}.
+    Returns the parsed calculation dict — ``id``, ``tax_amount_exclusive`` (total
+    tax in cents), and ``tax_breakdown``/``tax_summary`` for the jurisdictions.
+    Raises StripeError on non-2xx."""
+    if not secret_key:
+        raise StripeError("Stripe secret key is not configured")
+    if not line_items:
+        raise StripeError("cannot compute tax with no line items")
+    nested = {
+        "currency": CURRENCY,
+        "line_items": [
+            {
+                "amount": int(li["amount"]),
+                "reference": li["reference"],
+                "tax_code": li.get("tax_code", TAX_CODE_GOODS),
+                "tax_behavior": "exclusive",
+                "quantity": int(li.get("quantity", 1)),
+            }
+            for li in line_items
+        ],
+        "customer_details": {"address": address, "address_source": address_source},
+    }
+    if customer:
+        nested["customer"] = customer
+    resp = post(
+        f"{STRIPE_API_BASE}/v1/tax/calculations",
+        data=_flatten("", nested, {}),
+        auth=(secret_key, ""),
+        timeout=timeout,
+    )
+    return _parse(resp, "tax calculation")
+
+
+def create_tax_transaction(secret_key, *, calculation, reference, post=requests.post, timeout=DEFAULT_TIMEOUT):
+    """Record a tax/transaction from a calculation so Stripe Tax reports include
+    the settled tax (POST /v1/tax/transactions/create_from_calculation).
+    ``reference`` must be unique per transaction (use the order name). Returns the
+    parsed transaction dict. Raises StripeError on non-2xx."""
+    if not secret_key:
+        raise StripeError("Stripe secret key is not configured")
+    if not calculation:
+        raise StripeError("cannot create a tax transaction without a calculation id")
+    resp = post(
+        f"{STRIPE_API_BASE}/v1/tax/transactions/create_from_calculation",
+        data=_flatten("", {"calculation": calculation, "reference": reference}, {}),
+        auth=(secret_key, ""),
+        timeout=timeout,
+    )
+    return _parse(resp, "tax transaction")
 
 
 def _parse(resp, what):
