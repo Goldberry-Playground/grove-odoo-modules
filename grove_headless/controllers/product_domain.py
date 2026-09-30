@@ -35,7 +35,7 @@ LAYER_VALUES = {"canopy", "understory", "shrub", "ground", "vine"}
 SUN_VALUES = {"full", "partial", "shade"}
 
 
-def build_product_domain(kwargs: dict, company_id: int, cat_category_ids=None) -> list:
+def build_product_domain(kwargs: dict, company_id: int, cat_category_ids=None, dept_category_ids=None) -> list:
     # Visibility is gated by `website_published` alone — NOT `sale_ok`. A
     # published-but-not-for-sale "coming soon" placeholder (sale_ok=False,
     # GOL-757/760) must appear in the /shop grid and ?cat= facets so shoppers
@@ -58,6 +58,18 @@ def build_product_domain(kwargs: dict, company_id: int, cat_category_ids=None) -
     # never the whole catalog (which a bare `("public_categ_ids","in",[])` would).
     if str(kwargs.get("cat") or "").strip():
         domain.append(("public_categ_ids", "in", cat_category_ids or [-1]))
+    # ?dept=<slug> scopes to one department: its own category id + every
+    # descendant, resolved Odoo-side by the controller (GOL-2744). Same empty-set
+    # guard as ?cat= — an unknown department must match nothing, not everything.
+    if str(kwargs.get("dept") or "").strip():
+        domain.append(("public_categ_ids", "in", dept_category_ids or [-1]))
+    # ?q=<term> — cross-department keyword search. Runs across the whole
+    # (published) catalog by design: departments are not scoped out, so a search
+    # hits every live department + the Guilds collection at once (GOL-2744).
+    # Coming-soon matches come from the /catalog/nav coming_list, client-side.
+    q = str(kwargs.get("q") or "").strip()
+    if q:
+        domain += ["|", ("name", "ilike", q), ("default_code", "ilike", q)]
     slug = str(kwargs.get("slug") or "").strip().lower()
     if slug:
         domain.append(("grove_slug", "=", slug))

@@ -544,7 +544,215 @@ def setup_pos_configs(env):
         )
 
 
+# ── Department tree restructure (GOL-2744) ──────────────────────────────────
+#
+# The nursery groups its public-category tree into departments (Orchard, plus
+# the coming-soon Mycoforestry / Forest farming / Seed & scion families) and a
+# cross-cutting Guilds collection. See grove-sites
+# docs/superpowers/specs/2026-09-30-nursery-shop-departments-design.md.
+#
+# Existing category IDs are kept: the orchard top-level categories are reparented
+# under a new Orchard department root, category "Food Forest Packages" becomes
+# the Guilds collection, and "Mycoforestry" becomes a coming-soon department. New
+# coming-soon departments and their child categories are created. Idempotent, so
+# it is safe from both the post_init hook (fresh install) and the -u migration.
+
+# Current display names of the orchard top-level categories, reparented (by name)
+# under the Orchard department. Match is case-insensitive.
+_ORCHARD_CATEGORY_NAMES = (
+    "Fruit Trees",
+    "Nut Trees",
+    "Berry & Nut Shrubs",
+    "Fruiting Vines",
+    "Native",
+)
+
+# Desired departments: slug -> (name, status, sequence, facets, [child names]).
+# The Orchard root adopts the existing orchard categories above; the coming-soon
+# departments' children are created fresh. Facets are drawn from the spec's
+# allowlist (models/product_public_category.GROVE_FACET_ALLOWLIST).
+_DEPARTMENT_SPEC = {
+    "orchard-food-forest": {
+        "name": "Orchard & food forest",
+        "status": "live",
+        "sequence": 10,
+        "facets": "zone,layer,sun,uses,on_offer,ships",
+        "adopt": _ORCHARD_CATEGORY_NAMES,
+        "children": (),
+    },
+    "mycoforestry": {
+        "name": "Mycoforestry",
+        "status": "coming_soon",
+        "sequence": 20,
+        "facets": "host_tree,fungus,zone,ships",
+        # Adopts the existing "Mycoforestry" category (id 7 on prod) as its root.
+        "adopt_as_root": "Mycoforestry",
+        "children": ("Truffle trees", "Porcini trees"),
+    },
+    "forest-farming": {
+        "name": "Forest farming",
+        "status": "coming_soon",
+        "sequence": 30,
+        "facets": "shade_level,years_to_harvest,uses,zone,ships",
+        "children": ("Medicinal roots", "Woodland edibles"),
+    },
+    "seed-and-scion": {
+        "name": "Seed & scion",
+        "status": "coming_soon",
+        "sequence": 40,
+        "facets": "form,species,ships",
+        "children": ("Scion wood", "Seed", "Rootstock"),
+    },
+}
+
+# The existing "Food Forest Packages" category becomes the Guilds collection.
+_GUILDS_SLUG = "guilds"
+_GUILDS_NAME = "Guilds"
+_GUILDS_SOURCE_NAME = "Food Forest Packages"
+
+
+def _public_slugify(text):
+    """slugify() without importing the controllers package at model-load time."""
+    from .controllers.product_domain import slugify
+
+    return slugify(text)
+
+
+def _find_category_by_name(Category, name):
+    """First public category matching ``name`` case-insensitively, else empty."""
+    return Category.search([("name", "=ilike", name)], limit=1)
+
+
+def _unique_public_slug(Category, base, keep_id=None):
+    """Return ``base`` (or ``base-<n>``) not already used by another category."""
+    if not base:
+        return base
+    slug = base
+    n = 1
+    while True:
+        clash = Category.search([("grove_slug", "=", slug), ("id", "!=", keep_id or 0)], limit=1)
+        if not clash:
+            return slug
+        n += 1
+        slug = f"{base}-{n}"
+
+
+def _backfill_public_slugs(Category):
+    """Set grove_slug = slugify(current name) on every category still missing one.
+
+    Run first so existing URLs (?cat=fruit-trees, …) are preserved before any
+    rename below changes a name. Skips rows that already carry a slug.
+    """
+    for category in Category.search([("grove_slug", "in", (False, ""))]):
+        base = _public_slugify(category.name)
+        category.grove_slug = _unique_public_slug(Category, base, keep_id=category.id)
+
+
+def _ensure_category(Category, slug, name, vals):
+    """Upsert a public category by grove_slug; returns the record.
+
+    Found -> writes the given vals (name/kind/status/etc.). Missing -> creates it
+    with the slug. Never touches parent unless ``vals`` carries ``parent_id``.
+    """
+    record = Category.search([("grove_slug", "=", slug)], limit=1)
+    write_vals = dict(vals)
+    write_vals.setdefault("name", name)
+    if record:
+        record.write(write_vals)
+        return record
+    write_vals["grove_slug"] = slug
+    return Category.create(write_vals)
+
+
+def restructure_department_tree(env):
+    """Build the department tree on ``product.public.category`` (GOL-2744).
+
+    Idempotent and order-safe: backfills slugs, converts the Food Forest Packages
+    category into the Guilds collection, stands up the four departments (adopting
+    the existing orchard categories and the Mycoforestry category, keeping their
+    IDs), and creates the coming-soon child categories.
+    """
+    Category = env["product.public.category"].sudo()
+
+    # 1. Preserve existing URLs before any rename.
+    _backfill_public_slugs(Category)
+
+    # 2. Food Forest Packages -> Guilds collection (keep its id + products).
+    guilds = Category.search([("grove_slug", "=", _GUILDS_SLUG)], limit=1)
+    if not guilds:
+        guilds = _find_category_by_name(Category, _GUILDS_SOURCE_NAME)
+    if guilds:
+        guilds.write(
+            {
+                "name": _GUILDS_NAME,
+                "grove_slug": _GUILDS_SLUG,
+                "grove_node_kind": "collection",
+                "parent_id": False,
+            }
+        )
+    else:
+        guilds = _ensure_category(
+            Category,
+            _GUILDS_SLUG,
+            _GUILDS_NAME,
+            {"grove_node_kind": "collection", "parent_id": False},
+        )
+
+    # 3. Departments + their categories.
+    for slug, spec in _DEPARTMENT_SPEC.items():
+        dept_vals = {
+            "grove_node_kind": "department",
+            "grove_dept_status": spec["status"],
+            "grove_facets": spec["facets"],
+            "sequence": spec["sequence"],
+            "parent_id": False,
+        }
+        # A department may adopt an existing category as its root (keeps id 7 for
+        # Mycoforestry); otherwise it is upserted by slug.
+        root = None
+        adopt_root_name = spec.get("adopt_as_root")
+        if adopt_root_name:
+            root = _find_category_by_name(Category, adopt_root_name)
+        if root:
+            dept_vals["name"] = spec["name"]
+            dept_vals["grove_slug"] = slug
+            root.write(dept_vals)
+        else:
+            root = _ensure_category(Category, slug, spec["name"], dept_vals)
+
+        # Reparent existing orchard categories under the department root.
+        for adopt_name in spec.get("adopt", ()):
+            child = _find_category_by_name(Category, adopt_name)
+            if child and child.id != root.id:
+                child.write({"parent_id": root.id, "grove_node_kind": "category"})
+
+        # Create the coming-soon child categories.
+        for child_name in spec.get("children", ()):
+            child_slug = _unique_public_slug(Category, _public_slugify(child_name))
+            existing = _find_category_by_name(Category, child_name)
+            if existing:
+                existing.write({"parent_id": root.id, "grove_node_kind": "category"})
+            else:
+                Category.create(
+                    {
+                        "name": child_name,
+                        "grove_slug": child_slug,
+                        "grove_node_kind": "category",
+                        "parent_id": root.id,
+                    }
+                )
+
+    _logger.info("grove_headless: department tree restructured (GOL-2744)")
+
+
 def post_init_hook(env):
     """Run on fresh install of grove_headless."""
     setup_wv_sales_tax(env)
     setup_pos_configs(env)
+    # NB: restructure_department_tree is deliberately NOT called here. It runs
+    # only from the 19.0.1.56.0 migration, against a DB that already holds the
+    # real public categories (prod ids 1-7). A fresh install has no categories to
+    # restructure, and building empty department roots pre-emptively would then
+    # collide with the categories a QA seed creates afterwards (the seed itself
+    # calls restructure_department_tree once its categories exist — GOL-2744
+    # follow-up on the QA seed).

@@ -45,6 +45,7 @@ from . import (
     test_shipping_rates_feed,  # noqa: F401
     test_shipping_zones,  # noqa: F401
     test_shippo_client,  # noqa: F401
+    test_shop_departments,  # noqa: F401
     test_stripe_checkout,  # noqa: F401
     test_tenant_routing,  # noqa: F401
     test_wv_taxes,  # noqa: F401

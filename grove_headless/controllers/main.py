@@ -18,7 +18,7 @@ from ..models import bundle_substitution, promotions, stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
 from ..models.mail_from import mail_from_vals
-from ..models.newsletter import newsletter_tag_names
+from ..models.newsletter import WAITLIST_INTEREST_PREFIX, newsletter_tag_names
 from ..models.order_alerts import (
     build_order_card_payload,
     format_merchant_email,
@@ -411,6 +411,174 @@ def _fulfillment_flags(product):
     }
 
 
+def _category_slug(category):
+    """URL slug the API emits/matches for a public category (GOL-2744).
+
+    Prefers the authored ``grove_slug`` and falls back to ``slugify(name)`` so a
+    rename no longer silently changes a category's URL. Single source of truth
+    is the model helper; this thin wrapper keeps the call sites readable.
+    """
+    return category.grove_effective_slug()
+
+
+def _category_department(category):
+    """Walk a category's ancestry to the department root it lives under.
+
+    Returns the ``product.public.category`` record whose ``grove_node_kind`` is
+    ``department`` (a category is at most under one department), or an empty
+    recordset when the category hangs off no department (e.g. the Guilds
+    collection, or legacy categories the migration hasn't reparented).
+    """
+    node = category
+    seen = set()
+    while node:
+        if node.id in seen:  # guard against a cyclic parent_id
+            break
+        seen.add(node.id)
+        if node.grove_node_kind == "department":
+            return node
+        node = node.parent_id
+    return category.browse()
+
+
+def _product_department(product):
+    """`{slug, name}` for the department a product belongs to, else ``None``.
+
+    Derived from the product's public-category ancestry. A product mapped into
+    more than one department (rare) resolves to the first one found in
+    ``public_categ_ids`` order, which is stable.
+    """
+    for category in product.public_categ_ids:
+        dept = _category_department(category)
+        if dept:
+            return {"slug": _category_slug(dept), "name": dept.name}
+    return None
+
+
+def _dept_category_ids(env, dept_slug):
+    """Public-category ids under a department slug, for the ``dept=`` filter.
+
+    Resolves the department root by ``grove_slug`` (falling back to
+    ``slugify(name)``) and returns the ids of the department itself plus every
+    descendant category, so ``public_categ_ids in [...]`` selects the whole
+    department. An unknown slug returns ``[]`` -> the caller must treat that as
+    "match nothing" (``[-1]``), never "match everything".
+    """
+    slug = slugify(dept_slug or "")
+    if not slug:
+        return []
+    Category = env["product.public.category"].sudo()
+    departments = Category.search([("grove_node_kind", "=", "department")])
+    root = departments.filtered(lambda c: _category_slug(c) == slug)
+    if not root:
+        return []
+    root = root[0]
+    # child_id is the direct-children One2many; recurse for the full subtree.
+    ids = [root.id]
+    frontier = root.child_id
+    while frontier:
+        ids.extend(frontier.ids)
+        frontier = frontier.child_id
+    return ids
+
+
+def _published_category_counts(env, company):
+    """Published-product counts keyed by public-category id, for one company.
+
+    One search over published templates; each product contributes to every
+    public category it is directly tagged with. The nav builder rolls these up
+    to department and collection totals via the category ancestry.
+    """
+    Template = env["product.template"].sudo().with_company(company)
+    products = Template.search(
+        [
+            ("website_published", "=", True),
+            ("company_id", "in", [company.id, False]),
+        ]
+    )
+    counts = {}
+    dept_products = {}  # department id -> set(product ids), for de-duped rollup
+    coll_products = {}
+    for product in products:
+        for category in product.public_categ_ids:
+            counts[category.id] = counts.get(category.id, 0) + 1
+            dept = _category_department(category)
+            if dept:
+                dept_products.setdefault(dept.id, set()).add(product.id)
+            node = category
+            seen = set()
+            while node:
+                if node.id in seen:
+                    break
+                seen.add(node.id)
+                if node.grove_node_kind == "collection":
+                    coll_products.setdefault(node.id, set()).add(product.id)
+                node = node.parent_id
+    dept_counts = {k: len(v) for k, v in dept_products.items()}
+    coll_counts = {k: len(v) for k, v in coll_products.items()}
+    return counts, dept_counts, coll_counts
+
+
+def _serialize_department(dept, direct_counts, dept_counts):
+    """Serialize one department root (+ its categories) for /catalog/nav."""
+    product_count = dept_counts.get(dept.id, 0)
+    categories = []
+    for child in dept.child_id.sorted(lambda c: (c.sequence, c.id)):
+        categories.append(
+            {
+                "slug": _category_slug(child),
+                "name": child.name,
+                "count": direct_counts.get(child.id, 0),
+            }
+        )
+    return {
+        "slug": _category_slug(dept),
+        "name": dept.name,
+        "kind": "department",
+        "status": dept.grove_dept_status or "live",
+        "teaser": dept.grove_teaser or "",
+        "facets": dept.grove_facet_list(),
+        "coming_list": dept.grove_coming_items(),
+        "categories": categories,
+        "product_count": product_count,
+    }
+
+
+def _catalog_nav(env, company):
+    """Build the storefront department tree for /catalog/nav (GOL-2744).
+
+    Departments render when their status is ``live`` **and** they have >=1
+    published product, or when their status is ``coming_soon``; ``hidden``
+    departments and live-with-zero-product departments are dropped here so the
+    storefront never has to know the rule. The Guilds collection is returned
+    alongside as its own node (it can hold products from any department).
+    """
+    Category = env["product.public.category"].sudo()
+    direct_counts, dept_counts, coll_counts = _published_category_counts(env, company)
+
+    departments = []
+    for dept in Category.search([("grove_node_kind", "=", "department")]).sorted(lambda c: (c.sequence, c.id)):
+        status = dept.grove_dept_status or "live"
+        if status == "hidden":
+            continue
+        if status == "live" and dept_counts.get(dept.id, 0) == 0:
+            continue
+        departments.append(_serialize_department(dept, direct_counts, dept_counts))
+
+    guilds = None
+    collection = Category.search([("grove_node_kind", "=", "collection")], limit=1)
+    if collection:
+        guilds = {
+            "slug": _category_slug(collection),
+            "name": collection.name,
+            "kind": "collection",
+            "teaser": collection.grove_teaser or "",
+            "product_count": coll_counts.get(collection.id, 0),
+        }
+
+    return {"departments": departments, "guilds": guilds}
+
+
 def _gate_guide_fields(product, data):
     """Withhold the species-guide body until Wes has approved it.
 
@@ -596,9 +764,21 @@ class GroveHeadlessAPI(http.Controller):
         if str(kwargs.get("cat") or "").strip():
             cat_slug = slugify(kwargs.get("cat"))
             categories = request.env["product.public.category"].sudo().search([])
-            cat_category_ids = [c.id for c in categories if slugify(c.name) == cat_slug]
+            cat_category_ids = [c.id for c in categories if _category_slug(c) == cat_slug]
 
-        domain = build_product_domain(kwargs, current_company.id, cat_category_ids=cat_category_ids)
+        # ?dept=<slug> scopes the grid to one department (its own category +
+        # every descendant). An unknown slug resolves to [] so the domain builder
+        # matches nothing rather than the whole catalog (GOL-2744).
+        dept_category_ids = None
+        if str(kwargs.get("dept") or "").strip():
+            dept_category_ids = _dept_category_ids(request.env, kwargs.get("dept"))
+
+        domain = build_product_domain(
+            kwargs,
+            current_company.id,
+            cat_category_ids=cat_category_ids,
+            dept_category_ids=dept_category_ids,
+        )
 
         limit = min(int(kwargs.get("limit", 40)), 200)
         offset = int(kwargs.get("offset", 0))
@@ -640,8 +820,9 @@ class GroveHeadlessAPI(http.Controller):
                     data["in_stock"] = _list_in_stock(product)
                 data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
                 data["categories"] = [
-                    {"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids
+                    {"id": c.id, "name": c.name, "slug": _category_slug(c)} for c in product.public_categ_ids
                 ]
+                data["department"] = _product_department(product)
                 data["variant_count"] = len(product.product_variant_ids)
                 data["cultivar_count"] = _cultivar_count(product)
                 # GOL-2587: fulfillment/compliance flags so the storefront can
@@ -717,7 +898,8 @@ class GroveHeadlessAPI(http.Controller):
         # the app has switched over.
         data["description_html"] = product.description_ecommerce or None
         data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
-        data["categories"] = [{"id": c.id, "name": c.name, "slug": slugify(c.name)} for c in product.public_categ_ids]
+        data["categories"] = [{"id": c.id, "name": c.name, "slug": _category_slug(c)} for c in product.public_categ_ids]
+        data["department"] = _product_department(product)
         data["images"] = _serialize_images(product)
         # Preorder-cap sold-out state (GOL-2171) — same derived flag as the grid
         # so the PDP buy box renders sold-out identically whether it came from
@@ -725,6 +907,27 @@ class GroveHeadlessAPI(http.Controller):
         data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
 
         return _json_response(data)
+
+    # ── Catalog nav (department tree) ────────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/catalog/nav",
+        type="http",
+        auth="public",
+        website=True,
+        methods=["GET"],
+        csrf=False,
+    )
+    def catalog_nav(self, **_kwargs):
+        """Storefront department tree: departments (+ categories, status, teaser,
+        facets, coming_list, counts) and the Guilds collection (GOL-2744).
+
+        Company-scoped like the product list. Cached and revalidated by the
+        existing publish webhook (the storefront's ISR tag), so launching a
+        family is a data change, not a deploy.
+        """
+        website = request.website
+        return _json_response(_catalog_nav(request.env, website.company_id))
 
     # ── ZIP → USDA zone ──────────────────────────────────────────────────
 
@@ -1851,7 +2054,10 @@ class GroveHeadlessAPI(http.Controller):
                 }
             )
 
-        tag_names = newsletter_tag_names(payload.get("brand"), interests)
+        # Resolve any waitlist:<dept-slug> interest to its real department name
+        # so the contact gets a readable "Waitlist: <Department>" tag (GOL-2744).
+        waitlist_names = _resolve_waitlist_dept_names(request.env, interests)
+        tag_names = newsletter_tag_names(payload.get("brand"), interests, waitlist_names=waitlist_names)
         source = payload.get("source")
         if isinstance(source, str) and source.strip():
             tag_names.append(f"source:{source.strip().lower()}")
@@ -1927,6 +2133,26 @@ class GroveHeadlessAPI(http.Controller):
         for order in orders:
             _apply_delivery_status(request.env, order, new_status, tracking, source="shippo")
         return _json_response({"ok": True, "matched": len(orders)})
+
+
+def _resolve_waitlist_dept_names(env, interests):
+    """Map ``waitlist:<slug>`` interests to their real department names (GOL-2744).
+
+    Returns ``{slug: department_name}`` for every waitlist interest whose slug
+    matches a ``product.public.category`` department (by ``grove_slug``, falling
+    back to ``slugify(name)``). Slugs with no match are simply absent, and the
+    tag helper title-cases them as a fallback. One search regardless of count.
+    """
+    slugs = set()
+    for interest in interests:
+        if isinstance(interest, str) and interest.strip().lower().startswith(WAITLIST_INTEREST_PREFIX):
+            slug = interest.strip().lower()[len(WAITLIST_INTEREST_PREFIX) :].strip()
+            if slug:
+                slugs.add(slug)
+    if not slugs:
+        return {}
+    departments = env["product.public.category"].sudo().search([("grove_node_kind", "=", "department")])
+    return {_category_slug(dept): dept.name for dept in departments if _category_slug(dept) in slugs}
 
 
 def _get_or_create_partner_categories(env, names):
