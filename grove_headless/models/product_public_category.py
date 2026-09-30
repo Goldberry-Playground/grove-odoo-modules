@@ -97,13 +97,15 @@ class ProductPublicCategory(models.Model):
         help=("'What's coming' list on teaser pages, one item per line as `Name | detail`, until real products exist."),
     )
 
-    _sql_constraints = [
-        (
-            "grove_slug_uniq",
-            "unique(grove_slug)",
-            "The Grove slug must be unique across public categories.",
-        ),
-    ]
+    # Odoo 19 dropped the `_sql_constraints` list attribute (it warns and never
+    # creates the constraint). Declared with the modern `models.Constraint` so
+    # Odoo creates the UNIQUE(grove_slug) on `-u grove_headless`. NULLs are
+    # distinct in Postgres, so legacy rows stay valid until the migration
+    # backfills them.
+    _grove_slug_uniq = models.Constraint(
+        "unique(grove_slug)",
+        "The Grove slug must be unique across public categories.",
+    )
 
     def grove_effective_slug(self):
         """URL slug the API emits/matches for this category.

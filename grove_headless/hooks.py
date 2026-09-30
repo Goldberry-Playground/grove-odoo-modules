@@ -749,4 +749,10 @@ def post_init_hook(env):
     """Run on fresh install of grove_headless."""
     setup_wv_sales_tax(env)
     setup_pos_configs(env)
-    restructure_department_tree(env)
+    # NB: restructure_department_tree is deliberately NOT called here. It runs
+    # only from the 19.0.1.56.0 migration, against a DB that already holds the
+    # real public categories (prod ids 1-7). A fresh install has no categories to
+    # restructure, and building empty department roots pre-emptively would then
+    # collide with the categories a QA seed creates afterwards (the seed itself
+    # calls restructure_department_tree once its categories exist — GOL-2744
+    # follow-up on the QA seed).
