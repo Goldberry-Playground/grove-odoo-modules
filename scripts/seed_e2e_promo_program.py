@@ -322,7 +322,8 @@ def main() -> None:
             )
         else:
             print(
-                f"  + WOULD CREATE loyalty.program '{PROGRAM_NAME}' (with_code '{PROMO_CODE}', ${PROMO_AMOUNT:.0f}/order) on company {company_id}"
+                f"  + WOULD CREATE loyalty.program '{PROGRAM_NAME}' (with_code '{PROMO_CODE}', "
+                f"${PROMO_AMOUNT:.0f}/order) on company {company_id}"
             )
         print("\nDry run — no writes performed. Re-run with DRY_RUN=0 against QA to apply.")
         return
