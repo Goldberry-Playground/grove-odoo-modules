@@ -1,48 +1,48 @@
-"""Regression: writing the two Html content fields must not raise (GOL-2677).
+"""Regression: html content fields must not be tracked (GOL-2677). DB test — Odoo runner only.
 
-Odoo 19's ``mail.tracking.value._create_tracking_values`` raises
-``NotImplementedError`` for ``html`` column types. When ``description_ecommerce``
-and ``website_description`` carried ``tracking=True`` (see product_template.py),
-every write to either field on a mail-thread record — the content drafter, the
-enrichment path, and plain admin edits alike — exploded at flush time. These
-tests write both fields (via create and via a subsequent write) and force a
-flush; a re-introduction of ``tracking=True`` on either Html field would make
-them raise again. DB tests — Odoo runner only.
+Odoo 19's mail.tracking.value._create_tracking_values raises NotImplementedError for
+html column types. A `fields.Html(tracking=True)` therefore explodes at flush on every
+write to the field on a mail.thread record — which broke both grove-content-drafter and
+manual admin edits of description_ecommerce / website_description. This test writes both
+html fields and forces a flush; it fails with NotImplementedError if tracking creeps back.
 """
 
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 
 
 @tagged("post_install", "-at_install")
-class TestHtmlFieldTracking(TransactionCase):
-    def test_html_fields_not_tracked(self):
-        """The two storefront Html fields must not opt into chatter tracking."""
-        fields_ = self.env["product.template"]._fields
-        self.assertFalse(
-            fields_["description_ecommerce"].tracking,
-            "description_ecommerce must not set tracking=True (html tracking "
-            "raises NotImplementedError at flush — GOL-2677)",
-        )
-        self.assertFalse(
-            fields_["website_description"].tracking,
-            "website_description must not set tracking=True (html tracking "
-            "raises NotImplementedError at flush — GOL-2677)",
-        )
+class TestHtmlFieldTracking(GroveTaxFixtureMixin, TransactionCase):
+    def _tmpl(self):
+        return self.env["product.template"].create({"name": "Test PawPaw", "type": "consu"})
 
-    def test_write_html_fields_does_not_raise(self):
-        """Writing both Html fields on a product.template must flush cleanly."""
-        tmpl = self.env["product.template"].create({"name": "PawPaw", "type": "consu"})
-        tmpl.flush_recordset()
+    def test_html_content_fields_not_tracked(self):
+        """description_ecommerce / website_description are html and MUST NOT set tracking=True."""
+        for fname in ("description_ecommerce", "website_description"):
+            field = self.env["product.template"]._fields[fname]
+            self.assertEqual(field.type, "html", f"{fname} should be an html field")
+            # Odoo 19 only sets the ``tracking`` attribute on a field when tracking is
+            # enabled, so a clean (untracked) html field has no such attribute — read it
+            # defensively rather than touching ``field.tracking`` directly.
+            self.assertFalse(
+                getattr(field, "tracking", False),
+                f"{fname} must not be tracked — Odoo 19 mail.tracking.value cannot track html "
+                "(NotImplementedError at flush). See GOL-2677.",
+            )
 
+    def test_write_html_fields_flushes_without_raising(self):
+        """Writing both html fields then flushing must not raise (the GOL-2677 prod failure)."""
+        tmpl = self._tmpl()
+        # Force the write onto an already-persisted record so mail tracking (which only
+        # runs on write, not create) would fire if the fields were tracked.
+        self.env.flush_all()
         tmpl.write(
             {
-                "description_ecommerce": "<p>Native understory fruit tree.</p>",
-                "website_description": "<p>Water weekly the first season.</p>",
+                "description_ecommerce": "<p>A sweet custard-apple relative native to the eastern US.</p>",
+                "website_description": "<p>Plant in part shade for the first two years, then full sun.</p>",
             }
         )
-        # Force the precommit flush that runs the mail-thread tracking machinery;
-        # this is exactly where the NotImplementedError surfaced before the fix.
-        tmpl.flush_recordset()
-
-        self.assertIn("understory", tmpl.description_ecommerce)
-        self.assertIn("Water weekly", tmpl.website_description)
+        # Precommit flush is where _create_tracking_values would have raised.
+        self.env.flush_all()
+        self.assertIn("custard-apple", tmpl.description_ecommerce)
+        self.assertIn("part shade", tmpl.website_description)
