@@ -49,7 +49,7 @@
       "service_title": "UPS Ground Saver"
     },
     "small": {
-      "base": 18.0,
+      "base": 17.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
@@ -75,7 +75,7 @@
       "service_title": "UPS Ground Saver"
     },
     "small": {
-      "base": 18.0,
+      "base": 17.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
@@ -101,7 +101,7 @@
       "service_title": "UPS Ground Saver"
     },
     "small": {
-      "base": 18.0,
+      "base": 17.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
