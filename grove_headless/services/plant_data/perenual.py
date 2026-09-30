@@ -134,6 +134,19 @@ class PerenualProvider:
                 )
             species_id = match.get("id")
 
+        # Perenual's free tier only serves species/details for ids <= the
+        # cutoff; anything above always 429s "Upgrade Plan". Once we know the id
+        # is above the range, skip the details call entirely — it would only
+        # burn a daily quota slot to rediscover the paywall (GOL-2676). Surface
+        # it as the plan-gate it is, carrying the id so the queue can cache it
+        # and a re-press skips even the species-list call.
+        if mapping.perenual_free_tier_gated(species_id):
+            raise PerenualPlanGated(
+                f"Perenual species #{species_id} is above the free plan's "
+                f"1–{mapping.PERENUAL_FREE_TIER_MAX_ID} id range",
+                species_id=species_id,
+            )
+
         try:
             details = self._fetch(f"species/details/{species_id}", {})
         except PerenualPlanGated as exc:
