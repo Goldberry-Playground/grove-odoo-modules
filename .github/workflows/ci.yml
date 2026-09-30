@@ -133,7 +133,11 @@ jobs:
       - name: Install test dependencies
         run: pip install requests ruff pytest
       - name: Run pytest
-        run: python3 -m pytest grove_headless/tests/ scripts/rate_check/tests/ -v
+        # scripts/tests/ holds the pure tests for the operator scripts (QA seed,
+        # livechat setup). They were never in this path, so they have been
+        # passing-by-not-running since they were added — a seed-script
+        # regression could ship green (GOL-2463).
+        run: python3 -m pytest grove_headless/tests/ scripts/rate_check/tests/ scripts/tests/ -v
 
   validate-tenant-config:
     name: Validate Tenant Slug Map
