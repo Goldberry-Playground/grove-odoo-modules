@@ -9,6 +9,7 @@ from . import (
     order_rollup,  # noqa: F401  weekly order/preorder digest cron (GOL-1978)
     potting_batch,  # noqa: F401
     product_product,  # noqa: F401
+    product_public_category,  # noqa: F401  department tree metadata (GOL-2744)
     product_template,  # noqa: F401
     sale_order,  # noqa: F401
     shipping_zones,  # noqa: F401  pure rate engine (GOL-15), no ORM models
