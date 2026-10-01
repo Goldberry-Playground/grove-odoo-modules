@@ -3,10 +3,12 @@
 from odoo.addons.grove_headless.controllers.main import (
     PRODUCT_DETAIL_FIELDS,
     PRODUCT_LIST_FIELDS,
+    SEO_TEXT_FIELDS,
     _cultivar_count,
     _fulfillment_flags,
     _gate_guide_fields,
     _image_url,
+    _normalize_seo,
     _ordered_variants,
     _serialize_facts,
     _serialize_images,
@@ -214,6 +216,41 @@ class TestDetailSerialization(GroveTaxFixtureMixin, TransactionCase):
         # ...but never leak into the leaner list payload (detail-only).
         self.assertNotIn("website_description", PRODUCT_LIST_FIELDS)
         self.assertNotIn("grove_guide_ready", PRODUCT_LIST_FIELDS)
+
+    # ── SEO fields (GOL-2884) ───────────────────────────────────────────
+    def test_seo_fields_on_both_list_and_detail(self):
+        # GOL-2884: the storefront resolves a PDP through the LIST endpoint
+        # (?slug=X -> results[0]), so GOL-2878's generateMetadata reads the SEO
+        # copy from the list shape. Both fields must ride the list payload (and
+        # therefore detail, which is list + extras), not detail alone.
+        for field in ("grove_seo_description", "grove_seo_title"):
+            self.assertIn(field, PRODUCT_LIST_FIELDS)
+            self.assertIn(field, PRODUCT_DETAIL_FIELDS)
+
+    def test_seo_empty_serializes_as_empty_string(self):
+        # Odoo returns False for an empty char/text; the serializer must coerce
+        # that to "" so a `value ?? default` fallback in TS is never poisoned by
+        # JSON `false`. Default (unset) fixture product -> both fields "".
+        for payload in (PRODUCT_LIST_FIELDS, PRODUCT_DETAIL_FIELDS):
+            data = _normalize_seo(_serialize_product(self.tmpl, payload))
+            for field in SEO_TEXT_FIELDS:
+                self.assertIn(field, data)
+                self.assertEqual(data[field], "", f"{field} should be '' when unset")
+
+    def test_seo_values_pass_through(self):
+        self.tmpl.grove_seo_description = "Cold-hardy pear for food forests."
+        self.tmpl.grove_seo_title = "Magness Pear | Goldberry Grove"
+        data = _normalize_seo(_serialize_product(self.tmpl, PRODUCT_DETAIL_FIELDS))
+        self.assertEqual(data["grove_seo_description"], "Cold-hardy pear for food forests.")
+        self.assertEqual(data["grove_seo_title"], "Magness Pear | Goldberry Grove")
+
+    def test_normalize_seo_only_touches_seo_keys(self):
+        # Defensive: _normalize_seo must not invent keys that weren't read, and
+        # must leave non-SEO keys untouched.
+        data = _normalize_seo({"name": "Pear", "grove_seo_title": False})
+        self.assertEqual(data["name"], "Pear")
+        self.assertEqual(data["grove_seo_title"], "")
+        self.assertNotIn("grove_seo_description", data)
 
     def test_guide_body_withheld_until_approved(self):
         # A drafted-but-unapproved guide must NOT cross the API boundary, even

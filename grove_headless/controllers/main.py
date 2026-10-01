@@ -135,11 +135,21 @@ PRODUCT_LIST_FIELDS = [
     # frontend derives purchasability from stock alone and a qty-0 Bareroot
     # placeholder leaks a live reservation.
     "sale_ok",
+    # SEO copy (GOL-2884). Both are on the LIST payload — not just detail —
+    # because the storefront's getBySlug resolves a PDP through
+    # /grove/api/v1/products?slug=X (the list endpoint) and reads results[0],
+    # so GOL-2878's generateMetadata consumes these from the list shape. Odoo
+    # returns False for an empty char/text; _normalize_seo coerces that to ""
+    # so a `?? fallback` in TS is never poisoned by JSON `false`.
+    "grove_seo_description",
+    "grove_seo_title",
 ]
+
+# SEO char/text fields that must serialize as "" (never JSON false) when unset.
+SEO_TEXT_FIELDS = ("grove_seo_description", "grove_seo_title")
 
 PRODUCT_DETAIL_FIELDS = PRODUCT_LIST_FIELDS + [
     "description_sale",
-    "grove_seo_description",
     # website_description holds the species "guide" body (agent-drafted, then
     # human-reviewed). It is read here but the value is GATED by
     # _gate_guide_fields on the way out — an un-approved draft is withheld even
@@ -365,6 +375,22 @@ def _serialize_product(product, fields):
         if isinstance(value, bytes):
             record[key] = None
     return record
+
+
+def _normalize_seo(data):
+    """Coerce the SEO text fields to "" when Odoo read them as ``False``.
+
+    Odoo returns ``False`` for an empty char/text field, which ``_serialize_product``
+    passes through verbatim and JSON renders as ``false``. The storefront keys SEO
+    off a ``value ?? defaultTemplate`` fallback (GOL-2878); ``false`` is not nullish,
+    so it would slip past ``??`` and render the literal string "false" in a <title>.
+    Normalising to "" here keeps the field a plain string the frontend can treat as
+    empty. Mutates ``data`` in place (the fields are already in the read set).
+    """
+    for key in SEO_TEXT_FIELDS:
+        if key in data:
+            data[key] = data[key] or ""
+    return data
 
 
 def _serialize_facts(product):
@@ -813,6 +839,7 @@ class GroveHeadlessAPI(http.Controller):
         for product in products:
             data = _serialize_product(product, PRODUCT_LIST_FIELDS)
             if data:
+                _normalize_seo(data)
                 data["image_url"] = _image_url("product.template", product, "image_128")
                 data["slug"] = data.pop("grove_slug", "") or ""
                 data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
@@ -874,6 +901,7 @@ class GroveHeadlessAPI(http.Controller):
 
         detail_fields = PRODUCT_DETAIL_FIELDS + _available_fields(product, OPTIONAL_STOCK_FIELDS)
         data = _serialize_product(product, detail_fields)
+        _normalize_seo(data)
         # Gate the agent-drafted guide body: withhold website_description until
         # grove_guide_ready is set (GATH-130). Must run after the raw read.
         _gate_guide_fields(product, data)

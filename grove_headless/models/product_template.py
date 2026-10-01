@@ -228,6 +228,16 @@ class ProductTemplate(models.Model):
         translate=True,
         help="SEO-optimized description used by the headless frontend meta tags.",
     )
+    grove_seo_title = fields.Char(
+        string="Grove SEO Title",
+        translate=True,
+        help="Per-product <title>/og:title override for the headless storefront "
+        "(GOL-2884). Leave blank to let the frontend fall back to its default "
+        "title template. Deliberately a grove_-owned field rather than Odoo's "
+        "website_meta_title: the latter is scoped to Odoo's own website SEO "
+        "machinery (is_seo_optimized, the SEO promote wizard) which can rewrite "
+        "it, whereas this is marketing-owned copy the headless feed owns outright.",
+    )
     grove_slug = fields.Char(
         string="Grove Slug",
         compute="_compute_grove_slug",
