@@ -745,6 +745,49 @@ def restructure_department_tree(env):
     _logger.info("grove_headless: department tree restructured (GOL-2744)")
 
 
+# ── Guilds membership backfill (GOL-2882) ───────────────────────────────────
+#
+# The Guilds collection (ex "Food Forest Packages", prod category 6) should
+# surface every live multi-tree bundle. tmpl 22 — the "(5-Tree Native Bundle)"
+# memorial SKU ($47, published, sale_ok) — shipped with ``public_categ_ids=[]``,
+# so it was omitted from /shop/guilds and from shop category filtering while its
+# five siblings (132/133/134/135/140) were listed. CEO ruling (GOL-2882): YES,
+# include it. Matched by its stable "(5-Tree Native Bundle)" name suffix rather
+# than a raw id, so the fix survives the product's Remembrance→Chestnut rename
+# and is safe to run on any DB (no-ops where the product/category are absent).
+_GUILDS_BUNDLE_NAME_LIKE = "(5-Tree Native Bundle)"
+
+
+def add_native_bundle_to_guilds(env):
+    """Add the 5-Tree Native Bundle to the Guilds collection (GOL-2882).
+
+    Idempotent and additive: resolves the Guilds category by slug (falling back
+    to its source name) and the bundle by its "(5-Tree Native Bundle)" suffix,
+    then links the product into that category without touching any other
+    membership. No-ops cleanly when either record is absent (fresh install / QA
+    before the catalog is seeded).
+    """
+    Category = env["product.public.category"].sudo()
+    Template = env["product.template"].sudo()
+
+    guilds = Category.search([("grove_slug", "=", _GUILDS_SLUG)], limit=1)
+    if not guilds:
+        guilds = _find_category_by_name(Category, _GUILDS_SOURCE_NAME)
+    if not guilds:
+        _logger.warning("grove_headless: Guilds category not found; skipping bundle add (GOL-2882)")
+        return
+
+    bundle = Template.search([("name", "ilike", _GUILDS_BUNDLE_NAME_LIKE)], limit=1)
+    if not bundle:
+        _logger.info("grove_headless: 5-Tree Native Bundle not found; nothing to add (GOL-2882)")
+        return
+
+    if guilds.id in bundle.public_categ_ids.ids:
+        return
+    bundle.write({"public_categ_ids": [(4, guilds.id)]})
+    _logger.info("grove_headless: added %r to the Guilds collection (GOL-2882)", bundle.name)
+
+
 def post_init_hook(env):
     """Run on fresh install of grove_headless."""
     setup_wv_sales_tax(env)

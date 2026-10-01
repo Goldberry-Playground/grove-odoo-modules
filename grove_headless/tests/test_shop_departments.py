@@ -9,7 +9,10 @@ Run via:
     odoo --addons-path=... --test-enable --stop-after-init -i grove_headless
 """
 
-from odoo.addons.grove_headless.hooks import restructure_department_tree
+from odoo.addons.grove_headless.hooks import (
+    add_native_bundle_to_guilds,
+    restructure_department_tree,
+)
 from odoo.tests.common import TransactionCase, tagged
 
 from ..controllers.main import (
@@ -116,6 +119,53 @@ class TestDepartmentRestructure(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(depts_first, depts_second)
         # Still exactly one Guilds collection.
         self.assertEqual(self.Category.search_count([("grove_slug", "=", "guilds")]), 1)
+
+    # ── Guilds bundle membership (GOL-2882) ─────────────────────────────
+
+    def _make_native_bundle(self, name="Chestnut Grove (5-Tree Native Bundle)"):
+        return self.env["product.template"].create(
+            {"name": name, "website_published": True, "sale_ok": True, "list_price": 47.0}
+        )
+
+    def test_native_bundle_added_to_guilds(self):
+        restructure_department_tree(self.env)
+        bundle = self._make_native_bundle()
+        self.assertFalse(bundle.public_categ_ids, "precondition: bundle starts with no public category")
+        add_native_bundle_to_guilds(self.env)
+        guilds = self._by_slug("guilds")
+        self.assertIn(guilds.id, bundle.public_categ_ids.ids, "bundle should now be in the Guilds collection")
+
+    def test_native_bundle_add_matches_after_rename(self):
+        # The SKU was renamed Remembrance -> Chestnut; the "(5-Tree Native
+        # Bundle)" suffix is the stable anchor, so resolution still works.
+        restructure_department_tree(self.env)
+        bundle = self._make_native_bundle("The Remembrance Grove (5-Tree Native Bundle)")
+        add_native_bundle_to_guilds(self.env)
+        self.assertIn(self._by_slug("guilds").id, bundle.public_categ_ids.ids)
+
+    def test_native_bundle_add_is_idempotent_and_additive(self):
+        restructure_department_tree(self.env)
+        other = self.Category.browse(self.original["Native"])
+        bundle = self._make_native_bundle()
+        bundle.public_categ_ids = [(6, 0, [other.id])]  # a pre-existing membership
+        add_native_bundle_to_guilds(self.env)
+        add_native_bundle_to_guilds(self.env)  # second run must be a no-op
+        guilds = self._by_slug("guilds")
+        self.assertEqual(
+            set(bundle.public_categ_ids.ids),
+            {other.id, guilds.id},
+            "Guilds is added exactly once and existing memberships are preserved",
+        )
+
+    def test_native_bundle_add_noops_without_bundle(self):
+        restructure_department_tree(self.env)
+        # No "(5-Tree Native Bundle)" product exists -> clean no-op, no raise.
+        add_native_bundle_to_guilds(self.env)
+        guilds = self._by_slug("guilds")
+        self.assertFalse(
+            self.env["product.template"].search([("public_categ_ids", "in", [guilds.id])]),
+            "nothing should be linked to Guilds when no bundle is present",
+        )
 
     # ── Slug stability ──────────────────────────────────────────────────
 
