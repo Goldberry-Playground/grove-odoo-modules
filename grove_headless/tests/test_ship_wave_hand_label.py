@@ -244,7 +244,7 @@ class TestShipHandlingFee(GroveTaxFixtureMixin, TransactionCase):
     ``grove_actual_shipping_cost`` stays the raw carrier spend for reporting; only the
     customer-facing line carries the fee, so ``amount_total`` and the Stripe Tax line
     items both include it. The fee is Odoo-editable
-    (``grove_headless.shipping_handling_fee``, default $2.50), applied PER ORDER."""
+    (``grove_headless.shipping_handling_fee``, default $5.00), applied PER ORDER."""
 
     def setUp(self):
         super().setUp()
@@ -286,7 +286,7 @@ class TestShipHandlingFee(GroveTaxFixtureMixin, TransactionCase):
         order = self._ship_order_with_label(actual=8.79)
         grove_main._recompute_ship_total(self.env, order)
         ship_line = grove_main._settlement_shipping_line(order)
-        self.assertEqual(ship_line.price_unit, 11.29)  # 8.79 label + 2.50 default fee
+        self.assertEqual(ship_line.price_unit, 13.79)  # 8.79 label + 5.00 default fee
         # The raw carrier spend is left untouched for true-cost reporting.
         self.assertEqual(order.grove_actual_shipping_cost, 8.79)
 
@@ -299,15 +299,15 @@ class TestShipHandlingFee(GroveTaxFixtureMixin, TransactionCase):
 
     def test_fee_defaults_and_bad_values_fall_back(self):
         self.icp.set_param("grove_headless.shipping_handling_fee", "")
-        self.assertEqual(grove_main._shipping_handling_fee(self.env), 2.50)
+        self.assertEqual(grove_main._shipping_handling_fee(self.env), 5.00)
         self.icp.set_param("grove_headless.shipping_handling_fee", "not-a-number")
-        self.assertEqual(grove_main._shipping_handling_fee(self.env), 2.50)
+        self.assertEqual(grove_main._shipping_handling_fee(self.env), 5.00)
         self.icp.set_param("grove_headless.shipping_handling_fee", "-1")
-        self.assertEqual(grove_main._shipping_handling_fee(self.env), 2.50)  # negative rejected
+        self.assertEqual(grove_main._shipping_handling_fee(self.env), 5.00)  # negative rejected
 
     def test_settlement_charges_actual_plus_fee(self):
-        """Worked example shape (Josh): trees $48 + label $8.79 + fee $2.50 - deposit
-        $10 = $49.29 before tax. Stripe Tax is left OFF so the balance is Odoo's
+        """Worked example shape (Josh): trees $48 + label $8.79 + fee $5.00 - deposit
+        $10 = $51.79 before tax. Stripe Tax is left OFF so the balance is Odoo's
         amount_total minus the deposit; the fee is proven present two ways — the
         settled ship line is actual+fee, and the captured balance tracks the
         fee-bearing amount_total."""
@@ -329,7 +329,7 @@ class TestShipHandlingFee(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(status, "settled")
         self.assertEqual(len(charges), 1)
         # The GROVE-SHIP line settled at actual label + flat fee.
-        self.assertEqual(grove_main._settlement_shipping_line(order).price_unit, 11.29)
+        self.assertEqual(grove_main._settlement_shipping_line(order).price_unit, 13.79)
         # The captured balance is the fee-bearing total minus the deposit.
         expected_cents = stripe_gateway.to_cents(order.amount_total - 10.0)
         self.assertEqual(charges[0]["amount_cents"], expected_cents)

@@ -3758,14 +3758,14 @@ def _settlement_shipping_line(order):
 
 
 SHIPPING_HANDLING_FEE_PARAM = "grove_headless.shipping_handling_fee"
-DEFAULT_SHIPPING_HANDLING_FEE = 2.50  # Josh 2026-10-02 (GOL-2895): flat per-ORDER S&H
+DEFAULT_SHIPPING_HANDLING_FEE = 5.00  # Josh 2026-10-02 PM (GOL-2895): flat per-ORDER S&H
 
 
 def _shipping_handling_fee(env):
     """The shipping & handling fee (USD) added to the ACTUAL carrier cost at
     settlement, on top of the raw Pirate Ship label cost (GOL-2895, Josh
     2026-10-02). Odoo-editable via ir.config_parameter
-    ``grove_headless.shipping_handling_fee`` (default $2.50); a blank or malformed
+    ``grove_headless.shipping_handling_fee`` (default $5.00); a blank or malformed
     value falls back to the default rather than silently dropping the fee.
 
     Applied PER ORDER — one fee on the single GROVE-SHIP line, NOT per box. Josh
