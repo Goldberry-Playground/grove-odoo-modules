@@ -67,12 +67,16 @@ class TestPickupSettlement(GroveTaxFixtureMixin, TransactionCase):
         return self._order(**v)
 
     def _seed_wv_tax(self):
-        wv_group = self.env["account.tax"].search(
-            [("name", "=", "WV Sales Tax 7%"), ("amount_type", "=", "group")], limit=1
+        """Put the WV state tax on the product so the deposit order carries a real
+        balance to settle. GroveTaxFixtureMixin seeds only the WV 6% *state* tax
+        (GOL-2449: no municipal, no group), so query that record — the same one
+        the settlement tests in test_stripe_checkout bind."""
+        wv_state = self.env["account.tax"].search(
+            [("name", "=", "WV State Sales Tax 6%"), ("amount_type", "=", "percent")], limit=1
         )
-        self.assertTrue(wv_group, "WV group tax must exist (post_init_hook)")
-        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_group.ids)]
-        return wv_group
+        self.assertTrue(wv_state, "WV state tax must exist (GroveTaxFixtureMixin)")
+        self.product.product_tmpl_id.taxes_id = [(6, 0, wv_state.ids)]
+        return wv_state
 
     # ── deposit pickup genuinely settles at collection (the hotfix) ───────
 
