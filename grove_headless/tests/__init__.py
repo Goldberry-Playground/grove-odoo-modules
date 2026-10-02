@@ -31,6 +31,7 @@ from . import (
     test_newsletter_subscribe,  # noqa: F401
     test_order_digest,  # noqa: F401
     test_order_rollup,  # noqa: F401
+    test_pickup_settlement,  # noqa: F401
     test_plant_compliance,  # noqa: F401
     test_poller_lifecycle,  # noqa: F401
     test_pos,  # noqa: F401

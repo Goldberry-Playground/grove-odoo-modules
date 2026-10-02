@@ -194,7 +194,12 @@ class SaleOrder(models.Model):
         "label_purchased": ("awaiting_label", "wave_assigned"),
         "shipped": ("awaiting_label", "label_purchased"),
         "delivered": ("shipped",),
-        "collected": ("reserved",),
+        # A pickup order collects from either a fully-paid reservation OR a
+        # sold-out deposit (GOL-2233 applies the $10 deposit to ANY fulfilment,
+        # so a pickup order can sit at deposit_paid). Only action_grove_mark_collected
+        # requests this target and it is pickup-guarded, so admitting deposit_paid
+        # here never lets a ship/preorder deposit skip the ship path (GOL-2893).
+        "collected": ("reserved", "deposit_paid"),
     }
 
     @api.depends(
@@ -299,12 +304,51 @@ class SaleOrder(models.Model):
 
     def action_grove_mark_collected(self, operator=None):
         """Terminal transition for pickup: operator confirms collection at the
-        farm. Never buys a label and never emits the shipment email."""
+        farm. Never buys a label and never emits the shipment email. Returns True
+        only on the real transition so a double-click is a no-op.
+
+        This is the raw state move only — it does NOT settle the deferred balance.
+        Ops-facing collection (the bearer endpoint + the Odoo server action) goes
+        through ``_grove_mark_collected_and_settle`` so collection is exactly when
+        a deposit-only pickup order's balance is captured (GOL-2893)."""
         self.ensure_one()
         if self.grove_fulfillment != "pickup":
             _logger.warning("Refused to mark non-pickup order %s collected.", self.name)
             return False
+        # Serialise concurrent collect signals on this exact row, mirroring
+        # action_grove_mark_shipped (GOL-1980): the second caller blocks on this
+        # FOR UPDATE until the first commits, then re-reads the committed watermark
+        # and no-ops, so "double collect ≠ double settle" holds under real
+        # concurrency, not just at human speed (GOL-2893).
+        self.env.cr.execute("SELECT id FROM sale_order WHERE id = %s FOR UPDATE", (self.id,))
+        self.invalidate_recordset(["grove_fulfillment_state", "grove_fulfillment_stage"])
         return self._grove_advance_state("collected", source="operator", operator=operator)
+
+    def _grove_mark_collected_and_settle(self, operator=None):
+        """Mark a pickup order collected AND settle its deferred balance (GOL-2893).
+
+        Collection is the pickup analogue of a ship event: a sold-out bareroot
+        pickup order took only the flat $10 deposit (GOL-2233) and its balance is
+        never charged, because ship-time settlement (GOL-2053) runs off ship
+        signals and pickup has none. So the moment the trees actually change hands
+        is when the remainder must be captured.
+
+        Contract mirrors ``_operator_mark_shipped`` exactly:
+          * settlement runs ONLY on the real collected transition (a double-click
+            re-runs neither), and
+          * it is best-effort — ``_grove_settle_at_ship`` never raises, so a
+            decline flags ``settlement_failed`` + duns + alerts Discord but NEVER
+            rolls back the collected state (the customer has the trees).
+
+        ``settle_order_at_ship`` already handles pickup (no GROVE-SHIP line, WV
+        tax kept, balance = amount_total − grove_amount_charged_today) and is
+        ``not_applicable`` for a fully-paid order, so calling it on every
+        collection is safe. Returns ``{"newly_collected": bool, "settlement":
+        <status str> | None}`` for the endpoint's JSON body."""
+        self.ensure_one()
+        newly_collected = self.action_grove_mark_collected(operator=operator)
+        settlement = self._grove_settle_at_ship() if newly_collected else None
+        return {"newly_collected": newly_collected, "settlement": settlement}
 
     def action_grove_assign_wave(self, wave_ref=None):
         """Preorder: assign a deposit-paid order to a ship wave. From here the
