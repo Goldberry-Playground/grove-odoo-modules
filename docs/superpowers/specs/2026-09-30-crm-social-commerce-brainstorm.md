@@ -1,9 +1,23 @@
 # CRM, social leads and marketplace cross-posting (brainstorm)
 
-**Status:** brainstorm, 2026-09-30. Nothing here is ratified. Findings come from
-reading this repo, `grove-sites`, the Odoo 19.0 source on GitHub, and the
-public platform docs for Meta, Threads and Etsy. Where a platform doc could
-not be read directly, that is flagged as *verify*.
+**Status:** brainstorm 2026-09-30; decisions ratified by Josh 2026-10-02 (see
+"Decisions" below). Findings come from reading this repo, `grove-sites`, the
+Odoo 19.0 source on GitHub, and the public platform docs for Meta, Threads
+and Etsy. Where a platform doc could not be read directly, that is flagged
+as *verify*.
+
+## Decisions (Josh, 2026-10-02)
+
+1. **One lead per person per company.** A later interest from the same person
+   must land on that same lead, never a second card. Rules in §3.
+2. **Release follow-up email goes through Odoo** (`mass_mailing`), not Ghost.
+3. **Social DMs, comments and replies become leads only after Discord
+   approval.** Lead-form submissions (if ads are ever run) auto-create.
+4. **Validate live-plant policy on Meta and Etsy with real listings before
+   engineering any cross-posting.** Checklist in §5.
+5. **Etsy buy-vs-build:** comparison in §5; recommendation is build, phased.
+6. **Meta lead-form ads vs organic:** explained in §4; organic plus our own
+   notify-me form first, lead ads only if paid ads start.
 
 ## The four asks
 
@@ -142,13 +156,36 @@ This is the core of ask 2. New module `grove_crm` (depends `crm`,
 | `source_ref` | channel id, IG comment id, leadgen id, ... for dedupe and deep links |
 | `state` | `open` → `notified` → `converted` / `closed`; plus `notified_at`, `notified_count`, `last_release_delivery_id` |
 
-**One lead per person per company, many interests.** A `crm.lead` is the
-pipeline card the team works; `grove.interest` lines hang off it (one2many).
-Odoo's `_get_lead_duplicates` / `merge_opportunity` handle the inevitable
-duplicates by email. The alternative (one lead per interest) makes the
-pipeline noisy for a two-person team and loses the "this is the same
-customer" view. The zero-new-model alternative (tags only) cannot answer "who
-did we already tell about release #1" and is the reason to build the model.
+**One lead per person per company, many interests (ratified).** A
+`crm.lead` is the pipeline card the team works; `grove.interest` lines hang
+off it (one2many). The zero-new-model alternative (tags only) cannot answer
+"who did we already tell about release #1" and is the reason to build the
+model.
+
+**"It goes back to them": the attach rule.** Every capture path, whatever
+the source, runs the same resolver (`grove.interest._attach`):
+
+1. Resolve the person: email → company-scoped partner (existing
+   never-overwrite search); no email → social handle + platform (stored on
+   the lead as `grove_social_handle` / `grove_social_platform`).
+2. Find that person's lead for this company, newest first:
+   - an **open** lead → attach the interest, post a chatter line "New
+     interest: Mushroom-inoculated trees (via Instagram)", and schedule a
+     "New interest" activity if none is pending;
+   - the newest lead is **lost** (archived) → restore it
+     (`crm.lead.toggle_active`) and attach, so the history stays in one
+     chatter;
+   - the newest lead is **won** → create a fresh lead on the same partner
+     (the partner form already lists every opportunity, so the customer
+     view is intact);
+   - no lead → create one.
+3. Duplicate safety net: a daily cron runs Odoo's own
+   `_get_lead_duplicates` per partner email and merges with
+   `merge_opportunity`, so a lead created by another path (e.g. a human
+   quick-create) folds back into the one card.
+4. Handle-to-email join: when a handle-only lead later yields an email
+   (chat, checkout, lead form), set `partner_id` and let step 3 merge any
+   email-keyed lead that already existed.
 
 ### Capture points
 
@@ -181,14 +218,27 @@ same coalesced set) and, for each template that became purchasable
 4. Never raise into the availability flush; log and move on, same stance as
    the webhook emit.
 
-**Email blast on release: decide the medium.** Options: (a) Ghost, which is
-already the list of record with double opt-in and `Waitlist: <Dept>` labels,
-so the blast is a Ghost post to a label segment and Odoo only owns tasks;
-(b) Odoo `mass_mailing` (Community) on a `crm.lead` mailing list, keeps
-everything in Odoo but creates a second sender with its own deliverability
-and unsubscribe handling. Recommendation: (a) for broadcast, activities in
-Odoo for the high-intent sources (chat, DM, lead ad), because 200 activities
-per release is not workable for two operators.
+**Email blast on release goes through Odoo (ratified).** `grove_crm` depends
+on `mass_mailing` (+ `mass_mailing_crm` so `crm.lead` is a mailing model).
+On release the hook creates a **draft** `mailing.mailing` per tenant whose
+recipient domain is "leads with an open interest matching this template",
+subject prefilled, body from a template that pulls the product's storefront
+URL, image and `description_ecommerce`. A human reviews and sends; nothing
+mails automatically. Consequences to plan for:
+
+- Odoo becomes a second sender next to Ghost. It needs its own outbound
+  mail server per company (`grove_headless/models/mail_from.py` already
+  handles per-company From), SPF/DKIM for that sender, and Odoo's
+  unsubscribe/blacklist (`mail.blacklist`) honoured on every send.
+- Consent: a release email is marketing. Only interests captured with
+  `consent=true` (the newsletter endpoint already requires it; chat and
+  social captures must ask) are eligible; store `consent_at` on the
+  interest and filter on it in the mailing domain.
+- Ghost stays the newsletter list of record; release mailings are
+  transactional-style product notices to people who asked for exactly that
+  product, which is the line that keeps the two lists from fighting.
+- Activities stay for high-intent sources (chat, DM, lead form): one per
+  lead per release, as above. Broadcast interests get the mailing only.
 
 ---
 
@@ -247,6 +297,26 @@ per release is not workable for two operators.
    clears, which is the long pole (weeks). Start business verification and
    the app review now; dev mode already works for the app's own admins.
 
+### Lead-form ads vs organic (decision 6, explained)
+
+There are three different ways a lead can come out of Instagram/Facebook,
+and they need three different plumbing jobs:
+
+| Path | What the customer does | What we get | What it costs us |
+| --- | --- | --- | --- |
+| **Meta Lead Ads** (paid) | Taps a sponsored post, fills a native form inside IG/FB ("Tell me when pawpaws are back": name, email, phone pre-filled by Meta) without leaving the app | A structured lead with email, delivered by the `leadgen` webhook within seconds; Meta deletes it after 90 days | Ad spend; the leadgen permissions and a Page token; a daily bulk-read backstop |
+| **Organic DM / comment / reply** (free) | Comments "price?" on a post, DMs "do you ship to Ohio", replies on Threads | Text + handle, **no email**, inside a 24-hour reply window | Instagram Messaging API + Meta app review + business verification; the Discord approve-to-lead card; handle-based identity until they give an email |
+| **Organic post → our own form** (free) | Taps the link in bio or a "notify me" link we reply with, lands on the storefront product page, submits email | A `grove.interest` with email and consent through `POST /grove/api/v1/interests`, UTM-tagged | Nothing new from Meta at all; the form is ours |
+
+The third path is what the nursery already does for the newsletter, just
+pointed at a product. It needs no Meta API, no review, and produces a
+consented email, which is also what the Odoo release mailing needs.
+Recommendation: build path three first (it is part of `grove_crm` anyway),
+path two when app review clears (approve via Discord, as ratified), and
+path one only if someone actually starts buying lead ads. The `leadgen`
+controller is small, so it is cheap to add later; it is pointless to build
+before there is spend.
+
 ---
 
 ## 5. Proposal D: cross-posting products
@@ -262,10 +332,46 @@ fields: `id`, `title`, `description`, `availability`, `condition`, `price`,
 `link`, `image_link`, `brand`; HTTPS public product URLs; domain verification
 in Business Manager.
 
-*Verify before building:* Meta Commerce Policies restrict some live plants
-(endangered/protected species explicitly; sellers report broader rejections).
-Upload a hand-made CSV of five real products to Commerce Manager first and
-confirm they pass review. Cheap, and it decides whether this track exists.
+*Verify before building (ratified, decision 4).* What the public record
+says, with the caveat that the policy pages themselves could not be fetched
+from this environment:
+
+- **Meta.** The Commerce Policies' "Animals" entry bans live animals and
+  animal parts; endangered or protected species, wildlife *and plants*
+  (CITES-type), are banned outright. Ordinary live plants are listed under
+  the "Garden & Outdoor" Marketplace category and plant sellers operate on
+  Marketplace openly. Two real risks remain: automated review sometimes
+  mis-files plants under the animals rule, and Meta has been narrowing
+  Marketplace toward consumer-to-consumer sales, so a Page sells through a
+  Commerce Manager shop, not personal listings.
+- **Etsy.** Live plants are allowed under the "Plants, Herbs, Seeds and
+  Soil" rules: US-origin only, no USDA noxious weeds, no CITES or
+  Endangered Species Act species, seller carries phytosanitary and
+  state-permit compliance. The 2025 Creativity Standards update matters
+  more: plants and nature items must be **personally cultivated** by the
+  seller ("Handpicked by a seller" category). Trees we grow or graft
+  qualify; bought-in liners resold as-is do not. Reselling generic
+  gardening supplies is also now prohibited, so the "supplies" department
+  stays off Etsy.
+
+Validation checklist (manual, no code; a half day):
+
+1. Commerce Manager: create the nursery catalog, upload a CSV of five real,
+   published, listing-complete products (one bareroot tree, one potted,
+   one berry shrub, one seed/kit, one bundle) with storefront links and
+   images, and wait for item review. Record which pass and the rejection
+   reason for any that do not.
+2. Request Marketplace distribution for that shop and confirm plant items
+   appear.
+3. Etsy: open the shop, create one draft listing for a tree we grafted
+   ourselves, categorized under plants, with `who_made = i_did`, a
+   shipping profile for the bareroot tier, and confirm it activates and
+   stays up for a week.
+4. Check the state-shipping rules in `grove_headless/models/plant_compliance.py`
+   against each channel's shipping settings: both channels must exclude the
+   states we cannot ship to, or orders will arrive that we must cancel.
+5. If any of 1-3 fails for the plant category, that channel is dropped and
+   only non-plant goods (woodworking, kits, supplies where allowed) go on it.
 
 Design: a feed endpoint in `grove_headless`, per tenant, e.g.
 `GET /grove/api/v1/feeds/meta.csv?key=<per-tenant token>` (Meta must fetch
@@ -300,14 +406,70 @@ compliance (we already have `plant_compliance.py` for state rules).
 This one is **bidirectional** or it double-sells: listings and quantity go
 out, receipts must come back in as `sale.order` (team "Etsy", paid, existing
 fulfillment flow) and tracking must go back out (`createReceiptShipment`).
-That is a real connector. Options:
+That is a real connector.
 
-- **Buy**: the `sale_etsy` 19.0 app (imports receipts and customers, syncs
-  inventory, pushes tracking). Evaluate whether it also *creates* listings
-  from Odoo; if it only imports, it covers the hard half and we push listings.
-- **Build** `grove_etsy`: `grove.channel.listing` (product, marketplace,
-  external id, state, payload hash, last sync), a "Publish to Etsy" button,
-  a qty-sync hook on the same availability flush, a receipts-import cron.
+### Buy vs build (decision 5, explained)
+
+**Buy.** Paid connectors on apps.odoo.com for 19.0, roughly $290 to $500
+one-time per version: Teqstars "Etsy Connector" (`sale_etsy`, ~$292), Webkul
+"Etsy Odoo Bridge" (~$299), TheNapkinCompany (~$400), Ecosire (~$499). The
+Teqstars one, per its docs, covers the full loop: imports Etsy master data
+(categories, shipping profiles, return policies, readiness states), creates
+and updates listings from Odoo products with variants, exports stock and
+price on a schedule, imports orders into `sale.order`, exports tracking.
+
+What buying really costs us:
+
+- **Licence and deployment.** These are OPL-1 (proprietary), delivered as
+  a zip. They cannot be committed to this repo if it is public and cannot
+  be modified-and-redistributed; they have to live in a separate private
+  addons path in odoocker and be upgraded by hand per Odoo version.
+- **A second order-creation path.** Our `sale.order` pipeline is not
+  vanilla: the headless checkout applies the compliance gate
+  (`plant_compliance.py`, which states we may ship to), the shared-pool and
+  preorder-cap quantity rules, tier shipping lines, order alerts, Discord
+  pings, rollups and the fulfillment mirror. A bought connector creates
+  orders its own way, so each of those has to be re-verified against
+  Etsy-created orders, and a compliance miss means an order we must cancel
+  after Etsy already charged the buyer.
+- **Quantity truth.** The connector pushes `qty_available`; we need "free
+  qty from the shared pool minus a buffer", and we need it pushed on the
+  availability event, not on a 15-minute timer. That is a modification we
+  are not licensed to make cleanly.
+- **Multi-company.** Three tenants in one database; the connectors are
+  built for one shop per company at best. Only the nursery sells on Etsy,
+  which helps, but every record rule they add has to be audited.
+- **Vendor dependency** for every Odoo major upgrade and every Etsy API
+  change (Etsy retired shipping templates for processing profiles in 2025,
+  for example).
+
+**Build** `grove_etsy` (LGPL, in this repo, tested in CI like everything
+else): OAuth 2 PKCE with token refresh stored in `ir.config_parameter`;
+`grove.channel.listing` (product, marketplace, external id, state, payload
+hash, last sync, last error); a "Publish to Etsy" button that calls
+`createDraftListing` → `uploadListingImage` → `updateListingInventory` →
+state `active`; a quantity push wired to the same availability flush as the
+storefront webhook; a receipts-import cron that creates orders **through the
+same service path as the headless checkout** so compliance, alerts and
+rollups just work; a tracking push from the existing label flow. Etsy
+master data we need is small (one taxonomy id per department, two shipping
+profiles for the two tiers, one return policy). Rough size: two to three
+weeks of focused work, half of it the receipts-in side.
+
+**Recommendation: build, in two steps.** Step 1 is listings out plus
+quantity sync, which is the part no connector does the way we need and the
+part that can oversell. During step 1, Etsy orders are keyed into Odoo by
+hand (volume will be low while we test the channel). Step 2 is receipts in
+and tracking out. If step 1 shows Etsy is not worth the fees, we stop
+without having bought anything. Buying only makes sense if we decide Etsy
+orders may bypass our order pipeline entirely, and nothing above suggests
+we want that.
+
+Build components, concretely:
+
+- `grove.channel.listing` (product, marketplace, external id, state,
+  payload hash, last sync), a "Publish to Etsy" button, a qty-sync hook on
+  the same availability flush, a receipts-import cron.
 
 Either way the Etsy shipping profile is a lossy mapping of our zone × tier
 engine; simplest is one Etsy profile per `grove_shipping_tier` with flat
@@ -337,15 +499,15 @@ rates, reviewed against `data/shipping_rates.json` by the daily rate check.
 
 ---
 
-## 7. Decisions needed from Josh
+## 7. Still open after 2026-10-02
 
-1. One lead per person with many interests (recommended) vs one lead per interest.
-2. Release broadcast medium: Ghost segment email (recommended) + Odoo activities for high-intent sources, or everything through Odoo `mass_mailing`.
-3. Social DMs/comments: Discord approve-to-lead (recommended) vs auto-create.
-4. Validate Meta and Etsy plant policies with real listings before any engineering on D.
-5. Etsy: buy the connector or build `grove_etsy`.
-6. Which tenants get chat in phase 1 (nursery only today).
-7. Does anyone run Meta lead-form ads, or are leads purely organic DMs/comments? This decides whether the `leadgen` path is built at all.
+1. Which tenants get chat in phase 1 (nursery only today).
+2. Whether anyone will run Meta lead-form ads (decides if the `leadgen`
+   path is built at all; see §4).
+3. Outcome of the policy validation checklist in §5 (decides whether plants
+   go on Meta, Etsy, both or neither).
+4. Odoo outbound mail sender for release mailings: domain, SPF/DKIM, and
+   who owns deliverability (DevOps).
 
 ## 8. Risks
 
