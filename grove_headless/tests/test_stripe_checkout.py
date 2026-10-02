@@ -1383,7 +1383,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         """Acceptance 2/3: the deferred balance = actual goods + actual shipping +
         Stripe Tax − deposit already paid, captured off-session against the saved
         card with an order-scoped Idempotency-Key (GOL-2568: tax is Stripe's)."""
-        order = self._settleable_order()  # 2×$25 goods + $15 actual shipping = $65 base
+        # 2×$25 goods + $15 actual shipping + $2.50 flat S&H fee (GOL-2895, Josh
+        # 2026-10-02) = $67.50 base. The fee rides on the GROVE-SHIP line at
+        # settlement; grove_actual_shipping_cost stays the raw $15 carrier spend.
+        order = self._settleable_order()
         captured = {}
 
         def fake_pi(secret_key, **kwargs):
@@ -1391,7 +1394,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             captured["secret_key"] = secret_key
             return {"id": "pi_settled", "status": "succeeded"}
 
-        flag_p, tax_calc_p, tax_txn_p = self._fake_tax_calc(390)  # $3.90 Stripe tax on $65
+        flag_p, tax_calc_p, tax_txn_p = self._fake_tax_calc(390)  # $3.90 Stripe tax (mocked)
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
             flag_p,
@@ -1405,10 +1408,12 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_checkout_status, "settled")
         self.assertEqual(order.grove_settlement_payment_intent, "pi_settled")
         self.assertEqual(order.grove_settlement_attempts, 1)
-        # The quoted shipping line was rewritten to the ACTUAL bought cost.
-        self.assertEqual(grove_main._settlement_shipping_line(order).price_unit, 15.0)
-        # Charged = $65 base + $3.90 Stripe tax − $20 deposit = $48.90.
-        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents(48.90))
+        # The quoted shipping line was rewritten to the ACTUAL bought cost + the
+        # flat $2.50 S&H fee (GOL-2895): $15.00 + $2.50 = $17.50.
+        self.assertEqual(grove_main._settlement_shipping_line(order).price_unit, 17.50)
+        # Charged = $67.50 base ($50 goods + $17.50 shipping+fee) + $3.90 Stripe tax
+        # − $20 deposit = $51.40.
+        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents(51.40))
         self.assertEqual(order.grove_stripe_tax_amount, 3.90)
         self.assertEqual(captured["customer"], "cus_test")
         self.assertEqual(captured["payment_method"], "pm_test")
