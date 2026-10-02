@@ -352,10 +352,109 @@ class SaleOrder(models.Model):
 
     def action_grove_assign_wave(self, wave_ref=None):
         """Preorder: assign a deposit-paid order to a ship wave. From here the
-        wave's balance charge + label purchase put it back on the ship path."""
+        wave's balance charge + label purchase put it back on the ship path.
+
+        Pickup-guarded (GOL-2895): a farm-pickup deposit order collects at the
+        farm and must never be pulled onto the ship path by a wave assignment —
+        it settles on the collect path (GOL-2893), not here. A pickup order is
+        refused (logged, no write) so a mixed multi-select server action skips it
+        rather than mis-routing it. Returns True only on the real transition, so
+        the server action / bearer endpoint is idempotent across a re-run."""
         self.ensure_one()
+        if self.grove_fulfillment == "pickup":
+            _logger.warning(
+                "Refused to assign pickup order %s to a ship wave — pickup collects at the farm.",
+                self.name,
+            )
+            return False
         note = f"Preorder assigned to wave {wave_ref}." if wave_ref else None
         return self._grove_advance_state("wave_assigned", source="wave", note=note)
+
+    # Pirate Ship ground-carrier prefixes we can recognise from a bare tracking
+    # number (GOL-2895). UPS ground labels are "1Z...". USPS is harder to pin
+    # from the number alone (several formats), so an operator-entered carrier is
+    # trusted for everything that isn't an unambiguous 1Z.
+    def _grove_infer_carrier(self, tracking_number, fallback=None):
+        """Best-effort carrier KEY ("UPS"/"USPS") for a hand-entered tracking
+        number. A ``1Z`` prefix is an unambiguous UPS label (GOL-2895); anything
+        else defers to the operator-supplied ``fallback`` (normalised to the
+        canonical key the shipment email + carrier poll fold with
+        ``normalize_carrier``). Returns "" when neither resolves."""
+        if (tracking_number or "").strip().upper().startswith("1Z"):
+            return "UPS"
+        return normalize_carrier(fallback or "")
+
+    def action_grove_record_hand_label(self, tracking_number, carrier=None, actual_cost=0.0, service=None):
+        """Record a label bought by hand, outside the Odoo/Shippo/Pirate-Ship
+        flow, and advance the order to ``label_purchased`` (GOL-2895).
+
+        The ship-wave hotfix path: Josh buys a sold-out deposit order's label in
+        Pirate Ship directly (no Odoo batch, so there is no ``grove.label.batch``
+        line to reconcile against). This writes the tracking / carrier / ACTUAL
+        cost straight onto the order and advances the watermark exactly as the
+        batch reconcile does, so the order then follows the normal ship path.
+
+        Settlement is deliberately NOT run here — it runs at mark-shipped
+        (``_operator_mark_shipped`` → ``_grove_settle_at_ship``), mirroring
+        ``import_tracking`` so the single-box hand path and the batch path settle
+        at the same moment (the ship event, not the label event). Raises
+        ``UserError`` on a bad/duplicate tracking number, an unrecognised carrier,
+        or an order not awaiting a label, so the wizard surfaces it visibly rather
+        than failing silently (GOL-1975 no-silent-ack)."""
+        self.ensure_one()
+        if self.grove_fulfillment == "pickup":
+            raise UserError(f"{self.name}: farm-pickup orders buy no shipping label.")
+        if self.grove_tracking_numbers:
+            raise UserError(f"{self.name} already has tracking; clear the label fields to re-record.")
+        tracking = (tracking_number or "").strip()
+        if not shippo_client.is_valid_tracking(tracking):
+            raise UserError(f"{self.name}: {tracking!r} is not a valid tracking number.")
+        carrier_key = self._grove_infer_carrier(tracking, fallback=carrier)
+        if not carrier_key:
+            raise UserError(f"{self.name}: could not determine the carrier for {tracking!r}; pick UPS or USPS.")
+        try:
+            cost = round(float(actual_cost or 0.0), 2)
+        except (TypeError, ValueError):
+            raise UserError(f"{self.name}: actual shipping cost {actual_cost!r} is not a number.")
+        if cost < 0:
+            raise UserError(f"{self.name}: actual shipping cost cannot be negative.")
+        stage = self.grove_fulfillment_stage
+        # label_purchased is legal only from awaiting_label (a paid ship order) or
+        # wave_assigned (a deposit order whose wave opened). Reject anything else
+        # VISIBLY — a deposit_paid order must be assigned to a wave FIRST.
+        if stage not in ("awaiting_label", "wave_assigned"):
+            raise UserError(f"{self.name}: not awaiting a label (stage {stage}); assign it to a ship wave first.")
+        service_token = service or ("ups_ground" if carrier_key == "UPS" else "usps_ground_advantage")
+        # Advance the watermark BEFORE writing grove_delivery_status: setting the
+        # status to label_purchased first would make the derived stage already
+        # label_purchased and _grove_advance_state would no-op (no watermark, no
+        # chatter note) — the same ordering import_tracking relies on.
+        self._grove_advance_state("label_purchased", source="hand_label")
+        self.write(
+            {
+                "grove_tracking_numbers": tracking,
+                "grove_shipping_carriers": carrier_key,
+                "grove_shipping_services": service_token,
+                "grove_label_urls": "",  # label prints from Pirate Ship, not stored here
+                "grove_actual_shipping_cost": cost,
+                "grove_delivery_status": "label_purchased",
+            }
+        )
+        return True
+
+    def _grove_mark_shipped_and_settle(self, operator=None):
+        """Model entry point for the Odoo "Mark shipped" server action (GOL-2895).
+
+        Runs the SAME orchestration as the Discord-bridge endpoint so the ship
+        flow never depends on Discord being wired: the canonical GOL-1981 shipped
+        transition + ship-time settlement (GOL-2053) + exactly one branded
+        shipment email. Deferred import breaks the controller→models load cycle,
+        mirroring ``_grove_settle_at_ship``. Returns ``_operator_mark_shipped``'s
+        ``{"newly_shipped": bool, "settlement": <status> | None}``."""
+        self.ensure_one()
+        from ..controllers.main import _operator_mark_shipped
+
+        return _operator_mark_shipped(self.env, self, actor=operator, source="operator")
 
     def grove_should_send_shipment_email(self):
         """Predicate the Phase 3 shipment notification consumes: a shipment
@@ -481,17 +580,36 @@ class SaleOrder(models.Model):
         # `dormancy_window`, failing closed rather than shipping an
         # underpriced/heavier-than-quoted label off a bad window.
         window = dormancy_window(self.env)
-        # Seasonal gate (GOL-1906): bareroot ships ONLY in the nursery dormancy
-        # window. `unshippable_reason` above already cleared any pickup-only
-        # (potted) line, so every remaining line here is bareroot — a label
-        # outside the window would be a leafed bareroot parcel, impossible by
-        # policy. Fail CLOSED: such an order is a preorder that ships in the next
-        # dormant wave (the deposit path routed it there at checkout).
-        if not can_ship_bareroot(today, window):
+        # Seasonal gate (GOL-1906; RELAXED by Josh ruling 2026-10-02 on GOL-2895).
+        # A bareroot tree only gets a DORMANT-weight label inside the nursery
+        # dormancy window. But Josh ruled that an order placed ON OR BEFORE the
+        # season cutover (grove_headless.deposit_cutover_md, default Oct 15) may
+        # ship NOW as peat-and-bagged — the leafed box catalog — even outside the
+        # window: the store is shipping peat-and-bagged this fall and buying labels
+        # by hand. Only orders placed AFTER the cutover are held for the November
+        # dormant wave, so the window gate applies to those alone. Key the decision
+        # to the ORDER date + the existing cutover parameter (never a new hardcoded
+        # date), reusing the same `_after_deposit_cutover` the deposit rule uses at
+        # checkout so the two can never drift. `unshippable_reason` above already
+        # cleared any pickup-only line, so every line here is bareroot; packing in
+        # `packing_mode(today)` gives a leafed (peat-and-bagged) parcel now and a
+        # dormant parcel in-window.
+        #
+        # Future (GOL-2895 item 3, filed as its own issue): a per-order "hold for
+        # dormant bareroot wave" flag will let a customer opt a pre-cutover order
+        # into the November wave. When it lands, OR it into `held_for_wave` and the
+        # rest of this gate holds unchanged.
+        from ..controllers.main import _after_deposit_cutover
+
+        order_dt = self.date_order or fields.Datetime.now()
+        order_date = fields.Datetime.context_timestamp(self, order_dt).date()
+        held_for_wave = _after_deposit_cutover(self.env, order_date)
+        if held_for_wave and not can_ship_bareroot(today, window):
             raise UserError(
-                f"{self.name}: bareroot shipping labels can only be bought inside "
-                "the nursery dormancy window. This order is a preorder and ships in "
-                "the next dormant wave — assign it to that wave and buy the label then."
+                f"{self.name}: this order was placed after the season cutover, so its "
+                "bareroot trees ship in the next dormant wave. Bareroot labels can only "
+                "be bought inside the nursery dormancy window — assign it to that wave "
+                "and buy the label then."
             )
         mode = packing_mode(today, window)
         plan = pack_for_state(address["state"], items, mode)
