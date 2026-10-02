@@ -4,7 +4,9 @@
 Quotes Pirate Ship's public rate calculator (least-cost allowlisted ground:
 UPS Ground / UPS Ground Saver / USPS Ground Advantage, residential) for each
 rate zone x catalog box (shipping_boxes at representative billable weight),
-computes target = ceil(quote + per-box packaging + 2.00), and rewrites
+computes target = ceil(quote + flat shipping-handling fee) (GOL-2923: one flat
+$5 handling, shared with settlement, replaces the old per-box packaging + 2.00
+buffer), and rewrites
 grove_headless/data/shipping_rates.json when any zone drifts >= $1. Pirate Ship
 retires Shippo from quoting (design: spec docs/superpowers/specs/
 2026-09-09-pirateship-fulfillment-design.md section A, ratified Josh 2026-09-09;
@@ -144,9 +146,13 @@ PARCELS = {
     for catalog, weight_of in _CATALOGS
     for box_id, box in catalog.items()
 }
-# Per-box packaging (box + consumables) replaces the old flat $3.50/tree.
-PACKAGING = {box_id: box["packaging_usd"] for catalog, _ in _CATALOGS for box_id, box in catalog.items()}
-BUFFER = 2.00
+# Flat shipping & handling fee added to the raw carrier quote (GOL-2923, Josh
+# 2026-10-02: "$5 handling charge baked into shipping cost moving forward").
+# Imported from the box-catalog module so checkout (this table) and ship-time
+# settlement (controllers.main.DEFAULT_SHIPPING_HANDLING_FEE, which imports the
+# same constant) cannot drift. Replaces the old per-box packaging_usd + $2.00
+# buffer.
+SHIPPING_HANDLING_FEE = shipping_boxes.SHIPPING_HANDLING_FEE
 RATES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless", "data", "shipping_rates.json")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "out")
 
@@ -319,8 +325,11 @@ def visibility_report(counts, total):
     return "\n".join(lines)
 
 
-def target_rate(quote: float, box_id: str) -> int:
-    return math.ceil(quote + PACKAGING[box_id] + BUFFER)
+def target_rate(quote: float) -> int:
+    """Published cell = ceil(raw carrier quote + flat handling). GOL-2923 replaced
+    the per-box ``packaging_usd + 2.00 buffer`` with one flat SHIPPING_HANDLING_FEE
+    shared with settlement; ``ceil`` stays (Josh 2026-10-02)."""
+    return math.ceil(quote + SHIPPING_HANDLING_FEE)
 
 
 def load_manual_quotes(path: str) -> tuple:
@@ -328,7 +337,7 @@ def load_manual_quotes(path: str) -> tuple:
 
     The no-network refresh path for when the quote source is unavailable. The
     file carries RAW CARRIER QUOTES, never finished rates, so the hand refresh
-    goes through the exact same ``target_rate`` (packaging + buffer + ceil),
+    goes through the exact same ``target_rate`` (flat handling fee + ceil),
     monotonicity guard and drift gate as an automated run — hand-editing
     shipping_rates.json directly bypasses all three.
 
@@ -568,7 +577,7 @@ def main(argv=None) -> int:
                 missing.append(f"{zone}/{box_id}")
                 continue
             proposed[zone][box_id] = {
-                "base": float(target_rate(winner["price"], box_id)),
+                "base": float(target_rate(winner["price"])),
                 "carrier": winner["carrier"],
                 "service": winner["service"],
                 "service_title": winner["service_title"],
@@ -679,7 +688,8 @@ def main(argv=None) -> int:
         "_comment": "Maintained by scripts/rate_check (morning rate-checker). "
         "Per-box rates (Box Engine v2): ceil(Pirate Ship least-cost allowlisted "
         "ground [UPS Ground / UPS Ground Saver / USPS Ground Advantage] at the "
-        "box's representative billable weight + per-box packaging + 2.00 buffer). "
+        "box's representative billable weight + flat $5 shipping-handling fee "
+        "[GOL-2923, shared with settlement]). "
         "Each cell records the winning carrier/service (schema 3); the Odoo loader "
         "reads `base` only. Carries BOTH shippable catalogs (GOL-2199): bareroot "
         "small/large and potted/peat-and-bagged p24x10x4/p24x10x6. "

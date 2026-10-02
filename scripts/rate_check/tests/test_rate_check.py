@@ -211,8 +211,15 @@ class TestWinnerSelection(unittest.TestCase):
 
 class TestRateMath(unittest.TestCase):
     def test_target_formula_ceil(self):
-        # 9.84 + 3.50 (small packaging) + 2.00 = 15.34 -> 16
-        self.assertEqual(rc.target_rate(9.84, "small"), 16)
+        # GOL-2923: flat $5 handling (no per-box packaging). 9.84 + 5.00 = 14.84 -> 15
+        self.assertEqual(rc.target_rate(9.84), 15)
+
+    def test_target_formula_uses_shared_handling_constant(self):
+        # The fee must be the single source of truth from the box-catalog module
+        # (GOL-2923) so checkout and settlement cannot drift.
+        self.assertEqual(rc.SHIPPING_HANDLING_FEE, 5.00)
+        self.assertEqual(rc.SHIPPING_HANDLING_FEE, rc.shipping_boxes.SHIPPING_HANDLING_FEE)
+        self.assertEqual(rc.target_rate(10.0), 15)  # 10.00 + 5.00 = 15.00 -> 15
 
     def test_diff_detects_material_drift(self):
         current = {"zone_1": {"bareroot": {"base": 21.0}}}
@@ -389,8 +396,8 @@ class TestSchemaThreeAndWrite(unittest.TestCase):
             self.assertEqual(cell["carrier"], "UPS")
             self.assertEqual(cell["service"], "03")
             self.assertEqual(cell["service_title"], "UPS Ground")
-            # small: ceil(9.84 + 3.50 + 2.00) = 16
-            self.assertEqual(cell["base"], 16.0)
+            # small: ceil(9.84 + 5.00 flat handling) = 15 (GOL-2923)
+            self.assertEqual(cell["base"], 15.0)
         finally:
             os.unlink(path)
 
@@ -659,12 +666,12 @@ class TestManualRefreshRun(unittest.TestCase):
         self.assertNotIn("Service visibility", err)
 
     def test_hand_quotes_go_through_the_same_target_formula(self):
-        # small: ceil(9.00 + 3.50 packaging + 2.00 buffer) = 15 — NOT the raw
-        # quote. Hand-editing shipping_rates.json is what skips this.
+        # small: ceil(9.00 + 5.00 flat handling) = 14 — NOT the raw quote
+        # (GOL-2923). Hand-editing shipping_rates.json is what skips this.
         _, _, _, written = self._run(_manual_doc())
         cell = json.loads(written)["zone_1"]["small"]
-        self.assertEqual(cell["base"], float(rc.target_rate(9.0, "small")))
-        self.assertEqual(cell["base"], 15.0)
+        self.assertEqual(cell["base"], float(rc.target_rate(9.0)))
+        self.assertEqual(cell["base"], 14.0)
         self.assertEqual(set(cell), {"base", "carrier", "service", "service_title"})
 
     def test_incomplete_hand_refresh_is_refused(self):
