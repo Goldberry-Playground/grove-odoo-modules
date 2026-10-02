@@ -1440,6 +1440,96 @@ class GroveHeadlessAPI(http.Controller):
             }
         )
 
+    @http.route(
+        "/grove/api/v1/orders/<int:order_id>/mark-collected",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def order_mark_collected(self, order_id, **_kwargs):
+        """Operator "picked up at the farm" signal for a pickup order (GOL-2893).
+
+        The pickup twin of ``order_mark_shipped``: bearer-auth'd and company-scoped
+        the same way, and it drives the canonical GOL-1981 ``collected`` transition
+        (``action_grove_mark_collected`` — pickup-guarded, row-locked, idempotent).
+        Collection is the pickup analogue of a ship event, so on the REAL move it
+        settles the deferred balance off-session (``_grove_mark_collected_and_settle``):
+        a sold-out bareroot pickup order that took only the flat $10 deposit
+        (GOL-2233) would otherwise walk out the gate with the trees and its balance
+        never charged — pickup has no ship signal to trigger GOL-2053 settlement.
+
+        Idempotent and best-effort by the same contract as mark-shipped: a double
+        collect returns 200 ``already_collected`` and re-runs neither the transition
+        nor the charge; a settlement decline flags ``settlement_failed`` + duns +
+        alerts Discord but NEVER rolls back ``collected`` (the customer has the
+        trees). A missing / foreign-tenant order is 404; a non-pickup (ship /
+        preorder) order is 409 (it settles on the ship path, not here); a pickup
+        order not in a collectable state fails VISIBLY with 409 rather than a silent
+        "already collected" (GOL-1975 no-silent-ack guard).
+
+        Body (optional): ``{"actor": "<operator id>"}`` — stamped into the chatter.
+        Returns ``{newly_collected, settlement, grove_fulfillment_stage,
+        grove_checkout_status}``.
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        actor = payload.get("actor")
+        actor = actor if isinstance(actor, str) and actor.strip() else None
+
+        current_company = request.website.company_id
+        order = (
+            request.env["sale.order"]
+            .sudo()
+            .with_company(current_company)
+            .search(
+                [("id", "=", order_id), ("company_id", "=", current_company.id)],
+                limit=1,
+            )
+        )
+        if not order:
+            return _json_response({"error": "Order not found"}, status=404)
+        if order.grove_fulfillment != "pickup":
+            # A ship / preorder order settles on the ship path (mark-shipped /
+            # label purchase), never here — reject VISIBLY so the operator sees an
+            # ephemeral error, not a silent ack of a transition that will not run.
+            return _json_response(
+                {"error": "Order is not farm pickup and cannot be marked collected"},
+                status=409,
+            )
+
+        result = order._grove_mark_collected_and_settle(operator=actor)
+
+        stage = order.grove_fulfillment_stage
+        # action_grove_mark_collected returns False for BOTH "already collected"
+        # (idempotent double-click) and "illegal transition" (a pickup order not in
+        # a collectable state, e.g. awaiting_payment). Only the former is a safe 200
+        # ack; the latter must fail VISIBLY (GOL-1975 no-silent-ack guard).
+        if not result["newly_collected"] and stage != "collected":
+            return _json_response(
+                {
+                    "error": f"Order is not in a collectable state (stage: {stage}); not marked collected",
+                    "grove_fulfillment_stage": stage,
+                },
+                status=409,
+            )
+
+        return _json_response(
+            {
+                "id": order.id,
+                "name": order.name,
+                "state": order.state,
+                "grove_fulfillment_stage": stage,
+                "grove_checkout_status": order.grove_checkout_status,
+                "already_collected": not result["newly_collected"],
+                "newly_collected": result["newly_collected"],
+                "settlement": result["settlement"],
+            }
+        )
+
     # ── Pirate Ship label batch (GOL-2271) ────────────────────────────────
 
     @http.route(
