@@ -13,8 +13,8 @@ as *verify*.
 2. **Release follow-up email goes through Odoo** (`mass_mailing`), not Ghost.
 3. **Social DMs, comments and replies become leads only after Discord
    approval.** Lead-form submissions (if ads are ever run) auto-create.
-   The inbox itself is bought, not built: Chatwoot Cloud for DMs, Buffer
-   Community for comments (§4).
+   The inbox itself is bought, not built: **self-hosted Chatwoot** for DMs,
+   Buffer Community for comments (§4).
 4. **Live-plant policy is settled**: we grow everything we sell and Facebook
    accepts nursery plants (Josh). Etsy's cultivated-by-seller rule is met.
    Only the state-shipping exclusions need carrying into each channel (§5).
@@ -297,16 +297,55 @@ Threads DMs have no API at all, so no product covers them; they stay manual.
 Two things the table settles:
 
 - **Self-hosting Chatwoot does not skip Meta app review**; it only saves the
-  subscription. Chatwoot Cloud is what removes the weeks, because Instagram
+  subscription. Chatwoot Cloud would remove the wait because Instagram
   connects through Chatwoot's already-approved app.
 - **Comments and DMs are different products.** Buffer Community (free, and
   we already run Buffer) is a comment inbox across IG, FB and Threads with
   no API. Chatwoot is a DM inbox with an API and no comments.
 
+**Decision (Josh, 2026-10-02): Chatwoot is self-hosted.** Consequences:
+
+- The Meta app is ours. One Business-type app in the Meta developer portal
+  with two products, configured the way Chatwoot's self-hosted docs
+  describe (the "Instagram Business Login" route, v4.1+, not the older
+  Instagram-via-Facebook-Login route):
+  - **Messenger**: callback `https://<chatwoot host>/webhooks/facebook`,
+    env `FB_APP_ID`, `FB_APP_SECRET`, `FB_VERIFY_TOKEN`; advanced access for
+    `pages_messaging`, `pages_show_list`, `pages_manage_metadata`,
+    `business_management`, `pages_read_engagement`.
+  - **Instagram**: callback `https://<chatwoot host>/webhooks/instagram`,
+    app id/secret/verify token in Chatwoot's `instagram_webhooks` app
+    config; permissions `instagram_business_basic`,
+    `instagram_business_manage_messages`, `human_agent` (replies past the
+    24-hour window).
+  - **Business verification** of the Meta Business account, plus the app
+    review submission with a screencast of the Chatwoot inbox and test
+    credentials. Chatwoot's docs walk through the submission.
+- **Before review clears, it already works for us.** Meta delivers page and
+  Instagram messages to an unapproved app only for people added as app
+  testers / test users on the Business account. Add Josh's and Wes's
+  accounts as testers and the whole pipeline (DM → Chatwoot → bridge card →
+  Odoo lead) can be built and exercised end to end on real accounts while
+  the review runs. Review gates only messages from the public.
+- Known gotcha from the Chatwoot tracker: an older Messenger OAuth flow
+  requested Instagram scopes and stalled Meta review. Run a current Chatwoot
+  release and keep the two channels on their separate login routes.
+- Ops (odoocker or wherever Chatwoot runs): Rails web + Sidekiq + Postgres +
+  Redis, a public HTTPS host behind Caddy for the two webhook callbacks,
+  outbound access to `graph.facebook.com` / `graph.instagram.com`, the three
+  Meta secrets in the env, and Chatwoot's own backups. The Chatwoot → bridge
+  webhook stays on the private network.
+- API and webhooks are free and unrestricted on self-hosted (Cloud's free
+  tier blocks them), and conversation data never leaves our stack.
+
+The Meta review is therefore back on the critical path for **public** DMs,
+but it is a configuration and paperwork task guided by Chatwoot's docs, not
+engineering, and it does not block building or testing anything.
+
 ### Revised shape
 
-- **DMs: Chatwoot Cloud**, Instagram + Facebook Messenger inboxes, two
-  agents. Chatwoot is the conversation ledger; Odoo never stores message
+- **DMs: self-hosted Chatwoot**, Instagram + Facebook Messenger inboxes,
+  two agents. Chatwoot is the conversation ledger; Odoo never stores message
   bodies. Chatwoot's webhook posts to the **Discord bridge**, which already
   has the approval-card pattern: "New IG DM from @handle: 'do you ship
   pawpaws to Ohio?' → Create lead [Pawpaw] / Ignore". On approve the bridge
@@ -324,8 +363,9 @@ Two things the table settles:
 - **Lead-form ads:** not built until there is spend (below).
 
 What this removes from the Odoo build: the Meta webhook controller, the
-`X-Hub-Signature-256` verification, the `grove.social.event` ledger, the
-Page-token plumbing and the app-review wait. What remains in Odoo is one
+`X-Hub-Signature-256` verification, the `grove.social.event` ledger and the
+Page-token plumbing. Chatwoot owns the Meta integration; we own one Meta
+app registration. What remains in Odoo is one
 bearer endpoint (`/grove/api/v1/leads`) plus the fields on `crm.lead` for
 handle, platform and conversation URL; the bridge gains one Chatwoot
 webhook receiver and a card. If we ever outgrow Chatwoot, the Odoo side
@@ -500,10 +540,10 @@ rates, reviewed against `data/shipping_rates.json` by the daily rate check.
 
 | Phase | What | Mostly |
 | --- | --- | --- |
-| 0 (this week) | Add the interest step to the chatbot; seed Etsy/Meta teams; open a Chatwoot Cloud account and connect IG + FB; turn on Buffer Community; register the Etsy app; create the Commerce Manager catalog and verify the storefront domain | config, accounts |
+| 0 (this week) | Add the interest step to the chatbot; seed Etsy/Meta teams; register the Meta app for self-hosted Chatwoot (Messenger + Instagram products, testers added, business verification and app review submitted); turn on Buffer Community; register the Etsy app; create the Commerce Manager catalog and verify the storefront domain | config, accounts, ops |
 | 1 | `grove_crm`: interest model, product-level notify-me endpoint, release hook creating activities; `grove_support` v2 (lead name, attribution, activity, channel company); chat on goldberry + ggg | Odoo + small grove-sites |
 | 2 | Meta catalog feed endpoint, scheduled fetch, IG product tagging | Odoo |
-| 3 | `/lead` Discord command + `POST /grove/api/v1/leads`; Chatwoot Cloud inboxes for IG/FB DMs with a Chatwoot webhook → Discord approval card; Buffer Community for comments | Odoo + bridge |
+| 3 | `/lead` Discord command + `POST /grove/api/v1/leads`; self-hosted Chatwoot inboxes for IG/FB DMs with a Chatwoot webhook → Discord approval card (built and tested with tester accounts while Meta review runs); Buffer Community for comments | Odoo + bridge + ops |
 | 4 | Etsy: buy-vs-build decision, then listings out, receipts in, tracking out | Odoo |
 
 ---
@@ -518,8 +558,9 @@ rates, reviewed against `data/shipping_rates.json` by the daily rate check.
 
 ## 8. Risks
 
-- Meta app review is avoided by using Chatwoot Cloud's approved app; it
-  comes back the day we self-host Chatwoot or build against Meta directly.
+- Meta app review (self-hosted Chatwoot means our own Meta app) gates
+  public DMs only; testers' DMs flow before approval, so it does not block
+  the build. Start business verification in phase 0.
 - 90-day lead expiry on Meta lead forms needs a backstop cron, not just a webhook.
 - `im_livechat` in Community is not company-aware; the `company_id` field is our convention and must be set on every channel.
 - Anything that flips `sale_ok`/`website_published` now also fans out to CRM; the release hook must be as storm-guarded and non-raising as the webhook emit it piggybacks on.
