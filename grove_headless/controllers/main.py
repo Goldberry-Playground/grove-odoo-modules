@@ -3708,18 +3708,20 @@ def _send_dunning_email(env, order, amount_due, pay_url):
         f"{cta}"
         f"<p>Thank you — Goldberry Grove Nursery</p>"
     )
-    try:
-        env["mail.mail"].sudo().create(
-            {
-                "subject": f"Payment needed for your shipped order {order.name}",
-                "email_to": email,
-                **mail_from_vals(env, order.company_id),
-                "body_html": body,
-                "auto_delete": True,
-            }
-        ).send()
-    except Exception:  # noqa: BLE001 — dunning email is best-effort
-        _logger.warning("Dunning email failed for %s", order.name, exc_info=True)
+    subject = f"Payment needed for your shipped order {order.name}"
+    env["grove.email.log"].sudo().log_and_send(
+        order,
+        "dunning",
+        email,
+        subject,
+        mail_vals={
+            "subject": subject,
+            "email_to": email,
+            **mail_from_vals(env, order.company_id),
+            "body_html": body,
+            "auto_delete": True,
+        },
+    )
 
 
 def _mark_settlement_failed(env, order, secret_key, amount_cents, *, reason):
@@ -4084,18 +4086,20 @@ def _notify_preorder_deposit(env, order):
         f"<p>We'll email you again when your trees ship.</p>"
         f"<p>Goldberry Grove Nursery</p>"
     )
-    try:
-        env["mail.mail"].sudo().create(
-            {
-                "subject": f"Your preorder deposit for {order.name}",
-                "email_to": email,
-                **mail_from_vals(env, order.company_id),
-                "body_html": body,
-                "auto_delete": True,
-            }
-        ).send()
-    except Exception:  # noqa: BLE001 — deposit explainer is best-effort
-        _logger.warning("Preorder deposit email failed for %s", order.name, exc_info=True)
+    subject = f"Your preorder deposit for {order.name}"
+    env["grove.email.log"].sudo().log_and_send(
+        order,
+        "deposit",
+        email,
+        subject,
+        mail_vals={
+            "subject": subject,
+            "email_to": email,
+            **mail_from_vals(env, order.company_id),
+            "body_html": body,
+            "auto_delete": True,
+        },
+    )
 
 
 def _notify_customer_apology(env, order, product_names, refunded):
@@ -4112,18 +4116,20 @@ def _notify_customer_apology(env, order, product_names, refunded):
         f"Please reach out and we'll help you find an alternative.</p>"
         f"<p>— Goldberry Grove Nursery</p>"
     )
-    try:
-        env["mail.mail"].sudo().create(
-            {
-                "subject": f"About your order {order.name}",
-                "email_to": email,
-                **mail_from_vals(env, order.company_id),
-                "body_html": body,
-                "auto_delete": True,
-            }
-        ).send()
-    except Exception:  # noqa: BLE001 — apology email is best-effort
-        _logger.warning("Oversell apology email failed for %s", order.name, exc_info=True)
+    subject = f"About your order {order.name}"
+    env["grove.email.log"].sudo().log_and_send(
+        order,
+        "oversell_apology",
+        email,
+        subject,
+        mail_vals={
+            "subject": subject,
+            "email_to": email,
+            **mail_from_vals(env, order.company_id),
+            "body_html": body,
+            "auto_delete": True,
+        },
+    )
 
 
 def _notify_discord(message):
@@ -4299,10 +4305,17 @@ def _send_order_confirmation_email(env, order):
     if not template:
         _logger.warning("sale confirmation template missing; skipping receipt for %s", order.name)
         return
-    try:
-        template.sudo().send_mail(order.id, force_send=True)
-    except Exception:  # noqa: BLE001 — receipt is best-effort, never fails the webhook
-        _logger.warning("Order confirmation email failed for %s", order.name, exc_info=True)
+    # Subject here is only the log label — the branded subject is rendered by
+    # the sale template. The helper tags the template-created mail with our
+    # X-Mailgun-Variables header via email_values (GOL-2903).
+    env["grove.email.log"].sudo().log_and_send(
+        order,
+        "receipt",
+        order.partner_id.email,
+        f"Order confirmation {order.name}",
+        template=template,
+        template_res_id=order.id,
+    )
 
 
 # Progress order of the notify-worthy carrier statuses. A carrier event that is
@@ -4474,16 +4487,19 @@ def _notify_shipping_status(env, order, status, tracking):
     # Reply-To to the selling company's formatted address so a customer reply
     # lands with the operator, not the no-reply envelope sender.
     reply_to = getattr(order.company_id, "email_formatted", False) or order.company_id.email or None
-    try:
-        env["mail.mail"].sudo().create(
-            {
-                "subject": subject,
-                "email_to": order.partner_id.email,
-                **mail_from_vals(env, order.company_id),
-                "reply_to": reply_to,
-                "body_html": body,
-                "auto_delete": True,
-            }
-        ).send()
-    except Exception:  # noqa: BLE001 — shipping notice is best-effort
-        _logger.warning("Shipping notification email failed for %s", order.name, exc_info=True)
+    # Carrier status → customer-email kind for the delivery log (GOL-2903).
+    kind = {"transit": "shipped", "out_for_delivery": "out_for_delivery", "delivered": "delivered"}[status]
+    env["grove.email.log"].sudo().log_and_send(
+        order,
+        kind,
+        order.partner_id.email,
+        subject,
+        mail_vals={
+            "subject": subject,
+            "email_to": order.partner_id.email,
+            **mail_from_vals(env, order.company_id),
+            "reply_to": reply_to,
+            "body_html": body,
+            "auto_delete": True,
+        },
+    )

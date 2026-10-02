@@ -11,7 +11,6 @@ import hmac
 import importlib.util
 import json
 import os
-import time
 import unittest
 
 _MODULE_PATH = os.path.join(os.path.dirname(__file__), "..", "models", "mailgun_gateway.py")
