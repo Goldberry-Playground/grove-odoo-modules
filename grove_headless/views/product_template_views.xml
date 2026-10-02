@@ -81,6 +81,7 @@
                             </div>
                         </group>
                         <group string="SEO">
+                            <field name="grove_seo_title" placeholder="Overrides the storefront &lt;title&gt; — leave blank for the default template" />
                             <field name="grove_seo_description" />
                         </group>
                     </group>
