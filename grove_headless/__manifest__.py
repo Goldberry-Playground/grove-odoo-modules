@@ -68,6 +68,7 @@
         "views/fulfillment_views.xml",
         "report/bundle_substitution_report.xml",
         "views/label_batch_views.xml",
+        "views/hand_label_views.xml",
         "data/shipping_actions.xml",
         "data/settlement_cron.xml",
         "data/order_rollup_cron.xml",

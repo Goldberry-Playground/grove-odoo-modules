@@ -1299,6 +1299,89 @@ class GroveHeadlessAPI(http.Controller):
             }
         )
 
+    @http.route(
+        "/grove/api/v1/orders/<int:order_id>/assign-wave",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def order_assign_wave(self, order_id, **_kwargs):
+        """Assign a deposit-paid order to a ship wave (GOL-2895).
+
+        The programmatic twin of the "Assign to ship wave" Odoo server action,
+        bearer-auth'd and company-scoped exactly like ``order_mark_shipped``.
+        Drives the canonical ``action_grove_assign_wave`` (``deposit_paid`` →
+        ``wave_assigned``), from where the balance charge + label purchase put the
+        order back on the ship path. Without this a sold-out deposit order could
+        never leave ``deposit_paid``: nothing batched it, the label import rejected
+        it ("not awaiting a label"), and mark-shipped was an illegal jump.
+
+        Idempotent and fails VISIBLY (GOL-1975 no-silent-ack): a re-assign of an
+        order already ``wave_assigned`` returns 200 ``already_assigned``; a missing
+        / foreign-tenant order is 404; a farm-pickup order is 409 (it collects at
+        the farm and settles on the collect path, never a wave); a non-deposit
+        order (not in a waveable state) is 409 rather than a silent ack of a
+        transition that will not run.
+
+        Body (optional): ``{"wave_ref": "<label>", "actor": "<operator id>"}`` —
+        ``wave_ref`` is stamped into the chatter, ``actor`` is not used here (the
+        wave note carries the audit trail)."""
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        wave_ref = payload.get("wave_ref")
+        wave_ref = wave_ref if isinstance(wave_ref, str) and wave_ref.strip() else None
+
+        current_company = request.website.company_id
+        order = (
+            request.env["sale.order"]
+            .sudo()
+            .with_company(current_company)
+            .search(
+                [("id", "=", order_id), ("company_id", "=", current_company.id)],
+                limit=1,
+            )
+        )
+        if not order:
+            return _json_response({"error": "Order not found"}, status=404)
+        if order.grove_fulfillment == "pickup":
+            return _json_response(
+                {"error": "Order is farm pickup and cannot be assigned to a ship wave"},
+                status=409,
+            )
+
+        newly_assigned = order.action_grove_assign_wave(wave_ref=wave_ref)
+
+        stage = order.grove_fulfillment_stage
+        # action_grove_assign_wave returns False for BOTH "already assigned"
+        # (idempotent re-run) and "illegal transition" (e.g. awaiting_payment, a
+        # fully-paid awaiting_label order). Only the former is a safe 200 ack; the
+        # latter must fail VISIBLY (GOL-1975 no-silent-ack guard).
+        if not newly_assigned and stage != "wave_assigned":
+            return _json_response(
+                {
+                    "error": f"Order is not in a waveable state (stage: {stage}); not assigned to a wave",
+                    "grove_fulfillment_stage": stage,
+                },
+                status=409,
+            )
+
+        return _json_response(
+            {
+                "id": order.id,
+                "name": order.name,
+                "state": order.state,
+                "grove_fulfillment_stage": stage,
+                "grove_checkout_status": order.grove_checkout_status,
+                "already_assigned": not newly_assigned,
+                "newly_assigned": newly_assigned,
+                "wave_ref": wave_ref,
+            }
+        )
+
     # ── Pirate Ship label batch (GOL-2271) ────────────────────────────────
 
     @http.route(
@@ -3414,9 +3497,47 @@ def _settlement_shipping_line(order):
     ]
 
 
+SHIPPING_HANDLING_FEE_PARAM = "grove_headless.shipping_handling_fee"
+DEFAULT_SHIPPING_HANDLING_FEE = 5.00  # Josh 2026-10-02 PM (GOL-2895): flat per-ORDER S&H
+
+
+def _shipping_handling_fee(env):
+    """The shipping & handling fee (USD) added to the ACTUAL carrier cost at
+    settlement, on top of the raw Pirate Ship label cost (GOL-2895, Josh
+    2026-10-02). Odoo-editable via ir.config_parameter
+    ``grove_headless.shipping_handling_fee`` (default $5.00); a blank or malformed
+    value falls back to the default rather than silently dropping the fee.
+
+    Applied PER ORDER — one fee on the single GROVE-SHIP line, NOT per box. Josh
+    ruled "assume per order unless I say per box" (2026-10-02); flip to per-box
+    here (× number of packed boxes) only on his word. ``grove_actual_shipping_cost``
+    is deliberately left as the raw carrier spend so reporting still shows true
+    label cost — the fee lives only on the customer-facing shipping line."""
+    raw = (env["ir.config_parameter"].sudo().get_param(SHIPPING_HANDLING_FEE_PARAM) or "").strip()
+    if raw:
+        try:
+            fee = float(raw)
+            if fee >= 0:
+                return round(fee, 2)
+        except (ValueError, TypeError):
+            pass
+        _logger.warning(
+            "Malformed %s=%r; using $%.2f default", SHIPPING_HANDLING_FEE_PARAM, raw, DEFAULT_SHIPPING_HANDLING_FEE
+        )
+    return DEFAULT_SHIPPING_HANDLING_FEE
+
+
 def _recompute_ship_total(env, order):
-    """Rewrite the GROVE-SHIP line to the ACTUAL packed shipping cost so
-    settlement bills what really shipped, not the checkout estimate.
+    """Rewrite the GROVE-SHIP line to the ACTUAL packed shipping cost plus the
+    flat S&H fee so settlement bills what really shipped, not the checkout
+    estimate.
+
+    The customer-facing GROVE-SHIP line becomes ``grove_actual_shipping_cost +
+    _shipping_handling_fee`` (GOL-2895, Josh 2026-10-02). The raw carrier spend
+    stays on ``grove_actual_shipping_cost`` for reporting; because the fee rides
+    on the line price_unit, both ``amount_total`` and the Stripe Tax line items
+    (which read ``price_subtotal``) include it, so the balance and tax are
+    computed on actual shipping + fee.
 
     The authoritative sales tax now comes from Stripe Tax at settlement
     (GOL-2568, ``_settlement_tax_line_items`` + ``create_tax_calculation``), so
@@ -3427,7 +3548,7 @@ def _recompute_ship_total(env, order):
     the WV farm and keep WV tax."""
     ship_line = _settlement_shipping_line(order)
     if ship_line:
-        ship_line.price_unit = order.grove_actual_shipping_cost or 0.0
+        ship_line.price_unit = (order.grove_actual_shipping_cost or 0.0) + _shipping_handling_fee(env)
     if order.grove_fulfillment == "ship":
         state = order.partner_shipping_id.state_id.code or None
         _apply_destination_tax(env, order, {"state": state})
@@ -3709,7 +3830,8 @@ def settle_order_at_ship(env, order):
     order.message_post(
         body=(
             f"Ship-time settlement captured ${balance:.2f} off-session — actual shipping "
-            f"${order.grove_actual_shipping_cost or 0.0:.2f}, Stripe tax ${settled_tax or 0.0:.2f}."
+            f"${order.grove_actual_shipping_cost or 0.0:.2f} + ${_shipping_handling_fee(env):.2f} handling, "
+            f"Stripe tax ${settled_tax or 0.0:.2f}."
         )
     )
     return "settled"
@@ -4223,7 +4345,7 @@ def _apply_delivery_status(env, order, new_status, tracking, source="shippo"):
     return True
 
 
-def _operator_mark_shipped(env, order, actor=None):
+def _operator_mark_shipped(env, order, actor=None, source="discord"):
     """Operator "packed & shipped" orchestration (GOL-1980).
 
     Shared by the Discord-bridge endpoint (``order_mark_shipped``) and unit-
@@ -4252,7 +4374,7 @@ def _operator_mark_shipped(env, order, actor=None):
     dict for the endpoint's JSON body: ``{"newly_shipped": bool, "settlement":
     <status str> | None}``.
     """
-    newly_shipped = order.action_grove_mark_shipped(operator=actor, source="discord")
+    newly_shipped = order.action_grove_mark_shipped(operator=actor, source=source)
     settlement = None
     if newly_shipped:
         settlement = order._grove_settle_at_ship()

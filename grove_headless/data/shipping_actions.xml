@@ -28,6 +28,42 @@ for order in records:
     </field>
   </record>
 
+  <!-- Assign deposit-paid orders to a ship wave (GOL-2895). The multi-select
+       operator entry to the ship wave: a sold-out deposit order (GOL-2233 took
+       only the $10) sits at deposit_paid until it is waved, and before this it
+       had no caller at all. Iterates so a multi-select is safe; pickup orders
+       are refused by the model guard (logged, no write). No wave ref from the
+       list action — the bearer endpoint carries the optional ref. -->
+  <record id="action_grove_assign_wave" model="ir.actions.server">
+    <field name="name">Assign to ship wave</field>
+    <field name="model_id" ref="sale.model_sale_order"/>
+    <field name="binding_model_id" ref="sale.model_sale_order"/>
+    <field name="binding_view_types">list,form</field>
+    <field name="state">code</field>
+    <field name="code">
+for order in records:
+    order.action_grove_assign_wave()
+    </field>
+  </record>
+
+  <!-- Mark shipped + settle + notify from Odoo (GOL-2895), so the ship flow does
+       not depend on the Discord "Mark Shipped" button being wired. Runs the SAME
+       _operator_mark_shipped orchestration: canonical shipped transition +
+       ship-time settlement (the deferred balance is captured off-session) + one
+       branded shipment email. Best-effort settlement never rolls back shipped;
+       a pickup order is refused by the model guard. Iterates for multi-select. -->
+  <record id="action_grove_mark_shipped" model="ir.actions.server">
+    <field name="name">Mark shipped (settle + notify)</field>
+    <field name="model_id" ref="sale.model_sale_order"/>
+    <field name="binding_model_id" ref="sale.model_sale_order"/>
+    <field name="binding_view_types">list,form</field>
+    <field name="state">code</field>
+    <field name="code">
+for order in records:
+    order._grove_mark_shipped_and_settle()
+    </field>
+  </record>
+
   <!-- Manual "build the open Pirate Ship batch" trigger (GOL-2271). Rolls every
        eligible order (paid ship order awaiting a label / waved preorder) into
        the one open batch and opens its form so the operator can Export the CSV.
