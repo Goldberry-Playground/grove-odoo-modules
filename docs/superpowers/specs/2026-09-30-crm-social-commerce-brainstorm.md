@@ -13,8 +13,9 @@ as *verify*.
 2. **Release follow-up email goes through Odoo** (`mass_mailing`), not Ghost.
 3. **Social DMs, comments and replies become leads only after Discord
    approval.** Lead-form submissions (if ads are ever run) auto-create.
-4. **Validate live-plant policy on Meta and Etsy with real listings before
-   engineering any cross-posting.** Checklist in §5.
+4. **Live-plant policy is settled**: we grow everything we sell and Facebook
+   accepts nursery plants (Josh). Etsy's cultivated-by-seller rule is met.
+   Only the state-shipping exclusions need carrying into each channel (§5).
 5. **Etsy buy-vs-build:** comparison in §5; recommendation is build, phased.
 6. **Meta lead-form ads vs organic:** explained in §4; organic plus our own
    notify-me form first, lead ads only if paid ads start.
@@ -221,22 +222,33 @@ same coalesced set) and, for each template that became purchasable
 **Email blast on release goes through Odoo (ratified).** `grove_crm` depends
 on `mass_mailing` (+ `mass_mailing_crm` so `crm.lead` is a mailing model).
 On release the hook creates a **draft** `mailing.mailing` per tenant whose
-recipient domain is "leads with an open interest matching this template",
-subject prefilled, body from a template that pulls the product's storefront
-URL, image and `description_ecommerce`. A human reviews and sends; nothing
-mails automatically. Consequences to plan for:
+recipient domain is "leads with an open, consented interest matching this
+template", subject prefilled, body from a stored mailing template that pulls
+the product's storefront URL, image and `description_ecommerce`. Josh edits
+the body in Odoo's mailing editor and sends; nothing mails automatically.
 
-- Odoo becomes a second sender next to Ghost. It needs its own outbound
-  mail server per company (`grove_headless/models/mail_from.py` already
-  handles per-company From), SPF/DKIM for that sender, and Odoo's
-  unsubscribe/blacklist (`mail.blacklist`) honoured on every send.
-- Consent: a release email is marketing. Only interests captured with
-  `consent=true` (the newsletter endpoint already requires it; chat and
-  social captures must ask) are eligible; store `consent_at` on the
-  interest and filter on it in the mailing domain.
-- Ghost stays the newsletter list of record; release mailings are
-  transactional-style product notices to people who asked for exactly that
-  product, which is the line that keeps the two lists from fighting.
+Correction (Josh, 2026-10-02): Odoo already sends through **Mailgun SMTP**
+in QA and prod (`ir.mail_server` with the `send.gatheringatthegrove.com`
+from-filter; see `grove_headless/models/mail_from.py` and GOL-2180). So
+there is no "second sender" to stand up: `mass_mailing` uses the same
+outgoing server, SPF/DKIM on that domain already exist, and Mailgun keeps
+doing delivery, bounce suppression and complaint handling. What Odoo has to
+own is only the data (who gets which product notice) and the content (the
+editable email). Remaining practical points:
+
+- Use the existing from resolver (`mail_from_vals`) for the mailing's
+  `email_from`, so the branded display name per company rides on the
+  from-filter-compliant sender exactly as order mail does today.
+- `mass_mailing` adds its own unsubscribe link and `mail.blacklist`; that is
+  built in, not extra work, and it runs alongside Mailgun's suppression
+  list (both apply).
+- Optional: set Odoo's bounce alias and inbound fetch so hard bounces mark
+  the lead/interest in Odoo as well as in Mailgun. Not needed for v1.
+- Consent: only interests captured with `consent=true` (the newsletter
+  endpoint already requires it; chat and social captures must ask) are in
+  the mailing domain; store `consent_at` on the interest.
+- Ghost stays the newsletter list of record; release mailings are product
+  notices to people who asked for that product.
 - Activities stay for high-intent sources (chat, DM, lead form): one per
   lead per release, as above. Broadcast interests get the mailing only.
 
@@ -332,46 +344,16 @@ fields: `id`, `title`, `description`, `availability`, `condition`, `price`,
 `link`, `image_link`, `brand`; HTTPS public product URLs; domain verification
 in Business Manager.
 
-*Verify before building (ratified, decision 4).* What the public record
-says, with the caveat that the policy pages themselves could not be fetched
-from this environment:
-
-- **Meta.** The Commerce Policies' "Animals" entry bans live animals and
-  animal parts; endangered or protected species, wildlife *and plants*
-  (CITES-type), are banned outright. Ordinary live plants are listed under
-  the "Garden & Outdoor" Marketplace category and plant sellers operate on
-  Marketplace openly. Two real risks remain: automated review sometimes
-  mis-files plants under the animals rule, and Meta has been narrowing
-  Marketplace toward consumer-to-consumer sales, so a Page sells through a
-  Commerce Manager shop, not personal listings.
-- **Etsy.** Live plants are allowed under the "Plants, Herbs, Seeds and
-  Soil" rules: US-origin only, no USDA noxious weeds, no CITES or
-  Endangered Species Act species, seller carries phytosanitary and
-  state-permit compliance. The 2025 Creativity Standards update matters
-  more: plants and nature items must be **personally cultivated** by the
-  seller ("Handpicked by a seller" category). Trees we grow or graft
-  qualify; bought-in liners resold as-is do not. Reselling generic
-  gardening supplies is also now prohibited, so the "supplies" department
-  stays off Etsy.
-
-Validation checklist (manual, no code; a half day):
-
-1. Commerce Manager: create the nursery catalog, upload a CSV of five real,
-   published, listing-complete products (one bareroot tree, one potted,
-   one berry shrub, one seed/kit, one bundle) with storefront links and
-   images, and wait for item review. Record which pass and the rejection
-   reason for any that do not.
-2. Request Marketplace distribution for that shop and confirm plant items
-   appear.
-3. Etsy: open the shop, create one draft listing for a tree we grafted
-   ourselves, categorized under plants, with `who_made = i_did`, a
-   shipping profile for the bareroot tier, and confirm it activates and
-   stays up for a week.
-4. Check the state-shipping rules in `grove_headless/models/plant_compliance.py`
-   against each channel's shipping settings: both channels must exclude the
-   states we cannot ship to, or orders will arrive that we must cancel.
-5. If any of 1-3 fails for the plant category, that channel is dropped and
-   only non-plant goods (woodworking, kits, supplies where allowed) go on it.
+*Policy (decision 4, settled 2026-10-02).* We grow all our own plants, and
+Josh confirms Facebook accepts nursery plant listings. That settles both
+platforms' main rule: Meta bans live animals and endangered or protected
+species only, and Etsy's 2025 Creativity Standards require plants to be
+personally cultivated by the seller, which we satisfy. Remaining
+constraints to carry into the data: US-origin only (true), no USDA noxious
+or CITES species (none in the catalog), seller-side phytosanitary and state
+rules (already modelled in `plant_compliance.py`), and no reselling generic
+gardening supplies on Etsy. No validation gate remains before engineering;
+the first live feed is the test.
 
 Design: a feed endpoint in `grove_headless`, per tenant, e.g.
 `GET /grove/api/v1/feeds/meta.csv?key=<per-tenant token>` (Meta must fetch
@@ -491,7 +473,7 @@ rates, reviewed against `data/shipping_rates.json` by the daily rate check.
 
 | Phase | What | Mostly |
 | --- | --- | --- |
-| 0 (this week) | Add the interest step to the chatbot; seed Etsy/Meta teams; register the Meta app + business verification; register the Etsy app; hand-upload a 5-product CSV to Commerce Manager to validate plant listings | config, accounts |
+| 0 (this week) | Add the interest step to the chatbot; seed Etsy/Meta teams; register the Meta app + business verification; register the Etsy app; create the Commerce Manager catalog and verify the storefront domain | config, accounts |
 | 1 | `grove_crm`: interest model, product-level notify-me endpoint, release hook creating activities; `grove_support` v2 (lead name, attribution, activity, channel company); chat on goldberry + ggg | Odoo + small grove-sites |
 | 2 | Meta catalog feed endpoint, scheduled fetch, IG product tagging | Odoo |
 | 3 | Manual `/lead` path via the Discord bridge; then Meta webhook controller + social ledger + triage cards once app review clears; Threads replies/mentions | Odoo + bridge |
@@ -504,10 +486,8 @@ rates, reviewed against `data/shipping_rates.json` by the daily rate check.
 1. Which tenants get chat in phase 1 (nursery only today).
 2. Whether anyone will run Meta lead-form ads (decides if the `leadgen`
    path is built at all; see §4).
-3. Outcome of the policy validation checklist in §5 (decides whether plants
-   go on Meta, Etsy, both or neither).
-4. Odoo outbound mail sender for release mailings: domain, SPF/DKIM, and
-   who owns deliverability (DevOps).
+3. Whether to wire Odoo's bounce alias so Mailgun hard bounces mark the
+   interest in Odoo (optional, not v1).
 
 ## 8. Risks
 
