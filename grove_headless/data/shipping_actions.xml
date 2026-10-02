@@ -9,6 +9,25 @@
     <field name="code">records.action_buy_shipping_labels()</field>
   </record>
 
+  <!-- Mark a farm-pickup order collected AND settle its deferred balance (GOL-2893).
+       The pickup twin of the Discord "Mark Shipped" button, exposed on the order
+       list/form so Josh/Wesley can collect + charge the remainder from Odoo today
+       without waiting on a Discord button. Settlement runs ONLY on the real
+       collected transition and is best-effort — a decline flags settlement_failed
+       and duns, never rolls back the collected state. A non-pickup order is refused
+       by the model guard (logged, no write). Iterates so a multi-select is safe. -->
+  <record id="action_grove_mark_collected" model="ir.actions.server">
+    <field name="name">Mark collected (pickup)</field>
+    <field name="model_id" ref="sale.model_sale_order"/>
+    <field name="binding_model_id" ref="sale.model_sale_order"/>
+    <field name="binding_view_types">list,form</field>
+    <field name="state">code</field>
+    <field name="code">
+for order in records:
+    order._grove_mark_collected_and_settle()
+    </field>
+  </record>
+
   <!-- Manual "build the open Pirate Ship batch" trigger (GOL-2271). Rolls every
        eligible order (paid ship order awaiting a label / waved preorder) into
        the one open batch and opens its form so the operator can Export the CSV.
