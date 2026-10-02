@@ -173,6 +173,43 @@ class TestLabelBatch(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_shipping_services, "ups_ground\nusps_ground_advantage")
         self.assertEqual(order.grove_actual_shipping_cost, 17.46)
 
+    def test_reconcile_settles_each_advanced_order_once_off_session(self):
+        """GOL-2901: a deposit-only (preorder) ship order whose label is bought
+        via the Pirate Ship batch must have its deferred balance captured at
+        ``label_purchased`` — the same seam the Shippo path settles at — so it
+        can never strand if the GOL-2272 carrier poll later advances it to
+        shipped/delivered past the operator mark-shipped seam (same class as
+        GOL-2893). Reconcile must therefore invoke the best-effort
+        ``_grove_settle_at_ship`` exactly once per ADVANCED order (not per box),
+        on the order it just reconciled. The settlement engine itself (deposit
+        math, Stripe capture, idempotency) is proven in test_mark_shipped; here
+        it is stubbed so the test asserts only the batch→settle seam."""
+        order = self._paid_ship_order()
+        batch = self._build([_box(1), _box(1)])  # two boxes, one order
+        r1, r2 = f"{order.name}/1", f"{order.name}/2"
+        raw = self._tracking_csv([[r1, _VALID_TRACK[0], "UPS", "9.10"], [r2, _VALID_TRACK[1], "USPS", "8.36"]])
+        with patch.object(sale_order_module.SaleOrder, "_grove_settle_at_ship", autospec=True) as settle:
+            settle.return_value = "settled"
+            batch.import_tracking(raw)
+        self.assertEqual(settle.call_count, 1, "settlement runs once per advanced order, not once per box")
+        self.assertEqual(settle.call_args.args[0], order, "settled the order the batch just reconciled")
+        self.assertEqual(order.grove_fulfillment_stage, "label_purchased")
+
+    def test_reconcile_already_tracked_does_not_resettle(self):
+        """The idempotent already-tracked skip must not re-capture: a re-imported
+        file for an already-tracked order advances nothing and never calls
+        settlement again, so the deferred balance is captured exactly once across
+        repeated imports (GOL-2901). The first pass runs the real best-effort
+        settlement — a no-op (``not_applicable``) for this fully-paid order."""
+        order = self._paid_ship_order()
+        batch = self._build([_box(1)])
+        raw = self._tracking_csv([[f"{order.name}/1", _VALID_TRACK[0], "UPS", "9.10"]])
+        batch.import_tracking(raw)  # first pass advances + settles (no-op for a paid order)
+        with patch.object(sale_order_module.SaleOrder, "_grove_settle_at_ship", autospec=True) as settle:
+            second = batch.import_tracking(raw)
+        self.assertEqual(second["skipped_already_tracked"], 1)
+        settle.assert_not_called()
+
     def test_reconcile_bad_ref_writes_nothing(self):
         order = self._paid_ship_order()
         batch = self._build([_box(1)])
