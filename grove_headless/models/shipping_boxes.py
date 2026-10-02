@@ -204,12 +204,29 @@ def can_ship_bareroot(today: date, window: "Window | None" = None) -> bool:
 LENGTH_CLASSES: tuple[int, ...] = (16, 20)
 DEFAULT_LENGTH = 20
 
+# ── Shipping & handling fee ──────────────────────────────────────────────────
+# Flat handling added on top of the raw carrier (Pirate Ship) cost. THE single
+# source of truth shared by the checkout rate table (scripts/rate_check) and
+# ship-time settlement (grove_headless.controllers.main's
+# DEFAULT_SHIPPING_HANDLING_FEE, which imports this), so the two paths can never
+# drift. Josh ruling 2026-10-02 (GOL-2923): "$5 handling charge baked into
+# shipping cost moving forward" — shipping charged to a customer = carrier cost +
+# this one flat amount, and checkout and settlement must agree. Replaces the old
+# per-box ``packaging_usd`` + $2.00 buffer the rate checker used to add. Applied
+# per ORDER at settlement and per BOX in the rate table — they agree for the
+# single-box order (the common case); multi-box orders are flagged (GOL-2923)
+# until Josh rules per-order vs per-box for the table.
+SHIPPING_HANDLING_FEE = 5.00
+
 # ── Box catalog ─────────────────────────────────────────────────────────────
 # Two SKUs, selected by tree COUNT (CEO directive 2026-09-07). capacity: trees
 # per box, by mode — Josh's 1-5 / 6-10 ranges are season-independent, so both
 # modes carry the same count. packaging_usd: wholesale box + consumables
 # (biodegradable bag, packing paper, corrugate, rubber bands, tape, sticker,
-# care card, thank-you note).
+# care card, thank-you note). NOTE: no longer part of the customer shipping
+# charge — GOL-2923 folded packaging into the flat SHIPPING_HANDLING_FEE above.
+# Retained only because the GOL-2128 one-shot scripts/rate_check/probe_states.py
+# still references it; the production rate path (rate_check.target_rate) does not.
 #
 # Packed weight is modelled as three explicit terms (Josh bench-measurement,
 # 2026-09-07): ``tare_lb`` = the empty CARTON alone; ``paper_lb`` = the void-fill
