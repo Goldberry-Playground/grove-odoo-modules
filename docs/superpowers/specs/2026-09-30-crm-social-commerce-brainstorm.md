@@ -13,6 +13,8 @@ as *verify*.
 2. **Release follow-up email goes through Odoo** (`mass_mailing`), not Ghost.
 3. **Social DMs, comments and replies become leads only after Discord
    approval.** Lead-form submissions (if ads are ever run) auto-create.
+   The inbox itself is bought, not built: Chatwoot Cloud for DMs, Buffer
+   Community for comments (§4).
 4. **Live-plant policy is settled**: we grow everything we sell and Facebook
    accepts nursery plants (Josh). Etsy's cultivated-by-seller rule is met.
    Only the state-shipping exclusions need carrying into each channel (§5).
@@ -277,37 +279,62 @@ editable email). Remaining practical points:
   manual.
 - Odoo's Social Marketing app is Enterprise; none of this exists in Community.
 
-### Shape
+### Buy the inbox, build only the handoff (Josh, 2026-10-02)
 
-`grove_social` (or inside `grove_crm`):
+Josh's question: use an existing unified social-messaging product rather than
+talking to Meta ourselves. Yes. What the candidates actually cover:
 
-1. **One webhook controller** `/grove/api/v1/social/meta/webhook`: GET
-   verify-token handshake, POST with `X-Hub-Signature-256` HMAC check. Same
-   patterns we already have (`stripe/webhook`, `grove_publish.verify_signature`).
-2. **`grove.social.event` ledger**: platform, kind (`lead_ad`, `dm`,
-   `comment`, `mention`, `reply`), external id (unique, dedupe like
-   `grove.stripe.event`), author handle, text, permalink, raw payload,
-   state (`new` / `lead` / `ignored`). Every inbound is stored; only some
-   become leads.
-3. **Triage, human in the loop.** Lead-form submissions auto-create a lead
-   (explicit opt-in, has email). DMs, comments and replies do **not**
-   auto-create: they are posted as a Discord card by the existing bridge
-   ("Create lead for @handle? interest: Mushroom trees") and only an approver
-   turns them into `crm.lead` + `grove.interest` via a bearer endpoint
-   `POST /grove/api/v1/leads`. This matches the repo's guardrails (nothing
-   automatic, approvers allowlisted) and keeps spam out of the pipeline.
-   Keyword hints ("mushroom", "pawpaw", "price", "ship") pre-fill the product.
-4. **Identity without email:** store the handle on the lead
-   (`grove_social_handle`, platform) and on the interest `source_ref`. Merge
-   into the partner when an email shows up (chat, checkout, lead form).
-5. **Reply-window activity:** every social lead gets an activity due in 20
-   hours with the permalink; operators reply in the native app. Sending DMs
-   from Odoo is a later phase and needs more review scope.
-6. **Ship the manual path first.** A `/lead` slash command in the Discord
-   bridge and an Odoo quick-create (source = Instagram, product) gives
-   centralization in days. The webhook automation lands once Meta app review
-   clears, which is the long pole (weeks). Start business verification and
-   the app review now; dev mode already works for the app's own admins.
+| Product | IG DMs | FB Messenger | IG/FB comments | Threads replies | Threads DMs | Outbound API / webhooks | Meta app review on us? | Cost |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| **Buffer Community** (already in our stack) | no | no | yes | yes | no | no (not in the Buffer API we use) | no | free up to 3 channels |
+| **Meta Business Suite** inbox | yes | yes | yes | no | no | no | no | free |
+| **Chatwoot Cloud** | yes (DMs, story replies, mentions) | yes | no | no | no | REST + webhooks (`conversation_created`, `message_created`) | no, uses Chatwoot's reviewed app | ~$19/agent/month on the plan that includes Instagram |
+| **Chatwoot self-hosted** (would sit in odoocker) | yes | yes | no | no | no | free, unrestricted | **yes**, you bring your own Meta app and go through review | free |
+| Respond.io / Sprout / Agorapulse | yes | yes | yes | partly | no | yes | no | $79/month to $199/seat/month |
+
+Threads DMs have no API at all, so no product covers them; they stay manual.
+
+Two things the table settles:
+
+- **Self-hosting Chatwoot does not skip Meta app review**; it only saves the
+  subscription. Chatwoot Cloud is what removes the weeks, because Instagram
+  connects through Chatwoot's already-approved app.
+- **Comments and DMs are different products.** Buffer Community (free, and
+  we already run Buffer) is a comment inbox across IG, FB and Threads with
+  no API. Chatwoot is a DM inbox with an API and no comments.
+
+### Revised shape
+
+- **DMs: Chatwoot Cloud**, Instagram + Facebook Messenger inboxes, two
+  agents. Chatwoot is the conversation ledger; Odoo never stores message
+  bodies. Chatwoot's webhook posts to the **Discord bridge**, which already
+  has the approval-card pattern: "New IG DM from @handle: 'do you ship
+  pawpaws to Ohio?' → Create lead [Pawpaw] / Ignore". On approve the bridge
+  calls `POST /grove/api/v1/leads` (bearer) with handle, platform, product
+  guess, the Chatwoot conversation URL and, if the agent collected one, an
+  email. `grove_crm` runs the attach rule from §3 and schedules the
+  reply-window activity with the Chatwoot link. Operators reply inside
+  Chatwoot (web or mobile app), which keeps the 24-hour window and the
+  human-agent tag handled for us.
+- **Comments: Buffer Community.** Operators triage there; a comment that is
+  a lead goes in through the same `/lead` Discord command or Odoo
+  quick-create. Comment leads are lower volume and lower intent than DMs, so
+  manual entry is acceptable and costs nothing to build.
+- **Threads:** replies via Buffer Community as above; DMs manual.
+- **Lead-form ads:** not built until there is spend (below).
+
+What this removes from the Odoo build: the Meta webhook controller, the
+`X-Hub-Signature-256` verification, the `grove.social.event` ledger, the
+Page-token plumbing and the app-review wait. What remains in Odoo is one
+bearer endpoint (`/grove/api/v1/leads`) plus the fields on `crm.lead` for
+handle, platform and conversation URL; the bridge gains one Chatwoot
+webhook receiver and a card. If we ever outgrow Chatwoot, the Odoo side
+does not change: the endpoint is product-agnostic.
+
+Not reopened: `grove_support`'s ratified "no Chatwoot bridge" non-goal. The
+storefront widget stays Odoo livechat; Chatwoot is only the social DM inbox.
+Should we ever want one inbox for web chat and social, Chatwoot can host the
+website widget too, and that would be a separate decision.
 
 ### Lead-form ads vs organic (decision 6, explained)
 
@@ -473,10 +500,10 @@ rates, reviewed against `data/shipping_rates.json` by the daily rate check.
 
 | Phase | What | Mostly |
 | --- | --- | --- |
-| 0 (this week) | Add the interest step to the chatbot; seed Etsy/Meta teams; register the Meta app + business verification; register the Etsy app; create the Commerce Manager catalog and verify the storefront domain | config, accounts |
+| 0 (this week) | Add the interest step to the chatbot; seed Etsy/Meta teams; open a Chatwoot Cloud account and connect IG + FB; turn on Buffer Community; register the Etsy app; create the Commerce Manager catalog and verify the storefront domain | config, accounts |
 | 1 | `grove_crm`: interest model, product-level notify-me endpoint, release hook creating activities; `grove_support` v2 (lead name, attribution, activity, channel company); chat on goldberry + ggg | Odoo + small grove-sites |
 | 2 | Meta catalog feed endpoint, scheduled fetch, IG product tagging | Odoo |
-| 3 | Manual `/lead` path via the Discord bridge; then Meta webhook controller + social ledger + triage cards once app review clears; Threads replies/mentions | Odoo + bridge |
+| 3 | `/lead` Discord command + `POST /grove/api/v1/leads`; Chatwoot Cloud inboxes for IG/FB DMs with a Chatwoot webhook → Discord approval card; Buffer Community for comments | Odoo + bridge |
 | 4 | Etsy: buy-vs-build decision, then listings out, receipts in, tracking out | Odoo |
 
 ---
@@ -491,8 +518,8 @@ rates, reviewed against `data/shipping_rates.json` by the daily rate check.
 
 ## 8. Risks
 
-- Meta app review and business verification are the critical path for all
-  automated social ingest; nothing in Odoo shortens it.
+- Meta app review is avoided by using Chatwoot Cloud's approved app; it
+  comes back the day we self-host Chatwoot or build against Meta directly.
 - 90-day lead expiry on Meta lead forms needs a backstop cron, not just a webhook.
 - `im_livechat` in Community is not company-aware; the `company_id` field is our convention and must be set on every channel.
 - Anything that flips `sale_ok`/`website_published` now also fans out to CRM; the release hook must be as storm-guarded and non-raising as the webhook emit it piggybacks on.
