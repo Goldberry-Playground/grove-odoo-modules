@@ -1440,6 +1440,89 @@ class GroveHeadlessAPI(http.Controller):
             }
         )
 
+    @http.route(
+        "/grove/api/v1/orders/<int:order_id>/assign-wave",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def order_assign_wave(self, order_id, **_kwargs):
+        """Assign a deposit-paid order to a ship wave (GOL-2895).
+
+        The programmatic twin of the "Assign to ship wave" Odoo server action,
+        bearer-auth'd and company-scoped exactly like ``order_mark_shipped``.
+        Drives the canonical ``action_grove_assign_wave`` (``deposit_paid`` →
+        ``wave_assigned``), from where the balance charge + label purchase put the
+        order back on the ship path. Without this a sold-out deposit order could
+        never leave ``deposit_paid``: nothing batched it, the label import rejected
+        it ("not awaiting a label"), and mark-shipped was an illegal jump.
+
+        Idempotent and fails VISIBLY (GOL-1975 no-silent-ack): a re-assign of an
+        order already ``wave_assigned`` returns 200 ``already_assigned``; a missing
+        / foreign-tenant order is 404; a farm-pickup order is 409 (it collects at
+        the farm and settles on the collect path, never a wave); a non-deposit
+        order (not in a waveable state) is 409 rather than a silent ack of a
+        transition that will not run.
+
+        Body (optional): ``{"wave_ref": "<label>", "actor": "<operator id>"}`` —
+        ``wave_ref`` is stamped into the chatter, ``actor`` is not used here (the
+        wave note carries the audit trail)."""
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        wave_ref = payload.get("wave_ref")
+        wave_ref = wave_ref if isinstance(wave_ref, str) and wave_ref.strip() else None
+
+        current_company = request.website.company_id
+        order = (
+            request.env["sale.order"]
+            .sudo()
+            .with_company(current_company)
+            .search(
+                [("id", "=", order_id), ("company_id", "=", current_company.id)],
+                limit=1,
+            )
+        )
+        if not order:
+            return _json_response({"error": "Order not found"}, status=404)
+        if order.grove_fulfillment == "pickup":
+            return _json_response(
+                {"error": "Order is farm pickup and cannot be assigned to a ship wave"},
+                status=409,
+            )
+
+        newly_assigned = order.action_grove_assign_wave(wave_ref=wave_ref)
+
+        stage = order.grove_fulfillment_stage
+        # action_grove_assign_wave returns False for BOTH "already assigned"
+        # (idempotent re-run) and "illegal transition" (e.g. awaiting_payment, a
+        # fully-paid awaiting_label order). Only the former is a safe 200 ack; the
+        # latter must fail VISIBLY (GOL-1975 no-silent-ack guard).
+        if not newly_assigned and stage != "wave_assigned":
+            return _json_response(
+                {
+                    "error": f"Order is not in a waveable state (stage: {stage}); not assigned to a wave",
+                    "grove_fulfillment_stage": stage,
+                },
+                status=409,
+            )
+
+        return _json_response(
+            {
+                "id": order.id,
+                "name": order.name,
+                "state": order.state,
+                "grove_fulfillment_stage": stage,
+                "grove_checkout_status": order.grove_checkout_status,
+                "already_assigned": not newly_assigned,
+                "newly_assigned": newly_assigned,
+                "wave_ref": wave_ref,
+            }
+        )
+
     # ── Pirate Ship label batch (GOL-2271) ────────────────────────────────
 
     @http.route(
@@ -4393,7 +4476,7 @@ def _apply_delivery_status(env, order, new_status, tracking, source="shippo"):
     return True
 
 
-def _operator_mark_shipped(env, order, actor=None):
+def _operator_mark_shipped(env, order, actor=None, source="discord"):
     """Operator "packed & shipped" orchestration (GOL-1980).
 
     Shared by the Discord-bridge endpoint (``order_mark_shipped``) and unit-
@@ -4422,7 +4505,7 @@ def _operator_mark_shipped(env, order, actor=None):
     dict for the endpoint's JSON body: ``{"newly_shipped": bool, "settlement":
     <status str> | None}``.
     """
-    newly_shipped = order.action_grove_mark_shipped(operator=actor, source="discord")
+    newly_shipped = order.action_grove_mark_shipped(operator=actor, source=source)
     settlement = None
     if newly_shipped:
         settlement = order._grove_settle_at_ship()
