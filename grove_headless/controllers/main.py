@@ -3667,9 +3667,47 @@ def _settlement_shipping_line(order):
     ]
 
 
+SHIPPING_HANDLING_FEE_PARAM = "grove_headless.shipping_handling_fee"
+DEFAULT_SHIPPING_HANDLING_FEE = 2.50  # Josh 2026-10-02 (GOL-2895): flat per-ORDER S&H
+
+
+def _shipping_handling_fee(env):
+    """The shipping & handling fee (USD) added to the ACTUAL carrier cost at
+    settlement, on top of the raw Pirate Ship label cost (GOL-2895, Josh
+    2026-10-02). Odoo-editable via ir.config_parameter
+    ``grove_headless.shipping_handling_fee`` (default $2.50); a blank or malformed
+    value falls back to the default rather than silently dropping the fee.
+
+    Applied PER ORDER — one fee on the single GROVE-SHIP line, NOT per box. Josh
+    ruled "assume per order unless I say per box" (2026-10-02); flip to per-box
+    here (× number of packed boxes) only on his word. ``grove_actual_shipping_cost``
+    is deliberately left as the raw carrier spend so reporting still shows true
+    label cost — the fee lives only on the customer-facing shipping line."""
+    raw = (env["ir.config_parameter"].sudo().get_param(SHIPPING_HANDLING_FEE_PARAM) or "").strip()
+    if raw:
+        try:
+            fee = float(raw)
+            if fee >= 0:
+                return round(fee, 2)
+        except (ValueError, TypeError):
+            pass
+        _logger.warning(
+            "Malformed %s=%r; using $%.2f default", SHIPPING_HANDLING_FEE_PARAM, raw, DEFAULT_SHIPPING_HANDLING_FEE
+        )
+    return DEFAULT_SHIPPING_HANDLING_FEE
+
+
 def _recompute_ship_total(env, order):
-    """Rewrite the GROVE-SHIP line to the ACTUAL packed shipping cost so
-    settlement bills what really shipped, not the checkout estimate.
+    """Rewrite the GROVE-SHIP line to the ACTUAL packed shipping cost plus the
+    flat S&H fee so settlement bills what really shipped, not the checkout
+    estimate.
+
+    The customer-facing GROVE-SHIP line becomes ``grove_actual_shipping_cost +
+    _shipping_handling_fee`` (GOL-2895, Josh 2026-10-02). The raw carrier spend
+    stays on ``grove_actual_shipping_cost`` for reporting; because the fee rides
+    on the line price_unit, both ``amount_total`` and the Stripe Tax line items
+    (which read ``price_subtotal``) include it, so the balance and tax are
+    computed on actual shipping + fee.
 
     The authoritative sales tax now comes from Stripe Tax at settlement
     (GOL-2568, ``_settlement_tax_line_items`` + ``create_tax_calculation``), so
@@ -3680,7 +3718,7 @@ def _recompute_ship_total(env, order):
     the WV farm and keep WV tax."""
     ship_line = _settlement_shipping_line(order)
     if ship_line:
-        ship_line.price_unit = order.grove_actual_shipping_cost or 0.0
+        ship_line.price_unit = (order.grove_actual_shipping_cost or 0.0) + _shipping_handling_fee(env)
     if order.grove_fulfillment == "ship":
         state = order.partner_shipping_id.state_id.code or None
         _apply_destination_tax(env, order, {"state": state})
@@ -3962,7 +4000,8 @@ def settle_order_at_ship(env, order):
     order.message_post(
         body=(
             f"Ship-time settlement captured ${balance:.2f} off-session — actual shipping "
-            f"${order.grove_actual_shipping_cost or 0.0:.2f}, Stripe tax ${settled_tax or 0.0:.2f}."
+            f"${order.grove_actual_shipping_cost or 0.0:.2f} + ${_shipping_handling_fee(env):.2f} handling, "
+            f"Stripe tax ${settled_tax or 0.0:.2f}."
         )
     )
     return "settled"

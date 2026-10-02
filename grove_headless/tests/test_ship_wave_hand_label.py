@@ -23,9 +23,14 @@ Runs under Odoo's --test-enable runner (needs a DB for sale.order), so it is
 listed in tests/__init__.py AND excluded from pytest in conftest.py (GOL-1936).
 """
 
+import os
+from types import SimpleNamespace
 from unittest import mock
+from unittest.mock import patch
 
 from odoo.addons.grove_headless.controllers import main as grove_main
+from odoo.addons.grove_headless.models import sale_order as sale_order_module
+from odoo.addons.grove_headless.models import stripe_gateway
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
 from odoo.tools import mute_logger
@@ -230,3 +235,192 @@ class TestShipWaveHandLabel(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_fulfillment_stage, "shipped")
         self.assertEqual(result["settlement"], "settled")
         notify.assert_called_once()
+
+
+@tagged("post_install", "-at_install")
+class TestShipHandlingFee(GroveTaxFixtureMixin, TransactionCase):
+    """GOL-2895 item 2 (Josh ruling 2026-10-02): a flat shipping & handling fee rides
+    on the GROVE-SHIP line at settlement, on top of the raw Pirate Ship label cost.
+    ``grove_actual_shipping_cost`` stays the raw carrier spend for reporting; only the
+    customer-facing line carries the fee, so ``amount_total`` and the Stripe Tax line
+    items both include it. The fee is Odoo-editable
+    (``grove_headless.shipping_handling_fee``, default $2.50), applied PER ORDER."""
+
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.ref("base.main_company")
+        self.icp = self.env["ir.config_parameter"].sudo()
+        self.partner = self.env["res.partner"].create(
+            {"name": "Fee Customer", "email": "fee@example.com", "company_id": self.company.id}
+        )
+        self.product = self.env["product.product"].create(
+            {"name": "Sold-out Bareroot Pawpaw", "type": "consu", "is_storable": True, "list_price": 48.0}
+        )
+
+    def _ship_order_with_label(self, actual=8.79):
+        """A deposit SHIP order with a stale checkout shipping estimate on its
+        GROVE-SHIP line and the ACTUAL label cost recorded — the state settlement
+        rewrites."""
+        ship_product = grove_main._get_shipping_product(self.env, self.company)
+        return (
+            self.env["sale.order"]
+            .with_company(self.company)
+            .create(
+                {
+                    "partner_id": self.partner.id,
+                    "company_id": self.company.id,
+                    "grove_fulfillment": "ship",
+                    "grove_checkout_status": "deposit_paid",
+                    "grove_amount_charged_today": 10.0,
+                    "grove_actual_shipping_cost": actual,
+                    "order_line": [
+                        (0, 0, {"product_id": self.product.id, "product_uom_qty": 1.0, "price_unit": 48.0}),
+                        # Stale checkout estimate — settlement must rewrite this line.
+                        (0, 0, {"product_id": ship_product.id, "product_uom_qty": 1.0, "price_unit": 99.0}),
+                    ],
+                }
+            )
+        )
+
+    def test_recompute_adds_flat_fee_to_actual_cost(self):
+        order = self._ship_order_with_label(actual=8.79)
+        grove_main._recompute_ship_total(self.env, order)
+        ship_line = grove_main._settlement_shipping_line(order)
+        self.assertEqual(ship_line.price_unit, 11.29)  # 8.79 label + 2.50 default fee
+        # The raw carrier spend is left untouched for true-cost reporting.
+        self.assertEqual(order.grove_actual_shipping_cost, 8.79)
+
+    def test_fee_is_odoo_editable(self):
+        self.icp.set_param("grove_headless.shipping_handling_fee", "4.00")
+        self.assertEqual(grove_main._shipping_handling_fee(self.env), 4.00)
+        order = self._ship_order_with_label(actual=8.79)
+        grove_main._recompute_ship_total(self.env, order)
+        self.assertEqual(grove_main._settlement_shipping_line(order).price_unit, 12.79)
+
+    def test_fee_defaults_and_bad_values_fall_back(self):
+        self.icp.set_param("grove_headless.shipping_handling_fee", "")
+        self.assertEqual(grove_main._shipping_handling_fee(self.env), 2.50)
+        self.icp.set_param("grove_headless.shipping_handling_fee", "not-a-number")
+        self.assertEqual(grove_main._shipping_handling_fee(self.env), 2.50)
+        self.icp.set_param("grove_headless.shipping_handling_fee", "-1")
+        self.assertEqual(grove_main._shipping_handling_fee(self.env), 2.50)  # negative rejected
+
+    def test_settlement_charges_actual_plus_fee(self):
+        """Worked example shape (Josh): trees $48 + label $8.79 + fee $2.50 - deposit
+        $10 = $49.29 before tax. Stripe Tax is left OFF so the balance is Odoo's
+        amount_total minus the deposit; the fee is proven present two ways — the
+        settled ship line is actual+fee, and the captured balance tracks the
+        fee-bearing amount_total."""
+        order = self._ship_order_with_label(actual=8.79)
+        order.grove_stripe_customer = "cus_fee"
+        order.grove_stripe_payment_method = "pm_fee"
+        charges = []
+
+        def fake_pi(secret_key, **kwargs):
+            charges.append(kwargs)
+            return {"id": "pi_fee", "status": "succeeded"}
+
+        with (
+            mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            mock.patch.dict(os.environ, {"stripe_test_secret_key": "sk_test"}, clear=False),
+        ):
+            status = grove_main.settle_order_at_ship(self.env, order)
+
+        self.assertEqual(status, "settled")
+        self.assertEqual(len(charges), 1)
+        # The GROVE-SHIP line settled at actual label + flat fee.
+        self.assertEqual(grove_main._settlement_shipping_line(order).price_unit, 11.29)
+        # The captured balance is the fee-bearing total minus the deposit.
+        expected_cents = stripe_gateway.to_cents(order.amount_total - 10.0)
+        self.assertEqual(charges[0]["amount_cents"], expected_cents)
+
+
+@tagged("post_install", "-at_install")
+class TestSeasonalLabelGate(GroveTaxFixtureMixin, TransactionCase):
+    """GOL-2895 item 2 (Josh ruling 2026-10-02): the bareroot label gate is keyed to
+    the ORDER date and the season cutover (``grove_headless.deposit_cutover_md``,
+    default Oct 15), not to today's dormancy window alone. An order placed ON OR
+    BEFORE the cutover ships now as peat-and-bagged (leafed) even outside the window;
+    only orders placed AFTER the cutover are held for the next dormant wave.
+
+    ``can_ship_bareroot`` is stubbed so the test fixes the SEASON (in/out of the
+    dormancy window) deterministically rather than coupling to today's date; the
+    packer is stubbed so this isolates the gate decision, not box planning."""
+
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.ref("base.main_company")
+        self.partner = self.env["res.partner"].create(
+            {
+                "name": "Gate Customer",
+                "street": "1 Grove Way",
+                "city": "Summersville",
+                "zip": "26651",
+                "email": "gate@example.com",
+            }
+        )
+        self.product = self.env["product.product"].create(
+            {
+                "name": "Sold-out Bareroot Hazelnut",
+                "type": "consu",
+                "list_price": 48.0,
+                "grove_shipping_tier": "bareroot",
+                "grove_tree_length": "20",
+            }
+        )
+
+    def _order(self, order_date):
+        return (
+            self.env["sale.order"]
+            .with_company(self.company)
+            .create(
+                {
+                    "partner_id": self.partner.id,
+                    "company_id": self.company.id,
+                    "date_order": order_date,
+                    "grove_fulfillment": "ship",
+                    "order_line": [(0, 0, {"product_id": self.product.id, "product_uom_qty": 1.0, "price_unit": 48.0})],
+                }
+            )
+        )
+
+    def _stub_pack(self):
+        return (
+            patch.object(sale_order_module, "pack_for_state", return_value=[SimpleNamespace(box_id="BR_S", count=1)]),
+            patch.object(sale_order_module, "unshippable_reason", return_value=None),
+        )
+
+    def test_pre_cutover_order_ships_now_outside_dormancy(self):
+        order = self._order("2026-10-01 12:00:00")  # on/before the Oct 15 cutover
+        packer, reason = self._stub_pack()
+        with (
+            packer,
+            reason,
+            # Leafed season: outside the dormancy window today.
+            patch.object(sale_order_module, "can_ship_bareroot", return_value=False),
+        ):
+            _address, plan, _mode = order._grove_pack_for_label()
+        self.assertTrue(plan)  # the gate did NOT refuse a pre-cutover order in the leafed season
+
+    @mute_logger("odoo.addons.grove_headless.models.sale_order")
+    def test_post_cutover_order_held_for_dormant_wave(self):
+        order = self._order("2026-11-20 12:00:00")  # after the Oct 15 cutover
+        packer, reason = self._stub_pack()
+        with (
+            packer,
+            reason,
+            patch.object(sale_order_module, "can_ship_bareroot", return_value=False),  # outside the window
+        ):
+            with self.assertRaisesRegex(UserError, "after the season cutover"):
+                order._grove_pack_for_label()
+
+    def test_post_cutover_order_ships_inside_window(self):
+        order = self._order("2026-11-20 12:00:00")  # after cutover, but the dormant wave is open
+        packer, reason = self._stub_pack()
+        with (
+            packer,
+            reason,
+            patch.object(sale_order_module, "can_ship_bareroot", return_value=True),  # inside the dormancy window
+        ):
+            _address, plan, _mode = order._grove_pack_for_label()
+        self.assertTrue(plan)  # the November dormant wave ships normally

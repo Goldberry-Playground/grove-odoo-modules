@@ -536,17 +536,36 @@ class SaleOrder(models.Model):
         # `dormancy_window`, failing closed rather than shipping an
         # underpriced/heavier-than-quoted label off a bad window.
         window = dormancy_window(self.env)
-        # Seasonal gate (GOL-1906): bareroot ships ONLY in the nursery dormancy
-        # window. `unshippable_reason` above already cleared any pickup-only
-        # (potted) line, so every remaining line here is bareroot — a label
-        # outside the window would be a leafed bareroot parcel, impossible by
-        # policy. Fail CLOSED: such an order is a preorder that ships in the next
-        # dormant wave (the deposit path routed it there at checkout).
-        if not can_ship_bareroot(today, window):
+        # Seasonal gate (GOL-1906; RELAXED by Josh ruling 2026-10-02 on GOL-2895).
+        # A bareroot tree only gets a DORMANT-weight label inside the nursery
+        # dormancy window. But Josh ruled that an order placed ON OR BEFORE the
+        # season cutover (grove_headless.deposit_cutover_md, default Oct 15) may
+        # ship NOW as peat-and-bagged — the leafed box catalog — even outside the
+        # window: the store is shipping peat-and-bagged this fall and buying labels
+        # by hand. Only orders placed AFTER the cutover are held for the November
+        # dormant wave, so the window gate applies to those alone. Key the decision
+        # to the ORDER date + the existing cutover parameter (never a new hardcoded
+        # date), reusing the same `_after_deposit_cutover` the deposit rule uses at
+        # checkout so the two can never drift. `unshippable_reason` above already
+        # cleared any pickup-only line, so every line here is bareroot; packing in
+        # `packing_mode(today)` gives a leafed (peat-and-bagged) parcel now and a
+        # dormant parcel in-window.
+        #
+        # Future (GOL-2895 item 3, filed as its own issue): a per-order "hold for
+        # dormant bareroot wave" flag will let a customer opt a pre-cutover order
+        # into the November wave. When it lands, OR it into `held_for_wave` and the
+        # rest of this gate holds unchanged.
+        from ..controllers.main import _after_deposit_cutover
+
+        order_dt = self.date_order or fields.Datetime.now()
+        order_date = fields.Datetime.context_timestamp(self, order_dt).date()
+        held_for_wave = _after_deposit_cutover(self.env, order_date)
+        if held_for_wave and not can_ship_bareroot(today, window):
             raise UserError(
-                f"{self.name}: bareroot shipping labels can only be bought inside "
-                "the nursery dormancy window. This order is a preorder and ships in "
-                "the next dormant wave — assign it to that wave and buy the label then."
+                f"{self.name}: this order was placed after the season cutover, so its "
+                "bareroot trees ship in the next dormant wave. Bareroot labels can only "
+                "be bought inside the nursery dormancy window — assign it to that wave "
+                "and buy the label then."
             )
         mode = packing_mode(today, window)
         plan = pack_for_state(address["state"], items, mode)

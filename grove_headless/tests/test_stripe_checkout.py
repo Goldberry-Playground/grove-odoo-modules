@@ -1029,9 +1029,15 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         action_buy_shipping_labels fails closed with a loud error before any
         Shippo call, so a mistimed label attempt can never buy a leafed
         (underpriced, ~2x heavier) parcel against the dormant-priced table. Such
-        an order is a preorder that ships in the next dormant wave."""
+        an order is a preorder that ships in the next dormant wave.
+
+        GOL-2895 (Josh ruling 2026-10-02) relaxed this for orders placed ON OR
+        BEFORE the season cutover (they ship now as peat-and-bagged); the label
+        gate now only fails closed for an order placed AFTER the cutover, so pin
+        the order date past it to keep exercising the still-valid block."""
         self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
         order = self._make_order(qty=2)
+        order.date_order = "2026-11-20 12:00:00"  # after the Oct 15 cutover → held for the dormant wave
         with (
             mock.patch.dict("os.environ", {"SHIPPO_API_KEY": "shippo_test"}, clear=False),
             mock.patch.object(grove_sale_order, "can_ship_bareroot", return_value=False),
