@@ -522,6 +522,17 @@ class GroveLabelBatch(models.Model):
                         "actual_cost": cost,
                     }
                 )
+            # Every box is bought and the ACTUAL shipping cost is persisted, so a
+            # deposit-only (preorder) balance can settle off-session now — exactly
+            # as the Shippo path does right after its own label_purchased advance
+            # (GOL-2053, action_buy_shipping_labels). Without this the balance only
+            # captures later at operator mark-shipped; an order the GOL-2272 carrier
+            # poll advances straight to shipped/delivered bypasses that seam and the
+            # deferred balance strands (GOL-2901, same class as GOL-2893). Best-effort
+            # by contract: _grove_settle_at_ship is idempotent (already_settled
+            # no-op) and never raises, so a decline cannot roll back a persisted
+            # label.
+            order._grove_settle_at_ship()
             if fallback_refs:
                 # Loud, per-order flag: this order reconciled without a Grove Ref
                 # round-trip (matched on recipient email). A human should confirm
