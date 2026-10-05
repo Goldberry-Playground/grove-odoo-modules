@@ -21,6 +21,7 @@ from . import (
     test_enrich_status,  # noqa: F401
     test_fulfillment_pool_gate,  # noqa: F401
     test_fulfillment_state,  # noqa: F401
+    test_grove_email_log,  # noqa: F401
     test_growing_facts,  # noqa: F401
     test_html_field_tracking,  # noqa: F401
     test_kit_boms,  # noqa: F401

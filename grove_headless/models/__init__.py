@@ -1,10 +1,12 @@
 from . import (
     carrier_tracking,  # noqa: F401  pure UPS/USPS tracking clients (GOL-2272), no ORM models
+    grove_email_log,  # noqa: F401  customer-email delivery log + Mailgun event apply (GOL-2903)
     grove_enrich_job,  # noqa: F401  Perenual enrich job queue + budgeted cron (GOL-2391)
     grove_publish,  # noqa: F401  pure HMAC signer/sender (GOL-985), no ORM models
     grove_publish_event,  # noqa: F401
     grove_stripe_event,  # noqa: F401
     label_batch,  # noqa: F401  Pirate Ship label batch + rows (GOL-2271)
+    mailgun_gateway,  # noqa: F401  pure HMAC verify + event parse (GOL-2903), no ORM models
     newsletter,  # noqa: F401  pure tag-name helper (GOL-221), no ORM models
     order_rollup,  # noqa: F401  weekly order/preorder digest cron (GOL-1978)
     potting_batch,  # noqa: F401

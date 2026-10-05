@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+
+    <!-- Customer-email delivery log (GOL-2903). Read-only audit trail: every
+         customer email grove_headless sends, with the Mailgun delivery status
+         fed back by the webhook. "Opened" is approximate (image-based) — the
+         reliable signals are Delivered and Failed/Blocked. -->
+
+    <record id="grove_email_log_list" model="ir.ui.view">
+        <field name="name">grove.email.log.list</field>
+        <field name="model">grove.email.log</field>
+        <field name="arch" type="xml">
+            <list string="Customer Emails" default_order="create_date desc" create="false">
+                <field name="create_date" string="Logged" />
+                <field name="order_id" />
+                <field name="kind" />
+                <field name="recipient" />
+                <field name="sent_at" optional="show" />
+                <field name="delivered_at" optional="hide" />
+                <field name="status" widget="badge"
+                       decoration-success="status in ('delivered', 'opened')"
+                       decoration-warning="status == 'sent'"
+                       decoration-danger="status in ('failed', 'blocked', 'complained')"
+                       decoration-muted="status == 'pending'" />
+                <field name="failure_reason" optional="hide" />
+                <field name="company_id" optional="hide" groups="base.group_multi_company" />
+            </list>
+        </field>
+    </record>
+
+    <record id="grove_email_log_form" model="ir.ui.view">
+        <field name="name">grove.email.log.form</field>
+        <field name="model">grove.email.log</field>
+        <field name="arch" type="xml">
+            <form string="Customer Email" create="false" edit="false">
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="order_id" />
+                            <field name="kind" />
+                            <field name="recipient" />
+                            <field name="subject" />
+                            <field name="company_id" groups="base.group_multi_company" />
+                        </group>
+                        <group>
+                            <field name="status" />
+                            <field name="sent_at" />
+                            <field name="delivered_at" />
+                            <!-- Approximate: image-blocking clients never report an open. -->
+                            <field name="opened_at" string="Opened (approx.)" />
+                            <field name="failed_at" invisible="status not in ('failed', 'blocked')" />
+                            <field name="complained_at" invisible="status != 'complained'" />
+                            <field name="mailgun_message_id" />
+                        </group>
+                    </group>
+                    <group string="Failure" invisible="status not in ('failed', 'blocked')">
+                        <field name="failure_severity" />
+                        <field name="failure_reason" nolabel="1" />
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="grove_email_log_search" model="ir.ui.view">
+        <field name="name">grove.email.log.search</field>
+        <field name="model">grove.email.log</field>
+        <field name="arch" type="xml">
+            <search string="Customer Emails">
+                <field name="recipient" />
+                <field name="order_id" />
+                <field name="mailgun_message_id" />
+                <filter name="failed" string="Failed"
+                        domain="[('status', '=', 'failed')]" />
+                <filter name="blocked" string="Blocked / suppressed"
+                        domain="[('status', '=', 'blocked')]" />
+                <filter name="complained" string="Complained"
+                        domain="[('status', '=', 'complained')]" />
+                <!-- Anything that has not reached the recipient: still queued, or
+                     a terminal non-delivery. -->
+                <filter name="not_delivered" string="Not delivered"
+                        domain="[('status', 'in', ('pending', 'sent', 'failed', 'blocked'))]" />
+                <separator />
+                <filter name="delivered" string="Delivered"
+                        domain="[('status', 'in', ('delivered', 'opened'))]" />
+                <group expand="0" string="Group By">
+                    <filter name="group_status" string="Status" context="{'group_by': 'status'}" />
+                    <filter name="group_kind" string="Email type" context="{'group_by': 'kind'}" />
+                    <filter name="group_order" string="Order" context="{'group_by': 'order_id'}" />
+                </group>
+            </search>
+        </field>
+    </record>
+
+    <record id="action_grove_email_log" model="ir.actions.act_window">
+        <field name="name">Customer Emails</field>
+        <field name="res_model">grove.email.log</field>
+        <field name="view_mode">list,form</field>
+        <field name="search_view_id" ref="grove_email_log_search" />
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiling_face">No customer emails logged yet</p>
+            <p>Every receipt, deposit explainer, shipping notice, dunning, and
+               oversell apology is logged here with its Mailgun delivery status.</p>
+        </field>
+    </record>
+
+    <menuitem
+        id="menu_grove_email_log"
+        name="Customer Emails"
+        parent="sale.sale_menu_root"
+        action="action_grove_email_log"
+        sequence="92"
+    />
+
+    <!-- "Emails" tab on the sale order form (GOL-2903 §3). -->
+    <record id="view_order_form_grove_email_log" model="ir.ui.view">
+        <field name="name">sale.order.form.grove.email.log</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_form" />
+        <field name="arch" type="xml">
+            <xpath expr="//notebook" position="inside">
+                <page string="Emails" name="grove_emails">
+                    <field name="grove_email_log_ids" readonly="1">
+                        <list default_order="create_date desc" create="false" edit="false">
+                            <field name="create_date" string="Logged" />
+                            <field name="kind" />
+                            <field name="recipient" />
+                            <field name="sent_at" />
+                            <field name="delivered_at" />
+                            <field name="status" widget="badge"
+                                   decoration-success="status in ('delivered', 'opened')"
+                                   decoration-warning="status == 'sent'"
+                                   decoration-danger="status in ('failed', 'blocked', 'complained')"
+                                   decoration-muted="status == 'pending'" />
+                            <field name="failure_reason" optional="show" />
+                        </list>
+                    </field>
+                </page>
+            </xpath>
+        </field>
+    </record>
+
+</odoo>

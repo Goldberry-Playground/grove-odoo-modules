@@ -65,6 +65,7 @@
         "views/product_template_views.xml",
         "views/potting_batch_views.xml",
         "views/grove_publish_event_views.xml",
+        "views/grove_email_log_views.xml",
         "views/fulfillment_views.xml",
         "report/bundle_substitution_report.xml",
         "views/label_batch_views.xml",
