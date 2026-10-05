@@ -10,7 +10,7 @@ from datetime import timezone as _timezone
 
 import psycopg2
 import requests
-from odoo import http
+from odoo import fields, http
 from odoo.http import Response, request
 
 from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME, _get_company_wv_state_tax
@@ -3933,26 +3933,171 @@ def _send_dunning_email(env, order, amount_due, pay_url):
         _logger.warning("Dunning email failed for %s", order.name, exc_info=True)
 
 
-def _mark_settlement_failed(env, order, secret_key, amount_cents, *, reason):
-    """Record a shipped-but-unsettled order and start the dunning path: flag the
-    status, post chatter, alert ops on Discord, and email the customer a hosted
-    payment link. The order STAYS shipped — the decline never rolls back the
-    fulfilment (GOL-2053 acceptance 4)."""
+def _settlement_max_retries(env):
+    """CEO-tunable automatic-retry cap (ir.config_parameter, default 3)."""
+    return int(env["ir.config_parameter"].sudo().get_param("grove_headless.settlement_max_retries", 3))
+
+
+def _mark_settlement_failed(env, order, secret_key, amount_cents, *, reason, needs_customer=False):
+    """BUCKET 1 — the card could not be charged (GOL-3011).
+
+    A decline / expired card / insufficient funds / no saved card / SCA
+    (``authentication_required``). Flag the status, post chatter, alert ops on
+    Discord, and email the customer a hosted payment link. The order STAYS shipped
+    — the decline never rolls back the fulfilment (GOL-2053 acceptance 4).
+
+    The chatter/alert now state what ACTUALLY happens next (GOL-3011) rather than a
+    blanket 'will retry': an SCA decline needs the customer to authenticate, so an
+    off-session auto-retry is disabled and we wait on the pay link; an ordinary
+    decline auto-retries daily until ``settlement_max_retries`` is hit, after which
+    it is manual-only."""
     balance = round(amount_cents / 100.0, 2)
     order.write({"grove_checkout_status": "settlement_failed"})
+    attempts = order.grove_settlement_attempts or 0
+    max_retries = _settlement_max_retries(env)
+    if needs_customer:
+        next_action = (
+            "authentication (SCA) is required — an automatic retry cannot clear this; "
+            "awaiting the customer's payment via the link"
+        )
+    elif attempts < max_retries:
+        next_action = f"will auto-retry on the next daily run (attempt {attempts} of {max_retries})"
+    else:
+        next_action = (
+            f"auto-retries exhausted ({attempts} of {max_retries}); awaiting the "
+            "customer's payment via the link or a manual Retry settlement"
+        )
     note = (
         f"Ship-time settlement of ${balance:.2f} failed ({reason}). Order stays "
-        f"SHIPPED; customer has been emailed a payment link. Attempt "
-        f"{order.grove_settlement_attempts}."
+        f"SHIPPED; customer has been emailed a payment link. {next_action.capitalize()}."
     )
     order.message_post(body=note)
     _notify_discord(
         f":rotating_light: Settlement FAILED on {order.name} — ${balance:.2f} unpaid "
-        f"({reason}). Shipped but unsettled; customer dunned. Attempt "
-        f"{order.grove_settlement_attempts}."
+        f"({reason}). Shipped but unsettled; customer dunned. {next_action.capitalize()}."
     )
     pay_url = _settlement_pay_link(env, order, secret_key, amount_cents)
     _send_dunning_email(env, order, balance, pay_url)
+
+
+# Stripe ``error.type`` values that mean Stripe REJECTED the request before any
+# charge was attempted — no money moved, so a retry (with a fresh idempotency key)
+# is safe and the customer must NOT be dunned (GOL-3011 bucket 2). Everything else
+# with a received-but-failed response, plus a transport error where we got no
+# response at all, leaves the outcome UNKNOWN (bucket 3 — reconcile first).
+_KNOWN_NOT_CHARGED_TYPES = frozenset({"invalid_request_error", "authentication_error", "idempotency_error"})
+
+
+def _classify_gateway_error(exc):
+    """Split a non-card ``StripeError`` into 'known_not_charged' | 'unknown' (GOL-3011).
+
+    known_not_charged — Stripe rejected the request before processing it (4xx
+    invalid_request / authentication / permission / config, e.g. the restricted
+    rk_live key that lacked Payment Intents: Write on S00357). No charge exists.
+
+    unknown — no response (timeout / connection reset), a 5xx, a rate-limit, or an
+    ``api_error``: Stripe may have processed the charge before we lost the answer,
+    so we must reconcile before ever retrying. Default to 'unknown' when unsure —
+    the safe side is never to double-charge."""
+    status = exc.http_status
+    etype = exc.error_type
+    if status is None:  # no response received at all → outcome unverifiable
+        return "unknown"
+    if status >= 500 or status == 429 or etype == "api_error":
+        return "unknown"
+    if etype in _KNOWN_NOT_CHARGED_TYPES or 400 <= status < 500:
+        return "known_not_charged"
+    return "unknown"
+
+
+def _mark_settlement_error(env, order, amount_cents, *, reason, reconcile):
+    """BUCKET 2 & 3 — an error where no charge was made (known_not_charged) or the
+    outcome is UNKNOWN (reconcile) (GOL-3011).
+
+    Distinct from ``settlement_failed``: the customer is NOT at fault, so we do NOT
+    dun them. The order parks in ``settlement_error`` (``grove_settlement_reconcile``
+    flags the unknown-outcome case for ops), the retry cron picks it up with
+    backoff, and Discord names the order / amount / error once and escalates to ops
+    once auto-retries are exhausted."""
+    balance = round(amount_cents / 100.0, 2)
+    order.write({"grove_checkout_status": "settlement_error"})
+    attempts = order.grove_settlement_attempts or 0
+    max_retries = _settlement_max_retries(env)
+    exhausted = attempts >= max_retries
+    if reconcile:
+        next_action = "outcome UNKNOWN — the retry will reconcile with Stripe before charging (never double-charges)"
+    elif exhausted:
+        next_action = f"auto-retries exhausted ({attempts} of {max_retries}); needs a manual Retry settlement"
+    else:
+        next_action = f"will auto-retry on the next daily run (attempt {attempts} of {max_retries})"
+    order.message_post(
+        body=(
+            f"Ship-time settlement ERROR on ${balance:.2f} ({reason}). Order stays "
+            f"SHIPPED; the customer was NOT charged and was NOT dunned (not their "
+            f"fault). {next_action.capitalize()}."
+        )
+    )
+    if exhausted and not reconcile:
+        _notify_discord(
+            f":rotating_light: Settlement ERROR on {order.name} — ${balance:.2f} ({reason}). "
+            f"Auto-retries EXHAUSTED ({attempts} of {max_retries}); ops must run Retry settlement."
+        )
+    else:
+        _notify_discord(
+            f":warning: Settlement error on {order.name} — ${balance:.2f} ({reason}). {next_action.capitalize()}."
+        )
+
+
+def _reconcile_settlement(env, order, secret_key):
+    """Look an outcome-UNKNOWN order up at Stripe and decide whether it is safe to
+    (re-)charge (GOL-3011 bucket 3). Returns one of:
+
+      settled       — a prior settlement charge already SUCCEEDED; the order is
+                      marked settled and NO new charge must be made.
+      still_pending — a prior charge exists but is not yet final, OR Stripe could
+                      not be reached; hold and do not charge.
+      none          — Stripe confirms no settlement charge exists; safe to charge.
+
+    Searches by the metadata we stamp on every off-session settlement intent
+    (``order_ref`` + ``purpose=ship_settlement``). Search has no 24h TTL so it
+    stays authoritative past the idempotency window; its ~1 min indexing lag is
+    covered by the stable idempotency key the caller reuses for the fresh charge."""
+    query = f"metadata['order_ref']:'{order.name}' AND metadata['purpose']:'ship_settlement'"
+    try:
+        intents = stripe_gateway.search_payment_intents(secret_key, query)
+    except Exception as exc:  # noqa: BLE001 — any search failure means we cannot confirm; stay parked
+        _logger.warning("Settlement reconcile search failed for %s; staying parked: %s", order.name, exc)
+        order.message_post(
+            body=f"Settlement reconcile could not reach Stripe; still reconciling (no charge made): {exc}"
+        )
+        return "still_pending"
+    succeeded = next((pi for pi in intents if pi.get("status") == "succeeded"), None)
+    if succeeded:
+        order.write(
+            {
+                "grove_checkout_status": "settled",
+                "grove_settlement_payment_intent": succeeded.get("id") or order.grove_settlement_payment_intent,
+                "grove_settlement_reconcile": False,
+                "grove_settlement_needs_customer": False,
+            }
+        )
+        order.message_post(
+            body=(
+                f"Reconciled with Stripe: a prior settlement charge already SUCCEEDED "
+                f"(intent {succeeded.get('id')}); marked settled, no new charge made."
+            )
+        )
+        _notify_discord(
+            f":white_check_mark: Settlement reconciled on {order.name} — prior charge succeeded; no double-charge."
+        )
+        return "settled"
+    not_final = {"processing", "requires_capture", "requires_action", "requires_confirmation"}
+    if any(pi.get("status") in not_final for pi in intents):
+        order.message_post(
+            body="Reconciled with Stripe: a prior settlement charge is still processing; holding, no new charge."
+        )
+        return "still_pending"
+    return "none"
 
 
 def settle_order_at_ship(env, order):
@@ -3969,13 +4114,30 @@ def settle_order_at_ship(env, order):
       settlement_failed | settlement_error
     """
     order.ensure_one()
+    # Serialise this order's settlement so a retry cron run and a manual "Retry
+    # settlement" (or two cron ticks) can never charge concurrently (GOL-3011):
+    # the second caller blocks on FOR UPDATE, then re-reads the committed status
+    # below and short-circuits if the first already settled it. Re-locking a row
+    # already locked earlier in the same txn (the mark-shipped / collect paths)
+    # is a harmless no-op.
+    env.cr.execute("SELECT id FROM sale_order WHERE id = %s FOR UPDATE", (order.id,))
+    order.invalidate_recordset(
+        [
+            "grove_checkout_status",
+            "grove_settlement_attempts",
+            "grove_settlement_reconcile",
+            "grove_settlement_idem_key",
+            "grove_settlement_needs_customer",
+            "grove_settlement_payment_intent",
+        ]
+    )
     status = order.grove_checkout_status
     if status == "settled":
         return "already_settled"
-    # Only a deposit-only order (or one whose earlier settlement failed) has a
-    # deferred balance. A fully-in-stock order already collected shipping+tax at
-    # checkout, and a non-checkout order has nothing to settle.
-    if status not in ("deposit_paid", "settlement_failed"):
+    # Only a deposit-only order (or one whose earlier settlement failed/errored)
+    # has a deferred balance. A fully-in-stock order already collected
+    # shipping+tax at checkout, and a non-checkout order has nothing to settle.
+    if status not in ("deposit_paid", "settlement_failed", "settlement_error"):
         return "not_applicable"
 
     _recompute_ship_total(env, order)
@@ -4023,51 +4185,95 @@ def settle_order_at_ship(env, order):
         order.message_post(body="Ship-time settlement could not run: Stripe key is not configured.")
         return "no_key"
 
+    now = fields.Datetime.now()
     attempts = (order.grove_settlement_attempts or 0) + 1
     customer, payment_method = _resolve_saved_card(secret_key, order)
     if not customer or not payment_method:
-        order.write({"grove_settlement_attempts": attempts})
+        # Bucket 1 (card could not be charged): no card on file. No charge was
+        # attempted, so no reconcile and no idempotency key to preserve.
+        order.write(
+            {
+                "grove_settlement_attempts": attempts,
+                "grove_settlement_last_attempt": now,
+                "grove_settlement_reconcile": False,
+            }
+        )
         _mark_settlement_failed(env, order, secret_key, amount_cents, reason="no saved card on file")
         return "settlement_failed"
 
-    # Per-ATTEMPT idempotency key (GOL-2053/2054). Stripe caches a response —
-    # including a card-decline error — against an idempotency key for 24h, so a
-    # key that is stable across retries would make every retry within the day
-    # replay the ORIGINAL decline instead of re-charging, silently defeating the
-    # ratified daily×3 auto-retry (GOL-2054 ruling 2). Scoping the key to the
-    # attempt number gives each retry a genuinely new charge while still deduping
-    # a concurrent double-fire of the SAME attempt (label-purchase + mark-shipped
-    # both compute attempts=N from the same committed value → identical key). The
-    # primary double-charge guard is the status=="settled" short-circuit above.
-    idem = f"grove-settle-{order.id}-{attempts}"
+    # Reconcile-before-charge (GOL-3011 bucket 3): if a prior attempt left the
+    # outcome UNKNOWN, confirm with Stripe that no charge landed before we ever
+    # create another one. A confirmed success settles here; a pending charge or an
+    # unreachable Stripe keeps the order parked (no second charge).
+    if order.grove_settlement_reconcile:
+        verdict = _reconcile_settlement(env, order, secret_key)
+        if verdict == "settled":
+            return "settled"
+        if verdict == "still_pending":
+            order.write({"grove_settlement_last_attempt": now})
+            return "settlement_error"
+        # verdict == "none": Stripe confirms no charge exists → safe to charge.
+
+    # Idempotency key (GOL-2053/2054/3011). Stripe caches a response against an
+    # Idempotency-Key for 24h, so replaying the SAME key returns the ORIGINAL
+    # result instead of charging again. We exploit that two ways:
+    #   • While reconciling an unknown outcome, REUSE the stored key so a replay
+    #     within 24h dedupes even if Search's ~1 min index lag hid a just-created
+    #     intent — the belt to Search's suspenders.
+    #   • Otherwise a per-ATTEMPT key gives each retry of a clean decline /
+    #     known-not-charged a genuinely new charge, while still deduping a
+    #     concurrent double-fire of the SAME attempt (label-purchase + mark-shipped
+    #     compute the same attempts=N → identical key).
+    # The primary double-charge guard remains the status=="settled" short-circuit
+    # above, now under a row lock.
+    if order.grove_settlement_reconcile and order.grove_settlement_idem_key:
+        idem = order.grove_settlement_idem_key
+    else:
+        idem = f"grove-settle-{order.id}-{attempts}"
     try:
         intent = stripe_gateway.create_payment_intent(
             secret_key,
             amount_cents=amount_cents,
             customer=customer,
             payment_method=payment_method,
-            metadata={"order_ref": order.name, "purpose": "ship_settlement"},
+            metadata={"order_ref": order.name, "order_id": order.id, "purpose": "ship_settlement"},
             idempotency_key=idem,
             description=f"Ship-time balance for {order.name}",
         )
     except stripe_gateway.StripeCardError as exc:
+        # Bucket 1: the card could not be charged. An authentication_required (SCA)
+        # decline can NEVER clear off-session, so it goes straight to the pay link
+        # with auto-retry disabled; any other decline keeps the daily auto-retry.
+        sca = "authentication_required" in (exc.code or "", exc.decline_code or "")
         order.write(
             {
                 "grove_settlement_attempts": attempts,
+                "grove_settlement_last_attempt": now,
+                "grove_settlement_idem_key": idem,
+                "grove_settlement_reconcile": False,
+                "grove_settlement_needs_customer": sca,
                 "grove_settlement_payment_intent": exc.payment_intent or order.grove_settlement_payment_intent,
             }
         )
-        _mark_settlement_failed(
-            env, order, secret_key, amount_cents, reason=f"card declined ({exc.decline_code or exc.code or 'declined'})"
-        )
+        decline_reason = f"card declined ({exc.decline_code or exc.code or 'declined'})"
+        reason = "authentication required (SCA)" if sca else decline_reason
+        _mark_settlement_failed(env, order, secret_key, amount_cents, reason=reason, needs_customer=sca)
         return "settlement_failed"
     except stripe_gateway.StripeError as exc:
-        # Transport/config error (not a decline) — retryable. Keep the order in
-        # its current status so the retry cron / manual re-trigger tries again.
-        order.write({"grove_settlement_attempts": attempts})
-        _logger.error("Ship-time settlement gateway error for %s: %s", order.name, exc)
-        order.message_post(body=f"Ship-time settlement could not reach Stripe (will retry): {exc}")
-        _notify_discord(f":warning: Settlement gateway error on {order.name} (${balance:.2f}) — will retry: {exc}")
+        # Bucket 2 (known not charged) vs bucket 3 (outcome unknown). Keep the order
+        # retryable in settlement_error; never dun the customer (not their fault).
+        bucket = _classify_gateway_error(exc)
+        reconcile = bucket == "unknown"
+        order.write(
+            {
+                "grove_settlement_attempts": attempts,
+                "grove_settlement_last_attempt": now,
+                "grove_settlement_idem_key": idem,
+                "grove_settlement_reconcile": reconcile,
+            }
+        )
+        _logger.error("Ship-time settlement gateway error for %s (%s): %s", order.name, bucket, exc)
+        _mark_settlement_error(env, order, amount_cents, reason=str(exc), reconcile=reconcile)
         return "settlement_error"
 
     # Record a tax/transaction from the calculation (GOL-2568) so Stripe Tax's
@@ -4084,16 +4290,25 @@ def settle_order_at_ship(env, order):
             "grove_checkout_status": "settled",
             "grove_settlement_payment_intent": intent.get("id") or order.grove_settlement_payment_intent,
             "grove_settlement_attempts": attempts,
+            "grove_settlement_last_attempt": now,
+            "grove_settlement_reconcile": False,
+            "grove_settlement_needs_customer": False,
         }
     )
     settled_tax = order.grove_stripe_tax_amount if tax_calc else order.amount_tax
-    order.message_post(
-        body=(
-            f"Ship-time settlement captured ${balance:.2f} off-session — actual shipping "
-            f"${order.grove_actual_shipping_cost or 0.0:.2f} + ${_shipping_handling_fee(env):.2f} handling, "
-            f"Stripe tax ${settled_tax or 0.0:.2f}."
+    # Only describe shipping + handling when the order actually carried a GROVE-SHIP
+    # line (GOL-3011): a PICKUP order has none — it transfers at the farm — so the
+    # old blanket "actual shipping $0.00 + $5.00 handling" wording misled ops into
+    # thinking a handling line existed. For pickup, report just the captured balance
+    # and tax.
+    if _settlement_shipping_line(order):
+        breakdown = (
+            f" — actual shipping ${order.grove_actual_shipping_cost or 0.0:.2f} + "
+            f"${_shipping_handling_fee(env):.2f} handling, Stripe tax ${settled_tax or 0.0:.2f}"
         )
-    )
+    else:
+        breakdown = f" (farm pickup — no shipping), Stripe tax ${settled_tax or 0.0:.2f}"
+    order.message_post(body=f"Ship-time settlement captured ${balance:.2f} off-session{breakdown}.")
     return "settled"
 
 
