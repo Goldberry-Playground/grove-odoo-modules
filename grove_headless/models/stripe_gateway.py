@@ -391,6 +391,13 @@ def create_payment_intent(
         "payment_method": payment_method,
         "off_session": True,
         "confirm": True,
+        # Without an explicit allow-list Stripe defaults a PaymentIntent to card
+        # only on this account's (2017-01-27) API version, so a saved Stripe Link
+        # method is refused ("The PaymentMethod provided (link) is not allowed for
+        # this PaymentIntent"). Checkout saves whichever reusable method the
+        # shopper picked (card, Link, ...); accept any enabled type that needs no
+        # redirect, since an off-session charge has no shopper to redirect.
+        "automatic_payment_methods": {"enabled": True, "allow_redirects": "never"},
     }
     if description:
         nested["description"] = description

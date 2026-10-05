@@ -267,6 +267,19 @@ class TestPaymentIntent(unittest.TestCase):
         # double-charges.
         self.assertEqual(post.call_args.kwargs["headers"], {"Idempotency-Key": "order-42-settle"})
 
+    def test_accepts_any_saved_method_type_not_card_only(self):
+        # Prod S00357 (2026-10-05): the shopper saved Stripe Link at checkout and
+        # the balance charge, created with no allow-list, defaulted to card only
+        # and Stripe refused it ("PaymentMethod provided (link) is not allowed").
+        # The charge must opt into automatic payment methods with redirects off,
+        # and must not pin the allow-list to card.
+        post = mock.Mock(return_value=_ok(200, {"id": "pi_9", "status": "succeeded"}))
+        self._charge(post)
+        data = post.call_args.kwargs["data"]
+        self.assertEqual(data["automatic_payment_methods[enabled]"], "true")
+        self.assertEqual(data["automatic_payment_methods[allow_redirects]"], "never")
+        self.assertFalse([k for k in data if k.startswith("payment_method_types")])
+
     def test_missing_key_raises_before_network(self):
         post = mock.Mock()
         with self.assertRaises(sg.StripeError):
