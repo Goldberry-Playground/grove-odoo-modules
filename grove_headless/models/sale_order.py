@@ -4,6 +4,7 @@ from datetime import timedelta
 
 from odoo import api, fields, models
 from odoo.exceptions import UserError
+from odoo.tools import config
 
 from . import carrier_tracking, shippo_client
 from .shipment_email import normalize_carrier
@@ -822,7 +823,11 @@ class SaleOrder(models.Model):
             ]
         )
         now = fields.Datetime.now()
-        in_test = self.env.registry.in_test_mode()
+        # Odoo 19 dropped Registry.in_test_mode(); the test runner sets the
+        # ``test_enable`` config flag for the whole process, which is exactly the
+        # signal we want — skip the per-order commit below so a TestCursor stays
+        # isolated and rolls back.
+        in_test = bool(config["test_enable"])
         for order in stuck:
             if not order._settlement_retry_due(now=now):
                 continue
