@@ -64,6 +64,24 @@ for order in records:
     </field>
   </record>
 
+  <!-- Retry settlement (GOL-3011). The in-Odoo replacement for the odoo-shell
+       _grove_settle_at_ship() workaround: re-runs the reconcile-then-charge
+       settlement on every selected order and posts the result to the chatter.
+       Callable on a shipped/collected order and on settlement_failed /
+       settlement_error orders; settle_order_at_ship no-ops (already_settled /
+       not_applicable) for anything with nothing to charge, so a stray selection is
+       harmless. Concurrency-safe against the retry cron via the row lock inside the
+       settlement engine; the outcome-unknown bucket reconciles with Stripe before
+       charging so a manual retry never double-charges. Iterates for multi-select. -->
+  <record id="action_grove_retry_settlement" model="ir.actions.server">
+    <field name="name">Retry settlement</field>
+    <field name="model_id" ref="sale.model_sale_order"/>
+    <field name="binding_model_id" ref="sale.model_sale_order"/>
+    <field name="binding_view_types">list,form</field>
+    <field name="state">code</field>
+    <field name="code">records.action_grove_retry_settlement()</field>
+  </record>
+
   <!-- Manual "build the open Pirate Ship batch" trigger (GOL-2271). Rolls every
        eligible order (paid ship order awaiting a label / waved preorder) into
        the one open batch and opens its form so the operator can Export the CSV.

@@ -132,12 +132,16 @@ def build_digest(
     ]
 
     # --- Settlement failures (shipped, balance NOT captured) ---
-    # GOL-2053: a preorder that shipped but whose off-session balance charge
-    # declined lands in "settlement_failed". That is money already-shipped-not-
-    # collected, the highest-priority signal in the digest, so it gets its own
-    # section rather than silently vanishing from every other bucket.
+    # GOL-2053/3011: a preorder that shipped but whose off-session balance charge
+    # could not be captured lands in "settlement_failed" (card declined) or
+    # "settlement_error" (known-not-charged / outcome-unknown gateway error). Both
+    # are money already-shipped-not-collected, the highest-priority signal in the
+    # digest, so they share this section rather than silently vanishing from every
+    # other bucket.
     settlement_failures = [
-        _settlement_failure(o) for o in orders if (o.get("grove_checkout_status") or "") == "settlement_failed"
+        _settlement_failure(o)
+        for o in orders
+        if (o.get("grove_checkout_status") or "") in ("settlement_failed", "settlement_error")
     ]
 
     return {
