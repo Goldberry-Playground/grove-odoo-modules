@@ -289,6 +289,7 @@ def rate_feed(calendar_override=None, today=None) -> dict:
             "modes": ["dormant", "leafed"],
           },
           "calendar": {   # GOL-1172: per-USDA-zone twice-yearly ship calendar
+            "served_usda_range": [3, 10],  # GOL-2957: [min, max] zones the green list covers (null-safe)
             "preorder_open": {"fall": [8, 15], "spring": [11, 1]},
             "leafed_window": [[5, 1], [10, 15]],
             "fulfillment_days": [5, 10],
@@ -317,6 +318,16 @@ def rate_feed(calendar_override=None, today=None) -> dict:
     frontend reads the shopper's exact zone verbatim instead of re-deriving the
     backend state machine (the raw ``calendar`` block stays as the client's
     degraded-feed fallback). See ``shipping_calendar.serialize_resolved``.
+
+    ``calendar.served_usda_range`` (GOL-2957) is the ``[min, max]`` USDA
+    hardiness-zone span the green list actually covers, derived from the
+    green-filtered PHZM matrix (``shipping_calendar.served_usda_range``), so a
+    zone-agnostic surface like the ``/shipping-warranty`` "Shipping season" copy
+    can state the span honestly without a hand-typed literal — and a green-list
+    change reshapes it with no copy edit. It is the DESTINATION hardiness span,
+    not the ``zone_1..zone_5`` distance bands and not the (wider) set of
+    ``calendar.zones`` the calendar is configured for. ``None`` (key omitted at
+    the frontend's discretion) when the matrix is unavailable.
 
     ``calendar_override`` is the parsed ``grove_headless.shipping_calendar``
     system parameter (or None); the controller reads the DB and passes it in so

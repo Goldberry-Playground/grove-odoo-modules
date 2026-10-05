@@ -278,6 +278,21 @@ class TestCalendarSerialization(unittest.TestCase):
         self.assertEqual(out["zones"]["6"]["spring"], [[4, 5], [6, 6]])
         self.assertEqual(out["zones"]["6"]["spring_order_deadline"], [5, 31])
 
+    def test_served_usda_range_is_derived_green_list_span(self):
+        # GOL-2957: the span the green list covers, derived from the
+        # green-filtered PHZM matrix — NOT a hand-typed literal. Pinned by value
+        # (like leafed_window above): the vendored matrix currently spans USDA
+        # zones 3-10, so a shift here on a matrix re-vendor is a deliberate copy
+        # change the test should force someone to acknowledge.
+        span = sc.served_usda_range()
+        self.assertEqual(span, [3, 10])
+        # Shape contract: a 2-int [min <= max] list the frontend renders as a span.
+        self.assertEqual(len(span), 2)
+        self.assertLessEqual(span[0], span[1])
+        self.assertTrue(all(isinstance(z, int) for z in span))
+        # It is surfaced on the serialized calendar block the feed emits.
+        self.assertEqual(sc.serialize_calendar()["served_usda_range"], [3, 10])
+
     def test_merge_ignores_garbage_override(self):
         self.assertEqual(sc.merge_calendar_override("not-a-dict"), sc.default_calendar())
         self.assertEqual(sc.merge_calendar_override(None), sc.default_calendar())

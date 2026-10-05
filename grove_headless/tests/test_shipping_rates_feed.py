@@ -91,6 +91,7 @@ class RateFeedTests(unittest.TestCase):
         self.assertEqual(
             set(cal),
             {
+                "served_usda_range",  # GOL-2957: [min, max] zones the green list covers
                 "preorder_open",
                 "leafed_window",
                 "fulfillment_days",
@@ -100,6 +101,9 @@ class RateFeedTests(unittest.TestCase):
                 "resolved",  # GOL-1386: per-zone server-resolved mode
             },
         )
+        # GOL-2957: the green list spans USDA zones 3-10 (derived from the
+        # green-filtered PHZM matrix), NOT the full 2-10 the calendar configures.
+        self.assertEqual(cal["served_usda_range"], [3, 10])
         # Global preorder-open switch dates: fall Aug 15, spring Nov 1.
         self.assertEqual(cal["preorder_open"], {"fall": [8, 15], "spring": [11, 1]})
         self.assertEqual(cal["fulfillment_days"], [5, 10])
