@@ -10,6 +10,7 @@ from odoo.addons.grove_headless.controllers.main import (
     _image_url,
     _normalize_seo,
     _ordered_variants,
+    _phantom_bom_by_variant,
     _serialize_facts,
     _serialize_images,
     _serialize_product,
@@ -54,14 +55,68 @@ class TestDetailSerialization(GroveTaxFixtureMixin, TransactionCase):
 
     def test_fulfillment_flags_default_and_set(self):
         """GOL-2587: pickup_only + compliance_exempt serialize as plain bools on
-        both list and detail. Default False; reflect the template flags when set."""
+        both list and detail. Default False; reflect the template flags when set.
+        GOL-2988 adds ships_all_green_states to the same block."""
         flags = _fulfillment_flags(self.tmpl)
-        self.assertEqual(flags, {"pickup_only": False, "compliance_exempt": False})
+        self.assertEqual(
+            flags,
+            {"pickup_only": False, "compliance_exempt": False, "ships_all_green_states": False},
+        )
         self.tmpl.grove_pickup_only = True
         self.tmpl.grove_compliance_exempt = True
         flags = _fulfillment_flags(self.tmpl)
         self.assertIs(flags["pickup_only"], True)
         self.assertIs(flags["compliance_exempt"], True)
+
+    def _phantom_bom(self, template, variant=None):
+        """Attach a phantom (Kit) BoM to ``template`` (optionally variant-specific)."""
+        component = self.env["product.product"].create({"name": "Kit component", "type": "consu"})
+        return self.env["mrp.bom"].create(
+            {
+                "product_tmpl_id": template.id,
+                "product_id": variant.id if variant else False,
+                "type": "phantom",
+                "product_qty": 1.0,
+                "bom_line_ids": [(0, 0, {"product_id": component.id, "product_qty": 1})],
+            }
+        )
+
+    def test_ships_all_green_states_kit_vs_standalone(self):
+        """GOL-2988: the flag is the checkout gate's phantom-BoM skip, exposed.
+
+        A standalone SKU reports False (the PDP must keep warning on a restricted
+        taxon); a kit-BoM template reports True (its components are substituted
+        per destination, so the gate ships it everywhere and the PDP notice must
+        go quiet). Without this the PDP would reject an order checkout accepts —
+        the mirror image of GOL-2973.
+        """
+        self.assertFalse(_fulfillment_flags(self.tmpl)["ships_all_green_states"])
+
+        bundle = self.env["product.template"].create(
+            {
+                "name": "Remembrance Grove (test bundle)",
+                "type": "consu",
+                "grove_botanical_name": "Bundle: five natives",
+            }
+        )
+        self._phantom_bom(bundle)
+        self.assertIs(_fulfillment_flags(bundle)["ships_all_green_states"], True)
+
+    def test_ships_all_green_states_requires_every_variant(self):
+        """A kit BoM on only one variant must NOT silence the notice.
+
+        The flag is template-level but the gate is per variant, so "all" is the
+        only safe reading: a template whose Potted variant has no kit BoM would
+        still be blocked at checkout, and promising "ships everywhere" on the PDP
+        would re-create the advertise-then-reject defect.
+        """
+        bareroot = self.tmpl.product_variant_ids.filtered(
+            lambda v: "Bareroot" in v.product_template_variant_value_ids.mapped("name")
+        )
+        self._phantom_bom(self.tmpl, variant=bareroot)
+        found = _phantom_bom_by_variant(self.tmpl.product_variant_ids)
+        self.assertTrue(found.get(bareroot), "variant-specific kit BoM should resolve for its variant")
+        self.assertFalse(_fulfillment_flags(self.tmpl)["ships_all_green_states"])
 
     def test_structured_variant(self):
         bareroot = self.tmpl.product_variant_ids.filtered(

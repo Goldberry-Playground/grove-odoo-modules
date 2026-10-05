@@ -422,18 +422,72 @@ def _serialize_facts(product):
     }
 
 
+def _phantom_bom_by_variant(variants):
+    """``{variant: kit_bom}`` for the phantom (Kit) BoMs of ``variants``.
+
+    Single call site for the ``_bom_find(..., bom_type="phantom")`` lookup, so
+    the checkout carve-out gate (which skips the per-taxon block for a kit line)
+    and the product API flag that mirrors it for the PDP notice can never drift
+    apart (GOL-2988). Returns ``{}`` — i.e. "nothing is a kit" — when ``mrp``
+    is absent from the registry, which fails safe towards warning.
+    """
+    if not variants:
+        return {}
+    env = variants.env
+    if "mrp.bom" not in env.registry:
+        return {}
+    return env["mrp.bom"].sudo()._bom_find(variants, bom_type="phantom")
+
+
+def _ships_all_green_states(product):
+    """Does every sellable variant of this template skip the carve-out gate?
+
+    The checkout gate (GOL-2132, ``checkout`` below) decides a line in three
+    steps: ``grove_compliance_exempt`` skips it; otherwise a variant that
+    resolves to a **phantom (Kit) BoM** skips the per-taxon block because the
+    GOL-2237 engine substitutes components per destination state; otherwise
+    ``plant_compliance.evaluate_line`` decides. The storefront can mirror steps
+    1 and 3 from the payload, but the BoM lookup was invisible to it — so the
+    PDP notice would warn "not cleared for Florida" on a bundle the checkout
+    happily ships (GOL-2988, the mirror image of GOL-2973).
+
+    Derived from the *same* ``_bom_find(variant, bom_type="phantom")`` call the
+    gate performs, so the two cannot drift. Semantics are deliberately **all**
+    variants, not any: the flag silences a compliance warning, so a template
+    where only some variants are kits must keep warning rather than promise
+    delivery the gate would then refuse.
+
+    Prod carries zero ``mrp.bom`` records today (GOL-2949), so this is False
+    for the whole catalog until ``scripts/seed_bundle_boms.py`` runs; it is the
+    seeding moment this flag exists for.
+    """
+    variants = product.product_variant_ids
+    if not variants:
+        return False
+    # One batched `_bom_find` per template. The list endpoint pays that once per
+    # row; cheap next to the serializer's own reads.
+    found = _phantom_bom_by_variant(variants)
+    return all(found.get(variant) for variant in variants)
+
+
 def _fulfillment_flags(product):
     """Storefront fulfillment/compliance flags for a template (GOL-2587).
 
     ``pickup_only`` lets the storefront reuse the existing potted pickup-only UI
     for a product forced to farm pickup regardless of shipping tier;
     ``compliance_exempt`` lets it hide the per-state plant-health notice for a
-    product Josh has cleared by hand. Both list + detail carry them (Iris wires
-    the render — GOL twin).
+    product Josh has cleared by hand; ``ships_all_green_states`` says the
+    checkout skips the per-taxon carve-out block for this product because its
+    components are substituted per destination (GOL-2988 — see
+    ``_ships_all_green_states``). All three are carried by list + detail.
+
+    The two compliance flags are independent short-circuits of the same gate:
+    the storefront should suppress the carve-out notice when *either* is true.
     """
     return {
         "pickup_only": bool(product.grove_pickup_only),
         "compliance_exempt": bool(product.grove_compliance_exempt),
+        "ships_all_green_states": _ships_all_green_states(product),
     }
 
 
@@ -3068,7 +3122,6 @@ def _create_draft_order(website, env, payload, discount_out=None):
         # line whose product resolves to a phantom BOM. Fail-safe: an empty or
         # unparseable botanical name can't be cleared into a regulated state and
         # is logged loudly (never guessed, never a silent drop).
-        bom_model = env["mrp.bom"] if "mrp.bom" in env.registry else None
         bundle_lines = []  # (line, kit_bom, variant) — stamped after the loop
         exempt_bundle_lines = []  # line — packing note stamped after the loop (GOL-2587)
         for line in order.order_line:
@@ -3100,7 +3153,9 @@ def _create_draft_order(website, env, payload, discount_out=None):
                     # order.order_line while iterating it would skip entries.
                     exempt_bundle_lines.append(line)
                 continue
-            kit_bom = bom_model._bom_find(variant, bom_type="phantom").get(variant) if bom_model is not None else None
+            # Shared with the product API's ships_all_green_states flag so the
+            # PDP notice and this gate stay in lockstep (GOL-2988).
+            kit_bom = _phantom_bom_by_variant(variant).get(variant)
             if kit_bom:
                 # Bundle — ships everywhere, exempt from the block gate. Defer the
                 # per-state substitution signal to after this loop so we never
