@@ -350,3 +350,27 @@ class TestConsultComplianceGate(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_consult_deferred_state, "WV")
         body = "".join((order.message_ids.mapped("body") or []))
         self.assertIn("none for this state", body)
+
+    # ── GOL-3055: expose the armed state in the rate feed ─────────────────
+    # The storefront reads product.grove_consult_built (PR #315) to know a SKU
+    # is consult-built, but could not see whether checkout would actually TAKE
+    # the deposit — the deferral flag and the consult_built flag are set by
+    # different steps of the GOL-3014 rollout. Surfacing the armed state in the
+    # compliance block lets the PDP tell a deferred deposit (reservable) from a
+    # refused one (cautious copy) instead of guessing.
+
+    def test_rate_feed_surfaces_deferral_armed_state(self):
+        """The /shipping/rates compliance block carries the GOL-3019 armed state,
+        derived EXACTLY as the controller derives it — a new (in-memory)
+        sale.order's ``_grove_consult_deferral_armed()`` — so flipping the one
+        reversibility flag flips the feed, and the §3 self-guard rides along."""
+
+        def _feed_flag():
+            armed = self.env["sale.order"].sudo().new()._grove_consult_deferral_armed()
+            return grove_main.rate_feed(consult_deferral_enabled=armed)["compliance"]["consult_deferral_enabled"]
+
+        # Flag off (default): not armed -> feed reports the deposit is refused.
+        self.assertFalse(_feed_flag())
+        # Flag on: armed -> feed reports the deposit is deferred/reservable.
+        self._arm_deferral()
+        self.assertTrue(_feed_flag())

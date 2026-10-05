@@ -269,7 +269,7 @@ ZONE_BY_STATE: dict[str, str] = {
 assert set(ZONE_BY_STATE) == GREEN_STATES
 
 
-def rate_feed(calendar_override=None, today=None) -> dict:
+def rate_feed(calendar_override=None, today=None, consult_deferral_enabled=None) -> dict:
     """Read-only snapshot of the live rate table + compliance zone map (GOL-952).
 
     Returns exactly the in-memory tables ``compute_order_shipping`` prices
@@ -337,6 +337,14 @@ def rate_feed(calendar_override=None, today=None) -> dict:
     when omitted so callers that only want the rate table need not supply it. The
     returned dict is a fresh deep copy so a caller can't mutate the engine's
     tables.
+
+    ``consult_deferral_enabled`` (GOL-3055) is the armed state of the GOL-3019
+    consult-built deposit deferral, passed straight through to
+    ``plant_compliance.carve_out_feed`` where it rides the ``compliance`` block.
+    This function stays DB-free, so the controller (which has ``env``) derives it
+    from ``sale.order._grove_consult_deferral_armed()`` and injects it; ``None``
+    (the default, and what the pure tests / rate-check scripts pass) leaves the
+    key absent — the storefront's safe cautious default.
     """
     calendar = shipping_calendar.merge_calendar_override(calendar_override)
     if today is None:
@@ -364,8 +372,10 @@ def rate_feed(calendar_override=None, today=None) -> dict:
         "calendar": calendar_block,
         # Per-product genus/species carve-outs (GOL-2132). The storefront reads
         # this to render the PDP compliance notice from the same map the
-        # checkout blocks with, so the two can never drift.
-        "compliance": plant_compliance.carve_out_feed(),
+        # checkout blocks with, so the two can never drift. ``consult_deferral_
+        # enabled`` (GOL-3055) rides the same block when the caller injects it
+        # (the controller, which has env); None here leaves the key absent.
+        "compliance": plant_compliance.carve_out_feed(consult_deferral_enabled),
         # Per-state bundle component substitution (GOL-2237). Bundles ship
         # everywhere; where a component is restricted the storefront swaps it for
         # the substitute here — computed from the same carve-out map as the
