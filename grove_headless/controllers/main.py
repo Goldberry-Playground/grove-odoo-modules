@@ -14,7 +14,7 @@ import requests
 from odoo import http
 from odoo.http import Response, request
 
-from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME, _get_company_wv_state_tax
+from ..hooks import _get_company_wv_state_tax
 from ..models import bundle_substitution, promotions, stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
@@ -56,11 +56,11 @@ from .product_domain import build_product_domain, slugify, zone_response
 
 # Grove has sales-tax nexus only in West Virginia, so the WV 6% state tax (the
 # product default set by hooks.setup_wv_sales_tax) legally applies only to a
-# WV-destination shipment. Any order shipping elsewhere must have the WV tax
-# stripped — see _apply_destination_tax. The set also includes the legacy 7%
-# group + 1% municipal names so a line left on an old order carrying either is
-# still caught and stripped out of state (GOL-2449).
-WV_TAX_NAMES = frozenset({WV_GROUP_NAME, WV_STATE_NAME, WV_MUNI_NAME})
+# WV-destination shipment. Any order shipping elsewhere must have EVERY sales
+# tax stripped from EVERY line — not only the WV-named ones — see
+# _apply_destination_tax. Matching on WV names alone let a stray stock "15%" tax
+# (account.tax id 6) survive on out-of-state orders and overcharge customers
+# (GOL-3074); out of state is $0 tax regardless of what tax a line carries.
 WV_NEXUS_STATE = "WV"
 
 _logger = logging.getLogger(__name__)
@@ -2676,15 +2676,18 @@ def _apply_shipping_line(env, order, shipping, company):
 
 
 def _apply_destination_tax(env, order, shipping):
-    """Strip the WV sales tax from every line when the order ships out of state.
+    """Strip EVERY sales tax from every line when the order ships out of state.
 
     The product default (hooks.setup_wv_sales_tax) puts the "WV State Sales Tax
     6%" tax on every line (GOL-2449: 6% state only, no municipal, no group),
     which is only lawful for a WV-destination shipment — Grove's sole sales-tax
-    nexus. For any other ship-to state (e.g. Ohio) any WV tax (by name, incl. a
-    legacy "7%" group left on an old order) is removed so the customer is not
-    wrongly charged WV tax. Called after the shipping line is added so that line
-    is de-taxed too when out of state.
+    nexus. For any other ship-to state (e.g. Ohio) the destination tax is $0, so
+    we remove ALL taxes from every line (goods and shipping), not only the
+    WV-named ones. Matching on name alone (the pre-GOL-3074 behaviour) let a
+    stray stock "15%" tax (account.tax id 6, left on a product or line) survive
+    out of state and overcharge the customer at both checkout and the ship-time
+    settlement recompute. Called after the shipping line is added so that line is
+    de-taxed too when out of state.
 
     Ship-to state is canonicalized identically to the shipping path. If it can't
     be determined we conservatively leave the default WV tax in place rather than
@@ -2697,9 +2700,8 @@ def _apply_destination_tax(env, order, shipping):
     for line in order.order_line:
         if line.display_type or not line.product_id:
             continue
-        wv_taxes = line.tax_ids.filtered(lambda t: t.name in WV_TAX_NAMES)
-        if wv_taxes:
-            line.tax_ids = [(3, tax.id) for tax in wv_taxes]
+        if line.tax_ids:
+            line.tax_ids = [(5, 0, 0)]
             changed = True
     if changed:
         order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
@@ -4329,12 +4331,16 @@ def settle_order_at_ship(env, order):
             "grove_settlement_attempts": attempts,
         }
     )
+    # Name the tax source honestly: only call it "Stripe tax" when Stripe Tax
+    # actually ran (tax_calc present). With the flag OFF the figure is Odoo's own
+    # destination-rule tax, so label it "sales tax" (GOL-3074).
     settled_tax = order.grove_stripe_tax_amount if tax_calc else order.amount_tax
+    tax_label = "Stripe tax" if tax_calc else "sales tax"
     order.message_post(
         body=(
             f"Ship-time settlement captured ${balance:.2f} off-session — actual shipping "
             f"${order.grove_actual_shipping_cost or 0.0:.2f} + ${_shipping_handling_fee(env):.2f} handling, "
-            f"Stripe tax ${settled_tax or 0.0:.2f}."
+            f"{tax_label} ${settled_tax or 0.0:.2f}."
         )
     )
     return "settled"
