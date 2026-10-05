@@ -251,3 +251,102 @@ class TestConsultComplianceGate(GroveTaxFixtureMixin, TransactionCase):
             order, error = grove_main._create_draft_order(self._website(), self.env, payload)
         self.assertIsNone(error)
         self.assertTrue(order)
+
+    # ── GOL-3019: deposit-time deferral for consult-built SKUs ────────────
+    # Templates 134/135 carry an EMPTY botanical (correct — the mix does not exist
+    # at deposit time, GOL-2972), so the fail-safe above blocks the four
+    # regulated∩green states FL/IN/OH/WI. Now that GOL-3007 enforces the mix-build
+    # check at ship-commit, those four are recoverable: take the $10 deposit and
+    # record a deferral instead of blocking. The whole feature is behind one flag
+    # (AC5), default-off, self-guarded on the GOL-3007 assert (§3).
+
+    def _arm_deferral(self):
+        self.env["ir.config_parameter"].sudo().set_param("grove_headless.consult_deferral_enabled", "True")
+
+    def _empty_consult(self):
+        """The real 134/135 prod shape: consult-built, EMPTY botanical, bareroot
+        so it clears the potted gate and reaches the carve-out loop."""
+        tmpl = self.consult.product_tmpl_id
+        tmpl.grove_shipping_tier = "bareroot"
+        tmpl.grove_botanical_name = False
+        return tmpl
+
+    def test_ac1_deposit_accepted_into_regulated_state_when_armed(self):
+        """AC1: an armed consult-built mix into FL returns an order (deposit path)
+        rather than the fail-safe 400, and the deferral is RECORDED on the order —
+        destination state captured, chatter names the taxa constrained there."""
+        self._empty_consult()
+        self._arm_deferral()
+        payload = self._cart_payload("FL", fulfillment="ship")
+        with mock.patch.object(grove_main, "_apply_shipping_line", return_value=16.0):
+            order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(error)
+        self.assertTrue(order)
+        self.assertTrue(order.grove_consult_compliance_deferred)
+        self.assertEqual(order.grove_consult_deferred_state, "FL")
+        body = "".join((order.message_ids.mapped("body") or []))
+        self.assertIn("castanea", body)
+        self.assertIn("cornus", body)
+
+    def test_ac2_deferred_order_still_cannot_ship(self):
+        """AC2: the deferral does NOT satisfy the ship-commit gate — the recorded
+        deferral lives on separate fields, grove_substitution_note stays empty, so
+        the order still owes a human check and mark-shipped still raises."""
+        self._empty_consult()
+        self._arm_deferral()
+        payload = self._cart_payload("IN", fulfillment="ship")
+        with mock.patch.object(grove_main, "_apply_shipping_line", return_value=16.0):
+            order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(error)
+        self.assertFalse((order.grove_substitution_note or "").strip())
+        self.assertTrue(order._grove_consult_compliance_missing())
+        with self.assertRaises(UserError):
+            order._grove_assert_consult_compliance()
+
+    @mute_logger("odoo.addons.grove_headless.controllers.main")
+    def test_ac3_non_consult_empty_botanical_still_blocks_when_armed(self):
+        """AC3: the deferral keys on grove_consult_built ONLY. With the flag ON, a
+        NON-consult template with an empty botanical into FL still hard-blocks —
+        emptiness alone never defers."""
+        tmpl = self.plain.product_tmpl_id
+        tmpl.grove_shipping_tier = "bareroot"
+        tmpl.grove_botanical_name = False
+        self._arm_deferral()
+        payload = {
+            "contact": {"name": "Plain", "email": "plain-cart@example.com", "phone": "3045551212"},
+            "items": [{"variant_id": self.plain.id, "quantity": 1}],
+            "shipping": {"street": "1 Rd", "city": "Town", "state": "FL", "zip": "33101"},
+            "fulfillment": "ship",
+        }
+        with mock.patch.object(grove_main, "_apply_shipping_line", return_value=16.0):
+            order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(order)
+        self.assertEqual(error.status_code, 400)
+        self.assertIn("can't confirm", error.data.decode().lower())
+
+    @mute_logger("odoo.addons.grove_headless.controllers.main")
+    def test_self_guard_blocks_when_flag_off(self):
+        """§3 self-guard (flag side): with the deferral flag OFF (default), a
+        consult-built empty-botanical mix into FL still fail-safe-blocks — merging
+        the code changes nothing until the flag is explicitly set (AC5 reversible)."""
+        self._empty_consult()  # flag NOT armed
+        payload = self._cart_payload("FL", fulfillment="ship")
+        with mock.patch.object(grove_main, "_apply_shipping_line", return_value=16.0):
+            order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(order)
+        self.assertEqual(error.status_code, 400)
+
+    def test_deferral_in_unregulated_state_records_no_exclusions(self):
+        """An armed consult mix into a non-regulated green state (WV) also records
+        the deferral, naming no constrained taxa — the mix is fully deliverable
+        there and the record says so honestly."""
+        self._empty_consult()
+        self._arm_deferral()
+        payload = self._cart_payload("WV", fulfillment="ship")
+        with mock.patch.object(grove_main, "_apply_shipping_line", return_value=16.0):
+            order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(error)
+        self.assertTrue(order.grove_consult_compliance_deferred)
+        self.assertEqual(order.grove_consult_deferred_state, "WV")
+        body = "".join((order.message_ids.mapped("body") or []))
+        self.assertIn("none for this state", body)

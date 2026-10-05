@@ -25,6 +25,7 @@ from ..models.order_alerts import (
     format_new_order_discord,
 )
 from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
+from ..models.plant_compliance import excluded_taxa_for_state
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
 from ..models.shipment_email import NOTIFY_STATUSES, delivery_status_from_webhook, shipment_notice_copy
 from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
@@ -428,12 +429,18 @@ def _fulfillment_flags(product):
     ``pickup_only`` lets the storefront reuse the existing potted pickup-only UI
     for a product forced to farm pickup regardless of shipping tier;
     ``compliance_exempt`` lets it hide the per-state plant-health notice for a
-    product Josh has cleared by hand. Both list + detail carry them (Iris wires
-    the render — GOL twin).
+    product Josh has cleared by hand. ``consult_built`` lets the PDP/checkout
+    show the "mix is constrained for this destination" carve-out notice for a
+    consult-built SKU (134/135), keyed on the flag rather than on the empty
+    botanical, and read against ``compliance.carve_outs`` already in the rate
+    feed (GOL-3019 §4; Iris wires the render on PR #970's estimator branch, copy
+    signed by CMO-Sora). Both list + detail carry them (Iris wires the render —
+    GOL twin).
     """
     return {
         "pickup_only": bool(product.grove_pickup_only),
         "compliance_exempt": bool(product.grove_compliance_exempt),
+        "consult_built": bool(product.grove_consult_built),
     }
 
 
@@ -3106,6 +3113,31 @@ def _create_draft_order(website, env, payload, discount_out=None):
                 # per-state substitution signal to after this loop so we never
                 # mutate order.order_line while iterating it (GOL-2237).
                 bundle_lines.append((line, kit_bom, variant))
+                continue
+            # (2b-iii) Consult-built deferral (GOL-3019) — decide compliance at
+            # mix time, not deposit time. A consult-built mix (grove_consult_built,
+            # e.g. 134/135) has nothing true to declare at checkout: the species
+            # list is agreed with the customer AFTER the deposit, so the botanical
+            # is correctly empty (GOL-2972) and the fail-safe below would otherwise
+            # hard-block every regulated state (FL/IN/OH/WI of the green list). Now
+            # that GOL-3007 refuses the balance/label at ship-commit until the
+            # mix-build check is recorded, the real compliance decision has a home
+            # at mix time — so take the $10 deposit and RECORD a deferral here
+            # instead of blocking. This is a distinct branch from the two escapes
+            # above on purpose: NOT grove_compliance_exempt (which skips evaluate
+            # and leaves no trace) and NOT type=="service" (which drops the line
+            # from the gate for every purpose and breaks the deposit modelling).
+            # Keys on grove_consult_built + empty botanical ONLY — a non-consult
+            # empty botanical still hits the fail-safe and hard-blocks (AC3). Self-
+            # guarded: _grove_consult_deferral_armed() is True only while the flag
+            # is on AND the GOL-3007 assert is live, else we fall through to the
+            # fail-safe so a 3007 revert re-blocks the regulated states (§3).
+            if (
+                template.grove_consult_built
+                and not (template.grove_botanical_name or "").strip()
+                and order._grove_consult_deferral_armed()
+            ):
+                order._grove_record_consult_deferral(dest, excluded_taxa_for_state(dest))
                 continue
             botanical = variant.product_tmpl_id.grove_botanical_name or ""
             block_msg, is_failsafe = compliance_evaluate_line(botanical, dest, ship_state)

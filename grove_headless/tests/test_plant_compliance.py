@@ -97,6 +97,22 @@ class TestRegulatedStates(unittest.TestCase):
         self.assertEqual(pc.REGULATED_STATES, frozenset({"WA", "OR", "FL", "AZ", "NM", "IN", "OH", "WI", "CA"}))
 
 
+class TestExcludedTaxaForState(unittest.TestCase):
+    """The per-state constraint list a consult-built deferral records (GOL-3019
+    AC4), derived from the same CARVE_OUTS map the checkout blocks with."""
+
+    def test_fl_excludes_chestnut_and_dogwood(self):
+        self.assertEqual(pc.excluded_taxa_for_state("FL"), ["castanea", "cornus"])
+
+    def test_in_oh_wi_exclude_only_white_mulberry(self):
+        for state in ("IN", "OH", "WI"):
+            self.assertEqual(pc.excluded_taxa_for_state(state), ["morus alba"])
+
+    def test_unregulated_state_excludes_nothing(self):
+        self.assertEqual(pc.excluded_taxa_for_state("WV"), [])
+        self.assertEqual(pc.excluded_taxa_for_state("GA"), [])
+
+
 class TestEvaluateLine(unittest.TestCase):
     def test_blocked_line_returns_message_not_failsafe(self):
         msg, failsafe = pc.evaluate_line("Castanea mollissima", "FL", "Florida")

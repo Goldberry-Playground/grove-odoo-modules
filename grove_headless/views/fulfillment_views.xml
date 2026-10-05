@@ -95,6 +95,18 @@
             <xpath expr="//field[@name='order_line']" position="after">
                 <group string="Compliance check / substitutions"
                        name="grove_compliance_check">
+                    <!-- Consult-built deposit deferral banner (GOL-3019). When a
+                         consult-built mix took its deposit into a constrained
+                         state, Wesley sees the destination here, right above the
+                         note he must fill, without opening the chatter. -->
+                    <div class="alert alert-warning" role="alert"
+                         invisible="not grove_consult_compliance_deferred">
+                        ⏸️ Consult compliance deferred for destination
+                        <field name="grove_consult_deferred_state" class="oe_inline" readonly="1" />
+                        — agree a compliant species list with the customer, then record the
+                        check below before the balance can be charged or the order shipped.
+                    </div>
+                    <field name="grove_consult_compliance_deferred" invisible="1" />
                     <field
                         name="grove_substitution_note"
                         nolabel="1"

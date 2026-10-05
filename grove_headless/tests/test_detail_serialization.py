@@ -53,15 +53,18 @@ class TestDetailSerialization(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(facts["layer"], "")
 
     def test_fulfillment_flags_default_and_set(self):
-        """GOL-2587: pickup_only + compliance_exempt serialize as plain bools on
-        both list and detail. Default False; reflect the template flags when set."""
+        """GOL-2587/GOL-3019: pickup_only + compliance_exempt + consult_built
+        serialize as plain bools on both list and detail. Default False; reflect
+        the template flags when set."""
         flags = _fulfillment_flags(self.tmpl)
-        self.assertEqual(flags, {"pickup_only": False, "compliance_exempt": False})
+        self.assertEqual(flags, {"pickup_only": False, "compliance_exempt": False, "consult_built": False})
         self.tmpl.grove_pickup_only = True
         self.tmpl.grove_compliance_exempt = True
+        self.tmpl.grove_consult_built = True
         flags = _fulfillment_flags(self.tmpl)
         self.assertIs(flags["pickup_only"], True)
         self.assertIs(flags["compliance_exempt"], True)
+        self.assertIs(flags["consult_built"], True)
 
     def test_structured_variant(self):
         bareroot = self.tmpl.product_variant_ids.filtered(
