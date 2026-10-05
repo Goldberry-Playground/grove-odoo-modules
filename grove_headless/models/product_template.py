@@ -505,6 +505,27 @@ class ProductTemplate(models.Model):
         help="Why this product is exempt from the plant-health carve-out gate "
         "(who cleared it, when, for which components). Logged at checkout.",
     )
+    # Consult-built mix (GOL-3007). The contents of the carton are chosen AFTER
+    # the sale, by a human: the customer pays a flat deposit, then Wesley and the
+    # customer agree the species list, then the balance is charged and it ships.
+    # The checkout taxon gate therefore has nothing to evaluate (the box does not
+    # exist yet) and correctly fail-safe-blocks the regulated states for these
+    # SKUs. The control that makes a real mix safe is a human check at mix-build
+    # time, recorded on the order (sale.order.grove_substitution_note). This flag
+    # is the master-data switch that arms that backstop: an order carrying a
+    # consult-built line cannot settle its balance / ship until the compliance
+    # check is recorded (see sale_order._grove_assert_consult_compliance). A flag
+    # rather than a hardcoded (134, 135) id list so the next consult SKU — a
+    # custom orchard, a restoration mix — inherits the control by being ticked.
+    grove_consult_built = fields.Boolean(
+        string="Consult-built mix",
+        default=False,
+        tracking=True,
+        help="The species list is chosen with the customer AFTER the sale (deposit "
+        "now, balance at ship). An order with this product cannot be invoiced / "
+        "shipped until the mix-build compliance check is recorded in 'Compliance "
+        "check / substitutions' on the order. See the SOP in Internal Notes.",
+    )
     # Farm-pickup-only override, independent of the shipping tier. A Bareroot
     # product (which normally ships) can still be pickup-only for reasons the
     # tier doesn't capture (e.g. a large potted specimen, live-dig stock). The

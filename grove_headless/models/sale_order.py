@@ -68,7 +68,15 @@ class SaleOrder(models.Model):
     # composition and the contents of the box diverge in the barn, where no CI or
     # e2e check catches it. Empty on the overwhelming common case (no swap) and
     # on every non-bundle order. Plain text, newline-joined across bundle lines.
-    grove_substitution_note = fields.Text(readonly=True, copy=False)
+    #
+    # Reused as the consult-built compliance-recording surface (GOL-3007): for a
+    # consult-built mix (product.grove_consult_built) Wesley records the mix-build
+    # check here — destination state, species list checked against the carve-outs,
+    # any substitutions, who cleared it — and the balance cannot settle / ship
+    # until it is non-empty (see _grove_assert_consult_compliance). Hence NOT
+    # readonly at the model level: the sale.order form exposes it editable so a
+    # human can satisfy the gate (the stock.picking mirror stays read-only).
+    grove_substitution_note = fields.Text(copy=False)
 
     # Stripe Checkout linkage (GOL-642). Written when a checkout session is
     # created; read by the webhook to reconcile session.completed/expired back
@@ -280,6 +288,11 @@ class SaleOrder(models.Model):
         no label, and must never send the shipment email — GOL-1981 acceptance).
         Returns True only on the real transition so the email fires exactly once."""
         self.ensure_one()
+        # Consult-built backstop (GOL-3007): refuse to ship (and so to settle the
+        # balance, which runs off this transition) a consult mix with no recorded
+        # compliance check. Raised before the watermark move so the transition,
+        # the settlement and the shipment email are all blocked as one unit.
+        self._grove_assert_consult_compliance()
         if self.grove_fulfillment == "pickup":
             _logger.warning(
                 "Refused to mark pickup order %s shipped — pickup collects at the farm and sends no shipment email.",
@@ -312,6 +325,10 @@ class SaleOrder(models.Model):
         through ``_grove_mark_collected_and_settle`` so collection is exactly when
         a deposit-only pickup order's balance is captured (GOL-2893)."""
         self.ensure_one()
+        # Consult-built backstop (GOL-3007): collection is the pickup analogue of
+        # a ship event and is where a pickup consult mix's balance settles, so the
+        # same hard gate applies — no hand-off until the compliance check exists.
+        self._grove_assert_consult_compliance()
         if self.grove_fulfillment != "pickup":
             _logger.warning("Refused to mark non-pickup order %s collected.", self.name)
             return False
@@ -402,6 +419,10 @@ class SaleOrder(models.Model):
         or an order not awaiting a label, so the wizard surfaces it visibly rather
         than failing silently (GOL-1975 no-silent-ack)."""
         self.ensure_one()
+        # Consult-built backstop (GOL-3007): recording a hand-bought label puts
+        # the order on the ship path (and mark-shipped then settles it), so gate
+        # it here too — a consult mix with no recorded compliance check is refused.
+        self._grove_assert_consult_compliance()
         if self.grove_fulfillment == "pickup":
             raise UserError(f"{self.name}: farm-pickup orders buy no shipping label.")
         if self.grove_tracking_numbers:
@@ -636,6 +657,10 @@ class SaleOrder(models.Model):
         if not api_key:
             raise UserError("SHIPPO_API_KEY is not configured on this server.")
         for order in self:
+            # Consult-built backstop (GOL-3007): this path buys the label AND
+            # settles the balance right after, so refuse both for a consult mix
+            # with no recorded compliance check before any money is spent.
+            order._grove_assert_consult_compliance()
             if order.grove_tracking_numbers:
                 raise UserError(f"{order.name} already has labels; clear fields to re-buy.")
             address, plan, mode = order._grove_pack_for_label()
@@ -723,6 +748,47 @@ class SaleOrder(models.Model):
             order._grove_settle_at_ship()
 
         return True
+
+    # ── Consult-built mix compliance backstop (GOL-3007) ────────────────────
+    # The $10 deposit on a consult-built SKU (134/135) is taken at checkout long
+    # before the species list exists, so the checkout taxon gate fail-safe-blocks
+    # the regulated states for it (GOL-2971) — the box isn't built yet. The real
+    # control is a HUMAN check at mix-build time, run by Wesley against the
+    # carve-out table and written up as an SOP (GOL-2981). This is its system
+    # backstop: an order carrying a consult-built line cannot settle its balance
+    # or ship until that check is recorded on grove_substitution_note. Ordering:
+    # check → record → charge the balance → ship. Money/ship is the forcing
+    # function. Additive to checkout (GOL-3007 §5): this never touches the taxon
+    # gate and a filled-in note never influences the checkout evaluation.
+    GROVE_CONSULT_COMPLIANCE_MSG = (
+        "Compliance check required before invoicing a consult-built mix. Record the "
+        "species check in 'Compliance check / substitutions' on this order — "
+        "destination state, species list checked against the carve-outs, any "
+        "substitutions, and who cleared it. See the SOP in the product's Internal Notes."
+    )
+
+    def _grove_consult_compliance_missing(self):
+        """True when this order owes a mix-build compliance check it has not got
+        (GOL-3007): it carries at least one ``grove_consult_built`` line and
+        ``grove_substitution_note`` is empty or whitespace. The single predicate
+        the raising gate (operator ship-commit actions) and the non-raising hold
+        (settlement / bulk reconcile / retry cron) both read, so "is this a
+        consult mix with no recorded check" is decided in exactly one place."""
+        self.ensure_one()
+        if (self.grove_substitution_note or "").strip():
+            return False
+        return any(line.product_template_id.grove_consult_built for line in self.order_line if line.product_template_id)
+
+    def _grove_assert_consult_compliance(self):
+        """Hard gate for the operator-facing ship-commit actions (GOL-3007): raise
+        ``UserError`` (the message read by Wesley mid-task, not an engineer) when
+        the order is a consult-built mix with no recorded compliance check, so no
+        label is bought and the balance is never charged until the check exists.
+        A no-op for every non-consult order and for a consult order whose note is
+        filled, so the common path is untouched."""
+        self.ensure_one()
+        if self._grove_consult_compliance_missing():
+            raise UserError(self.GROVE_CONSULT_COMPLIANCE_MSG)
 
     def _grove_settle_at_ship(self):
         """Capture the deferred preorder balance off-session at ship time.

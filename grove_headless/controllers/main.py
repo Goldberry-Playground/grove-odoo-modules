@@ -3978,6 +3978,24 @@ def settle_order_at_ship(env, order):
     if status not in ("deposit_paid", "settlement_failed"):
         return "not_applicable"
 
+    # Consult-built backstop (GOL-3007), non-raising half. The operator ship-commit
+    # actions already raise UserError before a label is bought, but the automated
+    # settlement callers — the retry cron (_cron_retry_settlements) and the Pirate
+    # Ship batch reconcile — call here directly and must NEVER raise (one order
+    # cannot wedge a bulk loop, and _grove_settle_at_ship swallows anyway). So here
+    # we HOLD rather than raise: a consult mix with no recorded compliance check
+    # does not get its balance charged. The deposit already taken at checkout is
+    # untouched; status stays deposit_paid so settlement re-runs once the check is
+    # recorded. Loud chatter + Discord so ops knows to fill the note, not silent.
+    if order._grove_consult_compliance_missing():
+        _logger.warning("Ship-time settlement HELD for %s: consult mix has no recorded compliance check", order.name)
+        order.message_post(body=f"⏸️ Balance settlement HELD. {order.GROVE_CONSULT_COMPLIANCE_MSG}")
+        _notify_discord(
+            f"Balance settlement HELD on {order.name}: consult-built mix with no recorded compliance check. "
+            f"Record the species check in 'Compliance check / substitutions' on the order, then re-settle."
+        )
+        return "compliance_hold"
+
     _recompute_ship_total(env, order)
 
     tenant = order.website_id.grove_tenant_slug() if order.website_id else None
