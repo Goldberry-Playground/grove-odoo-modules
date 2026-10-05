@@ -1,5 +1,7 @@
 """Detail serializer: facts block + structured variants (catalog spec)."""
 
+from unittest.mock import patch
+
 from odoo.addons.grove_headless.controllers.main import (
     PRODUCT_DETAIL_FIELDS,
     PRODUCT_LIST_FIELDS,
@@ -10,6 +12,7 @@ from odoo.addons.grove_headless.controllers.main import (
     _image_url,
     _normalize_seo,
     _ordered_variants,
+    _phantom_kit_boms,
     _serialize_facts,
     _serialize_images,
     _serialize_product,
@@ -100,6 +103,44 @@ class TestDetailSerialization(GroveTaxFixtureMixin, TransactionCase):
         )
         self.assertTrue(_ships_all_green_states(bundle))
         self.assertIs(_fulfillment_flags(bundle)["ships_all_green_states"], True)
+
+    def test_list_path_resolves_phantom_boms_in_one_search(self):
+        """The grid must cost ONE `_bom_find`, not one per card (review on #310).
+
+        `_bom_find` is a live `search()`, so unlike the list loop's other
+        per-card reads it is never satisfied by ORM prefetch. This pins the
+        page-warm contract: one `_phantom_kit_boms` over every variant on the
+        page, then `_fulfillment_flags(product, page_map)` slices it per
+        template without reaching for mrp.bom again. If someone drops the
+        warmed map, this test fails with 3 searches instead of 1.
+        """
+        component = self.env["product.product"].create({"name": "Native shrub (page)", "type": "consu"})
+        bundle = self.env["product.template"].create({"name": "Remembrance Grove (page)", "type": "consu"})
+        self.env["mrp.bom"].create(
+            {
+                "product_tmpl_id": bundle.id,
+                "product_id": bundle.product_variant_id.id,
+                "type": "phantom",
+                "product_qty": 1.0,
+                "bom_line_ids": [(0, 0, {"product_id": component.id, "product_qty": 5})],
+            }
+        )
+        page = self.tmpl | bundle
+        bom_cls = type(self.env["mrp.bom"])
+        original = bom_cls._bom_find
+        calls = []
+
+        def counting_bom_find(model, products, *args, **kwargs):
+            calls.append(len(products))
+            return original(model, products, *args, **kwargs)
+
+        with patch.object(bom_cls, "_bom_find", counting_bom_find):
+            page_phantom_boms = _phantom_kit_boms(page.product_variant_ids)
+            flags = {product.id: _fulfillment_flags(product, page_phantom_boms) for product in page}
+
+        self.assertEqual(calls, [len(page.product_variant_ids)], "one batched _bom_find for the whole page")
+        self.assertIs(flags[bundle.id]["ships_all_green_states"], True)
+        self.assertIs(flags[self.tmpl.id]["ships_all_green_states"], False)
 
     def test_structured_variant(self):
         bareroot = self.tmpl.product_variant_ids.filtered(

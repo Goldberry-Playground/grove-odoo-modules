@@ -440,7 +440,7 @@ def _phantom_kit_boms(variants):
     return env["mrp.bom"]._bom_find(variants, bom_type="phantom")
 
 
-def _ships_all_green_states(product):
+def _ships_all_green_states(product, phantom_boms=None):
     """True when this template sells as a substitution bundle (phantom kit BoM).
 
     A bundle (e.g. Remembrance Grove) ships to every green-list state because
@@ -451,13 +451,20 @@ def _ships_all_green_states(product):
     (GOL-2988). Derived from the same phantom-BoM lookup the gate performs, so
     the notice and the gate can never disagree. True if ANY variant resolves to
     a phantom BoM (a template-level kit applies to every variant).
+
+    ``phantom_boms`` is an already-resolved ``{variant: bom}`` map covering at
+    least this template's variants — the list endpoint warms one for the whole
+    page so the grid costs a single ``_bom_find`` search instead of one per card
+    (review on PR #310). ``_bom_find`` is a live search, so unlike the loop's
+    other per-card reads it is never satisfied by ORM prefetch. Omit it and the
+    lookup runs for this template alone, which is what the detail path wants.
     """
     variants = product.product_variant_ids
-    boms = _phantom_kit_boms(variants)
+    boms = phantom_boms if phantom_boms is not None else _phantom_kit_boms(variants)
     return any(boms.get(variant) for variant in variants)
 
 
-def _fulfillment_flags(product):
+def _fulfillment_flags(product, phantom_boms=None):
     """Storefront fulfillment/compliance flags for a template (GOL-2587).
 
     ``pickup_only`` lets the storefront reuse the existing potted pickup-only UI
@@ -477,7 +484,7 @@ def _fulfillment_flags(product):
         "pickup_only": bool(product.grove_pickup_only),
         "compliance_exempt": bool(product.grove_compliance_exempt),
         "consult_built": bool(product.grove_consult_built),
-        "ships_all_green_states": _ships_all_green_states(product),
+        "ships_all_green_states": _ships_all_green_states(product, phantom_boms),
     }
 
 
@@ -879,6 +886,12 @@ class GroveHeadlessAPI(http.Controller):
         if has_stock_field:
             products.product_variant_ids.mapped("qty_available")
 
+        # Same batching reason as the two warms above, with one wrinkle: the
+        # phantom-BoM lookup behind ships_all_green_states (GOL-2988) is a live
+        # `search()`, so ORM prefetch can never cover it. Resolve the whole
+        # page's variants in one `_bom_find` and slice it per card below.
+        page_phantom_boms = _phantom_kit_boms(products.product_variant_ids)
+
         items = []
         for product in products:
             data = _serialize_product(product, PRODUCT_LIST_FIELDS)
@@ -899,7 +912,7 @@ class GroveHeadlessAPI(http.Controller):
                 # GOL-2587: fulfillment/compliance flags so the storefront can
                 # hide the state notice (exempt) and reuse the potted pickup-only
                 # UI (pickup_only). Iris follow-up wires the render.
-                data.update(_fulfillment_flags(product))
+                data.update(_fulfillment_flags(product, page_phantom_boms))
                 data["price_min"] = min(product.product_variant_ids.mapped("lst_price"), default=product.list_price)
                 items.append(data)
 
