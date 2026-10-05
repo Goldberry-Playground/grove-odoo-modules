@@ -423,6 +423,40 @@ def _serialize_facts(product):
     }
 
 
+def _phantom_kit_boms(variants):
+    """Map each variant to its phantom (kit) BoM, or ``{}`` when mrp is absent.
+
+    Single source of truth for "this line ships everywhere via per-state
+    component substitution" (GOL-2237): the checkout block-gate skip and the
+    storefront ``ships_all_green_states`` flag (GOL-2988) both resolve bundles
+    through this one ``bom_type="phantom"`` lookup, so the advertise side (the
+    PDP carve-out notice) and the fulfil side (the checkout gate) cannot drift.
+    ``mrp.bom._bom_find`` is batched — pass the whole variant recordset to keep
+    it one query, not an N+1.
+    """
+    env = variants.env
+    if "mrp.bom" not in env.registry:
+        return {}
+    return env["mrp.bom"]._bom_find(variants, bom_type="phantom")
+
+
+def _ships_all_green_states(product):
+    """True when this template sells as a substitution bundle (phantom kit BoM).
+
+    A bundle (e.g. Remembrance Grove) ships to every green-list state because
+    its components are swapped per destination at checkout (GOL-2237), so the
+    carve-out gate skips the per-taxon block for it. The storefront reads this
+    to suppress the PDP carve-out notice for such a product — otherwise the PDP
+    would warn "not cleared for <state>" on an order we can actually fulfil
+    (GOL-2988). Derived from the same phantom-BoM lookup the gate performs, so
+    the notice and the gate can never disagree. True if ANY variant resolves to
+    a phantom BoM (a template-level kit applies to every variant).
+    """
+    variants = product.product_variant_ids
+    boms = _phantom_kit_boms(variants)
+    return any(boms.get(variant) for variant in variants)
+
+
 def _fulfillment_flags(product):
     """Storefront fulfillment/compliance flags for a template (GOL-2587).
 
@@ -434,13 +468,16 @@ def _fulfillment_flags(product):
     consult-built SKU (134/135), keyed on the flag rather than on the empty
     botanical, and read against ``compliance.carve_outs`` already in the rate
     feed (GOL-3019 §4; Iris wires the render on PR #970's estimator branch, copy
-    signed by CMO-Sora). Both list + detail carry them (Iris wires the render —
-    GOL twin).
+    signed by CMO-Sora). ``ships_all_green_states`` is the inverse escape: it
+    drops the per-state carve-out warning entirely for a substitution bundle
+    that really does ship everywhere (GOL-2988). All four ride both list +
+    detail (Iris wires the render — GOL twin).
     """
     return {
         "pickup_only": bool(product.grove_pickup_only),
         "compliance_exempt": bool(product.grove_compliance_exempt),
         "consult_built": bool(product.grove_consult_built),
+        "ships_all_green_states": _ships_all_green_states(product),
     }
 
 
@@ -3076,7 +3113,6 @@ def _create_draft_order(website, env, payload, discount_out=None):
         # line whose product resolves to a phantom BOM. Fail-safe: an empty or
         # unparseable botanical name can't be cleared into a regulated state and
         # is logged loudly (never guessed, never a silent drop).
-        bom_model = env["mrp.bom"] if "mrp.bom" in env.registry else None
         bundle_lines = []  # (line, kit_bom, variant) — stamped after the loop
         exempt_bundle_lines = []  # line — packing note stamped after the loop (GOL-2587)
         for line in order.order_line:
@@ -3108,7 +3144,9 @@ def _create_draft_order(website, env, payload, discount_out=None):
                     # order.order_line while iterating it would skip entries.
                     exempt_bundle_lines.append(line)
                 continue
-            kit_bom = bom_model._bom_find(variant, bom_type="phantom").get(variant) if bom_model is not None else None
+            # Same phantom-BoM lookup the storefront's ships_all_green_states
+            # flag reads (GOL-2988) — shared so advertise and fulfil can't drift.
+            kit_bom = _phantom_kit_boms(variant).get(variant)
             if kit_bom:
                 # Bundle — ships everywhere, exempt from the block gate. Defer the
                 # per-state substitution signal to after this loop so we never

@@ -13,6 +13,7 @@ from odoo.addons.grove_headless.controllers.main import (
     _serialize_facts,
     _serialize_images,
     _serialize_product,
+    _ships_all_green_states,
     _structure_variant,
     _template_rootstock,
 )
@@ -53,11 +54,19 @@ class TestDetailSerialization(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(facts["layer"], "")
 
     def test_fulfillment_flags_default_and_set(self):
-        """GOL-2587/GOL-3019: pickup_only + compliance_exempt + consult_built
-        serialize as plain bools on both list and detail. Default False; reflect
-        the template flags when set."""
+        """GOL-2587/GOL-3019/GOL-2988: pickup_only + compliance_exempt +
+        consult_built + ships_all_green_states serialize as plain bools on both
+        list and detail. Default False; reflect the template flags when set."""
         flags = _fulfillment_flags(self.tmpl)
-        self.assertEqual(flags, {"pickup_only": False, "compliance_exempt": False, "consult_built": False})
+        self.assertEqual(
+            flags,
+            {
+                "pickup_only": False,
+                "compliance_exempt": False,
+                "consult_built": False,
+                "ships_all_green_states": False,
+            },
+        )
         self.tmpl.grove_pickup_only = True
         self.tmpl.grove_compliance_exempt = True
         self.tmpl.grove_consult_built = True
@@ -65,6 +74,32 @@ class TestDetailSerialization(GroveTaxFixtureMixin, TransactionCase):
         self.assertIs(flags["pickup_only"], True)
         self.assertIs(flags["compliance_exempt"], True)
         self.assertIs(flags["consult_built"], True)
+
+    def test_ships_all_green_states_tracks_phantom_bom(self):
+        """GOL-2988: ships_all_green_states mirrors the checkout gate's phantom-BoM
+        skip. A kit-BoM template reports True (substitution bundle, ships
+        everywhere); a standalone SKU reports False. Shares `_bom_find` with the
+        gate so the PDP carve-out notice and the block gate cannot disagree."""
+        # Standalone fixture (Pear, no BoM) -> the gate would evaluate per-taxon,
+        # so the storefront must keep the carve-out notice: False.
+        self.assertFalse(_ships_all_green_states(self.tmpl))
+        self.assertFalse(_fulfillment_flags(self.tmpl)["ships_all_green_states"])
+
+        # A phantom (kit) BoM on a template -> the gate skips the block and ships
+        # everywhere via substitution, so the notice must go quiet: True.
+        component = self.env["product.product"].create({"name": "Native shrub", "type": "consu"})
+        bundle = self.env["product.template"].create({"name": "Remembrance Grove", "type": "consu"})
+        self.env["mrp.bom"].create(
+            {
+                "product_tmpl_id": bundle.id,
+                "product_id": bundle.product_variant_id.id,
+                "type": "phantom",
+                "product_qty": 1.0,
+                "bom_line_ids": [(0, 0, {"product_id": component.id, "product_qty": 5})],
+            }
+        )
+        self.assertTrue(_ships_all_green_states(bundle))
+        self.assertIs(_fulfillment_flags(bundle)["ships_all_green_states"], True)
 
     def test_structured_variant(self):
         bareroot = self.tmpl.product_variant_ids.filtered(
