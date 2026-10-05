@@ -97,10 +97,59 @@ _GROVE_LISTING_DEPENDS = (
     "grove_pollination",
     "grove_years_to_fruit",
     "grove_chill_hours",
+    # The remaining spec-text fields are not required, but the format gate
+    # (GOL-2906) inspects them, so a change to any must re-run the computes.
+    "grove_wildlife",
+    "grove_bloom_season",
+    "grove_harvest_season",
     "description_ecommerce",
     "website_description",
     "grove_guide_ready",
     "grove_facts_reviewed",
+)
+
+
+# ── Spec-text format gate (GOL-2906) ─────────────────────────────────────────
+# The PDP "Growing specs" table prints these grove_* fields verbatim — the field
+# value IS the customer-facing string, with no formatter between Odoo and the
+# page. These checks flag values that render badly (a bare number with no unit, a
+# Wildlife value that says nothing, a double space). They are warnings only: they
+# surface in grove_listing_missing and the nightly audit, but are kept OUT of
+# _grove_missing_items() so the publish gate never blocks and a live, selling
+# listing never goes dark over a missing " ft" (GOL-2896 found all three defects
+# on published records; warn-only was the signed-off call). Values are never
+# auto-rewritten — "30" could be feet or inches, so a human types the fix.
+
+# Dimension fields that must carry a unit. A value made entirely of digits,
+# whitespace and separators (no letters at all) renders as a bare number next to
+# a label that does not supply the unit — e.g. "30" under "Plant Spacing".
+_GROVE_DIMENSION_FIELDS = ("grove_mature_size", "grove_mature_spread", "grove_spacing")
+_GROVE_UNITLESS_RE = re.compile(r"^[\d\s.,–-]+$")
+
+# Char spec fields rendered verbatim in the specs table; a double space in any of
+# them renders. Selection facts (sun, layer, growth rate, watering) are excluded
+# — their values come from a fixed key set and cannot carry stray spaces. Ordered
+# so the banner string is stable.
+_GROVE_SPEC_TEXT_FIELDS = (
+    "grove_botanical_name",
+    "grove_mature_size",
+    "grove_mature_spread",
+    "grove_spacing",
+    "grove_soil",
+    "grove_pollination",
+    "grove_years_to_fruit",
+    "grove_chill_hours",
+    "grove_bloom_season",
+    "grove_harvest_season",
+    "grove_wildlife",
+)
+
+# Generic words that carry no information in a Wildlife value (the field is
+# already named "Wildlife"). A value that reduces to nothing but these — or that
+# has fewer than three words — says nothing and is worse than empty, because
+# empty hides the row while a generic value renders a useless one. Lowercased.
+_GROVE_WILDLIFE_STOPWORDS = frozenset(
+    {"wildlife", "all", "various", "many", "yes", "n/a", "none", "butterflies", "birds", "bees", "and", "&"}
 )
 
 
@@ -117,6 +166,41 @@ def _html_is_blank(value):
     text = re.sub(r"<[^>]+>", " ", value)
     text = text.replace("\xa0", " ").replace("&nbsp;", " ")
     return not text.strip()
+
+
+def _dimension_missing_unit(value):
+    """True when a dimension value is a bare number with no unit (GOL-2906).
+
+    Only letters supply a unit ("ft", "in"), so a value made entirely of digits,
+    whitespace and separators ("30", "25 - 35") renders next to a label that does
+    not name the unit. Prose carries letters and passes — "up to 100 ft" and
+    "30 to 60 ft" are correct and must not trip. A blank value is handled by the
+    required-fact check, not here.
+    """
+    text = (value or "").strip()
+    return bool(text) and bool(_GROVE_UNITLESS_RE.match(text))
+
+
+def _wildlife_is_junk(value):
+    """True when a non-blank Wildlife value says nothing specific (GOL-2906).
+
+    Flags a value with fewer than three words, or one that reduces to nothing but
+    the generic stop-words ("All", "Wildlife and butterflies"). Blank is NOT junk
+    — an empty value hides the PDP row, while a generic one renders a useless row.
+    Good values ("Deer, turkey, raccoons, opossums, foxes & many birds") keep
+    several specific tokens after the stop-words are stripped.
+    """
+    text = (value or "").strip()
+    if not text:
+        return False
+    if len(text.split()) < 3:
+        return True
+    remaining = [
+        token
+        for token in (re.sub(r"[^\w&/]", "", word.lower()) for word in text.split())
+        if token and token not in _GROVE_WILDLIFE_STOPWORDS
+    ]
+    return not remaining
 
 
 def _parse_preorder_variant_ids(raw):
@@ -680,12 +764,12 @@ class ProductTemplate(models.Model):
     @api.depends(*_GROVE_LISTING_DEPENDS)
     def _compute_grove_listing_complete(self):
         for record in self:
-            record.grove_listing_complete = not record._grove_missing_items()
+            record.grove_listing_complete = not (record._grove_missing_items() or record._grove_format_warnings())
 
     @api.depends(*_GROVE_LISTING_DEPENDS)
     def _compute_grove_listing_missing(self):
         for record in self:
-            record.grove_listing_missing = ", ".join(record._grove_missing_items())
+            record.grove_listing_missing = ", ".join(record._grove_missing_items() + record._grove_format_warnings())
 
     def _grove_missing_items(self):
         """Ordered list of human labels for every unmet completeness requirement.
@@ -710,6 +794,27 @@ class ProductTemplate(models.Model):
         if not self.grove_facts_reviewed:
             missing.append(_GROVE_LABEL_REVIEWED)
         return missing
+
+    def _grove_format_warnings(self):
+        """Ordered labels for spec values that render badly on the PDP (GOL-2906).
+
+        Warnings, not hard-missing items: deliberately kept out of
+        _grove_missing_items() so the publish gate never blocks and a live listing
+        never goes dark, but folded into grove_listing_missing and (via
+        grove_listing_complete) the nightly audit so a human is chased to fix
+        them. Order: unitless dimensions, generic wildlife, then double spaces.
+        """
+        self.ensure_one()
+        warnings = []
+        for name in _GROVE_DIMENSION_FIELDS:
+            if _dimension_missing_unit(self[name]):
+                warnings.append(_("%s (needs a unit)") % self._fields[name].string)
+        if _wildlife_is_junk(self.grove_wildlife):
+            warnings.append(_("%s (too generic)") % self._fields["grove_wildlife"].string)
+        for name in _GROVE_SPEC_TEXT_FIELDS:
+            if "  " in (self[name] or ""):
+                warnings.append(_("%s (double space)") % self._fields[name].string)
+        return warnings
 
     # ── Enrichment / draft status panels (GOL-2541) ──────────────────────
     def _grove_latest_job(self, provider):
