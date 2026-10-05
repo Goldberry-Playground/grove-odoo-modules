@@ -86,6 +86,22 @@
                     decoration-info="grove_fulfillment == 'ship'"
                 />
             </xpath>
+            <!-- Consult-built compliance surface (GOL-3007). Editable, under the
+                 order lines on the default tab — where Wesley works the order,
+                 not buried away. For a consult-built mix (134/135) the balance
+                 cannot settle / ship until this is filled; see
+                 _grove_assert_consult_compliance. Harmless on every other order
+                 (it also carries the warehouse bundle-substitution note). -->
+            <xpath expr="//field[@name='order_line']" position="after">
+                <group string="Compliance check / substitutions"
+                       name="grove_compliance_check">
+                    <field
+                        name="grove_substitution_note"
+                        nolabel="1"
+                        placeholder="Destination state, species list checked against the carve-outs, any substitutions, and who cleared it. See the SOP in the product's Internal Notes."
+                    />
+                </group>
+            </xpath>
         </field>
     </record>
 
