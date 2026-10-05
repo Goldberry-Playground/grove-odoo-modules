@@ -40,6 +40,33 @@ def usda_zone_for_zip(zip_code) -> int | None:
     return _zip_matrix().get(zip5)
 
 
+@lru_cache(maxsize=1)
+def served_usda_range() -> list[int] | None:
+    """``[min, max]`` integer USDA hardiness zones the GREEN LIST actually covers.
+
+    Derived, never hand-typed (GOL-2957). The vendored PHZM matrix
+    (``data/zip_usda_zone.csv``) is built pre-filtered to the green-state ZIP
+    universe — ``scripts/build_zip_zone_matrix.py`` drops every ZIP whose state
+    is not in ``GREEN`` — so the union of zones across the whole matrix IS the
+    hardiness span the green list serves. Rebuilding the matrix after a green-
+    list change reshapes this automatically, so a zone-agnostic surface (the
+    ``/shipping-warranty`` "Shipping season" copy) can state the span honestly
+    with no copy edit and no second literal to drift.
+
+    Note this is the hardiness-zone span the DESTINATIONS fall in, resolved
+    per-ZIP from the PHZM — NOT the ``zone_1..zone_5`` carrier distance bands in
+    ``shipping_zones.ZONE_BY_STATE`` (same word "zone", different axis), and NOT
+    the ``calendar.zones`` config keys 2-10 (which span every zone the calendar
+    is *configured* for, a superset of what the green list reaches). Returns
+    ``None`` when the matrix is empty/missing so the feed omits the key and the
+    frontend falls back rather than rendering a bogus ``[None, None]``.
+    """
+    zones = _zip_matrix().values()
+    if not zones:
+        return None
+    return [min(zones), max(zones)]
+
+
 # ── Calendar data (Josh, 2026-07-02; vault wiki/Software/Grove Shipping) ────
 # (month, day) tuples; year resolved at query time.
 WAVE_SCHEDULE: dict[int, dict] = {
@@ -535,6 +562,13 @@ def serialize_calendar(calendar: dict | None = None) -> dict:
     per-zone ``fall``/``spring`` window pairs are unchanged; ``*_order_deadline``
     (nullable), ``approximate`` and ``weather_hold_note`` are additive
     (GOL-1177) so an existing consumer that only reads windows is unaffected.
+
+    ``served_usda_range`` (GOL-2957) is the ``[min, max]`` hardiness-zone span
+    the green list actually covers, derived from the matrix (see
+    ``served_usda_range``) — additive and null-safe. It lets the zone-agnostic
+    ``/shipping-warranty`` copy state the span honestly without a hand-typed
+    literal; omitted (``None``) rather than a bogus pair when the matrix is
+    unavailable.
     """
     cal = calendar or default_calendar()
 
@@ -543,6 +577,7 @@ def serialize_calendar(calendar: dict | None = None) -> dict:
         return list(md) if md else None
 
     return {
+        "served_usda_range": served_usda_range(),
         "preorder_open": {season: list(md) for season, md in cal["preorder_open"].items()},
         "leafed_window": [list(cal["leafed_window"][0]), list(cal["leafed_window"][1])],
         "fulfillment_days": list(cal["fulfillment_days"]),
