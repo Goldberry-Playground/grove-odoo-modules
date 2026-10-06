@@ -26,10 +26,30 @@
 import { pathToFileURL } from "node:url";
 
 // PROTECTED_GLOBS for THIS repo — the only thing that differs between repos.
-// `.github/workflows/**` is shared and self-protecting (covers this file and
-// auto-approve.yml).
+//
+// `.github/workflows/**` covers auto-approve.yml itself. It does NOT cover this
+// file (`scripts/ci/...`) and it does NOT cover `.github/actions/**` —
+// `globToRe('.github/workflows/**')` is `^\\.github\\/workflows\\/.*$`. Both are
+// listed explicitly below; see GOL-3105. Protect the AUTHORITY, not the
+// filename:
+//   - `.github/actions/**` is a shared composite action, consumed as
+//     `Goldberry-Playground/grove-sites/.github/actions/...@main` (a MOVING ref,
+//     5 live `uses:` per repo) by grove-sites, odoocker-goldberrygrove and
+//     grove-odoo-modules. A composite action runs inside the CALLING workflow's
+//     job with that job's token and permissions, so editing it is
+//     workflow-equivalent, and one merge retargets all three repos' CI at once.
+//   - this file is the carve-out. auto-approve.yml runs the BASE-branch copy, so
+//     a PR cannot edit it to approve ITSELF (GOL-1406-A) — but a PR that LOOSENS
+//     this list was, until GOL-3105, itself auto-approvable, and every
+//     subsequent agent PR would then run against the loosened list. One merge,
+//     not one PR.
+// The `.test.mjs` beside this file is deliberately NOT protected: it cannot
+// change the gate's behaviour, so protecting it would add review friction and
+// buy nothing.
 export const PROTECTED_GLOBS = [
   '.github/workflows/**',
+  '.github/actions/**',
+  'scripts/ci/protected-paths-carveout.mjs',
   '**/*payment*.py',
   '**/*stripe*',
   '**/*webhook*',
