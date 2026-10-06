@@ -97,6 +97,14 @@ REFERENCE_ZIPS = {
     # split proved to overcharge them; those bands are retired.
     "zone_5": [
         ("Portland", "ME", "04101"),
+        # Downeast Maine is the TRUE zone_5 worst corner, not Portland: the
+        # 2026-10-06 Odoo join (CEO, batch LB-20261005-01) found Mariaville ME
+        # 04605 quoted $19.38 at 6.5 lb vs Columbia SC $9.84 at the same weight —
+        # same zone, same box, +$9.54. Portland (coastal, I-95) quotes well under
+        # that, so it alone under-covered downeast ME by ~$4.88 (the S00232
+        # under-quote). 04605 is the Ellsworth post office that serves Mariaville;
+        # the city MUST match the zip, so it is listed as Ellsworth (GOL-2923).
+        ("Ellsworth", "ME", "04605"),
         ("Mobile", "AL", "36602"),
         ("Gulfport", "MS", "39501"),
         ("Lake Charles", "LA", "70601"),
@@ -109,6 +117,25 @@ REFERENCE_ZIPS = {
         ("Miami", "FL", "33101"),
         ("Key West", "FL", "33040"),
     ],
+}
+
+# Never-undercharge FLOORS from real shipped labels (GOL-2923, CEO Odoo join
+# 2026-10-06, batch LB-20261005-01). Each value is ceil() of the worst actual
+# label cost OBSERVED AT THE SMALL BOX'S MEDIAN PACKED WEIGHT (6.5 lb) for that
+# zone: the PUBLISHED small-box cell must never fall below it (asserted against
+# shipping_rates.json by the test suite), because a cell cheaper than a label we
+# already paid at the median weight means the worst-corner probe missed the real
+# corner (exactly the downeast-ME case). Only zones with a label at the 6.5 lb
+# median are floored: zone_3 had no shipped order, and zone_4's only labels were
+# at 8.5/14.5 lb (heavier than median), so flooring them would risk over-charging
+# the median shipment — left to the worst-corner probe. A safety floor, NOT a
+# replacement for the probe (CEO, finding #3). Not enforced on the regen path
+# itself: the never-undercharge guarantee there is the MAX across REFERENCE_ZIPS
+# corners, which now includes downeast Maine for zone_5.
+OBSERVED_FLOORS = {
+    "zone_1": {"small": 9},  # KY 6.5 lb $8.79  -> ceil 9
+    "zone_2": {"small": 12},  # PA/MD/NY 6.5 lb $11.15 -> ceil 12
+    "zone_5": {"small": 20},  # Mariaville ME 6.5 lb $19.38 -> ceil 20
 }
 
 # Box Engine v2: reference parcels come straight from the box catalog — one

@@ -45,6 +45,28 @@ class TestReferenceAddresses(unittest.TestCase):
                 self.assertTrue(city and city.strip().lower() != "n/a", f"{zone}: bad city {city!r}")
                 self.assertEqual(len(zip5), 5, f"{zone}: bad zip {zip5!r}")
 
+    def test_zone_5_covers_downeast_maine(self):
+        # The 2026-10-06 Odoo join proved downeast ME (04605) is the real zone_5
+        # worst corner, not Portland — it must be a reference corner or the
+        # published zone_5 rate under-covers it (the S00232 under-quote, GOL-2923).
+        zips = {z for _c, _s, z in rc.REFERENCE_ZIPS["zone_5"]}
+        self.assertIn("04605", zips, "zone_5 must probe a downeast Maine corner (04605)")
+
+    def test_published_table_meets_observed_label_floors(self):
+        # Never-undercharge: the real shipped shipping_rates.json must not price a
+        # small-box cell below a cost we already paid at the 6.5 lb median weight
+        # (GOL-2923, CEO Odoo join 2026-10-06). Guards the published artifact, not
+        # the synthetic regen fixtures.
+        with open(rc.RATES_PATH, encoding="utf-8") as fh:
+            table = json.load(fh)
+        for zone, boxes in rc.OBSERVED_FLOORS.items():
+            for box_id, floor in boxes.items():
+                cell = table[zone][box_id]
+                base = cell["base"] if isinstance(cell, dict) else cell
+                self.assertGreaterEqual(
+                    base, floor, f"{zone}/{box_id} published ${base} < observed-label floor ${floor}"
+                )
+
 
 class TestRequestShape(unittest.TestCase):
     def test_probe_posts_pirateship_ratesquery_in_ounces(self):
@@ -288,9 +310,10 @@ class TestCarrierVisibility(unittest.TestCase):
         self.assertEqual(present, {("USPS", "GroundAdvantage")})
 
     def test_quote_zone_box_publishes_max_across_corners(self):
-        # zone_5 has 9 corners (GOL-2238 folded AR/MO/IA back in; GOL-2235 added
-        # FL's Miami + Key West); each returns a different UPS Ground price.
-        prices = iter(["10.00", "18.00", "12.00", "15.00", "9.00", "11.00", "14.00", "13.00", "16.00"])
+        # zone_5 has 10 corners (GOL-2238 folded AR/MO/IA back in; GOL-2235 added
+        # FL's Miami + Key West; GOL-2923 added downeast Maine 04605); each returns
+        # a different UPS Ground price.
+        prices = iter(["10.00", "18.00", "12.00", "15.00", "9.00", "11.00", "14.00", "13.00", "16.00", "17.00"])
 
         def fake_post(url, json=None, timeout=None, headers=None):
             amount = next(prices)
@@ -324,7 +347,7 @@ class TestCarrierVisibility(unittest.TestCase):
         self.assertEqual(winner["price"], 18.00)
 
     def test_quote_zone_box_skips_graphql_error_corner(self):
-        # First of zone_5's nine corners errors (GraphQL errors[]); the run
+        # First of zone_5's ten corners errors (GraphQL errors[]); the run
         # continues and prices from the remaining corners (max wins).
         def _priced(amount):
             return {
@@ -352,6 +375,7 @@ class TestCarrierVisibility(unittest.TestCase):
                 _priced("8.00"),
                 _priced("7.50"),
                 _priced("7.00"),
+                _priced("6.50"),
             ]
         )
 
