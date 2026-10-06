@@ -26,6 +26,26 @@ def _status_clause(domain):
     return None
 
 
+def _user_ids_global(eval_attr):
+    """True when the ``user_ids`` eval attribute resolves to no users — i.e. a
+    shared/global filter. Accepts the x2many ``[(6, 0, [...])]`` form (and the
+    degenerate ``False``/empty forms) rather than string-matching, so a future
+    author writing ``[(6, 0, [])]`` vs ``eval="False"`` both read as global."""
+    if not eval_attr:
+        return True
+    value = ast.literal_eval(eval_attr)
+    if not value:  # False, [], None
+        return True
+    ids = set()
+    for cmd in value:
+        # (6, 0, ids) replace-all or (4, id) link — the only ways to add users.
+        if cmd[0] == 6:
+            ids.update(cmd[2])
+        elif cmd[0] == 4:
+            ids.add(cmd[1])
+    return not ids
+
+
 def _fulfillment_clause(domain):
     for leaf in domain:
         if isinstance(leaf, (list, tuple)) and len(leaf) == 3 and leaf[0] == "grove_fulfillment":
@@ -45,7 +65,9 @@ class TestZoneFilterXml(unittest.TestCase):
             cls.filters[rec.get("id")] = {
                 "domain": ast.literal_eval(fields["domain"].text),
                 "context": ast.literal_eval(fields["context"].text),
-                "user_id_global": fields["user_id"].get("eval") == "False",
+                # Odoo 19: ir.filters.user_id → user_ids (m2m res.users); a global
+                # filter is an empty set, written as the x2many command [(6, 0, [])].
+                "user_id_global": _user_ids_global(fields["user_ids"].get("eval")),
             }
 
     def test_three_filters_present(self):

@@ -80,6 +80,21 @@ class TestGroveUsdaZone(TransactionCase):
 
     # ── Shipped saved filters (data/grove_zone_filters.xml) ─────────────────
 
+    def test_shipped_filters_install_as_records(self):
+        """The three filters must actually exist as ir.filters rows after the
+        module installs — a bad field name (Odoo 19 renamed user_id → user_ids)
+        makes the data file unloadable, which the pure-XML/offline checks cannot
+        see. Each is global (empty user_ids) and bound to sale.order."""
+        for xmlid in (
+            "grove_headless.ir_filter_grove_balance_not_charged",
+            "grove_headless.ir_filter_grove_preorders_pickup",
+            "grove_headless.ir_filter_grove_preorders_shipping",
+        ):
+            flt = self.env.ref(xmlid)
+            self.assertTrue(flt, f"{xmlid} did not install")
+            self.assertFalse(flt.user_ids, f"{xmlid} is not a global filter")
+            self.assertEqual(flt.model_id, "sale.order", f"{xmlid} is not on sale.order")
+
     def test_shipped_filters_match_balance_due_constant(self):
         """Every shipped ir.filters' grove_checkout_status clause must equal
         GROVE_BALANCE_DUE_STATES — the item-4 guard: a new retry state added to
