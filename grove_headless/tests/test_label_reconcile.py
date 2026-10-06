@@ -220,7 +220,8 @@ class TestLabelReconcile(GroveTaxFixtureMixin, TransactionCase):
                     "name": "Sal the Salesman",
                     "login": "sal_reconcile_acl",
                     "email": "sal@example.com",
-                    "groups_id": [(6, 0, [self.env.ref("sales_team.group_sale_salesman").id])],
+                    # Odoo 19 renamed res.users.groups_id -> group_ids (GOL-2014).
+                    "group_ids": [(6, 0, [self.env.ref("sales_team.group_sale_salesman").id])],
                 }
             )
         )
