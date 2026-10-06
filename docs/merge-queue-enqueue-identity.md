@@ -87,7 +87,136 @@ inside the grace window, and it stays quiet, because a false positive would fail
 a healthy PR's merge. `scripts/ci/merge-queue-wedge-detector.test.mjs` asserts
 both directions against the real function extracted from the workflow.
 
-## Provisioning the App identity (one-time, human step)
+## The fix that needs no provisioning: arm auto-merge under the App (GOL-3118 / GOL-3150)
+
+**Auto-merge inherits the identity of whoever enabled it.** When auto-merge is
+armed on a PR, GitHub performs the eventual enqueue attributed to the identity
+that armed it — and that enqueue creates `merge_group` workflow runs normally.
+
+So the enqueue identity does **not** have to come from inside the workflow. It
+never did. Agents already hold a non-`GITHUB_TOKEN` identity: every agent PR is
+authored by `agenticos-developer[bot]` using a broker-minted installation token
+(`GH_TOKEN_BROKER_URL`). Arming auto-merge with that same token makes every
+subsequent enqueue healthy — no Actions variable, no Actions secret, no App
+private key anywhere.
+
+**Evidence** (`AutoMergeEnabledEvent.actor` vs the resulting
+`AddedToMergeQueueEvent.enqueuer`, grove-sites, 2026-09-30):
+
+| PR | armed by | resulting enqueuer | enqueues needed |
+| --- | --- | --- | --- |
+| #921 | `agenticos-developer` 19:50:49Z | `agenticos-developer[bot]` 20:10:25Z | **1** → merged |
+| #923 | `agenticos-developer` 20:12:22Z | `agenticos-developer[bot]` 20:15:45Z | **1** → merged |
+| #933 | `agenticos-developer` 20:26:05Z | `agenticos-developer[bot]` 20:31:54Z | **1** → merged |
+| #900 | `EngineeringMoonBear` 19:04:58Z | `EngineeringMoonBear` 19:12:20Z | **1** → merged |
+
+#921's twenty-minute gap is the load-bearing detail: arming happened *before*
+the checks were green, GitHub did the waiting, and the enqueue it made twenty
+minutes later still carried the arming identity.
+
+**This repo's own A/B.** 2026-09-23, same commits, same required checks; and
+again on 2026-10-06 (#318), where the GOL-2524 wedge detector caught it loudly
+at 09:16:07Z rather than letting the PR die silently 30 minutes in:
+
+| PR | enqueued by | group commit | `merge_group` runs | result |
+| --- | --- | --- | --- | --- |
+| #275 | `github-actions[bot]` 21:49:50Z, retried 21:57:25Z | — | **0** both times | ~17 min lost |
+| #275 | `agenticos-developer[bot]` 22:07:20Z | — | ran | **merged 22:12:41Z** |
+| #277 | `github-actions[bot]` 22:13:30Z | — | **0** in ~3.8 min | dequeued by hand |
+| #277 | `agenticos-developer[bot]` 22:17:19Z | — | ran | **merged 22:22:33Z** |
+| #318 | `github-actions` 09:13:00Z (2026-10-06) | `8eed18c2` | **0** | wedge detector failed the run |
+| #318 | `agenticos-developer` 09:18:30Z (manual GraphQL rescue) | `627f59f7` | **5** | merged |
+
+Nothing changed between each pair but the enqueuing identity.
+
+### Doing it
+
+The steady state is to arm the PR in the same breath as opening it, with the
+broker token already in hand. The sweep script is the backstop and the backlog
+drain:
+
+```bash
+scripts/ci/merge-queue-arm-automerge.sh              # dry run, lists decisions
+scripts/ci/merge-queue-arm-automerge.sh --apply      # arm already-APPROVED agent PRs
+ARM_UNAPPROVED=1 scripts/ci/merge-queue-arm-automerge.sh --apply   # steady state
+REPO=Goldberry-Playground/grove-sites scripts/ci/merge-queue-arm-automerge.sh --apply
+```
+
+It runs **from the agent box**, on a broker-minted App token — never from a
+GitHub Actions job on the default `GITHUB_TOKEN`, which is the identity that
+causes the wedge in the first place. That is why this fix is *not* wired into
+`auto-approve.yml`: a workflow arming auto-merge under `GITHUB_TOKEN` would
+rebuild exactly the dead group it is meant to prevent.
+
+**The default (approved-only) mode cannot be the steady state.** By the time
+`auto-approve.yml` has approved a PR it has *already* performed the enqueue on
+`GITHUB_TOKEN` — which is the wedge. Arming only helps if it happens **before**
+approval, so anything automated has to run `ARM_UNAPPROVED=1`. The
+approved-only default is for draining a backlog by hand and for the case where
+the enqueue has not happened yet.
+
+Auto-merge is allowed on all three repos and all three have a merge queue on
+`main` (re-measured 2026-10-06 — note REST `GET /repos/...` omits
+`allow_auto_merge` for a token without admin read, which reads as "disabled";
+GraphQL `autoMergeAllowed` is authoritative).
+
+The script **bypasses no gate**: auto-merge still requires every required review
+and every required status check, including the protected-paths human review that
+`auto-approve.yml` withholds its approval for. Arming decides *who* enqueues,
+not *whether* the PR may merge.
+
+Two guardrails worth knowing, both in
+`scripts/ci/merge-queue-arm-automerge.test.mjs`:
+
+- **It never arms a PR it did not author.** `auto-approve.yml` approves
+  maintainer PRs but deliberately does not enqueue them, so the human keeps
+  control over when their own PR merges.
+- **It never re-arms a PR someone else armed**, which would mean disabling their
+  auto-merge first and silently taking a merge decision from its owner.
+
+### Pre-approval arming and protected paths
+
+`ARM_UNAPPROVED=1` is a semantic no-op for almost every agent PR:
+`auto-approve.yml` was going to approve and enqueue it anyway, so pre-arming
+changes only the enqueuing identity. There is exactly **one** class where it is
+not a no-op — an agent PR that touches a **protected path**. There
+`auto-approve.yml` hard-withholds its approval and a human reviews by hand, and
+pre-arming would make that human's approval *be* the merge rather than a
+reviewer approving and someone then deciding to enqueue.
+
+So `ARM_UNAPPROVED=1` **skips unapproved protected-path PRs.** It evaluates them
+against the **target repo's own** base-branch
+`scripts/ci/protected-paths-carveout.mjs` — the same definition
+`auto-approve.yml` withholds on, and read from the base branch so a PR cannot
+edit the carve-out to un-protect itself. This repo's `PROTECTED_GLOBS` are
+`.github/workflows/**`, `**/*payment*.py`, `**/*stripe*` and `**/*webhook*`, so a cross-repo sweep gets each repo's real list rather than
+grove-sites'.
+
+That is what makes `ARM_UNAPPROVED=1` **safe to automate with no board decision
+attached.** `ARM_PROTECTED=1` is the separate, explicit override for the
+protected class — do not set it without the board's sign-off.
+
+It is **fail-closed**: a carve-out it cannot fetch, a `node` it cannot run, or a
+truncated changed-file list all skip the unapproved PR. An already-APPROVED PR
+is unaffected by any of it — its approval already happened, so there is no
+approval-timing semantics left to change.
+
+⚠️ The `files` connection caps `first` at **100**, and asking for more trips
+`EXCESSIVE_PAGINATION` — which GitHub returns as a **200 with an `errors` array**
+and a nulled field, so `curl -f` does not catch it and a partial response reads
+like real data. Fail-closed holds, but silently, so the sweep logs GraphQL
+`errors` and treats a missing `repository` as fatal.
+
+## Provisioning the App identity in Actions (optional — not recommended)
+
+> **Not required.** The section above fixes this with no credential at all.
+> `vars.MERGE_QUEUE_APP_CLIENT_ID` being unset is now a supported resting state,
+> not a pending chore. Kept here because `auto-approve.yml` still honours the
+> variables if they ever appear, and because the reasoning should not have to be
+> rediscovered. ADR-0001 keeps the App private key in `gh-token-broker` alone
+> ("agents never see the root key"); `MERGE_QUEUE_APP_PRIVATE_KEY` would be the
+> first long-lived root credential in Actions secrets, in three repos, to buy a
+> capability the broker already gives away.
 
 Adding Actions secrets/variables needs repo-admin rights the ops service account
 does not have — **Josh / CEO must run this.**
@@ -115,7 +244,7 @@ selected`) covers `grove-odoo-modules`, `odoocker-goldberrygrove` and
 Prefer the App over a fine-grained PAT here: PATs expire (max 1 year) and this
 code path degrades **silently** back into the bug when they do.
 
-## Verifying after provisioning
+## Verifying the enqueue identity (after arming, or after provisioning)
 
 1. Merge any agent PR normally and watch the auto-approve run: it should log
    `Auto-merge enabled for PR #N`, and no wedge diagnosis.
