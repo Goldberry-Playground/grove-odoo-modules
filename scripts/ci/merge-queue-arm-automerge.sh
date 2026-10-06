@@ -223,11 +223,15 @@ fi
 # Passed through the environment, not a pipe -- a heredoc-sourced program takes
 # over stdin, so piped data would never reach it.
 #
-# `env VAR=...`, not a bare `VAR=... cmd` assignment prefix: this repo
-# shellchecks scripts/ (grove-sites does not), and a prefix whose RHS reads the
-# same-named OUTER variable is SC2097/SC2098. The intent is exactly what
-# shellcheck cannot prove -- read the outer value, scope the assignment to the
-# forked python3 -- so say it with `env` instead of suppressing the warning.
+# `env VAR=...`, not a bare `VAR=... cmd` assignment prefix. odoocker lints
+# scripts/ with ShellCheck (grove-sites does not), and a prefix whose RHS reads
+# the same-named OUTER variable is SC2097/SC2098. The intent is exactly what
+# the linter cannot prove -- read the outer value, scope the assignment to the
+# forked python3 -- so say it with `env` rather than suppress the warning.
+#
+# (Do not start a comment line in this file with the word ShellCheck in lower
+# case: the linter parses `# shellcheck...` as a directive and SC1073s on the
+# rest of the sentence. That is how this very comment went red once.)
 APP_AUTHOR_LOGIN="${APP_AUTHOR_LOGIN:-$APP_LOGIN}"
 DECISIONS="$(env APP_LOGIN="$APP_LOGIN" APP_AUTHOR_LOGIN="$APP_AUTHOR_LOGIN" ARM_UNAPPROVED="$ARM_UNAPPROVED" ARM_PROTECTED="$ARM_PROTECTED" CARVEOUT="$CARVEOUT" GRAPH_JSON="$GRAPH" python3 <<'PYEOF'
 import json, os, subprocess
