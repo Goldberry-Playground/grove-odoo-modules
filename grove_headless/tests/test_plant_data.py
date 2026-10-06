@@ -434,6 +434,51 @@ class TestMapPerenual(unittest.TestCase):
         self.assertTrue(all(fv.source == "perenual" for fv in self.facts.fields.values()))
 
 
+class TestPerenualPaddedListItems(unittest.TestCase):
+    """Perenual list entries arrive comma-split without a strip, so soil and
+    attracts come back padded (e.g. ``["Acidic", " well-drained"]``). Joining
+    them unstripped shipped ``Acidic and  well-drained`` — a double space — onto
+    a live PDP, which prints ``grove_*`` values verbatim (GOL-3146, product 9).
+    """
+
+    @staticmethod
+    def _facts(details):
+        return mapping.map_perenual(details, "perenual://245")
+
+    def test_padded_soil_is_single_spaced(self):
+        facts = self._facts({"soil": ["Acidic", " well-drained"]})
+        self.assertEqual(facts.fields["grove_soil"].value, "Acidic and well-drained")
+
+    def test_padded_attracts_is_single_spaced(self):
+        facts = self._facts({"attracts": ["Hummingbirds", " butterflies"]})
+        self.assertEqual(facts.fields["grove_wildlife"].value, "Attracts hummingbirds and butterflies")
+
+    def test_three_padded_items_single_spaced(self):
+        facts = self._facts({"soil": ["Humus rich", " well-drained", " sandy "]})
+        self.assertEqual(facts.fields["grove_soil"].value, "Humus rich, well-drained and sandy")
+
+    def test_whitespace_only_item_is_dropped(self):
+        facts = self._facts({"soil": ["Acidic", "   "]})
+        self.assertEqual(facts.fields["grove_soil"].value, "Acidic")
+
+    def test_no_mapped_text_field_carries_a_double_space(self):
+        facts = self._facts({"soil": ["Acidic", " well-drained"], "attracts": ["Bees", " birds"]})
+        for name, fv in facts.fields.items():
+            if isinstance(fv.value, str):
+                self.assertNotIn("  ", fv.value, name)
+
+
+class TestJoinAndStripsPadding(unittest.TestCase):
+    def test_usda_textures_padding_stripped(self):
+        self.assertEqual(mapping._join_and(["medium ", " fine"]), "medium and fine")
+
+    def test_single_padded_item_stripped(self):
+        self.assertEqual(mapping._join_and([" coarse "]), "coarse")
+
+    def test_all_blank_yields_empty(self):
+        self.assertEqual(mapping._join_and([" ", "", None]), "")
+
+
 class TestPerenualSunRules(unittest.TestCase):
     def test_part_shade_to_partial(self):
         self.assertEqual(mapping._perenual_sun(["full sun", "part shade"]), "partial")
