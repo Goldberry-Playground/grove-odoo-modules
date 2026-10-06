@@ -57,12 +57,8 @@ class RateFeedTests(unittest.TestCase):
     def test_compliance_consult_deferral_passed_through(self):
         # GOL-3055: the controller computes the armed state and injects it; the
         # feed surfaces it verbatim on the compliance block for the storefront.
-        self.assertTrue(
-            sz.rate_feed(consult_deferral_enabled=True)["compliance"]["consult_deferral_enabled"]
-        )
-        self.assertFalse(
-            sz.rate_feed(consult_deferral_enabled=False)["compliance"]["consult_deferral_enabled"]
-        )
+        self.assertTrue(sz.rate_feed(consult_deferral_enabled=True)["compliance"]["consult_deferral_enabled"])
+        self.assertFalse(sz.rate_feed(consult_deferral_enabled=False)["compliance"]["consult_deferral_enabled"])
 
     def test_bundle_substitution_block_present(self):
         # Per-state bundle substitute map (GOL-2237) rides the same feed so the

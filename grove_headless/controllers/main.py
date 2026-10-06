@@ -1261,9 +1261,7 @@ class GroveHeadlessAPI(http.Controller):
         is computed here (where there is an ``env``) and injected.
         """
         armed = request.env["sale.order"].sudo().new()._grove_consult_deferral_armed()
-        return _json_response(
-            rate_feed(self._shipping_calendar_override(), _date.today(), armed)
-        )
+        return _json_response(rate_feed(self._shipping_calendar_override(), _date.today(), armed))
 
     # ── Orders ───────────────────────────────────────────────────────────
 
