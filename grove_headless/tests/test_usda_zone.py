@@ -11,10 +11,11 @@ from odoo.tests import TransactionCase, tagged
 
 from ..controllers.main import _farm_pickup_zip
 from ..models.shipping_calendar import usda_zone_for_zip
+from .common import GroveTaxFixtureMixin
 
 
 @tagged("post_install", "-at_install")
-class TestGroveUsdaZone(TransactionCase):
+class TestGroveUsdaZone(GroveTaxFixtureMixin, TransactionCase):
     @classmethod
     def setUpClass(cls):
         super().setUpClass()
