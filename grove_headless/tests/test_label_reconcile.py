@@ -200,3 +200,40 @@ class TestLabelReconcile(GroveTaxFixtureMixin, TransactionCase):
         )
         with self.assertRaises(UserError):
             order.action_grove_record_historical_label(UPS_TRACKING, carrier="UPS", actual_cost=8.79)
+
+    # ── ACL guard: the form opens for a real Sales user, not just superuser ──
+
+    def test_scan_runs_as_sales_salesman_not_just_superuser(self):
+        """Regression guard for the missing ir.model.access rows (GOL-3091 review).
+
+        The rest of this suite runs as SUPERUSER (TransactionCase), which bypasses
+        ir.model.access entirely — so a wizard with no ACL rows still passes every
+        other test while a real Sales user hits AccessError the moment the form
+        opens. Exercise the scan as an ordinary ``group_sale_salesman`` user so a
+        future deletion of the reconcile ACL rows fails red here instead of in
+        production."""
+        salesman = (
+            self.env["res.users"]
+            .with_context(no_reset_password=True)
+            .create(
+                {
+                    "name": "Sal the Salesman",
+                    "login": "sal_reconcile_acl",
+                    "email": "sal@example.com",
+                    "groups_id": [(6, 0, [self.env.ref("sales_team.group_sale_salesman").id])],
+                }
+            )
+        )
+        partner = self._partner("Jennifer Scott", "jen@example.com")
+        self._open_order(partner)
+        raw = _export_csv(
+            [("Jennifer Scott", "jen@example.com", UPS_TRACKING, "UPS", "$8.79", "Delivered", "2026-09-15")]
+        )
+        # No AccessError on create()/action_scan() == the wizard models carry ACL.
+        wizard = (
+            self.env["grove.label.reconcile"]
+            .with_user(salesman)
+            .create({"data": base64.b64encode(raw), "filename": "shipments.csv"})
+        )
+        wizard.action_scan()
+        self.assertEqual(wizard.line_ids.status, "matched")
