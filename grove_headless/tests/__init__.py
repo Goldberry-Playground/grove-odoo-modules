@@ -25,6 +25,7 @@ from . import (
     test_html_field_tracking,  # noqa: F401
     test_kit_boms,  # noqa: F401
     test_label_batch,  # noqa: F401
+    test_label_reconcile,  # noqa: F401
     test_listing_audit,  # noqa: F401
     test_listing_gate,  # noqa: F401
     test_mark_shipped,  # noqa: F401

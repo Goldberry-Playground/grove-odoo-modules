@@ -449,15 +449,38 @@ class GroveLabelBatch(models.Model):
             cell = _find_column(header, *needles)
             return header.index(cell) if cell is not None else None
 
+        def first_idx(*needle_groups):
+            # First matching column index across the candidate header names.
+            # NB: a hit at column 0 is a valid index — test each result against
+            # ``None`` explicitly rather than ``or``-chaining (``0 or next`` would
+            # silently skip a column that happens to be first, GOL-3104).
+            for needles in needle_groups:
+                i = idx(*needles)
+                if i is not None:
+                    return i
+            return None
+
         i_ref = idx("grove", "ref")
         if i_ref is None:
             i_ref = self._detect_ref_idx(rows)
-        i_track = idx("tracking", "number") or idx("tracking") or idx("track")
+        i_track = first_idx(("tracking", "number"), ("tracking",), ("track",))
         i_carrier = idx("carrier")
-        i_cost = idx("cost") or idx("amount") or idx("charge") or idx("price")
-        i_service = idx("service") or idx("mail", "class")
+        i_cost = first_idx(("cost",), ("amount",), ("charge",), ("price",))
+        i_service = first_idx(("service",), ("mail", "class"))
         i_email = idx("email")
-        i_recipient = idx("recipient") or idx("name")
+        i_recipient = first_idx(("recipient",), ("name",))
+        # Shipments-export-only columns (GOL-3091 legacy reconcile): the delivery
+        # status ("Delivered") and the label/ship date. Absent on the normal
+        # tracking export — purely additive, so import_tracking (which reads by
+        # named key) is unaffected.
+        i_status = idx("status")
+        i_date = first_idx(
+            ("delivered", "date"),
+            ("ship", "date"),
+            ("label", "date"),
+            ("created", "date"),
+            ("date",),
+        )
         missing = [
             label for label, i in (("Tracking Number", i_track), ("Carrier", i_carrier), ("Cost", i_cost)) if i is None
         ]
@@ -484,6 +507,8 @@ class GroveLabelBatch(models.Model):
                     "cost_raw": cell(i_cost),
                     "email": cell(i_email),
                     "recipient": cell(i_recipient),
+                    "status": cell(i_status),
+                    "date": cell(i_date),
                 }
             )
         return parsed
