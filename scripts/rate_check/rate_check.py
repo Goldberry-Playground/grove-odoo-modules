@@ -3,10 +3,11 @@
 
 Quotes Pirate Ship's public rate calculator (least-cost allowlisted ground:
 UPS Ground / UPS Ground Saver / USPS Ground Advantage, residential) for each
-rate zone x catalog box (shipping_boxes at representative billable weight),
-computes target = ceil(quote + flat shipping-handling fee) (GOL-2923: one flat
-$5 handling, shared with settlement, replaces the old per-box packaging + 2.00
-buffer), and rewrites
+rate zone x catalog box (shipping_boxes at its representative billable weight —
+the MEDIAN packed weight of that box type, GOL-2923), computes target =
+ceil(quote) (raw carrier cost rounded up to the whole dollar; GOL-2923 moved the
+flat S&H fee out of the per-box cell and onto the order, charged once by the app
+— see shipping_zones.compute_order_shipping), and rewrites
 grove_headless/data/shipping_rates.json when any zone drifts >= $1. Pirate Ship
 retires Shippo from quoting (design: spec docs/superpowers/specs/
 2026-09-09-pirateship-fulfillment-design.md section A, ratified Josh 2026-09-09;
@@ -146,13 +147,14 @@ PARCELS = {
     for catalog, weight_of in _CATALOGS
     for box_id, box in catalog.items()
 }
-# Flat shipping & handling fee added to the raw carrier quote (GOL-2923, Josh
-# 2026-10-02: "$5 handling charge baked into shipping cost moving forward").
-# Imported from the box-catalog module so checkout (this table) and ship-time
-# settlement (controllers.main.DEFAULT_SHIPPING_HANDLING_FEE, which imports the
-# same constant) cannot drift. Replaces the old per-box packaging_usd + $2.00
-# buffer.
-SHIPPING_HANDLING_FEE = shipping_boxes.SHIPPING_HANDLING_FEE
+# Each published cell is the RAW CARRIER cost only — no handling (GOL-2923, Josh
+# 2026-10-06: handling is charged ONCE PER ORDER, not per box, so it cannot live
+# in a per-box table cell or a 2-box order would pay it twice). The one flat
+# shipping-&-handling fee (shipping_boxes.SHIPPING_HANDLING_FEE) is added at the
+# ORDER level by the app — at checkout in shipping_zones.compute_order_shipping
+# and at ship-time settlement in controllers.main._recompute_ship_total — both
+# reading that one constant so they cannot drift. This replaced the old per-box
+# packaging_usd + $2.00 buffer (and the short-lived per-cell flat $5).
 RATES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless", "data", "shipping_rates.json")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "out")
 
@@ -326,10 +328,12 @@ def visibility_report(counts, total):
 
 
 def target_rate(quote: float) -> int:
-    """Published cell = ceil(raw carrier quote + flat handling). GOL-2923 replaced
-    the per-box ``packaging_usd + 2.00 buffer`` with one flat SHIPPING_HANDLING_FEE
-    shared with settlement; ``ceil`` stays (Josh 2026-10-02)."""
-    return math.ceil(quote + SHIPPING_HANDLING_FEE)
+    """Published cell = ceil(raw carrier quote) — carrier cost only, rounded up
+    to the whole dollar. GOL-2923 (Josh 2026-10-06): the flat S&H fee is charged
+    ONCE PER ORDER by the app (shipping_zones / settlement), NOT folded into each
+    per-box cell, so the table carries pure carrier cost. ``ceil`` stays (the
+    whole-dollar round-up is the table's only margin; Josh 2026-10-02)."""
+    return math.ceil(quote)
 
 
 def load_manual_quotes(path: str) -> tuple:
@@ -337,7 +341,7 @@ def load_manual_quotes(path: str) -> tuple:
 
     The no-network refresh path for when the quote source is unavailable. The
     file carries RAW CARRIER QUOTES, never finished rates, so the hand refresh
-    goes through the exact same ``target_rate`` (flat handling fee + ceil),
+    goes through the exact same ``target_rate`` (ceil of the carrier quote),
     monotonicity guard and drift gate as an automated run — hand-editing
     shipping_rates.json directly bypasses all three.
 
@@ -686,10 +690,11 @@ def main(argv=None) -> int:
 
     new_doc = {
         "_comment": "Maintained by scripts/rate_check (morning rate-checker). "
-        "Per-box rates (Box Engine v2): ceil(Pirate Ship least-cost allowlisted "
-        "ground [UPS Ground / UPS Ground Saver / USPS Ground Advantage] at the "
-        "box's representative billable weight + flat $5 shipping-handling fee "
-        "[GOL-2923, shared with settlement]). "
+        "Per-box RAW CARRIER cost (Box Engine v2): ceil(Pirate Ship least-cost "
+        "allowlisted ground [UPS Ground / UPS Ground Saver / USPS Ground Advantage] "
+        "at the box's representative/median billable weight). No handling in the "
+        "cell — the flat $5 S&H fee is added ONCE PER ORDER by the app "
+        "[GOL-2923, shared with settlement]. "
         "Each cell records the winning carrier/service (schema 3); the Odoo loader "
         "reads `base` only. Carries BOTH shippable catalogs (GOL-2199): bareroot "
         "small/large and potted/peat-and-bagged p24x10x4/p24x10x6. "

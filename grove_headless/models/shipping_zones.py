@@ -496,9 +496,17 @@ def zone_for_state(state: str) -> str | None:
 
 
 def box_rate(state: str, box_id: str) -> float | None:
-    """Committed charge for shipping one `box_id` to `state`, or None.
+    """Raw carrier cost for shipping one `box_id` to `state`, or None.
 
     None (not 0.0) means "no rate configured — this box cannot ship there".
+
+    This is the carrier cost ONLY — the flat shipping-&-handling fee
+    (``shipping_boxes.SHIPPING_HANDLING_FEE``) is NOT included here. Handling is
+    charged once per ORDER (GOL-2923, Josh 2026-10-06), so it is added at the
+    order level in ``compute_order_shipping`` / the single-unit estimators, never
+    per box. Keeping this carrier-only means the packer's cheapest-combo choice
+    is driven by true carrier cost and per-box reporting (label_batch
+    ``committed_rate``) stays honest.
     """
     zone = zone_for_state(state)
     if not zone:
@@ -543,22 +551,28 @@ def single_tree_rate(
     state: str, length_class: int = shipping_boxes.DEFAULT_LENGTH, mode: str = "leafed"
 ) -> float | None:
     """Cheapest way to ship exactly one bareroot tree — the product-card
-    "shipping from $X" estimate. None when unpriceable."""
+    "shipping from $X" estimate. None when unpriceable.
+
+    Includes the one flat S&H fee (GOL-2923): a real single-tree order is one
+    box's carrier cost + one handling fee, so the "from $X" floor carries it too.
+    """
     plan = shipping_boxes.pack_order([(length_class, 1)], mode, lambda b: box_rate(state, b))
     if not plan:
         return None
-    return round(sum(r for r in (box_rate(state, pb.box_id) for pb in plan)), 2)
+    return round(sum(r for r in (box_rate(state, pb.box_id) for pb in plan)) + shipping_boxes.SHIPPING_HANDLING_FEE, 2)
 
 
 def single_potted_rate(state: str) -> float | None:
     """Cheapest way to ship exactly one potted / peat-and-bagged unit — the
     product-card "shipping from $X" estimate for the potted catalog
     (GOL-2199 go-live). None when unpriceable, including the window before the
-    rate-checker's first potted-inclusive table publishes."""
+    rate-checker's first potted-inclusive table publishes.
+
+    Includes the one flat S&H fee (GOL-2923), same as ``single_tree_rate``."""
     plan = shipping_boxes.pack_potted(1, lambda b: box_rate(state, b))
     if not plan:
         return None
-    return round(sum(box_rate(state, pb.box_id) for pb in plan), 2)
+    return round(sum(box_rate(state, pb.box_id) for pb in plan) + shipping_boxes.SHIPPING_HANDLING_FEE, 2)
 
 
 def unshippable_reason(items: list[tuple[str, int, float]]) -> str | None:
@@ -648,4 +662,11 @@ def compute_order_shipping(state: str, items: list[tuple[str, int, float]], mode
         if rate is None:  # pragma: no cover — packer only picks rated boxes
             return None
         total += rate
+    # GOL-2923 (Josh 2026-10-06): the flat S&H fee is charged ONCE per order, not
+    # per packed box — a 2-box order must not pay handling twice. box_rate carries
+    # the raw carrier cost only; the one fee is added here, at the order level,
+    # matching ship-time settlement (controllers.main._recompute_ship_total, which
+    # adds the same fee once on top of the actual label cost). The two paths read
+    # the one constant (shipping_boxes.SHIPPING_HANDLING_FEE) so they can't drift.
+    total += shipping_boxes.SHIPPING_HANDLING_FEE
     return round(total, 2)

@@ -249,6 +249,11 @@ BOXES: dict[str, dict] = {
         "packaging_usd": 3.50,
         "tare_lb": 2.0,  # empty carton, measured (Josh 2026-09-07)
         "paper_lb": 2.5,  # void-fill packing paper, measured
+        # MEASURED median packed weight of small boxes actually shipped (GOL-2923,
+        # Josh 2026-10-06): batch LB-20261005-01, 13 rows — 9×6.5, 2×8.5, 1×12.5,
+        # 1×14.5 -> median 6.5 lb. This (not full capacity) is what the rate probe
+        # quotes at; see representative_billable_lb. Refresh as more batches ship.
+        "median_packed_lb": 6.5,
     },
     "large": {
         "length": 24,
@@ -258,6 +263,11 @@ BOXES: dict[str, dict] = {
         "packaging_usd": 4.50,
         "tare_lb": 3.1,  # empty carton, DERIVED (scaled by surface area) — weigh to confirm
         "paper_lb": 5.0,  # void-fill packing paper, DERIVED (scaled by void volume)
+        # NO large box has shipped yet (GOL-2923, 2026-10-06), so there is no
+        # measured median. None -> representative_billable_lb falls back to the
+        # model full-capacity estimate (~14 lb), the conservative over-quote side.
+        # Set this to the measured median once a large-box batch ships.
+        "median_packed_lb": None,
     },
 }
 
@@ -361,15 +371,26 @@ def billable_weight_lb(box_id: str, count: int, mode: str) -> float:
 
 
 def representative_billable_lb(box_id: str) -> int:
-    """Worst typical billable weight at full capacity across the QUOTABLE modes
-    — the weight the rate-checker declares for each box (never undercharge).
+    """Billable weight the rate-checker declares for each box, rounded up to the
+    carrier's whole billing pound.
 
-    Only ``QUOTABLE_MODES`` (dormant) count: a bareroot parcel only ships in its
-    dormant window, so the leafed weight prices a parcel that is never bought
-    (see ``QUOTABLE_MODES``). Falls back to the box's own modes if a future box
-    declares none of the quotable modes, so this never silently returns 0.
+    GOL-2923 (Josh 2026-10-06): quote at the MEDIAN packed weight of boxes
+    ACTUALLY shipped for this box type, not the full-capacity worst case. Full
+    capacity systematically over-declared — a full 5-tree small box is rare; the
+    median real small box is 6.5 lb (batch LB-20261005-01). When a measured
+    median is present (``median_packed_lb``) it wins, floored by the box's DIM
+    weight (``billable = max(actual, DIM)``).
+
+    When no box of this type has shipped yet (median None/absent), fall back to
+    the model full-capacity estimate across ``QUOTABLE_MODES`` (dormant only — a
+    bareroot parcel only ships dormant, so leafed weight prices a parcel never
+    bought). The fallback is the conservative over-quote side (never undercharge)
+    until a batch of that box is weighed.
     """
     b = BOXES[box_id]
+    median = b.get("median_packed_lb")
+    if median is not None:
+        return math.ceil(max(float(median), dim_weight_lb(box_id)))
     modes = [m for m in QUOTABLE_MODES if m in b["capacity"]] or list(b["capacity"])
     worst = max(billable_weight_lb(box_id, b["capacity"][mode], mode) for mode in modes)
     return math.ceil(worst)
@@ -614,9 +635,20 @@ def potted_billable_weight_lb(box_id: str, count: int) -> float:
 
 
 def potted_representative_billable_lb(box_id: str) -> int:
-    """Worst-case billable weight at full capacity — the weight the
-    rate-checker quotes each potted box at (never undercharge)."""
-    return math.ceil(potted_billable_weight_lb(box_id, POTTED_BOXES[box_id]["capacity"]))
+    """Billable weight the rate-checker quotes each potted box at, rounded up to
+    the carrier's whole billing pound.
+
+    GOL-2923 (Josh 2026-10-06): prefer the MEASURED median packed weight of
+    potted boxes actually shipped (``median_packed_lb``), floored by DIM. No
+    potted box has shipped yet, so none carries a median today and this falls
+    back to the full-capacity model estimate — the conservative over-quote side
+    (never undercharge) until a potted batch is weighed. Set ``median_packed_lb``
+    on the box once that data exists."""
+    b = POTTED_BOXES[box_id]
+    median = b.get("median_packed_lb")
+    if median is not None:
+        return math.ceil(max(float(median), potted_dim_weight_lb(box_id)))
+    return math.ceil(potted_billable_weight_lb(box_id, b["capacity"]))
 
 
 assert all(potted_representative_billable_lb(box_id) <= MAX_SHIP_WEIGHT_LB for box_id in POTTED_BOXES)

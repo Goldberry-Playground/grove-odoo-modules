@@ -115,7 +115,8 @@ python3 scripts/rate_check/staleness.py      # or just this, locally — no netw
 
 When the quote source is unavailable, **do not hand-edit
 `shipping_rates.json`.** A direct edit bypasses all three safety gates: the
-`ceil(quote + per-box packaging + $2.00)` target formula, the monotonicity guard,
+`ceil(quote)` carrier-only target formula (GOL-2923 — the flat $5 S&H is added
+once per order by the app, never folded into a cell), the monotonicity guard,
 and the `$1` drift gate — on 20 cells, by hand.
 
 Instead, record the **raw carrier quotes** and let the script do the maths:

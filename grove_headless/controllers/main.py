@@ -28,7 +28,12 @@ from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
 from ..models.plant_compliance import excluded_taxa_for_state
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
 from ..models.shipment_email import NOTIFY_STATUSES, delivery_status_from_webhook, shipment_notice_copy
-from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
+from ..models.shipping_boxes import (
+    SHIPPING_HANDLING_FEE,
+    can_ship_bareroot,
+    dormancy_window,
+    packing_mode,
+)
 from ..models.shipping_calendar import (
     MODE_PREORDER,
     merge_calendar_override,
@@ -3851,7 +3856,12 @@ def _settlement_shipping_line(order):
 
 
 SHIPPING_HANDLING_FEE_PARAM = "grove_headless.shipping_handling_fee"
-DEFAULT_SHIPPING_HANDLING_FEE = 5.00  # Josh 2026-10-02 PM (GOL-2895): flat per-ORDER S&H
+# THE single source of truth is shipping_boxes.SHIPPING_HANDLING_FEE — the same
+# constant the checkout rate path reads (shipping_zones.compute_order_shipping),
+# so settlement and checkout can never drift (GOL-2923, Josh 2026-10-02/10-06:
+# one flat per-ORDER S&H fee). Odoo-editable override lives in ir.config_parameter
+# (SHIPPING_HANDLING_FEE_PARAM); this is only the fallback when that is blank.
+DEFAULT_SHIPPING_HANDLING_FEE = SHIPPING_HANDLING_FEE
 
 
 def _shipping_handling_fee(env):
