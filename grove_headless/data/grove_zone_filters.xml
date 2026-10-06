@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Outstanding-balance order filters, shipped as data so every database
+         gets them and they are reviewable in git (GOL-3056 item 3). Josh built
+         these three by hand on prod on 2026-10-05 as ir.filters ids 9, 10 and 11;
+         those hand-made rows have no xml_id, so these xml-id records are NEW rows
+         and the three originals must be deleted on prod after deploy to avoid
+         duplicates (see PR — delete ir.filters 9/10/11).
+
+         Global (empty user_ids) so they appear for everyone. NB Odoo 19 renamed
+         ir.filters.user_id → user_ids (m2m res.users); an empty set is how a
+         shared/global filter is represented. Each groups by
+         grove_usda_zone, so opening the filter immediately breaks the
+         outstanding orders down by USDA zone. The grove_checkout_status set is
+         GROVE_BALANCE_DUE_STATES (sale_order.py) — deposit_paid + settlement_failed
+         + settlement_error (GOL-3011's retryable state; a no-op string match
+         until that ships). test_usda_zone asserts these domains match the
+         constant so a new retry state can never silently drop orders. -->
+
+    <record id="ir_filter_grove_balance_not_charged" model="ir.filters">
+        <field name="name">Deposit orders: balance not charged</field>
+        <field name="model_id">sale.order</field>
+        <field name="user_ids" eval="[(6, 0, [])]" />
+        <field name="domain">[('state', 'in', ['sale', 'done']), ('grove_checkout_status', 'in', ['deposit_paid', 'settlement_failed', 'settlement_error'])]</field>
+        <field name="context">{'group_by': ['grove_usda_zone']}</field>
+    </record>
+
+    <record id="ir_filter_grove_preorders_pickup" model="ir.filters">
+        <field name="name">Preorders for pickup (balance not charged)</field>
+        <field name="model_id">sale.order</field>
+        <field name="user_ids" eval="[(6, 0, [])]" />
+        <field name="domain">[('state', 'in', ['sale', 'done']), ('grove_checkout_status', 'in', ['deposit_paid', 'settlement_failed', 'settlement_error']), ('grove_fulfillment', '=', 'pickup')]</field>
+        <field name="context">{'group_by': ['grove_usda_zone']}</field>
+    </record>
+
+    <record id="ir_filter_grove_preorders_shipping" model="ir.filters">
+        <field name="name">Preorders for shipping (balance not charged)</field>
+        <field name="model_id">sale.order</field>
+        <field name="user_ids" eval="[(6, 0, [])]" />
+        <field name="domain">[('state', 'in', ['sale', 'done']), ('grove_checkout_status', 'in', ['deposit_paid', 'settlement_failed', 'settlement_error']), ('grove_fulfillment', '=', 'ship')]</field>
+        <field name="context">{'group_by': ['grove_usda_zone']}</field>
+    </record>
+
+</odoo>
