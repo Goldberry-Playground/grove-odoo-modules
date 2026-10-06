@@ -458,6 +458,18 @@ class GroveLabelBatch(models.Model):
         i_service = idx("service") or idx("mail", "class")
         i_email = idx("email")
         i_recipient = idx("recipient") or idx("name")
+        # Shipments-export-only columns (GOL-3091 legacy reconcile): the delivery
+        # status ("Delivered") and the label/ship date. Absent on the normal
+        # tracking export — purely additive, so import_tracking (which reads by
+        # named key) is unaffected.
+        i_status = idx("status")
+        i_date = (
+            idx("delivered", "date")
+            or idx("ship", "date")
+            or idx("label", "date")
+            or idx("created", "date")
+            or idx("date")
+        )
         missing = [
             label for label, i in (("Tracking Number", i_track), ("Carrier", i_carrier), ("Cost", i_cost)) if i is None
         ]
@@ -484,6 +496,8 @@ class GroveLabelBatch(models.Model):
                     "cost_raw": cell(i_cost),
                     "email": cell(i_email),
                     "recipient": cell(i_recipient),
+                    "status": cell(i_status),
+                    "date": cell(i_date),
                 }
             )
         return parsed

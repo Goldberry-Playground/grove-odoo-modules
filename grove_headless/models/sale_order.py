@@ -537,6 +537,90 @@ class SaleOrder(models.Model):
         )
         return True
 
+    def action_grove_record_historical_label(
+        self, tracking_number, carrier=None, actual_cost=0.0, service=None, label_date=None, delivered=True
+    ):
+        """Record a label that was bought AND shipped (usually delivered) by hand
+        WEEKS AGO, for the one-time legacy reconcile (GOL-3091, split from GOL-3083).
+
+        This is deliberately NOT the vanilla hand-label flow. ``action_grove_record_hand_label``
+        lands the order at ``label_purchased`` and the normal ship path then fires
+        the branded shipment email + runs ship-time settlement — the exact harm
+        GOL-3083 is about (four customers were re-emailed a tracking notice for an
+        order delivered weeks earlier, and a card could be re-settled). A legacy
+        order has already run its course offline, so recording its historical label
+        must be silent: stamp the tracking/carrier/cost, walk the fulfilment
+        watermark straight to ``delivered`` (or ``shipped``) through
+        ``_grove_advance_state`` — which only writes internal chatter, never the
+        customer email — and skip settlement entirely. The customer shipment email
+        lives in ``_operator_mark_shipped`` (the controller orchestration), which we
+        never call here, so "no customer email" holds by construction rather than by
+        a notify flag threaded through the live ship path.
+
+        ``label_date`` (a datetime / ``fields.Datetime``-parseable value) stamps
+        ``grove_label_purchased_at`` to when the label was actually bought so the
+        carrier poll's 30-day stop and any audit stay honest; when absent it falls
+        back to now(). Validation mirrors ``action_grove_record_hand_label`` and
+        raises ``UserError`` so the wizard surfaces it visibly. Returns True."""
+        self.ensure_one()
+        # No consult-compliance assert and no settlement here: the order already
+        # delivered offline, so there is nothing fresh to ship or capture — this is
+        # a records-only backfill. Re-asserting/settling weeks later is exactly the
+        # money/notification harm this reconcile exists to avoid.
+        if self.grove_fulfillment == "pickup":
+            raise UserError(f"{self.name}: farm-pickup orders buy no shipping label.")
+        if self.grove_tracking_numbers:
+            raise UserError(f"{self.name} already has tracking; clear the label fields to re-record.")
+        tracking = (tracking_number or "").strip()
+        if not shippo_client.is_valid_tracking(tracking):
+            raise UserError(f"{self.name}: {tracking!r} is not a valid tracking number.")
+        carrier_key = self._grove_infer_carrier(tracking, fallback=carrier)
+        if not carrier_key:
+            raise UserError(f"{self.name}: could not determine the carrier for {tracking!r}; pick UPS or USPS.")
+        try:
+            cost = round(float(actual_cost or 0.0), 2)
+        except (TypeError, ValueError):
+            raise UserError(f"{self.name}: actual shipping cost {actual_cost!r} is not a number.")
+        if cost < 0:
+            raise UserError(f"{self.name}: actual shipping cost cannot be negative.")
+        stage = self.grove_fulfillment_stage
+        if stage not in ("awaiting_label", "wave_assigned"):
+            raise UserError(f"{self.name}: not awaiting a label (stage {stage}); assign it to a ship wave first.")
+        service_token = service or ("ups_ground" if carrier_key == "UPS" else "usps_ground_advantage")
+        # Stamp the historical label date BEFORE advancing: _grove_advance_state
+        # only now()-stamps grove_label_purchased_at when it is still unset, so
+        # pre-setting it preserves the real purchase date from the export.
+        if label_date:
+            self.grove_label_purchased_at = label_date
+        # Walk the legal machine: awaiting_label/wave_assigned -> label_purchased ->
+        # shipped -> (delivered). Every hop is a _grove_advance_state call, which
+        # posts internal chatter only — no customer email, no settlement — so a
+        # legacy order lands silently out of the eligible pool.
+        self._grove_advance_state("label_purchased", source="historical_reconcile")
+        self.write(
+            {
+                "grove_tracking_numbers": tracking,
+                "grove_shipping_carriers": carrier_key,
+                "grove_shipping_services": service_token,
+                "grove_label_urls": "",  # label printed from Pirate Ship, not stored here
+                "grove_actual_shipping_cost": cost,
+                "grove_delivery_status": "label_purchased",
+            }
+        )
+        self._grove_advance_state("shipped", source="historical_reconcile")
+        if delivered:
+            self._grove_advance_state("delivered", source="historical_reconcile")
+        self.message_post(
+            body=(
+                "Historical label reconciled from the Pirate Ship Shipments export (GOL-3091): "
+                f"{carrier_key} {tracking}, ${cost:.2f}, landed at "
+                f"{'delivered' if delivered else 'shipped'}. "
+                "No customer email was sent and the balance was NOT auto-settled "
+                "(records-only backfill of an order already shipped by hand)."
+            )
+        )
+        return True
+
     def _grove_mark_shipped_and_settle(self, operator=None):
         """Model entry point for the Odoo "Mark shipped" server action (GOL-2895).
 
