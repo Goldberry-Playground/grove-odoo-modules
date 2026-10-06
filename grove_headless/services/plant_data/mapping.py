@@ -576,7 +576,11 @@ def under_budget(used: int, needed: int, budget: int) -> bool:
 
 
 def _join_and(items: list[str]) -> str:
-    items = [i for i in items if i]
+    # Provider list items arrive padded (Perenual returns soil/attracts entries
+    # comma-split without a strip, e.g. ["Acidic", " well-drained"]). Joining
+    # them unstripped shipped "Acidic and  well-drained" — a double space —
+    # straight onto a live PDP, which prints grove_* values verbatim (GOL-3146).
+    items = [i.strip() for i in items if i and i.strip()]
     if not items:
         return ""
     if len(items) == 1:
