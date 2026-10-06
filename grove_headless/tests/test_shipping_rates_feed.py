@@ -44,9 +44,21 @@ class RateFeedTests(unittest.TestCase):
         # Per-product carve-out map (GOL-2132) rides the same feed as the green
         # list so the storefront PDP notice reads one source of truth.
         compliance = self.feed["compliance"]
-        self.assertEqual(compliance["schema"], 1)
+        self.assertEqual(compliance["schema"], 2)
         self.assertIn("castanea", compliance["carve_outs"])
         self.assertIn("regulated_states", compliance)
+
+    def test_compliance_consult_deferral_absent_when_not_injected(self):
+        # GOL-3055: rate_feed() stays DB-free — without the controller injecting
+        # the armed state (pure tests, rate-check scripts), the key is omitted,
+        # which the storefront reads as the safe cautious default.
+        self.assertNotIn("consult_deferral_enabled", self.feed["compliance"])
+
+    def test_compliance_consult_deferral_passed_through(self):
+        # GOL-3055: the controller computes the armed state and injects it; the
+        # feed surfaces it verbatim on the compliance block for the storefront.
+        self.assertTrue(sz.rate_feed(consult_deferral_enabled=True)["compliance"]["consult_deferral_enabled"])
+        self.assertFalse(sz.rate_feed(consult_deferral_enabled=False)["compliance"]["consult_deferral_enabled"])
 
     def test_bundle_substitution_block_present(self):
         # Per-state bundle substitute map (GOL-2237) rides the same feed so the

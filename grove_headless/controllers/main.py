@@ -1251,8 +1251,17 @@ class GroveHeadlessAPI(http.Controller):
         for the shopper's mode/ship_timing verbatim (GOL-1386), resolved
         server-side against ``date.today()`` so it never re-derives the backend
         state machine or disagrees on a timezone boundary day.
+
+        The ``compliance`` block additionally carries ``consult_deferral_enabled``
+        (GOL-3055): the armed state of the GOL-3019 consult-built deposit
+        deferral, derived from ``sale.order._grove_consult_deferral_armed()`` so
+        it reflects that method's self-guard (a GOL-3007 revert flips it False).
+        The storefront reads it to tell a *deferred* deposit from a *refused* one
+        on a consult-built SKU. ``rate_feed`` stays DB-free, so the armed state
+        is computed here (where there is an ``env``) and injected.
         """
-        return _json_response(rate_feed(self._shipping_calendar_override(), _date.today()))
+        armed = request.env["sale.order"].sudo().new()._grove_consult_deferral_armed()
+        return _json_response(rate_feed(self._shipping_calendar_override(), _date.today(), armed))
 
     # ── Orders ───────────────────────────────────────────────────────────
 
