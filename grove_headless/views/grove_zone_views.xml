@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+
+    <!-- USDA zone on the sale.order search view (GOL-3056): a Group By option
+         and a "balance not charged" filter, so "outstanding preorders by zone"
+         is one click. The group_by context key puts the zone under the standard
+         Group By dropdown; grouping sorts by the Selection's declared 2..10
+         order so Zone 10 lands after Zone 9. The balance-not-charged domain uses
+         the same state set as grove_zone_filters.xml / GROVE_BALANCE_DUE_STATES
+         (settlement_error is GOL-3011's retryable state; harmless until it ships). -->
+    <record id="view_sales_order_filter_grove_usda_zone" model="ir.ui.view">
+        <field name="name">sale.order.search.grove.usda.zone</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_sales_order_filter" />
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <separator />
+                <filter
+                    name="grove_balance_not_charged"
+                    string="Balance not charged"
+                    domain="[('state', 'in', ['sale', 'done']), ('grove_checkout_status', 'in', ['deposit_paid', 'settlement_failed', 'settlement_error'])]"
+                />
+                <filter
+                    name="group_grove_usda_zone"
+                    string="USDA Zone"
+                    context="{'group_by': 'grove_usda_zone'}"
+                />
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Optional (hidden-by-default) USDA zone column on the orders list. -->
+    <record id="view_order_tree_grove_usda_zone" model="ir.ui.view">
+        <field name="name">sale.order.list.grove.usda.zone</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_tree" />
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='partner_id']" position="after">
+                <field name="grove_usda_zone" optional="hide" />
+            </xpath>
+        </field>
+    </record>
+
+</odoo>

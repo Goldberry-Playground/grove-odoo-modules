@@ -51,5 +51,7 @@ from . import (
     test_shop_departments,  # noqa: F401
     test_stripe_checkout,  # noqa: F401
     test_tenant_routing,  # noqa: F401
+    test_usda_zone,  # noqa: F401
+    test_usda_zone_filters,  # noqa: F401
     test_wv_taxes,  # noqa: F401
 )

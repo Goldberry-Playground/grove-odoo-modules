@@ -8,6 +8,7 @@ from odoo.exceptions import UserError
 from . import carrier_tracking, shippo_client
 from .shipment_email import normalize_carrier
 from .shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
+from .shipping_calendar import usda_zone_for_zip
 from .shipping_zones import pack_for_state, unshippable_reason
 
 _logger = logging.getLogger(__name__)
@@ -135,6 +136,65 @@ class SaleOrder(models.Model):
     # registers) for filing/audit.
     grove_stripe_tax_amount = fields.Monetary(readonly=True, copy=False)
     grove_stripe_tax_jurisdictions = fields.Text(readonly=True, copy=False)
+
+    # ── Destination USDA zone, as a groupable order field (GOL-3056) ────────
+    # Ship windows and labels are batched by the DESTINATION USDA hardiness zone
+    # (shipping_calendar.WAVE_SCHEDULE, zones 2-10), so "what preorders are
+    # outstanding, by zone" is the natural ops cut. The zone already exists as
+    # pure Python — shipping_calendar.usda_zone_for_zip() off the vendored PHZM
+    # matrix, used by checkout and the weekly digest — but ONLY in Python, so
+    # Odoo could not filter / group / pivot by it. This stores it on the order.
+    #
+    # Reuses usda_zone_for_zip() verbatim so the zone here can NEVER drift from
+    # the zone checkout and the digest resolve. Keyed off the shipping ZIP for a
+    # ship order, and off the FARM's ZIP for a pickup order (we lift on our own
+    # schedule, not the buyer's — GOL-1669; same rule order_rollup already
+    # applies via controllers.main._farm_pickup_zip). Unknown / missing ZIP ->
+    # False, which groups under Odoo's "None" bucket. A Selection (not a raw int)
+    # so groups read "Zone 5" and sort by the declared 2..10 order — "Zone 10"
+    # after "Zone 9", never the lexical "10 < 2" a Char would give.
+    grove_usda_zone = fields.Selection(
+        selection=[(str(z), f"Zone {z}") for z in range(2, 11)],
+        string="USDA Zone",
+        compute="_compute_grove_usda_zone",
+        store=True,
+        index=True,
+        help="Destination USDA hardiness zone (2-10) that decides this order's "
+        "ship wave: the shipping ZIP for a shipped order, the farm's ZIP for a "
+        "pickup. Empty when the ZIP is unknown. Stored so it can be grouped, "
+        "filtered and pivoted; recomputes on a shipping-address edit.",
+    )
+
+    # The 'balance still due' checkout states, defined ONCE (GOL-3056 item 4) so
+    # every zone view and saved filter stays in sync. A deposit-only preorder
+    # (deposit_paid) and a shipped order whose off-session balance has not landed
+    # (settlement_failed = declined; settlement_error = unknown/errored, retrying
+    # — added by GOL-3011) all still owe their balance; settled / paid do not.
+    # Shipped as-is into the ir.filters domains in data/grove_zone_filters.xml;
+    # test_usda_zone asserts those XML domains match this tuple so a new retry
+    # state can never silently drop orders out of a filter.
+    GROVE_BALANCE_DUE_STATES = ("deposit_paid", "settlement_failed", "settlement_error")
+
+    @api.depends("grove_fulfillment", "partner_shipping_id.zip", "company_id")
+    def _compute_grove_usda_zone(self):
+        """Resolve the destination USDA zone from the order's governing ZIP.
+
+        Pickup orders key off the FARM origin ZIP (controllers.main._farm_pickup_zip,
+        the same precedence the digest uses); shipped orders off the customer's
+        shipping ZIP. Deferred import of the controller helper mirrors
+        _grove_settle_at_ship and avoids the controller→models load cycle.
+        """
+        from ..controllers.main import _farm_pickup_zip
+
+        for order in self:
+            if order.grove_fulfillment == "pickup":
+                zip_code = _farm_pickup_zip(order.env, order.company_id)
+            else:
+                partner = order.partner_shipping_id
+                zip_code = partner.zip if partner else None
+            zone = usda_zone_for_zip((zip_code or "").strip() or None)
+            order.grove_usda_zone = str(zone) if zone is not None else False
+
     # ── Terminal fulfilment state machine (GOL-1981) ────────────────────────
     # Odoo is the system of record for "what is outstanding". Payment
     # (grove_checkout_status) and raw label substatus (grove_delivery_status)
