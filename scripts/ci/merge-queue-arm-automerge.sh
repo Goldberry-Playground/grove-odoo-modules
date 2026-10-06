@@ -222,7 +222,14 @@ fi
 # One JSON object per line: {"number","action","reason","id","headRefOid"}.
 # Passed through the environment, not a pipe -- a heredoc-sourced program takes
 # over stdin, so piped data would never reach it.
-DECISIONS="$(APP_LOGIN="$APP_LOGIN" APP_AUTHOR_LOGIN="${APP_AUTHOR_LOGIN:-$APP_LOGIN}" ARM_UNAPPROVED="$ARM_UNAPPROVED" ARM_PROTECTED="$ARM_PROTECTED" CARVEOUT="$CARVEOUT" GRAPH_JSON="$GRAPH" python3 <<'PYEOF'
+#
+# `env VAR=...`, not a bare `VAR=... cmd` assignment prefix: this repo
+# shellchecks scripts/ (grove-sites does not), and a prefix whose RHS reads the
+# same-named OUTER variable is SC2097/SC2098. The intent is exactly what
+# shellcheck cannot prove -- read the outer value, scope the assignment to the
+# forked python3 -- so say it with `env` instead of suppressing the warning.
+APP_AUTHOR_LOGIN="${APP_AUTHOR_LOGIN:-$APP_LOGIN}"
+DECISIONS="$(env APP_LOGIN="$APP_LOGIN" APP_AUTHOR_LOGIN="$APP_AUTHOR_LOGIN" ARM_UNAPPROVED="$ARM_UNAPPROVED" ARM_PROTECTED="$ARM_PROTECTED" CARVEOUT="$CARVEOUT" GRAPH_JSON="$GRAPH" python3 <<'PYEOF'
 import json, os, subprocess
 
 app = os.environ["APP_LOGIN"]
