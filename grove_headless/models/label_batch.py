@@ -23,6 +23,8 @@ import base64
 import csv
 import io
 import logging
+import re
+from datetime import timedelta
 
 from odoo import api, fields, models
 from odoo.exceptions import UserError
@@ -69,6 +71,27 @@ _CARRIER_TOKENS = {
     "UPS": ("UPS", "ups_ground"),
     "USPS": ("USPS", "usps_ground_advantage"),
 }
+
+# Already-labelled guard (GOL-3083). A batch row whose order has been sitting
+# awaiting a label longer than this many days is "likely already shipped by
+# hand" (the duplicate-label failure in LB-20261005-01) and must be explicitly
+# acknowledged before it is written to the Pirate Ship CSV. Operator-tunable via
+# the ir.config_parameter below so the number is never a hard code constant.
+AGE_ACK_DAYS_PARAM = "grove_headless.label_batch_age_ack_days"
+DEFAULT_AGE_ACK_DAYS = 14
+
+# Import-time cross-check window (GOL-3083 item 3): warn when a recipient already
+# has a recorded (Purchased) label within this many days outside the current batch.
+PRIOR_LABEL_WINDOW_DAYS = 60
+
+# A Grove Ref value ("S01234/1"): order name + box index. Pirate Ship carries the
+# upload's columns through to its tracking export, but the pass-through column is
+# not always named "Grove Ref", so the reconcile also detects it by VALUE pattern.
+GROVE_REF_RE = re.compile(r"^S\d+/\d+$")
+
+# Magic bytes: xlsx is a zip (PK\x03\x04); legacy .xls is an OLE2 compound file.
+_XLSX_MAGIC = b"PK\x03\x04"
+_XLS_MAGIC = b"\xd0\xcf\x11\xe0"
 
 
 class LabelBatchError(UserError):
@@ -134,6 +157,11 @@ class GroveLabelBatch(models.Model):
     tracking_import = fields.Binary(copy=False, attachment=True)
     tracking_import_filename = fields.Char(copy=False)
     notes = fields.Text(copy=False)
+    unacked_flagged_count = fields.Integer(
+        compute="_compute_unacked_flagged",
+        help="Rows flagged as likely-already-shipped (old) that have NOT been acknowledged. "
+        "These are held OUT of the exported Pirate Ship CSV until confirmed (GOL-3083).",
+    )
 
     _sql_constraints = [
         ("name_uniq", "unique(name)", "A label batch name must be unique."),
@@ -144,6 +172,22 @@ class GroveLabelBatch(models.Model):
         for batch in self:
             batch.row_count = len(batch.line_ids)
             batch.expected_total = round(sum(batch.line_ids.mapped("committed_rate")), 2)
+
+    @api.depends("line_ids.age_flagged", "line_ids.age_ack")
+    def _compute_unacked_flagged(self):
+        for batch in self:
+            batch.unacked_flagged_count = len(batch.line_ids.filtered(lambda ln: ln.age_flagged and not ln.age_ack))
+
+    @api.model
+    def _age_ack_days(self):
+        """Already-labelled acknowledgement threshold in days (GOL-3083),
+        from ``ir.config_parameter`` so an operator can tune it without a deploy.
+        Falls back to ``DEFAULT_AGE_ACK_DAYS`` when unset or non-integer."""
+        raw = self.env["ir.config_parameter"].sudo().get_param(AGE_ACK_DAYS_PARAM, DEFAULT_AGE_ACK_DAYS)
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return DEFAULT_AGE_ACK_DAYS
 
     # ── Name allocation ──────────────────────────────────────────────────────
     @api.model
@@ -207,6 +251,10 @@ class GroveLabelBatch(models.Model):
         unpriceable destination) are skipped and noted, never fatal."""
         self.ensure_one()
         company = self.company_id
+        # Preserve already-given age acknowledgements across an idempotent
+        # rebuild (GOL-3083): grove_ref (order name + box index) is stable, so an
+        # operator who confirmed an aged row is not re-prompted after a re-export.
+        acked_refs = {ln.grove_ref for ln in self.line_ids if ln.age_ack}
         self.line_ids.unlink()
         Line = self.env["grove.label.batch.line"].sudo()
         skipped = []
@@ -247,6 +295,8 @@ class GroveLabelBatch(models.Model):
                     }
                 )
             packed_orders |= order
+        if acked_refs:
+            self.line_ids.filtered(lambda ln: ln.grove_ref in acked_refs).age_ack = True
         packed_orders.write({"grove_label_batch_id": self.id})
         self.order_ids = [(6, 0, packed_orders.ids)]
         self.notes = ("Skipped (not shippable yet):\n" + "\n".join(skipped)) if skipped else False
@@ -277,6 +327,12 @@ class GroveLabelBatch(models.Model):
         writer = csv.writer(buf)
         writer.writerow(CSV_COLUMNS)
         for line in self.line_ids.sorted(key=lambda ln: (ln.order_id.name or "", ln.box_index)):
+            # Already-labelled guard (GOL-3083): an aged, unacknowledged row is
+            # likely already shipped by hand — never silently export it. It stays
+            # visible (flagged) on the batch until the operator confirms it is not
+            # already shipped (ticks the ack) or resolves it another way.
+            if line.age_flagged and not line.age_ack:
+                continue
             writer.writerow(line._csv_row())
         data = buf.getvalue().encode("utf-8")
         self.csv_export = base64.b64encode(data)
@@ -292,80 +348,185 @@ class GroveLabelBatch(models.Model):
         return base64.b64decode(self.csv_export)
 
     # ── Reconcile (tracking import) ─────────────────────────────────────────
-    def _parse_tracking_csv(self, raw_bytes):
-        """Parse Pirate Ship's *Export Tracking Data* CSV into row dicts.
+    def _read_tabular(self, raw_bytes, filename=None):
+        """Read a Pirate Ship export (CSV *or* .xls/.xlsx) into a list of string
+        rows (GOL-3083 item 4). Pirate Ship exports .xls/.xlsx, not CSV, so the
+        importer must accept them directly — xlrd/openpyxl ship with Odoo.
 
-        Loose header matching (§B1): tracking number, carrier and cost are always
-        required. For IDENTITY we need *either* Grove Ref (the proven round-trip
-        key, present only when the upload used the spec'd batch CSV + saved
-        mapping) *or* Email — the manual-review fallback. The real 2026-09-15
-        per-recipient export carried NO Grove Ref column at all (columns were
-        Created Date, Recipient, Email, Tracking Number, Cost, …), so refusing a
-        file that lacks Grove Ref would dead-end the operators' actual export.
-        Raises ``LabelBatchError`` only when a genuinely required column (tracking
-        / carrier / cost) or *both* identity columns are absent."""
+        Format is sniffed from the leading magic bytes (robust when the upload
+        carries no/filename-less extension); ``filename`` is only a fallback hint.
+        Every cell is coerced to a trimmed string so the downstream parser sees the
+        same shape regardless of source. Integral spreadsheet floats are rendered
+        without a trailing ``.0`` (so a cost cell ``9.0`` and a numeric ZIP survive
+        cleanly)."""
+        head = raw_bytes[:4] if isinstance(raw_bytes, (bytes, bytearray)) else b""
+        name = (filename or "").lower()
+        if head == _XLSX_MAGIC or name.endswith(".xlsx"):
+            return self._read_xlsx(raw_bytes)
+        if head == _XLS_MAGIC or name.endswith(".xls"):
+            return self._read_xls(raw_bytes)
         try:
             text = raw_bytes.decode("utf-8-sig")
         except (UnicodeDecodeError, AttributeError) as exc:
             raise LabelBatchError(f"Tracking file is not valid UTF-8 CSV: {exc}") from exc
-        reader = csv.reader(io.StringIO(text))
-        rows = list(reader)
+        return [[(c or "").strip() for c in row] for row in csv.reader(io.StringIO(text))]
+
+    @api.model
+    def _cell_str(self, value):
+        """Render a spreadsheet cell as a trimmed string without a spurious
+        ``.0`` on integral floats (openpyxl/xlrd hand back numbers as floats)."""
+        if value is None:
+            return ""
+        if isinstance(value, float) and value.is_integer():
+            return str(int(value))
+        return str(value).strip()
+
+    def _read_xlsx(self, raw_bytes):
+        try:
+            import openpyxl
+        except ImportError as exc:  # pragma: no cover - openpyxl ships with Odoo
+            raise LabelBatchError("Cannot read .xlsx: openpyxl is not installed on this server.") from exc
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(raw_bytes), read_only=True, data_only=True)
+        except Exception as exc:
+            raise LabelBatchError(f"Tracking file is not a readable .xlsx workbook: {exc}") from exc
+        ws = wb.active
+        rows = [[self._cell_str(c) for c in row] for row in ws.iter_rows(values_only=True)]
+        wb.close()
+        return rows
+
+    def _read_xls(self, raw_bytes):
+        try:
+            import xlrd
+        except ImportError as exc:  # pragma: no cover - xlrd ships with Odoo
+            raise LabelBatchError("Cannot read .xls: xlrd is not installed on this server.") from exc
+        try:
+            book = xlrd.open_workbook(file_contents=raw_bytes)
+        except Exception as exc:
+            raise LabelBatchError(f"Tracking file is not a readable .xls workbook: {exc}") from exc
+        sheet = book.sheet_by_index(0)
+        return [[self._cell_str(sheet.cell_value(r, c)) for c in range(sheet.ncols)] for r in range(sheet.nrows)]
+
+    @staticmethod
+    def _detect_ref_idx(rows):
+        """Index of the column whose values look like Grove Refs (``S\\d+/\\d+``),
+        or None. Pirate Ship may rename the pass-through Grove Ref column, so the
+        reconcile detects it by VALUE when the header name is absent (GOL-3083
+        item 4). A column qualifies when at least half of its non-empty cells
+        match the pattern."""
+        if len(rows) < 2:
+            return None
+        ncols = max((len(r) for r in rows), default=0)
+        for ci in range(ncols):
+            nonempty = [r[ci] for r in rows[1:] if ci < len(r) and r[ci]]
+            if not nonempty:
+                continue
+            hits = sum(1 for v in nonempty if GROVE_REF_RE.match(v))
+            if hits and hits >= len(nonempty) / 2:
+                return ci
+        return None
+
+    def _parse_tracking_file(self, raw_bytes, filename=None):
+        """Parse a Pirate Ship *Export Tracking Data* file (CSV/.xls/.xlsx) into
+        row dicts.
+
+        Loose header matching (§B1): tracking number, carrier and cost are always
+        required. For IDENTITY we need *either* Grove Ref (the proven round-trip
+        key — matched by header name OR, when Pirate Ship renamed the pass-through
+        column, by the ``S\\d+/\\d+`` value pattern, GOL-3083) *or* Email — the
+        manual-review fallback. The real 2026-09-15 per-recipient export carried
+        NO Grove Ref column at all (columns were Created Date, Recipient, Email,
+        Tracking Number, Cost, …), so refusing a file that lacks Grove Ref would
+        dead-end the operators' actual export. Raises ``LabelBatchError`` only when
+        a genuinely required column (tracking / carrier / cost) or *both* identity
+        columns are absent."""
+        rows = self._read_tabular(raw_bytes, filename=filename)
         if not rows:
             raise LabelBatchError("Tracking file is empty.")
         header = rows[0]
-        col_ref = _find_column(header, "grove", "ref")
-        col_track = (
-            _find_column(header, "tracking", "number")
-            or _find_column(header, "tracking")
-            or _find_column(header, "track")
-        )
-        col_carrier = _find_column(header, "carrier")
-        col_cost = (
-            _find_column(header, "cost")
-            or _find_column(header, "amount")
-            or _find_column(header, "charge")
-            or _find_column(header, "price")
-        )
-        col_service = _find_column(header, "service") or _find_column(header, "mail", "class")
-        col_email = _find_column(header, "email")
-        col_recipient = _find_column(header, "recipient") or _find_column(header, "name")
+
+        def idx(*needles):
+            cell = _find_column(header, *needles)
+            return header.index(cell) if cell is not None else None
+
+        i_ref = idx("grove", "ref")
+        if i_ref is None:
+            i_ref = self._detect_ref_idx(rows)
+        i_track = idx("tracking", "number") or idx("tracking") or idx("track")
+        i_carrier = idx("carrier")
+        i_cost = idx("cost") or idx("amount") or idx("charge") or idx("price")
+        i_service = idx("service") or idx("mail", "class")
+        i_email = idx("email")
+        i_recipient = idx("recipient") or idx("name")
         missing = [
-            label
-            for label, col in (
-                ("Tracking Number", col_track),
-                ("Carrier", col_carrier),
-                ("Cost", col_cost),
-            )
-            if col is None
+            label for label, i in (("Tracking Number", i_track), ("Carrier", i_carrier), ("Cost", i_cost)) if i is None
         ]
         if missing:
             raise LabelBatchError(f"Tracking file is missing required column(s): {', '.join(missing)}.")
-        if col_ref is None and col_email is None:
+        if i_ref is None and i_email is None:
             raise LabelBatchError(
                 "Tracking file has neither a Grove Ref nor an Email column; cannot match rows to the batch."
             )
-        index = {name: header.index(name) for name in header}
         parsed = []
         for raw in rows[1:]:
             if not any((c or "").strip() for c in raw):
                 continue  # blank line
 
-            def cell(col):
-                i = index.get(col)
+            def cell(i):
                 return raw[i].strip() if i is not None and i < len(raw) else ""
 
             parsed.append(
                 {
-                    "ref": cell(col_ref) if col_ref else "",
-                    "tracking": cell(col_track),
-                    "carrier_raw": cell(col_carrier),
-                    "service": cell(col_service) if col_service else "",
-                    "cost_raw": cell(col_cost),
-                    "email": cell(col_email) if col_email else "",
-                    "recipient": cell(col_recipient) if col_recipient else "",
+                    "ref": cell(i_ref),
+                    "tracking": cell(i_track),
+                    "carrier_raw": cell(i_carrier),
+                    "service": cell(i_service),
+                    "cost_raw": cell(i_cost),
+                    "email": cell(i_email),
+                    "recipient": cell(i_recipient),
                 }
             )
         return parsed
+
+    @api.model
+    def _order_emails(self, order):
+        """Lowercased recipient email(s) for an order (ship-to first, then the
+        order partner). Used to spot a recipient that already has a recorded label
+        (GOL-3083 item 3)."""
+        emails = set()
+        for partner in (order.partner_shipping_id, order.partner_id):
+            if partner and partner.email:
+                emails.add(partner.email.strip().lower())
+        return emails
+
+    def _recent_labelled_by_email(self, exclude_orders, within_days=PRIOR_LABEL_WINDOW_DAYS):
+        """Index recipient email → orders that already have a recorded label within
+        ``within_days``, EXCLUDING this batch and ``exclude_orders`` (GOL-3083 item
+        3). A hard refund is not recorded in Odoo, so "Purchased, non-refunded"
+        reduces to "has recorded tracking" — a sibling order whose hand-bought
+        label WAS recorded is exactly the LB-20261005-01 duplicate signature."""
+        self.ensure_one()
+        cutoff = fields.Datetime.now() - timedelta(days=within_days)
+        recent = (
+            self.env["sale.order"]
+            .sudo()
+            .with_company(self.company_id)
+            .search(
+                [
+                    ("company_id", "=", self.company_id.id),
+                    ("grove_label_purchased_at", ">=", cutoff),
+                    ("grove_tracking_numbers", "not in", (False, "")),
+                    ("grove_label_batch_id", "!=", self.id),
+                    ("id", "not in", [o.id for o in exclude_orders]),
+                ]
+            )
+        )
+        index = {}
+        for order in recent:
+            for email in self._order_emails(order):
+                index.setdefault(email, self.env["sale.order"])
+                index[email] |= order
+        return index
 
     def import_tracking(self, raw_bytes, filename=None):
         """All-or-nothing reconcile (spec §B1). Validate EVERY row before any
@@ -374,13 +535,14 @@ class GroveLabelBatch(models.Model):
         without one, on recipient email as an unambiguous-only fallback (§B1 field
         report 2026-09-15) — any email-matched order is flagged for manual review,
         never written silently. Returns ``{orders_advanced, skipped_already_tracked,
-        total, rows, manual_review}`` (``manual_review`` = grove_refs reconciled by
-        the email fallback). Raises ``LabelBatchError`` (→ 400) on any validation
-        failure, writing nothing."""
+        total, rows, manual_review, warnings}`` (``manual_review`` = grove_refs
+        reconciled by the email fallback; ``warnings`` = non-fatal already-labelled
+        notices, GOL-3083 item 3). Raises ``LabelBatchError`` (→ 400) on any
+        validation failure, writing nothing."""
         self.ensure_one()
         if self.state == "cancelled":
             raise LabelBatchError(f"{self.name} is cancelled; cannot import tracking.")
-        parsed = self._parse_tracking_csv(raw_bytes)
+        parsed = self._parse_tracking_file(raw_bytes, filename=filename)
         if filename:
             self.tracking_import = base64.b64encode(raw_bytes)
             self.tracking_import_filename = filename
@@ -486,6 +648,8 @@ class GroveLabelBatch(models.Model):
         orders_advanced = 0
         newly_total = 0.0
         manual_review = []  # grove_refs reconciled via the weaker email fallback
+        warnings = []  # non-fatal already-labelled notices (GOL-3083 item 3)
+        prior_by_email = self._recent_labelled_by_email([o for o, _e in orders_to_write])
         for order, entries in orders_to_write:
             entries.sort(key=lambda e: e[0].box_index)
             tracking = [row["tracking"] for (_ln, _c, _ca, _s, row, _v) in entries]
@@ -545,6 +709,23 @@ class GroveLabelBatch(models.Model):
                         f"Verify the tracking number belongs to this order."
                     )
                 )
+            # Already-labelled cross-check (GOL-3083 item 3): warn, never block,
+            # when this recipient already has a recorded label elsewhere recently.
+            priors = self.env["sale.order"]
+            for email in self._order_emails(order):
+                priors |= prior_by_email.get(email, self.env["sale.order"])
+            if priors:
+                parts = []
+                for p in priors:
+                    track = (p.grove_tracking_numbers or "").splitlines()
+                    when = f", {p.grove_label_purchased_at.date()}" if p.grove_label_purchased_at else ""
+                    parts.append(f"{p.name} ({track[0] if track else 'no tracking'}{when})")
+                msg = (
+                    f"{order.name}: recipient already has a recent recorded label on {', '.join(parts)}. "
+                    f"Confirm this is not a duplicate of an order already shipped by hand (GOL-3083)."
+                )
+                warnings.append(msg)
+                order.message_post(body="⚠️ " + msg)
             orders_advanced += 1
             newly_total += actual
 
@@ -565,6 +746,7 @@ class GroveLabelBatch(models.Model):
             "total": round(newly_total, 2),
             "rows": len(clean),
             "manual_review": sorted(manual_review),
+            "warnings": warnings,
         }
 
     @api.model
@@ -581,7 +763,10 @@ class GroveLabelBatch(models.Model):
         self.ensure_one()
         if self.state not in ("open", "exported"):
             raise UserError(f"{self.name} is {self.state}; only open/exported batches export.")
-        self.csv_bytes()  # ensure rendered + stored
+        # Re-render (not csv_bytes()) so a just-ticked already-labelled
+        # acknowledgement is reflected: _render_csv reads age_ack live and now
+        # includes the row the operator confirmed still needs a label (GOL-3083).
+        self._render_csv()
         return {
             "type": "ir.actions.act_url",
             "url": f"/web/content/grove.label.batch/{self.id}/csv_export/{self.csv_export_filename}?download=true",
@@ -622,11 +807,47 @@ class GroveLabelBatchLine(models.Model):
     height_in = fields.Integer()
     service = fields.Char(help="Carrier/service title (informational for the buyer).")
     committed_rate = fields.Float(digits=(8, 2))
+    # Already-labelled guard (GOL-3083). order_age_days / age_flagged are NOT
+    # stored: they are read-time derived from "now" so the form always shows a
+    # fresh age. age_ack is the operator's explicit confirmation that an aged row
+    # has NOT already been shipped by hand; it is preserved across rebuilds.
+    order_date = fields.Datetime(related="order_id.date_order", string="Order date", store=True)
+    order_age_days = fields.Integer(compute="_compute_order_age", string="Age (days)")
+    age_flagged = fields.Boolean(
+        compute="_compute_order_age",
+        string="Likely already shipped",
+        help="Order has been awaiting a label longer than the acknowledgement threshold "
+        "(grove_headless.label_batch_age_ack_days, default 14) — confirm it was not already "
+        "shipped by hand before exporting it (GOL-3083).",
+    )
+    age_ack = fields.Boolean(
+        string="Confirmed not already shipped",
+        copy=False,
+        help="Tick to confirm this aged order has NOT already been shipped on a hand-bought "
+        "label. Required before an aged row is written to the Pirate Ship CSV (GOL-3083).",
+    )
     # Written back on reconcile.
     tracking_number = fields.Char(copy=False)
     carrier_token = fields.Char(copy=False, help="Canonical carrier key (UPS/USPS), as stored on the order.")
     service_token = fields.Char(copy=False, help="Ground service token (ups_ground/usps_ground_advantage).")
     actual_cost = fields.Float(digits=(8, 2), copy=False)
+
+    @api.depends("order_date", "order_id.grove_fulfillment_stage")
+    def _compute_order_age(self):
+        """Age-since-order and the already-labelled flag (GOL-3083).
+
+        Only a regular paid ship order (``awaiting_label``) is age-flagged: a
+        ``wave_assigned`` preorder is expected to be old (ordered seasons before
+        its wave opens), so age-since-order is not a shipped-by-hand signal for it
+        — the import-time email cross-check and the reconcile wizard cover that
+        case instead."""
+        threshold = self.env["grove.label.batch"]._age_ack_days()
+        now = fields.Datetime.now()
+        for line in self:
+            line.order_age_days = (now - line.order_date).days if line.order_date else 0
+            line.age_flagged = (
+                line.order_id.grove_fulfillment_stage == "awaiting_label" and line.order_age_days >= threshold
+            )
 
     def _csv_row(self):
         """This line as a CSV_COLUMNS-ordered list of strings."""
