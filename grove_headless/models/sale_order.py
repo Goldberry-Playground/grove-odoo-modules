@@ -79,6 +79,20 @@ class SaleOrder(models.Model):
     # human can satisfy the gate (the stock.picking mirror stays read-only).
     grove_substitution_note = fields.Text(copy=False)
 
+    # Consult-built deposit deferral (GOL-3019). Set at checkout when a
+    # consult-built mix (product.grove_consult_built, empty botanical) took its
+    # $10 deposit into a destination where the taxon-level compliance decision
+    # was DEFERRED to mix time instead of hard-blocked at the deposit. Recorded
+    # (never implied): grove_consult_deferred_state is the canonical 2-letter
+    # destination so Wesley can read the constraint at consult time without
+    # asking anyone, and a chatter note names the taxa constrained there. These
+    # are audit fields ONLY — deliberately separate from grove_substitution_note
+    # so the deferral never satisfies the GOL-3007 ship-commit gate (see
+    # _grove_record_consult_deferral). copy=False so a duplicated order never
+    # inherits a stale deferral.
+    grove_consult_compliance_deferred = fields.Boolean(readonly=True, copy=False)
+    grove_consult_deferred_state = fields.Char(readonly=True, copy=False)
+
     # Stripe Checkout linkage (GOL-642). Written when a checkout session is
     # created; read by the webhook to reconcile session.completed/expired back
     # to this order. copy=False so a duplicated order never inherits a payment.
@@ -849,6 +863,59 @@ class SaleOrder(models.Model):
         self.ensure_one()
         if self._grove_consult_compliance_missing():
             raise UserError(self.GROVE_CONSULT_COMPLIANCE_MSG)
+
+    # Config flag that arms the GOL-3019 deposit-time deferral. Default-absent =
+    # off: deposit-time blocking stays until it is explicitly set True (the CEO
+    # money-flow GO, done after 1.63.0 + grove_consult_built are live on prod).
+    # Flipping it back to False restores deposit-time blocking with no data
+    # migration (GOL-3019 AC5).
+    GROVE_CONSULT_DEFERRAL_PARAM = "grove_headless.consult_deferral_enabled"
+
+    def _grove_consult_deferral_armed(self):
+        """GOL-3019 §3 self-guard. The deposit-time deferral for a consult-built
+        mix is honest ONLY while the GOL-3007 ship-commit assert is live to
+        catch the mix at ship time; without it the deferral would be a third
+        silent hole in the gate. Returns True iff BOTH:
+
+          (a) the reversibility flag ``grove_headless.consult_deferral_enabled``
+              is set (one config param flips the whole feature back to
+              deposit-time blocking — AC5), AND
+          (b) the GOL-3007 assert is actually present on this record at runtime,
+
+        so a code rollback that drops ``_grove_assert_consult_compliance`` makes
+        this return False, re-arming the deposit-time fail-safe — a 3007 revert
+        can never silently open a regulated state."""
+        self.ensure_one()
+        if not callable(getattr(self, "_grove_assert_consult_compliance", None)):
+            return False
+        enabled = self.env["ir.config_parameter"].sudo().get_param(self.GROVE_CONSULT_DEFERRAL_PARAM, "False")
+        return str(enabled).strip().lower() in ("1", "true", "yes", "on")
+
+    def _grove_record_consult_deferral(self, state_code, excluded_taxa):
+        """Record — never imply — that a consult-built mix took its $10 deposit
+        into ``state_code`` with the taxon-level compliance decision deferred to
+        mix time (GOL-3019 AC2/AC4). Sets the audit fields and posts a chatter
+        line naming the destination and the taxa constrained there, so Wesley
+        reads the constraint at consult time without asking anyone.
+
+        Deliberately does NOT write grove_substitution_note: that field is the
+        key the GOL-3007 ship-commit gate reads, so writing it here would
+        satisfy _grove_assert_consult_compliance and let the order settle / ship
+        with no human check (AC2 forbids it). The deferral and the ship-commit
+        gate stay on separate surfaces on purpose."""
+        self.ensure_one()
+        self.grove_consult_compliance_deferred = True
+        self.grove_consult_deferred_state = state_code
+        taxa = ", ".join(excluded_taxa) if excluded_taxa else "none for this state"
+        self.message_post(
+            body=(
+                "⏸️ <b>Consult compliance deferred</b> (GOL-3019). Deposit taken for a "
+                f"consult-built mix shipping to <b>{state_code or '?'}</b>. "
+                f"Constrained taxa for this state: <b>{taxa}</b>. Agree a compliant species "
+                "list with the customer, then record the check in 'Compliance check / "
+                "substitutions' before the balance can be charged or the order shipped."
+            )
+        )
 
     def _grove_settle_at_ship(self):
         """Capture the deferred preorder balance off-session at ship time.
