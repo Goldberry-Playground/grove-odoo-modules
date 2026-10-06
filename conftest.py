@@ -63,6 +63,7 @@ collect_ignore_glob = [
     "grove_headless/tests/test_settlement_failure_handling.py",
     "grove_headless/tests/test_ship_wave_hand_label.py",
     "grove_headless/tests/test_label_batch.py",
+    "grove_headless/tests/test_label_reconcile.py",
     "grove_headless/tests/test_carrier_tracking_cron.py",
     "grove_headless/tests/test_poller_lifecycle.py",
     "grove_headless/tests/test_order_rollup.py",
@@ -73,4 +74,6 @@ collect_ignore_glob = [
     "grove_headless/tests/test_content_draft_request.py",
     "grove_headless/tests/test_promotions.py",
     "grove_headless/tests/test_checkout_compliance_gate.py",
+    "grove_headless/tests/test_consult_compliance_gate.py",
+    "grove_headless/tests/test_usda_zone.py",
 ]

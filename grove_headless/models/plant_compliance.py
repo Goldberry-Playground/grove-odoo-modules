@@ -109,6 +109,24 @@ def is_taxon_blocked(genus: str, species: str | None, state_code: str) -> bool:
     return state_code not in states
 
 
+def excluded_taxa_for_state(state_code: str) -> list[str]:
+    """Carve-out taxa that may NOT ship to ``state_code`` (canonical 2-letter).
+
+    The honest, source-of-truth constraint list for a consult-built mix whose
+    compliance is deferred to mix time (GOL-3019 AC4): it answers "which taxa is
+    the palette constrained to exclude for this destination" from the same
+    ``CARVE_OUTS`` map the checkout blocks with, so the deferral note and the
+    gate can never drift. Returns the sorted carve-out keys (e.g.
+    ``["castanea", "cornus"]`` for FL, ``["morus alba"]`` for IN/OH/WI); empty
+    for an unregulated state where nothing is excluded.
+    """
+    return sorted(
+        taxon
+        for taxon, (kind, states) in CARVE_OUTS.items()
+        if (state_code in states if kind == "block" else state_code not in states)
+    )
+
+
 def _block_message(botanical_name: str, state_label: str) -> str:
     plant = (botanical_name or "").strip() or "this plant"
     return (
@@ -159,7 +177,7 @@ def evaluate_line(
     return None, False
 
 
-def carve_out_feed() -> dict:
+def carve_out_feed(consult_deferral_enabled: bool | None = None) -> dict:
     """Read-only snapshot of the carve-out map for the storefront mirror.
 
     Shipped inside ``shipping_zones.rate_feed`` (like ``green_states``) so
@@ -167,13 +185,35 @@ def carve_out_feed() -> dict:
     the checkout blocks with, and can never drift. Shape::
 
         {
-          "schema": 1,
+          "schema": 2,
           "carve_outs": {"castanea": {"kind": "block", "states": ["FL","OR","WA"]}, ...},
           "regulated_states": ["AZ","CA","FL","IN","NM","OH","OR","WA","WI"],
+          "consult_deferral_enabled": true,   # only when the caller supplies it
         }
+
+    ``consult_deferral_enabled`` (GOL-3055) is the armed state of the GOL-3019
+    deposit-time deferral: True iff a consult-built mix (templates 134/135) can
+    actually take its deposit into FL/IN/OH/WI right now, so the storefront can
+    tell a *deferred* deposit (quote the rate, word it as a reservation) from a
+    *refused* one (today's cautious copy). It is derived — by the controller,
+    which has ``env`` — from ``sale.order._grove_consult_deferral_armed()``, so
+    it reflects that method's self-guard too: a code revert that drops the
+    GOL-3007 ship-commit assert flips this back to False and pulls the
+    storefront's promise back with it.
+
+    This function is pure/DB-free, so the armed state is *injected* by the
+    caller rather than read here. When the caller cannot supply it (the pure
+    rate-feed tests, the rate-check scripts), the key is omitted — which the
+    storefront reads as "unknown", the safe cautious default. The block's
+    ``schema`` is bumped to 2 unconditionally: a frontend that only understands
+    schema 1 ignores the whole block (and keeps its baked copy) rather than
+    reading a half-understood contract.
     """
-    return {
-        "schema": 1,
+    feed = {
+        "schema": 2,
         "carve_outs": {taxon: {"kind": kind, "states": sorted(states)} for taxon, (kind, states) in CARVE_OUTS.items()},
         "regulated_states": sorted(REGULATED_STATES),
     }
+    if consult_deferral_enabled is not None:
+        feed["consult_deferral_enabled"] = bool(consult_deferral_enabled)
+    return feed

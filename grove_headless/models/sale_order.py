@@ -9,6 +9,7 @@ from odoo.tools import config
 from . import carrier_tracking, shippo_client
 from .shipment_email import normalize_carrier
 from .shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
+from .shipping_calendar import usda_zone_for_zip
 from .shipping_zones import pack_for_state, unshippable_reason
 
 _logger = logging.getLogger(__name__)
@@ -69,7 +70,29 @@ class SaleOrder(models.Model):
     # composition and the contents of the box diverge in the barn, where no CI or
     # e2e check catches it. Empty on the overwhelming common case (no swap) and
     # on every non-bundle order. Plain text, newline-joined across bundle lines.
-    grove_substitution_note = fields.Text(readonly=True, copy=False)
+    #
+    # Reused as the consult-built compliance-recording surface (GOL-3007): for a
+    # consult-built mix (product.grove_consult_built) Wesley records the mix-build
+    # check here — destination state, species list checked against the carve-outs,
+    # any substitutions, who cleared it — and the balance cannot settle / ship
+    # until it is non-empty (see _grove_assert_consult_compliance). Hence NOT
+    # readonly at the model level: the sale.order form exposes it editable so a
+    # human can satisfy the gate (the stock.picking mirror stays read-only).
+    grove_substitution_note = fields.Text(copy=False)
+
+    # Consult-built deposit deferral (GOL-3019). Set at checkout when a
+    # consult-built mix (product.grove_consult_built, empty botanical) took its
+    # $10 deposit into a destination where the taxon-level compliance decision
+    # was DEFERRED to mix time instead of hard-blocked at the deposit. Recorded
+    # (never implied): grove_consult_deferred_state is the canonical 2-letter
+    # destination so Wesley can read the constraint at consult time without
+    # asking anyone, and a chatter note names the taxa constrained there. These
+    # are audit fields ONLY — deliberately separate from grove_substitution_note
+    # so the deferral never satisfies the GOL-3007 ship-commit gate (see
+    # _grove_record_consult_deferral). copy=False so a duplicated order never
+    # inherits a stale deferral.
+    grove_consult_compliance_deferred = fields.Boolean(readonly=True, copy=False)
+    grove_consult_deferred_state = fields.Char(readonly=True, copy=False)
 
     # Stripe Checkout linkage (GOL-642). Written when a checkout session is
     # created; read by the webhook to reconcile session.completed/expired back
@@ -151,6 +174,65 @@ class SaleOrder(models.Model):
     # registers) for filing/audit.
     grove_stripe_tax_amount = fields.Monetary(readonly=True, copy=False)
     grove_stripe_tax_jurisdictions = fields.Text(readonly=True, copy=False)
+
+    # ── Destination USDA zone, as a groupable order field (GOL-3056) ────────
+    # Ship windows and labels are batched by the DESTINATION USDA hardiness zone
+    # (shipping_calendar.WAVE_SCHEDULE, zones 2-10), so "what preorders are
+    # outstanding, by zone" is the natural ops cut. The zone already exists as
+    # pure Python — shipping_calendar.usda_zone_for_zip() off the vendored PHZM
+    # matrix, used by checkout and the weekly digest — but ONLY in Python, so
+    # Odoo could not filter / group / pivot by it. This stores it on the order.
+    #
+    # Reuses usda_zone_for_zip() verbatim so the zone here can NEVER drift from
+    # the zone checkout and the digest resolve. Keyed off the shipping ZIP for a
+    # ship order, and off the FARM's ZIP for a pickup order (we lift on our own
+    # schedule, not the buyer's — GOL-1669; same rule order_rollup already
+    # applies via controllers.main._farm_pickup_zip). Unknown / missing ZIP ->
+    # False, which groups under Odoo's "None" bucket. A Selection (not a raw int)
+    # so groups read "Zone 5" and sort by the declared 2..10 order — "Zone 10"
+    # after "Zone 9", never the lexical "10 < 2" a Char would give.
+    grove_usda_zone = fields.Selection(
+        selection=[(str(z), f"Zone {z}") for z in range(2, 11)],
+        string="USDA Zone",
+        compute="_compute_grove_usda_zone",
+        store=True,
+        index=True,
+        help="Destination USDA hardiness zone (2-10) that decides this order's "
+        "ship wave: the shipping ZIP for a shipped order, the farm's ZIP for a "
+        "pickup. Empty when the ZIP is unknown. Stored so it can be grouped, "
+        "filtered and pivoted; recomputes on a shipping-address edit.",
+    )
+
+    # The 'balance still due' checkout states, defined ONCE (GOL-3056 item 4) so
+    # every zone view and saved filter stays in sync. A deposit-only preorder
+    # (deposit_paid) and a shipped order whose off-session balance has not landed
+    # (settlement_failed = declined; settlement_error = unknown/errored, retrying
+    # — added by GOL-3011) all still owe their balance; settled / paid do not.
+    # Shipped as-is into the ir.filters domains in data/grove_zone_filters.xml;
+    # test_usda_zone asserts those XML domains match this tuple so a new retry
+    # state can never silently drop orders out of a filter.
+    GROVE_BALANCE_DUE_STATES = ("deposit_paid", "settlement_failed", "settlement_error")
+
+    @api.depends("grove_fulfillment", "partner_shipping_id.zip", "company_id")
+    def _compute_grove_usda_zone(self):
+        """Resolve the destination USDA zone from the order's governing ZIP.
+
+        Pickup orders key off the FARM origin ZIP (controllers.main._farm_pickup_zip,
+        the same precedence the digest uses); shipped orders off the customer's
+        shipping ZIP. Deferred import of the controller helper mirrors
+        _grove_settle_at_ship and avoids the controller→models load cycle.
+        """
+        from ..controllers.main import _farm_pickup_zip
+
+        for order in self:
+            if order.grove_fulfillment == "pickup":
+                zip_code = _farm_pickup_zip(order.env, order.company_id)
+            else:
+                partner = order.partner_shipping_id
+                zip_code = partner.zip if partner else None
+            zone = usda_zone_for_zip((zip_code or "").strip() or None)
+            order.grove_usda_zone = str(zone) if zone is not None else False
+
     # ── Terminal fulfilment state machine (GOL-1981) ────────────────────────
     # Odoo is the system of record for "what is outstanding". Payment
     # (grove_checkout_status) and raw label substatus (grove_delivery_status)
@@ -304,6 +386,11 @@ class SaleOrder(models.Model):
         no label, and must never send the shipment email — GOL-1981 acceptance).
         Returns True only on the real transition so the email fires exactly once."""
         self.ensure_one()
+        # Consult-built backstop (GOL-3007): refuse to ship (and so to settle the
+        # balance, which runs off this transition) a consult mix with no recorded
+        # compliance check. Raised before the watermark move so the transition,
+        # the settlement and the shipment email are all blocked as one unit.
+        self._grove_assert_consult_compliance()
         if self.grove_fulfillment == "pickup":
             _logger.warning(
                 "Refused to mark pickup order %s shipped — pickup collects at the farm and sends no shipment email.",
@@ -336,6 +423,10 @@ class SaleOrder(models.Model):
         through ``_grove_mark_collected_and_settle`` so collection is exactly when
         a deposit-only pickup order's balance is captured (GOL-2893)."""
         self.ensure_one()
+        # Consult-built backstop (GOL-3007): collection is the pickup analogue of
+        # a ship event and is where a pickup consult mix's balance settles, so the
+        # same hard gate applies — no hand-off until the compliance check exists.
+        self._grove_assert_consult_compliance()
         if self.grove_fulfillment != "pickup":
             _logger.warning("Refused to mark non-pickup order %s collected.", self.name)
             return False
@@ -426,6 +517,10 @@ class SaleOrder(models.Model):
         or an order not awaiting a label, so the wizard surfaces it visibly rather
         than failing silently (GOL-1975 no-silent-ack)."""
         self.ensure_one()
+        # Consult-built backstop (GOL-3007): recording a hand-bought label puts
+        # the order on the ship path (and mark-shipped then settles it), so gate
+        # it here too — a consult mix with no recorded compliance check is refused.
+        self._grove_assert_consult_compliance()
         if self.grove_fulfillment == "pickup":
             raise UserError(f"{self.name}: farm-pickup orders buy no shipping label.")
         if self.grove_tracking_numbers:
@@ -463,6 +558,90 @@ class SaleOrder(models.Model):
                 "grove_actual_shipping_cost": cost,
                 "grove_delivery_status": "label_purchased",
             }
+        )
+        return True
+
+    def action_grove_record_historical_label(
+        self, tracking_number, carrier=None, actual_cost=0.0, service=None, label_date=None, delivered=True
+    ):
+        """Record a label that was bought AND shipped (usually delivered) by hand
+        WEEKS AGO, for the one-time legacy reconcile (GOL-3091, split from GOL-3083).
+
+        This is deliberately NOT the vanilla hand-label flow. ``action_grove_record_hand_label``
+        lands the order at ``label_purchased`` and the normal ship path then fires
+        the branded shipment email + runs ship-time settlement — the exact harm
+        GOL-3083 is about (four customers were re-emailed a tracking notice for an
+        order delivered weeks earlier, and a card could be re-settled). A legacy
+        order has already run its course offline, so recording its historical label
+        must be silent: stamp the tracking/carrier/cost, walk the fulfilment
+        watermark straight to ``delivered`` (or ``shipped``) through
+        ``_grove_advance_state`` — which only writes internal chatter, never the
+        customer email — and skip settlement entirely. The customer shipment email
+        lives in ``_operator_mark_shipped`` (the controller orchestration), which we
+        never call here, so "no customer email" holds by construction rather than by
+        a notify flag threaded through the live ship path.
+
+        ``label_date`` (a datetime / ``fields.Datetime``-parseable value) stamps
+        ``grove_label_purchased_at`` to when the label was actually bought so the
+        carrier poll's 30-day stop and any audit stay honest; when absent it falls
+        back to now(). Validation mirrors ``action_grove_record_hand_label`` and
+        raises ``UserError`` so the wizard surfaces it visibly. Returns True."""
+        self.ensure_one()
+        # No consult-compliance assert and no settlement here: the order already
+        # delivered offline, so there is nothing fresh to ship or capture — this is
+        # a records-only backfill. Re-asserting/settling weeks later is exactly the
+        # money/notification harm this reconcile exists to avoid.
+        if self.grove_fulfillment == "pickup":
+            raise UserError(f"{self.name}: farm-pickup orders buy no shipping label.")
+        if self.grove_tracking_numbers:
+            raise UserError(f"{self.name} already has tracking; clear the label fields to re-record.")
+        tracking = (tracking_number or "").strip()
+        if not shippo_client.is_valid_tracking(tracking):
+            raise UserError(f"{self.name}: {tracking!r} is not a valid tracking number.")
+        carrier_key = self._grove_infer_carrier(tracking, fallback=carrier)
+        if not carrier_key:
+            raise UserError(f"{self.name}: could not determine the carrier for {tracking!r}; pick UPS or USPS.")
+        try:
+            cost = round(float(actual_cost or 0.0), 2)
+        except (TypeError, ValueError):
+            raise UserError(f"{self.name}: actual shipping cost {actual_cost!r} is not a number.")
+        if cost < 0:
+            raise UserError(f"{self.name}: actual shipping cost cannot be negative.")
+        stage = self.grove_fulfillment_stage
+        if stage not in ("awaiting_label", "wave_assigned"):
+            raise UserError(f"{self.name}: not awaiting a label (stage {stage}); assign it to a ship wave first.")
+        service_token = service or ("ups_ground" if carrier_key == "UPS" else "usps_ground_advantage")
+        # Stamp the historical label date BEFORE advancing: _grove_advance_state
+        # only now()-stamps grove_label_purchased_at when it is still unset, so
+        # pre-setting it preserves the real purchase date from the export.
+        if label_date:
+            self.grove_label_purchased_at = label_date
+        # Walk the legal machine: awaiting_label/wave_assigned -> label_purchased ->
+        # shipped -> (delivered). Every hop is a _grove_advance_state call, which
+        # posts internal chatter only — no customer email, no settlement — so a
+        # legacy order lands silently out of the eligible pool.
+        self._grove_advance_state("label_purchased", source="historical_reconcile")
+        self.write(
+            {
+                "grove_tracking_numbers": tracking,
+                "grove_shipping_carriers": carrier_key,
+                "grove_shipping_services": service_token,
+                "grove_label_urls": "",  # label printed from Pirate Ship, not stored here
+                "grove_actual_shipping_cost": cost,
+                "grove_delivery_status": "label_purchased",
+            }
+        )
+        self._grove_advance_state("shipped", source="historical_reconcile")
+        if delivered:
+            self._grove_advance_state("delivered", source="historical_reconcile")
+        self.message_post(
+            body=(
+                "Historical label reconciled from the Pirate Ship Shipments export (GOL-3091): "
+                f"{carrier_key} {tracking}, ${cost:.2f}, landed at "
+                f"{'delivered' if delivered else 'shipped'}. "
+                "No customer email was sent and the balance was NOT auto-settled "
+                "(records-only backfill of an order already shipped by hand)."
+            )
         )
         return True
 
@@ -660,6 +839,10 @@ class SaleOrder(models.Model):
         if not api_key:
             raise UserError("SHIPPO_API_KEY is not configured on this server.")
         for order in self:
+            # Consult-built backstop (GOL-3007): this path buys the label AND
+            # settles the balance right after, so refuse both for a consult mix
+            # with no recorded compliance check before any money is spent.
+            order._grove_assert_consult_compliance()
             if order.grove_tracking_numbers:
                 raise UserError(f"{order.name} already has labels; clear fields to re-buy.")
             address, plan, mode = order._grove_pack_for_label()
@@ -747,6 +930,100 @@ class SaleOrder(models.Model):
             order._grove_settle_at_ship()
 
         return True
+
+    # ── Consult-built mix compliance backstop (GOL-3007) ────────────────────
+    # The $10 deposit on a consult-built SKU (134/135) is taken at checkout long
+    # before the species list exists, so the checkout taxon gate fail-safe-blocks
+    # the regulated states for it (GOL-2971) — the box isn't built yet. The real
+    # control is a HUMAN check at mix-build time, run by Wesley against the
+    # carve-out table and written up as an SOP (GOL-2981). This is its system
+    # backstop: an order carrying a consult-built line cannot settle its balance
+    # or ship until that check is recorded on grove_substitution_note. Ordering:
+    # check → record → charge the balance → ship. Money/ship is the forcing
+    # function. Additive to checkout (GOL-3007 §5): this never touches the taxon
+    # gate and a filled-in note never influences the checkout evaluation.
+    GROVE_CONSULT_COMPLIANCE_MSG = (
+        "Compliance check required before invoicing a consult-built mix. Record the "
+        "species check in 'Compliance check / substitutions' on this order — "
+        "destination state, species list checked against the carve-outs, any "
+        "substitutions, and who cleared it. See the SOP in the product's Internal Notes."
+    )
+
+    def _grove_consult_compliance_missing(self):
+        """True when this order owes a mix-build compliance check it has not got
+        (GOL-3007): it carries at least one ``grove_consult_built`` line and
+        ``grove_substitution_note`` is empty or whitespace. The single predicate
+        the raising gate (operator ship-commit actions) and the non-raising hold
+        (settlement / bulk reconcile / retry cron) both read, so "is this a
+        consult mix with no recorded check" is decided in exactly one place."""
+        self.ensure_one()
+        if (self.grove_substitution_note or "").strip():
+            return False
+        return any(line.product_template_id.grove_consult_built for line in self.order_line if line.product_template_id)
+
+    def _grove_assert_consult_compliance(self):
+        """Hard gate for the operator-facing ship-commit actions (GOL-3007): raise
+        ``UserError`` (the message read by Wesley mid-task, not an engineer) when
+        the order is a consult-built mix with no recorded compliance check, so no
+        label is bought and the balance is never charged until the check exists.
+        A no-op for every non-consult order and for a consult order whose note is
+        filled, so the common path is untouched."""
+        self.ensure_one()
+        if self._grove_consult_compliance_missing():
+            raise UserError(self.GROVE_CONSULT_COMPLIANCE_MSG)
+
+    # Config flag that arms the GOL-3019 deposit-time deferral. Default-absent =
+    # off: deposit-time blocking stays until it is explicitly set True (the CEO
+    # money-flow GO, done after 1.63.0 + grove_consult_built are live on prod).
+    # Flipping it back to False restores deposit-time blocking with no data
+    # migration (GOL-3019 AC5).
+    GROVE_CONSULT_DEFERRAL_PARAM = "grove_headless.consult_deferral_enabled"
+
+    def _grove_consult_deferral_armed(self):
+        """GOL-3019 §3 self-guard. The deposit-time deferral for a consult-built
+        mix is honest ONLY while the GOL-3007 ship-commit assert is live to
+        catch the mix at ship time; without it the deferral would be a third
+        silent hole in the gate. Returns True iff BOTH:
+
+          (a) the reversibility flag ``grove_headless.consult_deferral_enabled``
+              is set (one config param flips the whole feature back to
+              deposit-time blocking — AC5), AND
+          (b) the GOL-3007 assert is actually present on this record at runtime,
+
+        so a code rollback that drops ``_grove_assert_consult_compliance`` makes
+        this return False, re-arming the deposit-time fail-safe — a 3007 revert
+        can never silently open a regulated state."""
+        self.ensure_one()
+        if not callable(getattr(self, "_grove_assert_consult_compliance", None)):
+            return False
+        enabled = self.env["ir.config_parameter"].sudo().get_param(self.GROVE_CONSULT_DEFERRAL_PARAM, "False")
+        return str(enabled).strip().lower() in ("1", "true", "yes", "on")
+
+    def _grove_record_consult_deferral(self, state_code, excluded_taxa):
+        """Record — never imply — that a consult-built mix took its $10 deposit
+        into ``state_code`` with the taxon-level compliance decision deferred to
+        mix time (GOL-3019 AC2/AC4). Sets the audit fields and posts a chatter
+        line naming the destination and the taxa constrained there, so Wesley
+        reads the constraint at consult time without asking anyone.
+
+        Deliberately does NOT write grove_substitution_note: that field is the
+        key the GOL-3007 ship-commit gate reads, so writing it here would
+        satisfy _grove_assert_consult_compliance and let the order settle / ship
+        with no human check (AC2 forbids it). The deferral and the ship-commit
+        gate stay on separate surfaces on purpose."""
+        self.ensure_one()
+        self.grove_consult_compliance_deferred = True
+        self.grove_consult_deferred_state = state_code
+        taxa = ", ".join(excluded_taxa) if excluded_taxa else "none for this state"
+        self.message_post(
+            body=(
+                "⏸️ <b>Consult compliance deferred</b> (GOL-3019). Deposit taken for a "
+                f"consult-built mix shipping to <b>{state_code or '?'}</b>. "
+                f"Constrained taxa for this state: <b>{taxa}</b>. Agree a compliant species "
+                "list with the customer, then record the check in 'Compliance check / "
+                "substitutions' before the balance can be charged or the order shipped."
+            )
+        )
 
     def _grove_settle_at_ship(self):
         """Capture the deferred preorder balance off-session at ship time.

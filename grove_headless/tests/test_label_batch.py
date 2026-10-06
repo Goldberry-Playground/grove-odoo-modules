@@ -18,9 +18,11 @@ import base64
 import csv
 import io
 from contextlib import contextmanager
+from datetime import timedelta
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from odoo import fields
 from odoo.addons.grove_headless.models import label_batch as label_batch_module
 from odoo.addons.grove_headless.models import sale_order as sale_order_module
 from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
@@ -327,6 +329,138 @@ class TestLabelBatch(GroveTaxFixtureMixin, TransactionCase):
         )
         with self.assertRaisesRegex(label_batch_module.LabelBatchError, "neither a Grove Ref nor an Email"):
             batch.import_tracking(raw)
+
+    # ── Already-labelled guard (GOL-3083 item 1) ────────────────────────────
+    def _age(self, order, days):
+        """Backdate an order so its batch row is `days` old."""
+        order.date_order = fields.Datetime.now() - timedelta(days=days)
+
+    def test_aged_order_flagged_and_held_out_of_csv_until_acked(self):
+        """An awaiting-label order older than the threshold (default 14d) is
+        flagged as likely-already-shipped and HELD OUT of the exported CSV; only
+        after an explicit acknowledgement does it export (GOL-3083)."""
+        order = self._paid_ship_order()
+        self._age(order, 30)
+        batch = self._build([_box(1)])
+        line = batch.line_ids
+        self.assertTrue(line.age_flagged, "a 30-day-old awaiting-label row is flagged")
+        self.assertFalse(line.age_ack)
+        self.assertEqual(batch.unacked_flagged_count, 1)
+        # CSV has the header only — the flagged, unacknowledged row is excluded.
+        rows = list(csv.reader(io.StringIO(batch.csv_bytes().decode("utf-8"))))
+        self.assertEqual(len(rows), 1, "flagged-unacked row is not silently exported")
+        # Acknowledge → it now exports.
+        line.age_ack = True
+        rows = list(csv.reader(io.StringIO(batch._render_csv().decode("utf-8"))))
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1][0], f"{order.name}/1")
+        self.assertEqual(batch.unacked_flagged_count, 0)
+
+    def test_fresh_order_not_flagged_and_exports(self):
+        """A recent order is never flagged and exports normally — including two
+        same-customer orders in one batch (the S00319/S00322 duplicate-email case
+        the guard must NOT trip on), since the flag keys on age, not recipient."""
+        order_a = self._paid_ship_order()
+        order_b = self._paid_ship_order()  # same partner/email, same day
+        batch = self._build([_box(1)])
+        self.assertEqual(len(batch.line_ids), 2)
+        self.assertFalse(any(batch.line_ids.mapped("age_flagged")))
+        self.assertEqual(batch.unacked_flagged_count, 0)
+        rows = list(csv.reader(io.StringIO(batch.csv_bytes().decode("utf-8"))))
+        self.assertEqual(len(rows), 3)  # header + both orders
+        self.assertEqual(sorted(r[0] for r in rows[1:]), sorted([f"{order_a.name}/1", f"{order_b.name}/1"]))
+
+    def test_age_ack_preserved_across_rebuild(self):
+        """An acknowledgement survives an idempotent re-export (grove_ref stable)."""
+        order = self._paid_ship_order()
+        self._age(order, 30)
+        batch = self._build([_box(1)])
+        batch.line_ids.age_ack = True
+        again = self._build([_box(1)])
+        self.assertEqual(again, batch)
+        self.assertTrue(again.line_ids.age_ack, "ack is re-applied to the rebuilt row")
+
+    # ── Import-time already-labelled cross-check (GOL-3083 item 3) ───────────
+    def test_import_warns_when_recipient_has_recent_recorded_label(self):
+        """Reconcile WARNS (never blocks) when an advanced order's recipient
+        already has a recent recorded label on another order (GOL-3083 item 3)."""
+        prior = self._paid_ship_order()  # same partner/email as the new order
+        prior.write(
+            {
+                "grove_tracking_numbers": _VALID_TRACK[2],
+                "grove_label_purchased_at": fields.Datetime.now() - timedelta(days=5),
+            }
+        )
+        order = self._paid_ship_order()
+        batch = self._build([_box(1)])  # only `order` is eligible (prior has tracking)
+        self.assertEqual(batch.order_ids, order)
+        raw = self._tracking_csv([[f"{order.name}/1", _VALID_TRACK[0], "UPS", "9.10"]])
+        result = batch.import_tracking(raw)
+        self.assertEqual(result["orders_advanced"], 1)
+        self.assertTrue(result["warnings"], "a prior-label warning is surfaced")
+        self.assertIn(prior.name, result["warnings"][0])
+        self.assertEqual(order.grove_tracking_numbers, _VALID_TRACK[0], "order still advanced — warn, not block")
+
+    def test_import_no_warning_without_prior_label(self):
+        order = self._paid_ship_order()
+        batch = self._build([_box(1)])
+        raw = self._tracking_csv([[f"{order.name}/1", _VALID_TRACK[0], "UPS", "9.10"]])
+        result = batch.import_tracking(raw)
+        self.assertEqual(result["warnings"], [])
+
+    # ── Real export format: xls/xlsx + value-pattern ref (GOL-3083 item 4) ───
+    def test_value_pattern_detects_renamed_ref_column(self):
+        """A pass-through column of Grove Refs renamed away from 'Grove Ref' is
+        still found by the S\\d+/\\d+ value pattern (GOL-3083 item 4)."""
+        order = self._paid_ship_order()
+        batch = self._build([_box(1)])
+        raw = self._tracking_csv(
+            [[f"{order.name}/1", _VALID_TRACK[0], "UPS", "9.10"]],
+            header=["Rubber Stamp", "Tracking Number", "Carrier", "Cost"],  # no 'Grove Ref'
+        )
+        result = batch.import_tracking(raw)
+        self.assertEqual(result["orders_advanced"], 1)
+        self.assertEqual(result["manual_review"], [], "matched by Grove Ref value, not the email fallback")
+        self.assertEqual(order.grove_tracking_numbers, _VALID_TRACK[0])
+
+    def test_xlsx_and_csv_parse_identically(self):
+        """.xlsx and UTF-8 CSV with the same data parse to identical row dicts."""
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        header = ["Grove Ref", "Tracking Number", "Carrier", "Cost"]
+        data = [["S00001/1", _VALID_TRACK[0], "UPS", "9.10"], ["S00002/1", _VALID_TRACK[1], "USPS", "8.36"]]
+        csv_bytes = self._tracking_csv(data, header=header)
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(header)
+        for row in data:
+            ws.append(row)
+        bio = io.BytesIO()
+        wb.save(bio)
+        batch = self.env["grove.label.batch"].create({"name": "LB-PARSE-TEST", "company_id": self.company.id})
+        parsed_csv = batch._parse_tracking_file(csv_bytes, filename="track.csv")
+        parsed_xlsx = batch._parse_tracking_file(bio.getvalue(), filename="track.xlsx")
+        self.assertEqual(parsed_xlsx, parsed_csv)
+        self.assertEqual(parsed_csv[0]["ref"], "S00001/1")
+        self.assertEqual(parsed_csv[0]["cost_raw"], "9.10")
+
+    def test_xlsx_sniffed_without_filename(self):
+        """A .xlsx is detected by magic bytes even when no filename is given."""
+        try:
+            import openpyxl
+        except ImportError:
+            self.skipTest("openpyxl not installed")
+        wb = openpyxl.Workbook()
+        ws = wb.active
+        ws.append(["Grove Ref", "Tracking Number", "Carrier", "Cost"])
+        ws.append(["S00001/1", _VALID_TRACK[0], "UPS", "9.10"])
+        bio = io.BytesIO()
+        wb.save(bio)
+        batch = self.env["grove.label.batch"].create({"name": "LB-SNIFF-TEST", "company_id": self.company.id})
+        parsed = batch._parse_tracking_file(bio.getvalue(), filename=None)
+        self.assertEqual(parsed[0]["tracking"], _VALID_TRACK[0])
 
     # ── Import-wizard ACL (GOL-2481) ────────────────────────────────────────
     def test_import_wizard_acl_fulfillment_create_plain_user_denied(self):
