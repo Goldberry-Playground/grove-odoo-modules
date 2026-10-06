@@ -423,7 +423,48 @@ def _serialize_facts(product):
     }
 
 
-def _fulfillment_flags(product):
+def _phantom_kit_boms(variants):
+    """Map each variant to its phantom (kit) BoM, or ``{}`` when mrp is absent.
+
+    Single source of truth for "this line ships everywhere via per-state
+    component substitution" (GOL-2237): the checkout block-gate skip and the
+    storefront ``ships_all_green_states`` flag (GOL-2988) both resolve bundles
+    through this one ``bom_type="phantom"`` lookup, so the advertise side (the
+    PDP carve-out notice) and the fulfil side (the checkout gate) cannot drift.
+    ``mrp.bom._bom_find`` is batched — pass the whole variant recordset to keep
+    it one query, not an N+1.
+    """
+    env = variants.env
+    if "mrp.bom" not in env.registry:
+        return {}
+    return env["mrp.bom"]._bom_find(variants, bom_type="phantom")
+
+
+def _ships_all_green_states(product, phantom_boms=None):
+    """True when this template sells as a substitution bundle (phantom kit BoM).
+
+    A bundle (e.g. Remembrance Grove) ships to every green-list state because
+    its components are swapped per destination at checkout (GOL-2237), so the
+    carve-out gate skips the per-taxon block for it. The storefront reads this
+    to suppress the PDP carve-out notice for such a product — otherwise the PDP
+    would warn "not cleared for <state>" on an order we can actually fulfil
+    (GOL-2988). Derived from the same phantom-BoM lookup the gate performs, so
+    the notice and the gate can never disagree. True if ANY variant resolves to
+    a phantom BoM (a template-level kit applies to every variant).
+
+    ``phantom_boms`` is an already-resolved ``{variant: bom}`` map covering at
+    least this template's variants — the list endpoint warms one for the whole
+    page so the grid costs a single ``_bom_find`` search instead of one per card
+    (review on PR #310). ``_bom_find`` is a live search, so unlike the loop's
+    other per-card reads it is never satisfied by ORM prefetch. Omit it and the
+    lookup runs for this template alone, which is what the detail path wants.
+    """
+    variants = product.product_variant_ids
+    boms = phantom_boms if phantom_boms is not None else _phantom_kit_boms(variants)
+    return any(boms.get(variant) for variant in variants)
+
+
+def _fulfillment_flags(product, phantom_boms=None):
     """Storefront fulfillment/compliance flags for a template (GOL-2587).
 
     ``pickup_only`` lets the storefront reuse the existing potted pickup-only UI
@@ -434,13 +475,16 @@ def _fulfillment_flags(product):
     consult-built SKU (134/135), keyed on the flag rather than on the empty
     botanical, and read against ``compliance.carve_outs`` already in the rate
     feed (GOL-3019 §4; Iris wires the render on PR #970's estimator branch, copy
-    signed by CMO-Sora). Both list + detail carry them (Iris wires the render —
-    GOL twin).
+    signed by CMO-Sora). ``ships_all_green_states`` is the inverse escape: it
+    drops the per-state carve-out warning entirely for a substitution bundle
+    that really does ship everywhere (GOL-2988). All four ride both list +
+    detail (Iris wires the render — GOL twin).
     """
     return {
         "pickup_only": bool(product.grove_pickup_only),
         "compliance_exempt": bool(product.grove_compliance_exempt),
         "consult_built": bool(product.grove_consult_built),
+        "ships_all_green_states": _ships_all_green_states(product, phantom_boms),
     }
 
 
@@ -842,6 +886,12 @@ class GroveHeadlessAPI(http.Controller):
         if has_stock_field:
             products.product_variant_ids.mapped("qty_available")
 
+        # Same batching reason as the two warms above, with one wrinkle: the
+        # phantom-BoM lookup behind ships_all_green_states (GOL-2988) is a live
+        # `search()`, so ORM prefetch can never cover it. Resolve the whole
+        # page's variants in one `_bom_find` and slice it per card below.
+        page_phantom_boms = _phantom_kit_boms(products.product_variant_ids)
+
         items = []
         for product in products:
             data = _serialize_product(product, PRODUCT_LIST_FIELDS)
@@ -862,7 +912,7 @@ class GroveHeadlessAPI(http.Controller):
                 # GOL-2587: fulfillment/compliance flags so the storefront can
                 # hide the state notice (exempt) and reuse the potted pickup-only
                 # UI (pickup_only). Iris follow-up wires the render.
-                data.update(_fulfillment_flags(product))
+                data.update(_fulfillment_flags(product, page_phantom_boms))
                 data["price_min"] = min(product.product_variant_ids.mapped("lst_price"), default=product.list_price)
                 items.append(data)
 
@@ -3076,7 +3126,6 @@ def _create_draft_order(website, env, payload, discount_out=None):
         # line whose product resolves to a phantom BOM. Fail-safe: an empty or
         # unparseable botanical name can't be cleared into a regulated state and
         # is logged loudly (never guessed, never a silent drop).
-        bom_model = env["mrp.bom"] if "mrp.bom" in env.registry else None
         bundle_lines = []  # (line, kit_bom, variant) — stamped after the loop
         exempt_bundle_lines = []  # line — packing note stamped after the loop (GOL-2587)
         for line in order.order_line:
@@ -3108,7 +3157,9 @@ def _create_draft_order(website, env, payload, discount_out=None):
                     # order.order_line while iterating it would skip entries.
                     exempt_bundle_lines.append(line)
                 continue
-            kit_bom = bom_model._bom_find(variant, bom_type="phantom").get(variant) if bom_model is not None else None
+            # Same phantom-BoM lookup the storefront's ships_all_green_states
+            # flag reads (GOL-2988) — shared so advertise and fulfil can't drift.
+            kit_bom = _phantom_kit_boms(variant).get(variant)
             if kit_bom:
                 # Bundle — ships everywhere, exempt from the block gate. Defer the
                 # per-state substitution signal to after this loop so we never
