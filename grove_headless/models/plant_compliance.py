@@ -109,6 +109,24 @@ def is_taxon_blocked(genus: str, species: str | None, state_code: str) -> bool:
     return state_code not in states
 
 
+def excluded_taxa_for_state(state_code: str) -> list[str]:
+    """Carve-out taxa that may NOT ship to ``state_code`` (canonical 2-letter).
+
+    The honest, source-of-truth constraint list for a consult-built mix whose
+    compliance is deferred to mix time (GOL-3019 AC4): it answers "which taxa is
+    the palette constrained to exclude for this destination" from the same
+    ``CARVE_OUTS`` map the checkout blocks with, so the deferral note and the
+    gate can never drift. Returns the sorted carve-out keys (e.g.
+    ``["castanea", "cornus"]`` for FL, ``["morus alba"]`` for IN/OH/WI); empty
+    for an unregulated state where nothing is excluded.
+    """
+    return sorted(
+        taxon
+        for taxon, (kind, states) in CARVE_OUTS.items()
+        if (state_code in states if kind == "block" else state_code not in states)
+    )
+
+
 def _block_message(botanical_name: str, state_label: str) -> str:
     plant = (botanical_name or "").strip() or "this plant"
     return (
