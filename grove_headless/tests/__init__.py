@@ -44,6 +44,7 @@ from . import (
     test_product_slug,  # noqa: F401
     test_promotions,  # noqa: F401
     test_publish_event,  # noqa: F401
+    test_settlement_failure_handling,  # noqa: F401
     test_shared_pool_qty,  # noqa: F401
     test_ship_wave_hand_label,  # noqa: F401
     test_shipping_calendar,  # noqa: F401

@@ -1,13 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo noupdate="1">
-    <!-- GOL-2053/2054: automatically re-attempt shipped-but-unsettled orders
-         whose card can still be auto-charged. Stops at
-         grove_headless.settlement_max_retries (default 3), after which the
-         order is manual-only and stays in the ops queue via its Discord alert
-         (final decline = human follow-up, never auto-cancel — CEO ruling
-         GOL-2054). Daily cadence per the ratified retry policy: a once-a-day
-         retry clears a transient bank hold without hammering a hard-declined
-         card, so 3 attempts span ~3 days before dropping to manual. -->
+    <!-- GOL-2053/2054/3011: automatically re-attempt shipped-but-unsettled orders
+         that are still auto-retryable. Selects BOTH settlement_failed (card
+         decline) and settlement_error (known-not-charged / outcome-unknown gateway
+         error); the latter reconciles with Stripe before charging so a retry never
+         double-charges. Skips SCA (authentication_required) orders — an off-session
+         retry cannot clear them — and honours a per-order exponential backoff.
+         Stops at grove_headless.settlement_max_retries (default 3), after which the
+         order is manual-only (the Retry settlement server action) and stays in the
+         ops queue via its Discord alert (never auto-cancel — CEO ruling GOL-2054).
+         Daily cadence: a once-a-day retry clears a transient hold without hammering
+         a hard-declined card. -->
     <record id="ir_cron_grove_retry_settlements" model="ir.cron">
         <field name="name">Grove: retry failed ship-time settlements</field>
         <field name="model_id" ref="sale.model_sale_order"/>
