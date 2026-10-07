@@ -130,8 +130,8 @@ class RateFeedTests(unittest.TestCase):
             self.assertEqual(len(zw["fall"]), 2)
         # Real chart values for a sampled cold + warm zone.
         self.assertEqual(cal["zones"]["2"]["fall"], [[11, 2], [11, 13]])
-        self.assertEqual(cal["zones"]["8"]["spring"], [[3, 1], [4, 30]])
-        self.assertEqual(cal["zones"]["8"]["spring_order_deadline"], [4, 16])
+        self.assertEqual(cal["zones"]["8"]["spring"], [[3, 1], [4, 15]])
+        self.assertEqual(cal["zones"]["8"]["spring_order_deadline"], [2, 22])
 
     def test_calendar_override_flows_through_feed(self):
         # An admin override (the system parameter) narrows a single zone's fall

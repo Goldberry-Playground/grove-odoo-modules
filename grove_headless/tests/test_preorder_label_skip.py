@@ -162,7 +162,7 @@ class TestPreorderLabelSkip(GroveTaxFixtureMixin, TransactionCase):
 class TestPreorderWaveLabelGate(GroveTaxFixtureMixin, TransactionCase):
     """The stored wave (not the Oct 15 cutover) decides when a pre-order label
     may be bought: held until today is inside THAT wave's ship window for the
-    order's zone. Zone 6 default windows: fall Nov 1-Dec 15, spring Mar 1-Apr 30
+    order's zone. Zone 6 default windows: fall Nov 1-Dec 15, spring Mar 1-Apr 15
     style; dates pinned via context_today."""
 
     def setUp(self):

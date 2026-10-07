@@ -38,9 +38,12 @@ class TestCheckoutShipWave(GroveTaxFixtureMixin, TransactionCase):
         )
 
     def _website(self):
-        return self.env["website"].search([("company_id", "=", self.company.id)], limit=1) or self.env[
-            "website"
-        ].search([], limit=1)
+        # The wave / potted-season rules are nursery-only (M1): run them on the
+        # real nursery tenant website seeded by data/grove_companies.xml.
+        return self.env.ref("grove_headless.website_nursery")
+
+    def _goldberry(self):
+        return self.env.ref("website.default_website")
 
     def _payload(self, products, fulfillment="pickup", zip_code=ZONE8_ZIP, **extra):
         payload = {
@@ -53,12 +56,12 @@ class TestCheckoutShipWave(GroveTaxFixtureMixin, TransactionCase):
         payload.update(extra)
         return payload
 
-    def _create(self, payload, today):
+    def _create(self, payload, today, website=None):
         with (
             mock.patch.object(grove_main, "_today_utc", return_value=today),
             mock.patch.object(grove_main, "_apply_shipping_line", return_value=16.0),
         ):
-            return grove_main._create_draft_order(self._website(), self.env, payload)
+            return grove_main._create_draft_order(website or self._website(), self.env, payload)
 
     def _assert_400(self, result, fragment):
         order, error = result
@@ -77,6 +80,52 @@ class TestCheckoutShipWave(GroveTaxFixtureMixin, TransactionCase):
         self._assert_400(
             self._create(self._payload([self.potted]), date(2026, 10, 16)),
             "Potted trees are sold through Oct 15. Choose a bareroot pre-order.",
+        )
+
+    # ── tenant scope (M1): nursery only ─────────────────────────────────
+
+    def test_tenant_websites_resolve(self):
+        self.assertEqual(self._website().grove_tenant_slug(), "nursery")
+        self.assertEqual(self._goldberry().grove_tenant_slug(), "goldberry")
+        self.assertTrue(grove_main._is_nursery_website(self._website()))
+        self.assertFalse(grove_main._is_nursery_website(self._goldberry()))
+        self.assertFalse(grove_main._is_nursery_website(self.env.ref("grove_headless.website_ggg")))
+        self.assertFalse(grove_main._is_nursery_website(None))
+
+    def test_non_nursery_default_potted_after_oct_15_not_rejected(self):
+        # grove_shipping_tier defaults to "potted": a Goldberry / GGG product
+        # must keep selling after Oct 15, mixed or not, and a stray ship_wave
+        # is ignored (nothing stored).
+        default_tier = self.env["product.product"].create({"name": "Goldberry Thing", "type": "consu"})
+        self.assertEqual(default_tier.grove_effective_shipping_tier, "potted")
+        for website in (self._goldberry(), self.env.ref("grove_headless.website_ggg")):
+            with self.subTest(tenant=website.grove_tenant_slug()):
+                for products, extra in (
+                    ([default_tier], {}),
+                    ([default_tier, self.bareroot], {}),
+                    ([default_tier], {"ship_wave": "fall"}),
+                ):
+                    error, wave = grove_main._validate_ship_wave(
+                        self.env,
+                        self._payload(products, **extra),
+                        [mock.Mock(display_type=False, product_id=p) for p in products],
+                        "pickup",
+                        None,
+                        date(2026, 10, 16),
+                        website.company_id,
+                        website=website,
+                    )
+                    self.assertEqual((error, wave), (None, None))
+        order, error = self._create(self._payload([default_tier]), date(2026, 10, 16), website=self._goldberry())
+        self.assertIsNone(error)
+        self.assertFalse(order.grove_ship_wave)
+
+    @mute_logger("odoo.addons.grove_headless.controllers.main")
+    def test_nursery_default_potted_after_oct_15_still_rejected(self):
+        default_tier = self.env["product.product"].create({"name": "Nursery Thing", "type": "consu"})
+        self._assert_400(
+            self._create(self._payload([default_tier]), date(2026, 10, 16)),
+            "Potted trees are sold through Oct 15.",
         )
 
     def test_potted_on_oct_15_allowed(self):

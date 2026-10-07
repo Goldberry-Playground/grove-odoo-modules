@@ -260,10 +260,43 @@ class TestCheckoutQuoteEndpoint(_PoolFixture, GroveTaxFixtureMixin, HttpCase):
         self.assertFalse(body["lines"][0]["sold_out"])
 
     def _quote_waved(self, items, fulfillment, today=date(2026, 10, 7), **extra):
+        # The wave rules are nursery-only (M1); this fixture posts as goldberry
+        # (main-company pool), so treat it as the nursery for the rule tests.
+        # The real tenant scope is covered by the *_tenant tests below.
         body = {"items": [{"variant_id": v.id, "quantity": 1} for v in items], "fulfillment": fulfillment}
         body.update(extra)
-        with mock.patch.object(grove_main, "_today_utc", return_value=today):
+        with (
+            mock.patch.object(grove_main, "_today_utc", return_value=today),
+            mock.patch.object(grove_main, "_is_nursery_website", return_value=True),
+        ):
             return self._post(body)
+
+    def _post_tenant(self, body, tenant):
+        headers = {
+            "X-Odoo-Database": get_db_name(),
+            "X-Grove-Tenant": tenant,
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        return self.url_open("/grove/api/v1/checkout/quote", data=json.dumps(body).encode(), headers=headers)
+
+    def test_goldberry_tenant_potted_after_oct_15_quotes(self):
+        self._stock(self.potted, 5)
+        body = {"items": [{"variant_id": self.potted.id, "quantity": 1}], "fulfillment": "pickup"}
+        with mock.patch.object(grove_main, "_today_utc", return_value=date(2026, 10, 16)):
+            resp = self._post_tenant(dict(body, ship_wave="fall"), "goldberry")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIsNone(resp.json()["ship_wave"])
+
+    def test_nursery_tenant_potted_after_oct_15_rejected(self):
+        # A company-less product so the nursery tenant's variant lookup finds it;
+        # grove_shipping_tier left at its "potted" default.
+        product = self.env["product.product"].create({"name": "Nursery Quote Potted", "type": "consu"})
+        body = {"items": [{"variant_id": product.id, "quantity": 1}], "fulfillment": "pickup"}
+        with mock.patch.object(grove_main, "_today_utc", return_value=date(2026, 10, 16)):
+            resp = self._post_tenant(body, "nursery")
+        self.assertEqual(resp.status_code, 400, resp.text)
+        self.assertIn("sold through oct 15", resp.text.lower())
 
     def test_wave_quote_is_a_preorder_deposit_for_pickup_and_ship(self):
         self._stock(self.bareroot, 5)

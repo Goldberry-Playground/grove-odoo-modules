@@ -880,7 +880,11 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
         payload = self._cart_payload("WV", fulfillment="pickup", promo_code="TESTPROMO", ship_wave="fall")
         payload["items"] = [{"variant_id": self.product.id, "quantity": 2}]
-        with mock.patch.object(grove_main, "_today_utc", return_value=date(2026, 10, 7)):
+        with (
+            mock.patch.object(grove_main, "_today_utc", return_value=date(2026, 10, 7)),
+            # Wave rules are nursery-only (M1); this class runs on the main company.
+            mock.patch.object(grove_main, "_is_nursery_website", return_value=True),
+        ):
             rejected, error = grove_main._create_draft_order(self._website(), self.env, payload)
         self.assertIsNone(rejected)
         self.assertEqual(error.status_code, 400)

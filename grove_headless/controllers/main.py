@@ -1862,6 +1862,7 @@ class GroveHeadlessAPI(http.Controller):
             _today_utc(),
             company,
             require_zone=False,
+            website=request.website,
         )
         if wave_error:
             return _json_response({"error": wave_error}, status=400)
@@ -2895,12 +2896,29 @@ _SHIP_WAVES = ("fall", "spring")
 _MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
-def _validate_ship_wave(env, payload, lines, fulfillment, zip_code, today, company=None, require_zone=True):
+def _is_nursery_website(website):
+    """True when ``website`` is the nursery tenant (At The Grove Nursery).
+
+    The pre-order wave and potted-season rules are nursery business rules:
+    ``grove_shipping_tier`` defaults to "potted" for every product, so applying
+    them to the Goldberry / GGG storefronts would reject their carts after
+    Oct 15. Tenant identity is the website, same as ``grove_tenant_slug``.
+    """
+    return bool(website) and website.grove_tenant_slug() == "nursery"
+
+
+def _validate_ship_wave(
+    env, payload, lines, fulfillment, zip_code, today, company=None, require_zone=True, website=None
+):
     """Server-side pre-order wave / potted-season gate for ``_create_draft_order``.
 
     Returns ``(error_message, ship_wave)``; ``error_message`` is None when the
     cart passes, and ``ship_wave`` is the validated wave to store (None when the
     payload carried no ``ship_wave``).
+
+    Nursery only: for any other tenant (``website`` not the nursery) every rule
+    below is skipped and ``(None, None)`` is returned, so a stray ``ship_wave``
+    is ignored and nothing is stored.
 
     Always enforced (with or without ``ship_wave``): potted-tier lines only sell
     inside ``LEAFED_WINDOW`` (inclusive), and a cart never mixes a potted-tier
@@ -2910,6 +2928,8 @@ def _validate_ship_wave(env, payload, lines, fulfillment, zip_code, today, compa
     ``require_zone=False`` (the quote preview) skips ONLY the zone/open check for
     a ship cart that carries no ZIP yet.
     """
+    if not _is_nursery_website(website):
+        return None, None
     tiers = {
         line.product_id.grove_effective_shipping_tier
         for line in lines
@@ -3158,6 +3178,7 @@ def _create_draft_order(website, env, payload, discount_out=None):
         (shipping or {}).get("zip"),
         _today_utc(),
         current_company,
+        website=website,
     )
     if wave_error:
         order.unlink()
@@ -3480,8 +3501,8 @@ def _bareroot_ships_now(window_zip, tier, today, window=None):
 
     Nursery-dormancy override (GOL-1906, Josh 2026-09-07): bareroot NEVER ships
     outside the nursery dormancy window, whatever the destination zone's Arbor
-    Day window says — the default per-zone spring windows run to Jun 6, well past
-    the Apr 15 dormancy end, so a naive in-window read would ship a leafed
+    Day window says — a zone window overridden past the Apr 15 dormancy end (the defaults
+    now all end Apr 15) would otherwise ship a leafed
     (~2x heavier) parcel now and buy a leafed label against the dormant-priced
     rate table (a systematic undercharge, and the label path now refuses it
     outright). So when the nursery cannot ship bareroot today, the line fails

@@ -69,42 +69,45 @@ def served_usda_range() -> list[int] | None:
 
 # ── Calendar data (Josh, 2026-07-02; vault wiki/Software/Grove Shipping) ────
 # (month, day) tuples; year resolved at query time.
+# Spring windows all end Apr 15 (the bareroot dormancy end) so every spring wave
+# ships inside dormancy; spring order_by = 7 days before each zone's ship start
+# (Josh ruling 2026-10-07). Fall windows are unchanged.
 WAVE_SCHEDULE: dict[int, dict] = {
     2: {
         "fall": {"ship_start": (11, 2), "ship_end": (11, 13), "order_by": (11, 12)},
-        "spring": {"ship_start": (4, 19), "ship_end": (6, 6), "order_by": (5, 31)},
+        "spring": {"ship_start": (4, 8), "ship_end": (4, 15), "order_by": (4, 1)},
     },
     3: {
         "fall": {"ship_start": (11, 2), "ship_end": (11, 13), "order_by": (11, 12)},
-        "spring": {"ship_start": (4, 19), "ship_end": (6, 6), "order_by": (5, 31)},
+        "spring": {"ship_start": (4, 8), "ship_end": (4, 15), "order_by": (4, 1)},
     },
     4: {
         "fall": {"ship_start": (11, 2), "ship_end": (11, 19), "order_by": (11, 16)},
-        "spring": {"ship_start": (4, 19), "ship_end": (6, 6), "order_by": (5, 31)},
+        "spring": {"ship_start": (4, 8), "ship_end": (4, 15), "order_by": (4, 1)},
     },
     5: {
         "fall": {"ship_start": (11, 2), "ship_end": (11, 19), "order_by": (11, 16)},
-        "spring": {"ship_start": (4, 12), "ship_end": (6, 6), "order_by": (5, 31)},
+        "spring": {"ship_start": (4, 12), "ship_end": (4, 15), "order_by": (4, 5)},
     },
     6: {
         "fall": {"ship_start": (11, 9), "ship_end": (11, 26), "order_by": (11, 21)},
-        "spring": {"ship_start": (4, 5), "ship_end": (6, 6), "order_by": (5, 31)},
+        "spring": {"ship_start": (4, 5), "ship_end": (4, 15), "order_by": (3, 29)},
     },
     7: {
         "fall": {"ship_start": (11, 9), "ship_end": (11, 26), "order_by": (11, 21)},
-        "spring": {"ship_start": (3, 16), "ship_end": (5, 24), "order_by": (5, 17)},
+        "spring": {"ship_start": (3, 16), "ship_end": (4, 15), "order_by": (3, 9)},
     },
     8: {
         "fall": {"ship_start": (11, 9), "ship_end": (12, 12), "order_by": (11, 21)},
-        "spring": {"ship_start": (3, 1), "ship_end": (4, 30), "order_by": (4, 16)},
+        "spring": {"ship_start": (3, 1), "ship_end": (4, 15), "order_by": (2, 22)},
     },
     9: {
         "fall": {"ship_start": (11, 9), "ship_end": (12, 12), "order_by": (11, 21)},
-        "spring": {"ship_start": (3, 1), "ship_end": (4, 30), "order_by": (4, 16)},
+        "spring": {"ship_start": (3, 1), "ship_end": (4, 15), "order_by": (2, 22)},
     },
     10: {
         "fall": {"ship_start": (11, 9), "ship_end": (12, 12), "order_by": (11, 21)},
-        "spring": {"ship_start": (3, 1), "ship_end": (4, 30), "order_by": (4, 16)},
+        "spring": {"ship_start": (3, 1), "ship_end": (4, 15), "order_by": (2, 22)},
     },
 }
 
@@ -286,7 +289,7 @@ ZONE_ORDER_DEADLINES: dict[int, dict[str, tuple]] = {
 # Fallback windows for a zone an override introduces that the real chart does
 # not cover (defensive only — the chart already spans every USDA zone 2-10).
 _FALL_DEFAULT: tuple[tuple[int, int], tuple[int, int]] = ((11, 2), (11, 26))
-_SPRING_DEFAULT: tuple[tuple[int, int], tuple[int, int]] = ((3, 1), (6, 6))
+_SPRING_DEFAULT: tuple[tuple[int, int], tuple[int, int]] = ((3, 1), (4, 15))
 
 # The three shippable modes the frontend (GOL-1114) resolves to, plus the
 # fallback. Kept here so the contract has one authority.
