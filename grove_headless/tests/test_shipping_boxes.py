@@ -102,6 +102,54 @@ class TestWeights(unittest.TestCase):
         self.assertLess(sb.representative_billable_lb("large"), 22)
 
 
+class TestWeightBasisAndCalibration(unittest.TestCase):
+    """Packed-weight calibration + weight_basis (GOL-3201)."""
+
+    def setUp(self):
+        # Snapshot the module calibration seed so patches never leak between tests.
+        self._saved = dict(sb.WEIGHT_CALIBRATION)
+        self.addCleanup(lambda: sb.WEIGHT_CALIBRATION.clear() or sb.WEIGHT_CALIBRATION.update(self._saved))
+
+    def test_seed_small_is_verified_large_is_unverified(self):
+        self.assertEqual(sb.weight_basis("small"), "verified")
+        self.assertEqual(sb.weight_basis("large"), "unverified")
+
+    def test_seed_is_inert_against_full_capacity_quote(self):
+        # The calibration re-bases the published weight on measured data; it must
+        # not move it. small ceil(6.5)=7, large conservative 14 — unchanged.
+        self.assertEqual(sb.representative_billable_lb("small"), 7)
+        self.assertEqual(sb.representative_billable_lb("large"), 14)
+
+    def test_verified_prices_the_calibrated_median_not_full_capacity(self):
+        # Verify the mechanism really diverges from the conservative path: a
+        # verified small box calibrated to 5.5 lb quotes 6, below its 7 lb worst case.
+        sb.WEIGHT_CALIBRATION["small"] = {"samples": 13, "typical_billable_lb": 5.5}
+        self.assertEqual(sb.weight_basis("small"), "verified")
+        self.assertEqual(sb.representative_billable_lb("small"), 6)
+        self.assertLess(sb.representative_billable_lb("small"), sb.conservative_billable_lb("small"))
+
+    def test_fewer_than_min_samples_stays_unverified(self):
+        sb.WEIGHT_CALIBRATION["small"] = {"samples": sb.MIN_CALIBRATION_SAMPLES - 1, "typical_billable_lb": 5.5}
+        self.assertEqual(sb.weight_basis("small"), "unverified")
+        # Falls back to the conservative full-capacity weight (7), never the median.
+        self.assertEqual(sb.representative_billable_lb("small"), sb.conservative_billable_lb("small"))
+
+    def test_large_is_force_conservative_even_with_samples(self):
+        sb.WEIGHT_CALIBRATION["large"] = {"samples": 99, "typical_billable_lb": 9.0}
+        self.assertEqual(sb.weight_basis("large"), "unverified")
+        self.assertEqual(sb.representative_billable_lb("large"), 14)
+        self.assertIn("large", sb.FORCE_CONSERVATIVE_BOXES)
+
+    def test_missing_calibration_entry_is_unverified(self):
+        sb.WEIGHT_CALIBRATION.pop("small", None)
+        self.assertEqual(sb.weight_basis("small"), "unverified")
+        self.assertEqual(sb.representative_billable_lb("small"), sb.conservative_billable_lb("small"))
+
+    def test_every_box_has_a_known_basis(self):
+        for box_id in sb.BOXES:
+            self.assertIn(sb.weight_basis(box_id), ("verified", "unverified"))
+
+
 class TestPackingMode(unittest.TestCase):
     def test_winter_is_dormant(self):
         self.assertEqual(sb.packing_mode(date(2026, 1, 15)), "dormant")

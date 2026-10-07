@@ -90,6 +90,11 @@ class RateFeedTests(unittest.TestCase):
             src = sz.shipping_boxes.BOXES[box_id]
             self.assertEqual(box["length"], src["length"])
             self.assertEqual(box["capacity"], src["capacity"])
+            # GOL-3201: the billable weight the quote is priced at + whether it
+            # is calibrated (verified) or conservative (unverified).
+            self.assertEqual(box["billable_weight_lb"], sz.shipping_boxes.representative_billable_lb(box_id))
+            self.assertEqual(box["weight_basis"], sz.shipping_boxes.weight_basis(box_id))
+            self.assertIn(box["weight_basis"], ("verified", "unverified"))
         self.assertEqual(packing["length_classes"], list(sz.shipping_boxes.LENGTH_CLASSES))
         self.assertEqual(packing["modes"], list(sz.shipping_boxes.MODES))
         # dormant_window was replaced by the top-level per-zone calendar (GOL-1172).
