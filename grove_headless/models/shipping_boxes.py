@@ -263,11 +263,12 @@ BOXES: dict[str, dict] = {
         "packaging_usd": 4.50,
         "tare_lb": 3.1,  # empty carton, DERIVED (scaled by surface area) — weigh to confirm
         "paper_lb": 5.0,  # void-fill packing paper, DERIVED (scaled by void volume)
-        # NO large box has shipped yet (GOL-2923, 2026-10-06), so there is no
-        # measured median. None -> representative_billable_lb falls back to the
-        # model full-capacity estimate (~14 lb), the conservative over-quote side.
-        # Set this to the measured median once a large-box batch ships.
-        "median_packed_lb": None,
+        # No large box has shipped yet, so this is Josh's stated median (GOL-2923,
+        # 2026-10-07: "large box weights median at around 12lbs"), not a measured
+        # one. The 12 lb quotes in shipping_rates.json were read at this weight, so
+        # the next rate-check regenerates at 12 lb, not the ~14 lb full-capacity
+        # model. Replace with the measured median once a large-box batch ships.
+        "median_packed_lb": 12.0,
     },
 }
 
