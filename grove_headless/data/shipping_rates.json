@@ -5,7 +5,7 @@
   "_rates_source": "manual",
   "zone_1": {
     "large": {
-      "base": 16.0,
+      "base": 15.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
@@ -31,7 +31,7 @@
   },
   "zone_2": {
     "large": {
-      "base": 16.0,
+      "base": 15.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
@@ -57,7 +57,7 @@
   },
   "zone_3": {
     "large": {
-      "base": 16.0,
+      "base": 15.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
@@ -83,7 +83,7 @@
   },
   "zone_4": {
     "large": {
-      "base": 16.0,
+      "base": 15.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
