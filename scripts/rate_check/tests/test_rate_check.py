@@ -45,6 +45,28 @@ class TestReferenceAddresses(unittest.TestCase):
                 self.assertTrue(city and city.strip().lower() != "n/a", f"{zone}: bad city {city!r}")
                 self.assertEqual(len(zip5), 5, f"{zone}: bad zip {zip5!r}")
 
+    def test_zone_5_covers_downeast_maine(self):
+        # The 2026-10-06 Odoo join proved downeast ME (04605) is the real zone_5
+        # worst corner, not Portland — it must be a reference corner or the
+        # published zone_5 rate under-covers it (the S00232 under-quote, GOL-2923).
+        zips = {z for _c, _s, z in rc.REFERENCE_ZIPS["zone_5"]}
+        self.assertIn("04605", zips, "zone_5 must probe a downeast Maine corner (04605)")
+
+    def test_published_table_meets_observed_label_floors(self):
+        # Never-undercharge: the real shipped shipping_rates.json must not price a
+        # small-box cell below a cost we already paid at the 6.5 lb median weight
+        # (GOL-2923, CEO Odoo join 2026-10-06). Guards the published artifact, not
+        # the synthetic regen fixtures.
+        with open(rc.RATES_PATH, encoding="utf-8") as fh:
+            table = json.load(fh)
+        for zone, boxes in rc.OBSERVED_FLOORS.items():
+            for box_id, floor in boxes.items():
+                cell = table[zone][box_id]
+                base = cell["base"] if isinstance(cell, dict) else cell
+                self.assertGreaterEqual(
+                    base, floor, f"{zone}/{box_id} published ${base} < observed-label floor ${floor}"
+                )
+
 
 class TestRequestShape(unittest.TestCase):
     def test_probe_posts_pirateship_ratesquery_in_ounces(self):
@@ -211,8 +233,21 @@ class TestWinnerSelection(unittest.TestCase):
 
 class TestRateMath(unittest.TestCase):
     def test_target_formula_ceil(self):
-        # 9.84 + 3.50 (small packaging) + 2.00 = 15.34 -> 16
-        self.assertEqual(rc.target_rate(9.84, "small"), 16)
+        # GOL-2923 (Josh 2026-10-06): the published cell is the RAW CARRIER cost
+        # rounded up to the whole dollar — NO handling folded in (handling is one
+        # flat fee added once per order by the app, not per box). 9.84 -> 10.
+        self.assertEqual(rc.target_rate(9.84), 10)
+        self.assertEqual(rc.target_rate(10.0), 10)  # already whole -> unchanged
+        self.assertEqual(rc.target_rate(11.01), 12)
+
+    def test_target_cell_carries_no_handling(self):
+        # The table must NOT bake the S&H fee into a per-box cell (that would
+        # double-charge a 2-box order). target_rate adds nothing beyond ceil, so
+        # it is exactly the carrier quote rounded up — regardless of the fee.
+        fee = rc.shipping_boxes.SHIPPING_HANDLING_FEE
+        self.assertEqual(fee, 5.00)  # the one flat fee still lives in the catalog
+        self.assertEqual(rc.target_rate(12.00), 12)  # 12.00 carrier, no + fee
+        self.assertEqual(rc.target_rate(12.01), 13)  # round-up only
 
     def test_diff_detects_material_drift(self):
         current = {"zone_1": {"bareroot": {"base": 21.0}}}
@@ -275,9 +310,10 @@ class TestCarrierVisibility(unittest.TestCase):
         self.assertEqual(present, {("USPS", "GroundAdvantage")})
 
     def test_quote_zone_box_publishes_max_across_corners(self):
-        # zone_5 has 9 corners (GOL-2238 folded AR/MO/IA back in; GOL-2235 added
-        # FL's Miami + Key West); each returns a different UPS Ground price.
-        prices = iter(["10.00", "18.00", "12.00", "15.00", "9.00", "11.00", "14.00", "13.00", "16.00"])
+        # zone_5 has 10 corners (GOL-2238 folded AR/MO/IA back in; GOL-2235 added
+        # FL's Miami + Key West; GOL-2923 added downeast Maine 04605); each returns
+        # a different UPS Ground price.
+        prices = iter(["10.00", "18.00", "12.00", "15.00", "9.00", "11.00", "14.00", "13.00", "16.00", "17.00"])
 
         def fake_post(url, json=None, timeout=None, headers=None):
             amount = next(prices)
@@ -311,7 +347,7 @@ class TestCarrierVisibility(unittest.TestCase):
         self.assertEqual(winner["price"], 18.00)
 
     def test_quote_zone_box_skips_graphql_error_corner(self):
-        # First of zone_5's nine corners errors (GraphQL errors[]); the run
+        # First of zone_5's ten corners errors (GraphQL errors[]); the run
         # continues and prices from the remaining corners (max wins).
         def _priced(amount):
             return {
@@ -339,6 +375,7 @@ class TestCarrierVisibility(unittest.TestCase):
                 _priced("8.00"),
                 _priced("7.50"),
                 _priced("7.00"),
+                _priced("6.50"),
             ]
         )
 
@@ -389,8 +426,9 @@ class TestSchemaThreeAndWrite(unittest.TestCase):
             self.assertEqual(cell["carrier"], "UPS")
             self.assertEqual(cell["service"], "03")
             self.assertEqual(cell["service_title"], "UPS Ground")
-            # small: ceil(9.84 + 3.50 + 2.00) = 16
-            self.assertEqual(cell["base"], 16.0)
+            # small: ceil(9.84) = 10 — raw carrier cost only, no handling in the
+            # cell (GOL-2923, Josh 2026-10-06: handling is added once per order).
+            self.assertEqual(cell["base"], 10.0)
         finally:
             os.unlink(path)
 
@@ -659,12 +697,13 @@ class TestManualRefreshRun(unittest.TestCase):
         self.assertNotIn("Service visibility", err)
 
     def test_hand_quotes_go_through_the_same_target_formula(self):
-        # small: ceil(9.00 + 3.50 packaging + 2.00 buffer) = 15 — NOT the raw
-        # quote. Hand-editing shipping_rates.json is what skips this.
+        # small: ceil(9.00) = 9 — the published cell is the carrier quote rounded
+        # up, no handling (GOL-2923, Josh 2026-10-06). Hand quotes go through the
+        # same target_rate; hand-editing shipping_rates.json is what skips it.
         _, _, _, written = self._run(_manual_doc())
         cell = json.loads(written)["zone_1"]["small"]
-        self.assertEqual(cell["base"], float(rc.target_rate(9.0, "small")))
-        self.assertEqual(cell["base"], 15.0)
+        self.assertEqual(cell["base"], float(rc.target_rate(9.0)))
+        self.assertEqual(cell["base"], 9.0)
         self.assertEqual(set(cell), {"base", "carrier", "service", "service_title"})
 
     def test_incomplete_hand_refresh_is_refused(self):

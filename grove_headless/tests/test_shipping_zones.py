@@ -159,7 +159,8 @@ class TestShippingZoneEngineContract(unittest.TestCase):
         # bareroot ones).
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
             self.assertIsNone(sz.unshippable_reason([("potted", 20, 1)]))
-            self.assertEqual(sz.compute_order_shipping("WV", [("potted", 20, 1)], "leafed"), 16.0)
+            # potted small box $16 carrier + $5 flat S&H once (GOL-2923) = $21.
+            self.assertEqual(sz.compute_order_shipping("WV", [("potted", 20, 1)], "leafed"), 21.0)
 
     def test_potted_without_potted_rates_fails_safe(self):
         # The flip landed before the rate-checker's first potted-inclusive
@@ -175,7 +176,8 @@ class TestShippingZoneEngineContract(unittest.TestCase):
         # weight point — so it can never ship undercharged (GOL-2199).
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
             self.assertIsNone(sz.unshippable_reason([("mystery", 20, 1)]))
-            self.assertEqual(sz.compute_order_shipping("WV", [("mystery", 20, 1)], "leafed"), 16.0)
+            # prices as potted: $16 carrier + $5 flat S&H once = $21.
+            self.assertEqual(sz.compute_order_shipping("WV", [("mystery", 20, 1)], "leafed"), 21.0)
 
     def test_bareroot_has_no_unshippable_reason(self):
         self.assertIsNone(sz.unshippable_reason([("bareroot", 20, 3)]))
@@ -292,43 +294,46 @@ class TestOrderShipping(unittest.TestCase):
     TABLE = {"zone_1": BOX_RATES_Z1}
 
     def test_single_tree_prices_one_small_box(self):
+        # One small box $12 carrier + $5 flat S&H once (GOL-2923) = $17.
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 1)], "leafed"), 12.0)
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 1)], "leafed"), 17.0)
 
     def test_five_trees_fit_one_small_box(self):
-        # Small holds 1-5 -> one box ($12), not five.
+        # Small holds 1-5 -> one box ($12 carrier + $5 S&H = $17), not five.
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 5)], "leafed"), 12.0)
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 5)], "leafed"), 17.0)
 
     def test_six_trees_use_one_large_box(self):
-        # 6-10 -> one large box ($18), NOT two smalls ($24).
+        # 6-10 -> one large box ($18 carrier + $5 S&H = $23), NOT two smalls.
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 6)], "dormant"), 18.0)
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 6)], "dormant"), 23.0)
 
     def test_eleven_trees_split_large_plus_small(self):
-        # 11 -> large (10) + small (1) = 18 + 12 = 30.
+        # 11 -> large (10) + small (1) = $18 + $12 carrier + ONE $5 S&H = $35.
+        # The $5 is charged once for the whole order, NOT once per box (GOL-2923,
+        # Josh 2026-10-06) — this is the no-double-charge guard.
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 11)], "dormant"), 30.0)
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 11)], "dormant"), 35.0)
 
     def test_mixed_length_classes_pool_by_count(self):
-        # 3 whip-class + 3 standard-class = 6 trees -> one large box ($18).
+        # 3 whip-class + 3 standard-class = 6 trees -> one large box ($18 + $5 = $23).
         with _temp_table({"WV": "zone_1"}, self.TABLE):
             items = [("bareroot", 16, 3), ("bareroot", 20, 3)]
-            self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 18.0)
+            self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 23.0)
 
     def test_mixed_cart_prices_both_engines(self):
         # GOL-2199: 2 bareroot -> one small bareroot box ($12); 3 potted -> one
-        # p24x10x4 ($16). Split plans, summed: $28.
+        # p24x10x4 ($16). Two boxes, summed carrier $28 + ONE $5 S&H = $33.
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
             items = [("bareroot", 20, 2), ("potted", 20, 3)]
-            self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 28.0)
+            self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 33.0)
 
     def test_potted_units_pool_across_lines_into_boxes(self):
-        # 4 + 3 = 7 potted units -> one p24x10x6 10-pack ($24), not two 5-packs
-        # ($32) — pack_potted picks the cheapest combo, pooled across lines.
+        # 4 + 3 = 7 potted units -> one p24x10x6 10-pack ($24 + $5 S&H = $29), not
+        # two 5-packs — pack_potted picks the cheapest combo, pooled across lines.
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
             items = [("potted", 20, 4), ("potted", 16, 3)]
-            self.assertEqual(sz.compute_order_shipping("WV", items, "leafed"), 24.0)
+            self.assertEqual(sz.compute_order_shipping("WV", items, "leafed"), 29.0)
 
     def test_mixed_cart_with_unpriceable_potted_side_fails_whole_order(self):
         # Either engine failing to pack-and-price fails the WHOLE plan — a
@@ -350,7 +355,8 @@ class TestOrderShipping(unittest.TestCase):
     def test_zero_and_negative_qty_ignored(self):
         with _temp_table({"WV": "zone_1"}, self.TABLE):
             items = [("bareroot", 20, 0), ("bareroot", 20, 1)]
-            self.assertEqual(sz.compute_order_shipping("WV", items, "leafed"), 12.0)
+            # one priced tree -> one small box $12 + $5 S&H = $17.
+            self.assertEqual(sz.compute_order_shipping("WV", items, "leafed"), 17.0)
             self.assertIsNone(sz.compute_order_shipping("WV", [("bareroot", 20, 0)], "leafed"))
 
     def test_empty_cart_returns_none(self):
@@ -364,12 +370,13 @@ class TestSingleTreeRate(unittest.TestCase):
     TABLE = {"zone_1": BOX_RATES_Z1}
 
     def test_single_tree_is_the_small_box(self):
+        # "from $X" floor = one small box $12 carrier + $5 S&H once (GOL-2923) = $17.
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.single_tree_rate("WV", 20, "leafed"), 12.0)
+            self.assertEqual(sz.single_tree_rate("WV", 20, "leafed"), 17.0)
 
     def test_single_whip_class_is_also_the_small_box(self):
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.single_tree_rate("WV", 16, "dormant"), 12.0)
+            self.assertEqual(sz.single_tree_rate("WV", 16, "dormant"), 17.0)
 
     def test_unmapped_state_returns_none(self):
         with _temp_table({"WV": "zone_1"}, self.TABLE):
@@ -380,8 +387,9 @@ class TestSinglePottedRate(unittest.TestCase):
     """single_potted_rate: the potted PDP "shipping from $X" estimate (GOL-2199)."""
 
     def test_single_potted_unit_is_the_small_potted_box(self):
+        # p24x10x4 $16 carrier + $5 S&H once (GOL-2923) = $21.
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
-            self.assertEqual(sz.single_potted_rate("WV"), 16.0)
+            self.assertEqual(sz.single_potted_rate("WV"), 21.0)
 
     def test_no_potted_rates_returns_none(self):
         # Pre-first-potted-table window: bareroot-only rows quote nothing for
@@ -437,7 +445,7 @@ class TestFullNameShippingRouting(unittest.TestCase):
             by_code = sz.compute_order_shipping("WV", [("bareroot", 20, 1)], "leafed")
             by_name = sz.compute_order_shipping("West Virginia", [("bareroot", 20, 1)], "leafed")
             self.assertEqual(by_name, by_code)
-            self.assertEqual(by_name, 12.0)
+            self.assertEqual(by_name, 17.0)  # $12 carrier + $5 S&H once (GOL-2923)
 
     def test_full_name_non_green_state_still_drops(self):
         # "Ohio" canonicalizes to OH, but OH is not in this temp green table,

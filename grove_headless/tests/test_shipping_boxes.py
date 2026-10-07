@@ -88,15 +88,22 @@ class TestWeights(unittest.TestCase):
         # only ships in its dormant window; the heavier leafed weight prices a
         # parcel that is never bought (GOL-1906, Josh 2026-09-07). Rep must cover
         # every QUOTABLE mode's worst fill, but need NOT cover leafed.
+        # A box with a stated/measured median (GOL-2923) is quoted at that median
+        # instead of full capacity on purpose (never-undercharge is relaxed to the
+        # whole-dollar round-up margin, Josh 2026-10-06/07); only boxes WITHOUT a
+        # median must still cover their worst dormant fill.
         for box_id, box in sb.BOXES.items():
             rep = sb.representative_billable_lb(box_id)
+            if box.get("median_packed_lb") is not None:
+                continue
             for mode in sb.QUOTABLE_MODES:
                 cap = box["capacity"][mode]
                 self.assertGreaterEqual(rep, sb.billable_weight_lb(box_id, cap, mode), box_id)
-        # Dormant full fills: small ceil(2.0+2.5+5*0.5)=ceil(7.0)=7,
-        # large ceil(3.1+5.0+10*0.5)=ceil(13.1)=14.
+        # Median-quoted boxes bill at ceil(median): small 6.5 -> 7 (equals its full
+        # dormant fill, ceil(2.0+2.5+5*0.5)=7), large 12.0 -> 12 (Josh 2026-10-07;
+        # the ~14 lb full fill, ceil(3.1+5.0+10*0.5)=14, is no longer the quote).
         self.assertEqual(sb.representative_billable_lb("small"), 7)
-        self.assertEqual(sb.representative_billable_lb("large"), 14)
+        self.assertEqual(sb.representative_billable_lb("large"), 12)
         # And it must NOT be inflated by the un-shippable leafed weight.
         self.assertLess(sb.representative_billable_lb("small"), 11)
         self.assertLess(sb.representative_billable_lb("large"), 22)

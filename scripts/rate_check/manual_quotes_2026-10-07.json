@@ -1,0 +1,34 @@
+{
+  "_comment": "HAND QUOTES read 2026-10-07 (Josh, CEO session) from the PUBLIC Pirate Ship rate calculator pirateship.com/rates (no login, no API, no new credential), origin 26651 Summersville WV, residential, 15 corners x 4 boxes = 60 lookups. Each cell is the LEAST-COST allowlisted ground RAW CARRIER QUOTE (UPS Ground 03 / UPS Ground Saver 93 / USPS Ground Advantage) at the zone's WORST corner for that box at the box's median packed billable weight (small 7 lb [median packed 6.5 lb billed up], large 12 lb, p24x10x4 12 lb, p24x10x6 22 lb). NO packaging, NO buffer, NO handling — rate_check applies ceil() and the app adds the flat $5 S&H once per order. Calibration: at 7 lb the page's UPS Ground price matched 7 shipped small-box labels to the cent (KY 8.79, OH 8.29, NY 9.84, SC 9.84, PA/NY 11.15, ME 19.38), so the page is a faithful quote source. UPDATE 2026-10-07 (Josh, CEO session): large box re-quoted at its ~12 lb median packed weight (was 14 lb full-capacity) — zones 1-4 $14.37 UPS Ground, zone_5 $20.02 UPS Ground Saver at Mariaville ME 04605 (Portland ME was $16.57). At 12 lb the large box prices the same as p24x10x4, as expected. Potted (p24x10x4 / p24x10x6) is no longer a shipping consideration (potted = farm-pickup only); those cells stay here ONLY as placeholders because rate_check demands all 20 cells and the Odoo loader's known_box_ids() spans both catalogs — they are inert at checkout and never selected for a shipped order. CAVEAT (Josh): large + both potted weights still have no shipped-box data — treat large and the 2 potted cells as UNVERIFIED estimates until real packed weights exist. Zones 2-4 large/p4/p6 quote identically to zone_1 (same UPS zone from Summersville); the published zone_2-4 split is not supported by these quotes but is left intact (never undercharge). zone_5 small worst corner is downeast ME Mariaville 04605 (Saver 16.89); the real S00232 label there cost 19.38 because UPS Ground was bought, not least-cost Saver (Josh finding #4 — a service choice, not a bug).",
+  "_quoted_on": "2026-10-07",
+  "zone_1": {
+    "small": { "quote": 9.84, "carrier": "UPS", "service": "03", "service_title": "UPS Ground" },
+    "large": { "quote": 14.37, "carrier": "UPS", "service": "03", "service_title": "UPS Ground" },
+    "p24x10x4": { "quote": 14.37, "carrier": "UPS", "service": "03", "service_title": "UPS Ground" },
+    "p24x10x6": { "quote": 19.85, "carrier": "UPS", "service": "93", "service_title": "UPS Ground Saver" }
+  },
+  "zone_2": {
+    "small": { "quote": 11.35, "carrier": "UPS", "service": "93", "service_title": "UPS Ground Saver" },
+    "large": { "quote": 14.37, "carrier": "UPS", "service": "03", "service_title": "UPS Ground" },
+    "p24x10x4": { "quote": 14.37, "carrier": "UPS", "service": "03", "service_title": "UPS Ground" },
+    "p24x10x6": { "quote": 19.85, "carrier": "UPS", "service": "93", "service_title": "UPS Ground Saver" }
+  },
+  "zone_3": {
+    "small": { "quote": 11.35, "carrier": "UPS", "service": "93", "service_title": "UPS Ground Saver" },
+    "large": { "quote": 14.37, "carrier": "UPS", "service": "03", "service_title": "UPS Ground" },
+    "p24x10x4": { "quote": 14.37, "carrier": "UPS", "service": "03", "service_title": "UPS Ground" },
+    "p24x10x6": { "quote": 19.85, "carrier": "UPS", "service": "93", "service_title": "UPS Ground Saver" }
+  },
+  "zone_4": {
+    "small": { "quote": 11.35, "carrier": "UPS", "service": "93", "service_title": "UPS Ground Saver" },
+    "large": { "quote": 14.37, "carrier": "UPS", "service": "03", "service_title": "UPS Ground" },
+    "p24x10x4": { "quote": 14.37, "carrier": "UPS", "service": "03", "service_title": "UPS Ground" },
+    "p24x10x6": { "quote": 19.85, "carrier": "UPS", "service": "93", "service_title": "UPS Ground Saver" }
+  },
+  "zone_5": {
+    "small": { "quote": 16.89, "carrier": "UPS", "service": "93", "service_title": "UPS Ground Saver" },
+    "large": { "quote": 20.02, "carrier": "UPS", "service": "93", "service_title": "UPS Ground Saver" },
+    "p24x10x4": { "quote": 20.02, "carrier": "UPS", "service": "93", "service_title": "UPS Ground Saver" },
+    "p24x10x6": { "quote": 25.99, "carrier": "UPS", "service": "93", "service_title": "UPS Ground Saver" }
+  }
+}

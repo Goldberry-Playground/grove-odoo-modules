@@ -1,29 +1,29 @@
 {
-  "_comment": "Maintained by scripts/rate_check (morning rate-checker). Per-box rates (Box Engine v2): ceil(Pirate Ship least-cost allowlisted ground [UPS Ground / UPS Ground Saver / USPS Ground Advantage] at the box's representative billable weight + per-box packaging + 2.00 buffer). Each cell records the winning carrier/service (schema 3); the Odoo loader reads `base` only. Carries BOTH shippable catalogs (GOL-2199): bareroot small/large and potted/peat-and-bagged p24x10x4/p24x10x6. Design: spec 2026-09-09-pirateship-fulfillment-design.md (GOL-2270).",
+  "_comment": "Maintained by scripts/rate_check (morning rate-checker). Per-box RAW CARRIER cost (Box Engine v2): ceil(Pirate Ship least-cost allowlisted ground [UPS Ground / UPS Ground Saver / USPS Ground Advantage] at the box's representative/median billable weight). No handling in the cell \u2014 the flat $5 S&H fee is added ONCE PER ORDER by the app [GOL-2923, shared with settlement]. Each cell records the winning carrier/service (schema 3); the Odoo loader reads `base` only. Carries BOTH shippable catalogs (GOL-2199): bareroot small/large and potted/peat-and-bagged p24x10x4/p24x10x6. Design: spec 2026-09-09-pirateship-fulfillment-design.md (GOL-2270).",
   "_schema": 3,
-  "_rates_verified_on": "2026-09-21",
-  "_rates_source": "pirateship",
+  "_rates_verified_on": "2026-10-07",
+  "_rates_source": "manual",
   "zone_1": {
     "large": {
-      "base": 22.0,
+      "base": 15.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
     },
     "p24x10x4": {
-      "base": 20.0,
+      "base": 15.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
     },
     "p24x10x6": {
-      "base": 27.0,
+      "base": 20.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
     },
     "small": {
-      "base": 16.0,
+      "base": 10.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
@@ -31,25 +31,25 @@
   },
   "zone_2": {
     "large": {
-      "base": 22.0,
+      "base": 15.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
     },
     "p24x10x4": {
-      "base": 20.0,
+      "base": 15.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
     },
     "p24x10x6": {
-      "base": 27.0,
+      "base": 20.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
     },
     "small": {
-      "base": 17.0,
+      "base": 12.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
@@ -57,25 +57,25 @@
   },
   "zone_3": {
     "large": {
-      "base": 22.0,
+      "base": 15.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
     },
     "p24x10x4": {
-      "base": 20.0,
+      "base": 15.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
     },
     "p24x10x6": {
-      "base": 27.0,
+      "base": 20.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
     },
     "small": {
-      "base": 17.0,
+      "base": 12.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
@@ -83,25 +83,25 @@
   },
   "zone_4": {
     "large": {
-      "base": 22.0,
+      "base": 15.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
     },
     "p24x10x4": {
-      "base": 20.0,
+      "base": 15.0,
       "carrier": "UPS",
       "service": "03",
       "service_title": "UPS Ground"
     },
     "p24x10x6": {
-      "base": 27.0,
+      "base": 20.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
     },
     "small": {
-      "base": 17.0,
+      "base": 12.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
@@ -109,25 +109,25 @@
   },
   "zone_5": {
     "large": {
-      "base": 24.0,
+      "base": 21.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
     },
     "p24x10x4": {
-      "base": 23.0,
+      "base": 21.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
     },
     "p24x10x6": {
-      "base": 30.0,
+      "base": 26.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"
     },
     "small": {
-      "base": 20.0,
+      "base": 17.0,
       "carrier": "UPS",
       "service": "93",
       "service_title": "UPS Ground Saver"

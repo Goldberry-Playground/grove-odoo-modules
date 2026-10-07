@@ -115,7 +115,8 @@ python3 scripts/rate_check/staleness.py      # or just this, locally — no netw
 
 When the quote source is unavailable, **do not hand-edit
 `shipping_rates.json`.** A direct edit bypasses all three safety gates: the
-`ceil(quote + per-box packaging + $2.00)` target formula, the monotonicity guard,
+`ceil(quote)` carrier-only target formula (GOL-2923 — the flat $5 S&H is added
+once per order by the app, never folded into a cell), the monotonicity guard,
 and the `$1` drift gate — on 20 cells, by hand.
 
 Instead, record the **raw carrier quotes** and let the script do the maths:
@@ -124,14 +125,23 @@ Instead, record the **raw carrier quotes** and let the script do the maths:
    (the template is complete but deliberately *not* applyable as-is — zero
    quotes, placeholder date — so it can never stamp the table fresh with no real
    numbers behind it).
-2. `python3 scripts/rate_check/probe_states.py` prints each zone's reference
-   corner and every box's geometry + representative billable weight.
+2. The authoritative reference corners per zone are `REFERENCE_ZIPS` in
+   `rate_check.py` (the published cell is the MAX across a zone's corners, so it
+   never undercharges any member). `python3 scripts/rate_check/probe_states.py`
+   prints each box's geometry + representative billable weight and the state→zone
+   binning. **zone_5 worst corner is downeast Maine — Ellsworth `04605`, not
+   Portland** (GOL-2923, Odoo join 2026-10-06: Mariaville ME quoted $19.38 at
+   6.5 lb vs Columbia SC $9.84, same zone/weight). Quote that corner, not the
+   cheaper coastal one.
 3. For each of the 20 zone × box cells, read the least-cost **allowlisted
    ground** quote (UPS Ground `03` / UPS Ground Saver `93` / USPS Ground
-   Advantage `GroundAdvantage`, residential) and record `quote` plus the
-   `carrier` / `service` / `service_title` you read it off. All four are
-   required per cell: schema 3 exists so "which carrier set this rate" is always
-   answerable, and `rate_feed` shows `service_title` in storefront copy.
+   Advantage `GroundAdvantage`, residential) **at the box's median packed weight**
+   (GOL-2923: small box = 6.5 lb median from batch LB-20261005-01; large/potted
+   have no shipped data yet, so quote at their model weight and flag it) and
+   record `quote` plus the `carrier` / `service` / `service_title` you read it
+   off. All four are required per cell: schema 3 exists so "which carrier set
+   this rate" is always answerable, and `rate_feed` shows `service_title` in
+   storefront copy.
 4. Set `_quoted_on` to the date you actually read the quotes — it becomes
    `_rates_verified_on`, so it must not be the date you happened to run the
    script.

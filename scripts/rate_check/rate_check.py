@@ -3,8 +3,11 @@
 
 Quotes Pirate Ship's public rate calculator (least-cost allowlisted ground:
 UPS Ground / UPS Ground Saver / USPS Ground Advantage, residential) for each
-rate zone x catalog box (shipping_boxes at representative billable weight),
-computes target = ceil(quote + per-box packaging + 2.00), and rewrites
+rate zone x catalog box (shipping_boxes at its representative billable weight —
+the MEDIAN packed weight of that box type, GOL-2923), computes target =
+ceil(quote) (raw carrier cost rounded up to the whole dollar; GOL-2923 moved the
+flat S&H fee out of the per-box cell and onto the order, charged once by the app
+— see shipping_zones.compute_order_shipping), and rewrites
 grove_headless/data/shipping_rates.json when any zone drifts >= $1. Pirate Ship
 retires Shippo from quoting (design: spec docs/superpowers/specs/
 2026-09-09-pirateship-fulfillment-design.md section A, ratified Josh 2026-09-09;
@@ -94,6 +97,14 @@ REFERENCE_ZIPS = {
     # split proved to overcharge them; those bands are retired.
     "zone_5": [
         ("Portland", "ME", "04101"),
+        # Downeast Maine is the TRUE zone_5 worst corner, not Portland: the
+        # 2026-10-06 Odoo join (CEO, batch LB-20261005-01) found Mariaville ME
+        # 04605 quoted $19.38 at 6.5 lb vs Columbia SC $9.84 at the same weight —
+        # same zone, same box, +$9.54. Portland (coastal, I-95) quotes well under
+        # that, so it alone under-covered downeast ME by ~$4.88 (the S00232
+        # under-quote). 04605 is the Ellsworth post office that serves Mariaville;
+        # the city MUST match the zip, so it is listed as Ellsworth (GOL-2923).
+        ("Ellsworth", "ME", "04605"),
         ("Mobile", "AL", "36602"),
         ("Gulfport", "MS", "39501"),
         ("Lake Charles", "LA", "70601"),
@@ -106,6 +117,37 @@ REFERENCE_ZIPS = {
         ("Miami", "FL", "33101"),
         ("Key West", "FL", "33040"),
     ],
+}
+
+# Never-undercharge FLOORS from real shipped labels (GOL-2923, CEO Odoo join
+# 2026-10-06, batch LB-20261005-01). Each value is ceil() of the worst
+# LEAST-COST ground cost OBSERVED AT THE SMALL BOX'S MEDIAN PACKED WEIGHT
+# (6.5 lb) for that zone: the PUBLISHED small-box cell must never fall below it
+# (asserted against shipping_rates.json by the test suite), because a cell
+# cheaper than the least-cost ground at a corner we have actually shipped to
+# means the worst-corner probe missed the real corner (exactly the downeast-ME
+# case). Only zones with a label at the 6.5 lb median are floored: zone_3 had no
+# shipped order, and zone_4's only labels were at 8.5/14.5 lb (heavier than
+# median), so flooring them would risk over-charging the median shipment — left
+# to the worst-corner probe. A safety floor, NOT a replacement for the probe
+# (CEO, finding #3). Not enforced on the regen path itself: the never-undercharge
+# guarantee there is the MAX across REFERENCE_ZIPS corners, which now includes
+# downeast Maine for zone_5.
+#
+# Basis = LEAST-COST ground, not the service the operator happened to buy
+# (GOL-2923, Josh hand quotes 2026-10-07). The ruled pricing model charges the
+# least-cost allowlisted ground (UPS Ground Saver when it wins); the floor must
+# share that basis or it would contradict the published cell. zone_5 small was
+# 20 (ceil of the S00232 UPS *Ground* label $19.38); Josh's hand quote at that
+# exact corner (Mariaville 04605) is $16.89 on Saver — the least-cost ground the
+# table and settlement actually charge — so the floor is $17. The ~$2.49 Ground
+# vs Saver gap on that lane is a per-shipment service choice the operator makes,
+# not a rate-table undercharge (Josh finding #4), and the flat $5 S&H added once
+# per order more than covers it.
+OBSERVED_FLOORS = {
+    "zone_1": {"small": 9},  # KY 6.5 lb $8.79 (Ground) -> ceil 9
+    "zone_2": {"small": 12},  # PA/MD/NY 6.5 lb $11.15 -> ceil 12
+    "zone_5": {"small": 17},  # Mariaville ME 6.5 lb $16.89 (least-cost Saver) -> ceil 17
 }
 
 # Box Engine v2: reference parcels come straight from the box catalog — one
@@ -144,9 +186,14 @@ PARCELS = {
     for catalog, weight_of in _CATALOGS
     for box_id, box in catalog.items()
 }
-# Per-box packaging (box + consumables) replaces the old flat $3.50/tree.
-PACKAGING = {box_id: box["packaging_usd"] for catalog, _ in _CATALOGS for box_id, box in catalog.items()}
-BUFFER = 2.00
+# Each published cell is the RAW CARRIER cost only — no handling (GOL-2923, Josh
+# 2026-10-06: handling is charged ONCE PER ORDER, not per box, so it cannot live
+# in a per-box table cell or a 2-box order would pay it twice). The one flat
+# shipping-&-handling fee (shipping_boxes.SHIPPING_HANDLING_FEE) is added at the
+# ORDER level by the app — at checkout in shipping_zones.compute_order_shipping
+# and at ship-time settlement in controllers.main._recompute_ship_total — both
+# reading that one constant so they cannot drift. This replaced the old per-box
+# packaging_usd + $2.00 buffer (and the short-lived per-cell flat $5).
 RATES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless", "data", "shipping_rates.json")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "out")
 
@@ -319,8 +366,13 @@ def visibility_report(counts, total):
     return "\n".join(lines)
 
 
-def target_rate(quote: float, box_id: str) -> int:
-    return math.ceil(quote + PACKAGING[box_id] + BUFFER)
+def target_rate(quote: float) -> int:
+    """Published cell = ceil(raw carrier quote) — carrier cost only, rounded up
+    to the whole dollar. GOL-2923 (Josh 2026-10-06): the flat S&H fee is charged
+    ONCE PER ORDER by the app (shipping_zones / settlement), NOT folded into each
+    per-box cell, so the table carries pure carrier cost. ``ceil`` stays (the
+    whole-dollar round-up is the table's only margin; Josh 2026-10-02)."""
+    return math.ceil(quote)
 
 
 def load_manual_quotes(path: str) -> tuple:
@@ -328,7 +380,7 @@ def load_manual_quotes(path: str) -> tuple:
 
     The no-network refresh path for when the quote source is unavailable. The
     file carries RAW CARRIER QUOTES, never finished rates, so the hand refresh
-    goes through the exact same ``target_rate`` (packaging + buffer + ceil),
+    goes through the exact same ``target_rate`` (ceil of the carrier quote),
     monotonicity guard and drift gate as an automated run — hand-editing
     shipping_rates.json directly bypasses all three.
 
@@ -568,7 +620,7 @@ def main(argv=None) -> int:
                 missing.append(f"{zone}/{box_id}")
                 continue
             proposed[zone][box_id] = {
-                "base": float(target_rate(winner["price"], box_id)),
+                "base": float(target_rate(winner["price"])),
                 "carrier": winner["carrier"],
                 "service": winner["service"],
                 "service_title": winner["service_title"],
@@ -677,9 +729,11 @@ def main(argv=None) -> int:
 
     new_doc = {
         "_comment": "Maintained by scripts/rate_check (morning rate-checker). "
-        "Per-box rates (Box Engine v2): ceil(Pirate Ship least-cost allowlisted "
-        "ground [UPS Ground / UPS Ground Saver / USPS Ground Advantage] at the "
-        "box's representative billable weight + per-box packaging + 2.00 buffer). "
+        "Per-box RAW CARRIER cost (Box Engine v2): ceil(Pirate Ship least-cost "
+        "allowlisted ground [UPS Ground / UPS Ground Saver / USPS Ground Advantage] "
+        "at the box's representative/median billable weight). No handling in the "
+        "cell — the flat $5 S&H fee is added ONCE PER ORDER by the app "
+        "[GOL-2923, shared with settlement]. "
         "Each cell records the winning carrier/service (schema 3); the Odoo loader "
         "reads `base` only. Carries BOTH shippable catalogs (GOL-2199): bareroot "
         "small/large and potted/peat-and-bagged p24x10x4/p24x10x6. "
