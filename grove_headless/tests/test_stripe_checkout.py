@@ -24,6 +24,10 @@ from odoo.tests.common import HttpCase, get_db_name
 from odoo.tools import mute_logger
 from psycopg2 import IntegrityError
 
+# Potted lines only sell May 1 to Oct 15 (checkout season gate), so tests that
+# post default-potted carts pin "today" in season rather than use the real clock.
+_in_season = mock.patch.object(grove_main, "_today_utc", new=lambda: date(2026, 10, 7))
+
 
 @tagged("post_install", "-at_install")
 class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
@@ -1061,6 +1065,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         payload.update(extra)
         return payload
 
+    @_in_season
     def test_state_gate_rejects_non_green_destination(self):
         """Defect 1: an unsupported ship-to state is rejected server-side at
         session creation, before any payment. Fixture state = CA (permanently
@@ -1082,6 +1087,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(error.status_code, 409)
         self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
 
+    @_in_season
     def test_potted_ship_order_clears_gate_and_fails_safe_without_rates(self):
         """GOL-2199 potted go-live: a potted SHIP order is no longer 400-blocked
         at the unshippable gate. When no potted shipping charge can be resolved
@@ -1099,6 +1105,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertIn("couldn't calculate shipping", error.data.decode().lower())
         self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
 
+    @_in_season
     def test_potted_ship_order_proceeds_once_shipping_prices(self):
         """GOL-2199: with a potted shipping charge resolvable (rate table carries
         the potted boxes), a potted ship-to order passes the whole ship gate —
@@ -1112,6 +1119,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
 
     # ── explicit fulfillment: pickup vs ship (GOL-1057) ───────────────────
 
+    @_in_season
     def test_pickup_skips_ship_gate_and_adds_no_shipping(self):
         """Farm pickup is the ONE legitimate $0-shipping path. An explicit
         fulfillment='pickup' order clears the ship-to gate even for potted trees
@@ -1137,6 +1145,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertIn("pickup", error.data.decode().lower())
         self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
 
+    @_in_season
     def test_pickup_keeps_wv_tax_despite_out_of_state_address(self):
         """GOL-1303: a pickup order carrying a leftover out-of-state address (buyer
         filled the address, then toggled to pickup) must KEEP the WV default tax —
