@@ -120,22 +120,34 @@ REFERENCE_ZIPS = {
 }
 
 # Never-undercharge FLOORS from real shipped labels (GOL-2923, CEO Odoo join
-# 2026-10-06, batch LB-20261005-01). Each value is ceil() of the worst actual
-# label cost OBSERVED AT THE SMALL BOX'S MEDIAN PACKED WEIGHT (6.5 lb) for that
-# zone: the PUBLISHED small-box cell must never fall below it (asserted against
-# shipping_rates.json by the test suite), because a cell cheaper than a label we
-# already paid at the median weight means the worst-corner probe missed the real
-# corner (exactly the downeast-ME case). Only zones with a label at the 6.5 lb
-# median are floored: zone_3 had no shipped order, and zone_4's only labels were
-# at 8.5/14.5 lb (heavier than median), so flooring them would risk over-charging
-# the median shipment — left to the worst-corner probe. A safety floor, NOT a
-# replacement for the probe (CEO, finding #3). Not enforced on the regen path
-# itself: the never-undercharge guarantee there is the MAX across REFERENCE_ZIPS
-# corners, which now includes downeast Maine for zone_5.
+# 2026-10-06, batch LB-20261005-01). Each value is ceil() of the worst
+# LEAST-COST ground cost OBSERVED AT THE SMALL BOX'S MEDIAN PACKED WEIGHT
+# (6.5 lb) for that zone: the PUBLISHED small-box cell must never fall below it
+# (asserted against shipping_rates.json by the test suite), because a cell
+# cheaper than the least-cost ground at a corner we have actually shipped to
+# means the worst-corner probe missed the real corner (exactly the downeast-ME
+# case). Only zones with a label at the 6.5 lb median are floored: zone_3 had no
+# shipped order, and zone_4's only labels were at 8.5/14.5 lb (heavier than
+# median), so flooring them would risk over-charging the median shipment — left
+# to the worst-corner probe. A safety floor, NOT a replacement for the probe
+# (CEO, finding #3). Not enforced on the regen path itself: the never-undercharge
+# guarantee there is the MAX across REFERENCE_ZIPS corners, which now includes
+# downeast Maine for zone_5.
+#
+# Basis = LEAST-COST ground, not the service the operator happened to buy
+# (GOL-2923, Josh hand quotes 2026-10-07). The ruled pricing model charges the
+# least-cost allowlisted ground (UPS Ground Saver when it wins); the floor must
+# share that basis or it would contradict the published cell. zone_5 small was
+# 20 (ceil of the S00232 UPS *Ground* label $19.38); Josh's hand quote at that
+# exact corner (Mariaville 04605) is $16.89 on Saver — the least-cost ground the
+# table and settlement actually charge — so the floor is $17. The ~$2.49 Ground
+# vs Saver gap on that lane is a per-shipment service choice the operator makes,
+# not a rate-table undercharge (Josh finding #4), and the flat $5 S&H added once
+# per order more than covers it.
 OBSERVED_FLOORS = {
-    "zone_1": {"small": 9},  # KY 6.5 lb $8.79  -> ceil 9
+    "zone_1": {"small": 9},  # KY 6.5 lb $8.79 (Ground) -> ceil 9
     "zone_2": {"small": 12},  # PA/MD/NY 6.5 lb $11.15 -> ceil 12
-    "zone_5": {"small": 20},  # Mariaville ME 6.5 lb $19.38 -> ceil 20
+    "zone_5": {"small": 17},  # Mariaville ME 6.5 lb $16.89 (least-cost Saver) -> ceil 17
 }
 
 # Box Engine v2: reference parcels come straight from the box catalog — one

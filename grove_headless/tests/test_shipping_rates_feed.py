@@ -32,6 +32,7 @@ class RateFeedTests(unittest.TestCase):
                 "zones",
                 "zone_by_state",
                 "green_states",
+                "shipping_handling_fee",
                 "packing",
                 "calendar",
                 "compliance",
@@ -39,6 +40,14 @@ class RateFeedTests(unittest.TestCase):
             },
         )
         self.assertEqual(self.feed["schema"], 2)
+
+    def test_shipping_handling_fee_published_from_the_one_constant(self):
+        # GOL-2923: the flat S&H fee the order pays once on top of the raw carrier
+        # cells. The storefront estimator must add it to match checkout; the feed
+        # publishes it from the SAME constant checkout and settlement read so the
+        # three can never drift.
+        self.assertEqual(self.feed["shipping_handling_fee"], sz.shipping_boxes.SHIPPING_HANDLING_FEE)
+        self.assertEqual(self.feed["shipping_handling_fee"], 5.00)
 
     def test_compliance_block_present(self):
         # Per-product carve-out map (GOL-2132) rides the same feed as the green

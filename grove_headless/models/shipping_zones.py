@@ -356,6 +356,17 @@ def rate_feed(calendar_override=None, today=None, consult_deferral_enabled=None)
         "zones": {zone: {box: dict(rule) for box, rule in boxes.items()} for zone, boxes in ZONE_RATES.items()},
         "zone_by_state": dict(ZONE_BY_STATE),
         "green_states": sorted(ZONE_BY_STATE),
+        # Flat shipping-&-handling fee the order pays ONCE on top of the packed
+        # carrier cost (GOL-2923). The `zones` cells above are RAW CARRIER cost
+        # only now — the handling used to be folded into each cell, so the
+        # storefront estimator could read a cell and show the all-in number. With
+        # the fee moved to the order level (so a 2-box order pays it once, not
+        # twice), the estimator must add this once to match what checkout charges,
+        # or it under-quotes by the fee. Published here from the SAME constant
+        # checkout (compute_order_shipping) and settlement
+        # (controllers.main._recompute_ship_total) read, so the storefront can
+        # never drift from the charge.
+        "shipping_handling_fee": shipping_boxes.SHIPPING_HANDLING_FEE,
         "packing": {
             "boxes": {
                 box_id: {
