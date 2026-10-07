@@ -7,6 +7,7 @@ import re
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import timezone as _timezone
+from types import SimpleNamespace
 
 import psycopg2
 import requests
@@ -1849,7 +1850,22 @@ class GroveHeadlessAPI(http.Controller):
 
         lines = [(by_id[variant_id], qty) for variant_id, qty in parsed_items]
         today = _date.today()
-        reason = _deposit_reason_for_lines(request.env, lines, fulfillment, today)
+        # Same potted-season / no-mixing / wave rules _create_draft_order enforces
+        # (the quote carries a ZIP only for ship carts that already have one).
+        shipping = payload.get("shipping") if isinstance(payload.get("shipping"), dict) else {}
+        wave_error, ship_wave = _validate_ship_wave(
+            request.env,
+            payload,
+            [SimpleNamespace(display_type=False, product_id=product) for product, _qty in lines],
+            "pickup" if fulfillment == "pickup" else "ship",
+            shipping.get("zip") or payload.get("zip"),
+            _today_utc(),
+            company,
+            require_zone=False,
+        )
+        if wave_error:
+            return _json_response({"error": wave_error}, status=400)
+        reason = _deposit_reason_for_lines(request.env, lines, fulfillment, today, ship_wave)
         deposit_now = reason is not None
         line_quotes = []
         for product, qty in lines:
@@ -1870,6 +1886,7 @@ class GroveHeadlessAPI(http.Controller):
                 "deposit_amount": stripe_gateway.PREORDER_DEPOSIT,
                 "amount_due_today": stripe_gateway.PREORDER_DEPOSIT if deposit_now else None,
                 "after_cutover": _after_deposit_cutover(request.env, today),
+                "ship_wave": ship_wave,
                 "lines": line_quotes,
             }
         )
@@ -2878,7 +2895,7 @@ _SHIP_WAVES = ("fall", "spring")
 _MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
 
-def _validate_ship_wave(env, payload, lines, fulfillment, zip_code, today, company=None):
+def _validate_ship_wave(env, payload, lines, fulfillment, zip_code, today, company=None, require_zone=True):
     """Server-side pre-order wave / potted-season gate for ``_create_draft_order``.
 
     Returns ``(error_message, ship_wave)``; ``error_message`` is None when the
@@ -2890,6 +2907,8 @@ def _validate_ship_wave(env, payload, lines, fulfillment, zip_code, today, compa
     line with a bareroot line. The wave checks apply only when the payload sends
     ``ship_wave``, so a legacy client keeps today's behaviour (nothing stored).
     ``fulfillment`` is "pickup" for farm pickup, anything else for ship.
+    ``require_zone=False`` (the quote preview) skips ONLY the zone/open check for
+    a ship cart that carries no ZIP yet.
     """
     tiers = {
         line.product_id.grove_effective_shipping_tier
@@ -2915,6 +2934,8 @@ def _validate_ship_wave(env, payload, lines, fulfillment, zip_code, today, compa
     if "bareroot" not in tiers:
         return "A pre-order wave only applies to bareroot pre-orders.", None
 
+    if require_zone is False and fulfillment != "pickup" and not zip_code:
+        return None, wave
     wave_zip = _farm_pickup_zip(env, company) if fulfillment == "pickup" else zip_code
     zone = usda_zone_for_zip(wave_zip)
     calendar = merge_calendar_override(_parse_calendar_override(env))
@@ -3141,6 +3162,9 @@ def _create_draft_order(website, env, payload, discount_out=None):
     if wave_error:
         order.unlink()
         return None, _json_response({"error": wave_error}, status=400)
+    # Stored before the promo gate below: ``_cart_has_preorder`` reads it, so a
+    # wave pre-order is a deposit cart and a promo code on it is rejected.
+    order.grove_ship_wave = ship_wave
     if is_ship_to:
         dest = canonical_state_code(ship_state)
         if dest is None or zone_for_state(dest) is None:
@@ -3411,7 +3435,6 @@ def _create_draft_order(website, env, payload, discount_out=None):
     # state → the pre-1057 $0-shipping local case) carries no shipping line and
     # is never labelled, so it collapses to "pickup" for alerting/label-gating.
     order.grove_fulfillment = "ship" if is_ship_to else "pickup"
-    order.grove_ship_wave = ship_wave
 
     return order, None
 
@@ -3607,33 +3630,42 @@ def _sold_out_bareroot(order):
     return any(_line_sold_out(product, qty)[1] for product, qty in _deposit_lines(order))
 
 
-def _deposit_reason_for_lines(env, lines, fulfillment, today):
-    """The GOL-2233 rule over bare ``(product, qty)`` pairs, independent of any
-    sale.order — the single predicate behind ``_order_takes_deposit`` (the
-    checkout session) and ``/checkout/quote`` (the pre-checkout preview), so
-    the two can never disagree.
+def _deposit_reason_for_lines(env, lines, fulfillment, today, ship_wave=None):
+    """GOL-2233 as amended 2026-10-07, over bare ``(product, qty)`` pairs,
+    independent of any sale.order: the single predicate behind
+    ``_order_takes_deposit`` (the checkout session) and ``/checkout/quote`` (the
+    pre-checkout preview), so the two can never disagree.
 
-    Returns ``"sold-out"`` (a bareroot line short on free stock — any
-    fulfillment, any date), ``"off-season"`` (after the season cutover on a
-    shipped order carrying bareroot; unset fulfillment counts as ship), or
-    ``None`` (charged in full today). Sold-out is checked first so the stated
-    reason matches the trigger a shopper can act on."""
-    judged = [_line_sold_out(product, qty) for product, qty in lines]
-    if any(sold_out for _bareroot, sold_out, _free in judged):
-        return "sold-out"
-    if not _after_deposit_cutover(env, today):
+    Returns ``"preorder"`` (a bareroot line with a customer-chosen wave: the flat
+    deposit for ship or pickup, before or after the cutover, in stock or not),
+    ``"sold-out"`` (legacy, no wave: a bareroot line short on free stock, any
+    fulfillment, any date), ``"off-season"`` (legacy, no wave: after the cutover
+    on a shipped order carrying bareroot; unset fulfillment counts as ship), or
+    ``None`` (charged in full today). Legacy callers that pass no wave keep the
+    original rule; sold-out is checked before off-season so the stated reason
+    matches the trigger a shopper can act on."""
+    has_bareroot = False
+    for product, qty in lines:
+        bareroot, sold_out, _free = _line_sold_out(product, qty)
+        if not bareroot:
+            continue
+        has_bareroot = True
+        if ship_wave:
+            return "preorder"
+        if sold_out:
+            return "sold-out"
+    if not has_bareroot or not _after_deposit_cutover(env, today) or fulfillment == "pickup":
         return None
-    if fulfillment == "pickup":
-        return None
-    if any(bareroot for bareroot, _sold_out, _free in judged):
-        return "off-season"
-    return None
+    return "off-season"
 
 
 def _order_takes_deposit(order, today=None):
     """Does this order take the flat $10 deposit (GOL-2233)?
 
-    True when EITHER trigger fires:
+    True when ANY trigger fires:
+      * pre-order (2026-10-07) — the order stores a customer-chosen
+        ``grove_ship_wave`` and carries a bareroot line (ship or pickup, any
+        date, in stock or not), OR
       * sold-out bareroot — a bareroot line short on free stock (any
         fulfillment, any date), OR
       * the order is placed after the season cutover (default Oct 15) AND is a
@@ -3651,7 +3683,14 @@ def _order_takes_deposit(order, today=None):
     tree onto the deposit path."""
     if today is None:
         today = _date.today()
-    return _deposit_reason_for_lines(order.env, _deposit_lines(order), order.grove_fulfillment, today) is not None
+    reason = _deposit_reason_for_lines(
+        order.env,
+        _deposit_lines(order),
+        order.grove_fulfillment,
+        today,
+        ship_wave=order.grove_ship_wave or None,
+    )
+    return reason is not None
 
 
 def _cart_has_preorder(env, order, payload=None, today=None):

@@ -859,6 +859,33 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(discounts[0]["amount_cents"], -stripe_gateway.to_cents(10.0))
         self.assertEqual(discounts[0]["name"], "Discount (FLATWOODS)")
 
+    def test_wave_order_in_stock_pickup_takes_flat_deposit_and_blocks_promo(self):
+        """2026-10-07: an in-stock bareroot order carrying a chosen wave is a
+        pre-order deposit even for pickup before the cutover. The line builder
+        records every variant as a preorder (so grove_preorder_variant_ids and
+        setup_future_usage=off_session follow, as for the other deposit reasons)
+        and the promo gate rejects a code on it."""
+        self._make_bareroot()
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=2)
+        order.grove_fulfillment = "pickup"
+        self.assertFalse(grove_main._order_takes_deposit(order, self.BEFORE_CUTOVER))
+        order.grove_ship_wave = "fall"
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        self.assertEqual([li["kind"] for li in line_items], ["deposit"])
+        self.assertEqual(preorder_ids, [self.product.id])
+        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+        self.assertTrue(grove_main._cart_has_preorder(self.env, order, None, today=self.BEFORE_CUTOVER))
+
+        self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
+        payload = self._cart_payload("WV", fulfillment="pickup", promo_code="TESTPROMO", ship_wave="fall")
+        payload["items"] = [{"variant_id": self.product.id, "quantity": 2}]
+        with mock.patch.object(grove_main, "_today_utc", return_value=date(2026, 10, 7)):
+            rejected, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(rejected)
+        self.assertEqual(error.status_code, 400)
+        self.assertIn("preorder", error.data.decode().lower())
+
     def test_cart_has_preorder_agrees_with_line_builder(self):
         """The promo-gate predicate (_cart_has_preorder) must classify a cart the
         same way the charging path (_build_stripe_line_items) does — a deposit
