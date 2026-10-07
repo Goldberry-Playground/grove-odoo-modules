@@ -1,0 +1,5 @@
+{
+  "_doc": "Example --samples input for calibrate_weights.py (GOL-3201). The `small` list mirrors the 13 shipped small-box packed weights from the CEO Odoo join (batch LB-20261005-01, 2026-10-06; see GOL-3200 golden_labels_*.json) — median 6.5 lb -> ceil 7, so `small` verifies at the same weight already published. `large` carries only 2 samples (< MIN_CALIBRATION_SAMPLES) AND is force-conservative, so it stays unverified at its 14 lb worst case. Weights are lb; a sample may be a bare number or {\"weight_lb\": x, \"count\": n}.",
+  "small": [6.5, 6.5, 6.5, 6.5, 6.5, 6.5, 6.5, 6.5, 6.5, 8.5, 8.5, 12.5, 14.5],
+  "large": [13.0, 13.5]
+}

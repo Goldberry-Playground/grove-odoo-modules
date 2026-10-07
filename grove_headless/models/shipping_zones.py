@@ -363,6 +363,13 @@ def rate_feed(calendar_override=None, today=None, consult_deferral_enabled=None)
                     "width": b["width"],
                     "height": b["height"],
                     "capacity": dict(b["capacity"]),
+                    # Packed-weight model (GOL-3201): the billable weight the
+                    # rate quote is priced at, and whether that weight is
+                    # calibrated off recorded shipped labels (``verified``) or
+                    # the conservative full-capacity worst case (``unverified``).
+                    # The storefront can flag an unverified quote as an estimate.
+                    "billable_weight_lb": shipping_boxes.representative_billable_lb(box_id),
+                    "weight_basis": shipping_boxes.weight_basis(box_id),
                 }
                 for box_id, b in shipping_boxes.BOXES.items()
             },

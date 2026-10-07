@@ -343,14 +343,71 @@ def billable_weight_lb(box_id: str, count: int, mode: str) -> float:
     return max(actual_weight_lb(box_id, count, mode), dim_weight_lb(box_id))
 
 
-def representative_billable_lb(box_id: str) -> int:
-    """Worst typical billable weight at full capacity across the QUOTABLE modes
-    — the weight the rate-checker declares for each box (never undercharge).
+# ── Packed-weight calibration + basis (GOL-3201) ─────────────────────────────
+# The rate feed prices each box at an ESTIMATED ACTUAL billable weight, not the
+# full-capacity worst case — because packed weight moves the carrier price as
+# much as geography (the shipped small boxes ran 6.5-14.5 lb; most at 6.5). A
+# box is priced at its calibrated typical billable weight ONLY when it is
+# "verified": at least MIN_CALIBRATION_SAMPLES recorded shipped weights back it
+# AND it is not force-conservative. Every other box stays "unverified" and keeps
+# the conservative full-capacity weight — never undercharge on a box we have not
+# measured.
+#
+# Calibration is DATA, applied by a reviewed refresh PR from the report of
+# ``scripts/rate_check/calibrate_weights.py``; it is NEVER computed live (same
+# contract as the shipping_rates.json refresh). ``typical_billable_lb`` is the
+# empirical median packed weight (the carrier bills ceil() of it); ``samples``
+# is how many recorded ``grove.label.batch.line.weight_lb`` rows back it.
+MIN_CALIBRATION_SAMPLES = 5
 
-    Only ``QUOTABLE_MODES`` (dormant) count: a bareroot parcel only ships in its
-    dormant window, so the leafed weight prices a parcel that is never bought
-    (see ``QUOTABLE_MODES``). Falls back to the box's own modes if a future box
-    declares none of the quotable modes, so this never silently returns 0.
+# Boxes pinned to the conservative full-capacity weight regardless of sample
+# count (spec 2026-10-07): the large box's tare + paper were DERIVED by physical
+# scaling, never bench-measured, so even a full sample set keeps the
+# conservative weight (and the ``unverified`` flag) until Josh weighs a full
+# large box and the calibration moves it off this set in a reviewed PR.
+FORCE_CONSERVATIVE_BOXES: frozenset = frozenset({"large"})
+
+# Seed: ``small`` is verified off the 13 shipped small-box labels the CEO joined
+# from Odoo (batch LB-20261005-01, captured 2026-10-06; medians ratified
+# 2026-10-07 on the GOL-2923 thread) — packed weights 6.5(x9)/8.5(x2)/12.5/14.5,
+# median 6.5, so ceil = 7 lb, IDENTICAL to the prior full-capacity quote. This
+# seed re-bases the published 7 lb on measured data; it moves no published rate.
+# GOL-3200's golden dataset is the durable source — a refresh PR re-runs
+# calibrate_weights.py against it and updates ``samples`` / ``typical_billable_lb``
+# here only if the measured median moves. ``large`` is intentionally absent
+# (0 samples + force-conservative) so it quotes its 14 lb worst case.
+WEIGHT_CALIBRATION: dict[str, dict] = {
+    "small": {"samples": 13, "typical_billable_lb": 6.5},
+}
+
+
+def weight_basis(box_id: str) -> str:
+    """``"verified"`` | ``"unverified"`` — whether this box is priced at its
+    calibrated typical weight or the conservative full-capacity weight.
+
+    ``"verified"`` requires ``MIN_CALIBRATION_SAMPLES``+ recorded shipped
+    weights AND that the box is not in ``FORCE_CONSERVATIVE_BOXES``. Everything
+    else is ``"unverified"`` and quotes the conservative worst case (never
+    undercharge on a box we have not measured). Surfaced per box in the rate
+    feed so the storefront can label an unverified quote as conservative.
+    """
+    if box_id in FORCE_CONSERVATIVE_BOXES:
+        return "unverified"
+    cal = WEIGHT_CALIBRATION.get(box_id)
+    if cal and cal.get("samples", 0) >= MIN_CALIBRATION_SAMPLES and "typical_billable_lb" in cal:
+        return "verified"
+    return "unverified"
+
+
+def conservative_billable_lb(box_id: str) -> int:
+    """Full-capacity worst-case billable weight across QUOTABLE modes (ceil lb).
+
+    The no-undercharge fallback for an unverified box: assume the box ships
+    packed to capacity in its heaviest quotable mode. Only ``QUOTABLE_MODES``
+    (dormant) count — a bareroot parcel only ships in its dormant window, so the
+    leafed weight prices a parcel that is never bought (see ``QUOTABLE_MODES``).
+    Falls back to the box's own modes if a future box declares none of the
+    quotable modes, so this never silently returns 0.
     """
     b = BOXES[box_id]
     modes = [m for m in QUOTABLE_MODES if m in b["capacity"]] or list(b["capacity"])
@@ -358,9 +415,28 @@ def representative_billable_lb(box_id: str) -> int:
     return math.ceil(worst)
 
 
+def representative_billable_lb(box_id: str) -> int:
+    """Billable weight (whole lb, rounded up to the carrier pound) the rate feed
+    quotes for a box.
+
+    VERIFIED box: the calibrated typical billable weight — the estimated ACTUAL
+    weight its packed boxes ship at (median of recorded shipped weights), not the
+    full-capacity worst case. UNVERIFIED box: the conservative full-capacity
+    worst case (``conservative_billable_lb``) so an unmeasured box is never
+    undercharged. See ``weight_basis`` / ``WEIGHT_CALIBRATION`` (GOL-3201).
+    """
+    if weight_basis(box_id) == "verified":
+        return math.ceil(WEIGHT_CALIBRATION[box_id]["typical_billable_lb"])
+    return conservative_billable_lb(box_id)
+
+
 # No catalog box may exceed the 70 lb USPS Ground Advantage ceiling at its
 # worst-case fill — fails loudly at import if a future box does (GOL-1906).
-assert all(representative_billable_lb(box_id) <= MAX_SHIP_WEIGHT_LB for box_id in BOXES)
+# Guard on the conservative full-capacity weight, not the calibrated typical
+# (``representative_billable_lb``): a verified box can quote a typical weight
+# under the ceiling while its worst-case packed fill still exceeds it, so only
+# ``conservative_billable_lb`` preserves the original mailability invariant.
+assert all(conservative_billable_lb(box_id) <= MAX_SHIP_WEIGHT_LB for box_id in BOXES)
 
 
 def usable_boxes(length_class: int, mode: str) -> list[str]:
