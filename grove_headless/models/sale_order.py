@@ -59,6 +59,16 @@ class SaleOrder(models.Model):
         copy=False,
     )
 
+    # Bareroot pre-order wave the shopper chose at checkout (hotfix 2026-10-07).
+    # Validated server-side in _create_draft_order against the zone's order-by
+    # deadline; False for immediate orders and for legacy payloads that sent no
+    # ship_wave.
+    grove_ship_wave = fields.Selection(
+        [("fall", "Fall"), ("spring", "Spring")],
+        readonly=True,
+        copy=False,
+    )
+
     # Per-state bundle component substitution the warehouse MUST honour when
     # packing (GOL-2237). Written at checkout by _stamp_bundle_substitution when
     # a bundle (phantom-BOM kit) ships into a state that restricts one of its

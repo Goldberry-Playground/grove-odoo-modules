@@ -30,8 +30,10 @@ from ..models.preorder_email import confirmation_deposit_line, preship_balance_l
 from ..models.shipment_email import NOTIFY_STATUSES, delivery_status_from_webhook, shipment_notice_copy
 from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from ..models.shipping_calendar import (
+    LEAFED_WINDOW,
     MODE_PREORDER,
     merge_calendar_override,
+    preorder_waves,
     resolve_fulfillment,
     serialize_ship_options,
     ship_options,
@@ -2872,6 +2874,62 @@ def _stamp_exempt_bundle_note(kit_line, state_label):
     order.grove_substitution_note = (prior + "\n\n" + note) if prior else note
 
 
+_SHIP_WAVES = ("fall", "spring")
+_MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _validate_ship_wave(env, payload, lines, fulfillment, zip_code, today, company=None):
+    """Server-side pre-order wave / potted-season gate for ``_create_draft_order``.
+
+    Returns ``(error_message, ship_wave)``; ``error_message`` is None when the
+    cart passes, and ``ship_wave`` is the validated wave to store (None when the
+    payload carried no ``ship_wave``).
+
+    Always enforced (with or without ``ship_wave``): potted-tier lines only sell
+    inside ``LEAFED_WINDOW`` (inclusive), and a cart never mixes a potted-tier
+    line with a bareroot line. The wave checks apply only when the payload sends
+    ``ship_wave``, so a legacy client keeps today's behaviour (nothing stored).
+    ``fulfillment`` is "pickup" for farm pickup, anything else for ship.
+    """
+    tiers = {
+        line.product_id.grove_effective_shipping_tier
+        for line in lines
+        if not line.display_type and line.product_id and line.product_id.product_tmpl_id.type != "service"
+    }
+    if "potted" in tiers:
+        start, end = LEAFED_WINDOW
+        if not (start <= (today.month, today.day) <= end):
+            return "Potted trees are sold through Oct 15. Choose a bareroot pre-order.", None
+        if "bareroot" in tiers:
+            return (
+                "Pre-orders check out on their own. Remove the trees that ship now, or check them out first.",
+                None,
+            )
+
+    raw = payload.get("ship_wave")
+    if raw is None:
+        return None, None
+    wave = raw.strip().lower() if isinstance(raw, str) else None
+    if wave not in _SHIP_WAVES:
+        return "Choose a fall or spring pre-order wave.", None
+    if "bareroot" not in tiers:
+        return "A pre-order wave only applies to bareroot pre-orders.", None
+
+    wave_zip = _farm_pickup_zip(env, company) if fulfillment == "pickup" else zip_code
+    zone = usda_zone_for_zip(wave_zip)
+    calendar = merge_calendar_override(_parse_calendar_override(env))
+    if zone is None or int(zone) not in calendar["zones"]:
+        return "We could not find a planting zone for that ZIP code.", None
+    entry = next(w for w in preorder_waves(zone, today, calendar) if w["wave"] == wave)
+    if not entry["open"]:
+        if entry["reason"] == "opens_sep_1":
+            return f"The {wave} pre-order for zone {int(zone)} opens Sep 1.", None
+        month, day = entry["order_by"]
+        msg = f"The {wave} pre-order for zone {int(zone)} closed on {_MONTH_ABBR[month - 1]} {day}."
+        return (msg + " Choose spring." if wave == "fall" else msg), None
+    return None, wave
+
+
 def _create_draft_order(website, env, payload, discount_out=None):
     """Build a draft sale.order from a posted cart payload.
 
@@ -3070,6 +3128,19 @@ def _create_draft_order(website, env, payload, discount_out=None):
             status=400,
         )
     is_ship_to = not is_pickup and bool(ship_state)
+    # Potted-season, mixed-cart and pre-order wave gate (hotfix 2026-10-07).
+    wave_error, ship_wave = _validate_ship_wave(
+        env,
+        payload,
+        order.order_line,
+        "pickup" if is_pickup else "ship",
+        (shipping or {}).get("zip"),
+        _today_utc(),
+        current_company,
+    )
+    if wave_error:
+        order.unlink()
+        return None, _json_response({"error": wave_error}, status=400)
     if is_ship_to:
         dest = canonical_state_code(ship_state)
         if dest is None or zone_for_state(dest) is None:
@@ -3340,6 +3411,7 @@ def _create_draft_order(website, env, payload, discount_out=None):
     # state → the pre-1057 $0-shipping local case) carries no shipping line and
     # is never labelled, so it collapses to "pickup" for alerting/label-gating.
     order.grove_fulfillment = "ship" if is_ship_to else "pickup"
+    order.grove_ship_wave = ship_wave
 
     return order, None
 
