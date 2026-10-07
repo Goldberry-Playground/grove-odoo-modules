@@ -116,6 +116,7 @@ class RateFeedTests(unittest.TestCase):
                 "weather_hold_note",
                 "zones",
                 "resolved",  # GOL-1386: per-zone server-resolved mode
+                "pickup_waves",  # 2026-10-07: fixed farm-pickup fall schedule
             },
         )
         # GOL-2957: the green list spans USDA zones 3-10 (derived from the
@@ -173,6 +174,18 @@ class RateFeedTests(unittest.TestCase):
             # Advisory fields are calendar-wide, never duplicated per zone.
             self.assertNotIn("approximate", entry)
             self.assertNotIn("weather_hold_note", entry)
+
+    def test_pickup_waves_in_calendar_block(self):
+        # Josh 2026-10-07: the storefront renders farm-pickup waves from the feed.
+        feed = sz.rate_feed(None, datetime.date(2026, 10, 16))
+        waves = {w["wave"]: w for w in feed["calendar"]["pickup_waves"]}
+        self.assertEqual(waves["fall"]["ship_window"], [[10, 20], [10, 31]])
+        self.assertEqual(waves["fall"]["order_by"], [10, 15])
+        self.assertFalse(waves["fall"]["open"])
+        self.assertEqual(waves["fall"]["reason"], "deadline_passed")
+        self.assertTrue(waves["spring"]["open"])
+        self.assertEqual(waves["spring"]["order_by"], [3, 29])
+        json.dumps(feed)
 
     def test_resolved_is_json_serializable(self):
         # The whole feed (resolved block included) must round-trip through JSON —
