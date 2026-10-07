@@ -13,6 +13,7 @@ from . import (
     test_carrier_tracking_cron,  # noqa: F401
     test_checkout_compliance_gate,  # noqa: F401
     test_checkout_quote,  # noqa: F401
+    test_checkout_ship_wave,  # noqa: F401
     test_consult_compliance_gate,  # noqa: F401
     test_content_draft_request,  # noqa: F401
     test_detail_serialization,  # noqa: F401

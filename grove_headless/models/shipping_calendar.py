@@ -69,42 +69,45 @@ def served_usda_range() -> list[int] | None:
 
 # ── Calendar data (Josh, 2026-07-02; vault wiki/Software/Grove Shipping) ────
 # (month, day) tuples; year resolved at query time.
+# Spring windows all end Apr 15 (the bareroot dormancy end) so every spring wave
+# ships inside dormancy; spring order_by = 7 days before each zone's ship start
+# (Josh ruling 2026-10-07). Fall windows are unchanged.
 WAVE_SCHEDULE: dict[int, dict] = {
     2: {
         "fall": {"ship_start": (11, 2), "ship_end": (11, 13), "order_by": (11, 12)},
-        "spring": {"ship_start": (4, 19), "ship_end": (6, 6), "order_by": (5, 31)},
+        "spring": {"ship_start": (4, 8), "ship_end": (4, 15), "order_by": (4, 1)},
     },
     3: {
         "fall": {"ship_start": (11, 2), "ship_end": (11, 13), "order_by": (11, 12)},
-        "spring": {"ship_start": (4, 19), "ship_end": (6, 6), "order_by": (5, 31)},
+        "spring": {"ship_start": (4, 8), "ship_end": (4, 15), "order_by": (4, 1)},
     },
     4: {
         "fall": {"ship_start": (11, 2), "ship_end": (11, 19), "order_by": (11, 16)},
-        "spring": {"ship_start": (4, 19), "ship_end": (6, 6), "order_by": (5, 31)},
+        "spring": {"ship_start": (4, 8), "ship_end": (4, 15), "order_by": (4, 1)},
     },
     5: {
         "fall": {"ship_start": (11, 2), "ship_end": (11, 19), "order_by": (11, 16)},
-        "spring": {"ship_start": (4, 12), "ship_end": (6, 6), "order_by": (5, 31)},
+        "spring": {"ship_start": (4, 12), "ship_end": (4, 15), "order_by": (4, 5)},
     },
     6: {
         "fall": {"ship_start": (11, 9), "ship_end": (11, 26), "order_by": (11, 21)},
-        "spring": {"ship_start": (4, 5), "ship_end": (6, 6), "order_by": (5, 31)},
+        "spring": {"ship_start": (4, 5), "ship_end": (4, 15), "order_by": (3, 29)},
     },
     7: {
         "fall": {"ship_start": (11, 9), "ship_end": (11, 26), "order_by": (11, 21)},
-        "spring": {"ship_start": (3, 16), "ship_end": (5, 24), "order_by": (5, 17)},
+        "spring": {"ship_start": (3, 16), "ship_end": (4, 15), "order_by": (3, 9)},
     },
     8: {
         "fall": {"ship_start": (11, 9), "ship_end": (12, 12), "order_by": (11, 21)},
-        "spring": {"ship_start": (3, 1), "ship_end": (4, 30), "order_by": (4, 16)},
+        "spring": {"ship_start": (3, 1), "ship_end": (4, 15), "order_by": (2, 22)},
     },
     9: {
         "fall": {"ship_start": (11, 9), "ship_end": (12, 12), "order_by": (11, 21)},
-        "spring": {"ship_start": (3, 1), "ship_end": (4, 30), "order_by": (4, 16)},
+        "spring": {"ship_start": (3, 1), "ship_end": (4, 15), "order_by": (2, 22)},
     },
     10: {
         "fall": {"ship_start": (11, 9), "ship_end": (12, 12), "order_by": (11, 21)},
-        "spring": {"ship_start": (3, 1), "ship_end": (4, 30), "order_by": (4, 16)},
+        "spring": {"ship_start": (3, 1), "ship_end": (4, 15), "order_by": (2, 22)},
     },
 }
 
@@ -286,7 +289,7 @@ ZONE_ORDER_DEADLINES: dict[int, dict[str, tuple]] = {
 # Fallback windows for a zone an override introduces that the real chart does
 # not cover (defensive only — the chart already spans every USDA zone 2-10).
 _FALL_DEFAULT: tuple[tuple[int, int], tuple[int, int]] = ((11, 2), (11, 26))
-_SPRING_DEFAULT: tuple[tuple[int, int], tuple[int, int]] = ((3, 1), (6, 6))
+_SPRING_DEFAULT: tuple[tuple[int, int], tuple[int, int]] = ((3, 1), (4, 15))
 
 # The three shippable modes the frontend (GOL-1114) resolves to, plus the
 # fallback. Kept here so the contract has one authority.
@@ -533,6 +536,49 @@ def resolve_fulfillment(zone, today: date, calendar: dict | None = None) -> dict
     return result
 
 
+# Josh 2026-10-07: both pre-order waves open Sep 1; each closes at the zone's
+# order-by (inclusive). No late bundling past a deadline.
+PREORDER_WAVES_OPEN = (9, 1)
+
+
+def preorder_waves(zone, today: date, calendar: dict | None = None) -> list[dict]:
+    """Fall + spring pre-order availability for one USDA zone on ``today``.
+
+    The fall wave is sold from Sep 1 to the zone's fall order-by. The spring
+    wave is sold from Sep 1 through Dec 31 and Jan 1 to the zone's spring
+    order-by. Outside those spans the wave is returned closed with a reason so
+    the storefront can grey it out instead of hiding it.
+    """
+    calendar = calendar or default_calendar()
+    z = calendar["zones"][int(zone)]
+    t = (today.month, today.day)
+    fall_by = _md(z["fall_order_deadline"])
+    spring_by = _md(z["spring_order_deadline"])
+
+    def entry(wave, window, order_by, open_, reason):
+        return {
+            "wave": wave,
+            "ship_window": [list(_md(window[0])), list(_md(window[1]))],
+            "order_by": list(order_by),
+            "open": open_,
+            "reason": None if open_ else reason,
+        }
+
+    if t >= PREORDER_WAVES_OPEN:
+        fall_open, fall_reason = t <= fall_by, "deadline_passed"
+    else:
+        fall_open, fall_reason = False, "opens_sep_1"
+
+    spring_open = t >= PREORDER_WAVES_OPEN or t <= spring_by
+    # Closed spring: name the deadline that just passed through June, then point
+    # at the Sep 1 reopening for the rest of the summer.
+    spring_reason = "deadline_passed" if t <= (6, 30) else "opens_sep_1"
+    return [
+        entry("fall", z["fall"], fall_by, fall_open, fall_reason),
+        entry("spring", z["spring"], spring_by, spring_open, spring_reason),
+    ]
+
+
 def _prev_day(md: tuple[int, int], year: int = 2001) -> tuple[int, int]:
     """The (month, day) one day before ``md`` — the inclusive end of a preorder
     window that runs up to (but not into) a ship_start.
@@ -630,5 +676,6 @@ def serialize_resolved(calendar: dict | None, today: date) -> dict:
             "ship_window": r["ship_window"],
             "order_deadline": r["order_deadline"],
             "fulfillment_days": r["fulfillment_days"],
+            "waves": preorder_waves(z, today, cal),
         }
     return resolved

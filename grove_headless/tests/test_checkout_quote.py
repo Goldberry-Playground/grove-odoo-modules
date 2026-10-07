@@ -10,6 +10,7 @@ the charge can never disagree. Runs under Odoo's --test-enable runner.
 
 import json
 from datetime import date, datetime, timedelta
+from unittest import mock
 
 from odoo.addons.grove_headless.controllers import main as grove_main
 from odoo.addons.grove_headless.models import stripe_gateway
@@ -70,8 +71,49 @@ class TestDepositReasonForLines(_PoolFixture, GroveTaxFixtureMixin, TransactionC
         super().setUp()
         self._build_pool()
 
-    def _reason(self, lines, fulfillment="ship", today=BEFORE_CUTOVER):
-        return grove_main._deposit_reason_for_lines(self.env, lines, fulfillment, today)
+    def _reason(self, lines, fulfillment="ship", today=BEFORE_CUTOVER, ship_wave=None):
+        return grove_main._deposit_reason_for_lines(self.env, lines, fulfillment, today, ship_wave)
+
+    def test_in_stock_bareroot_with_wave_is_a_preorder_ship_or_pickup(self):
+        self._stock(self.bareroot, 5)
+        for fulfillment in ("ship", "pickup"):
+            for today in (BEFORE_CUTOVER, AFTER_CUTOVER):
+                for wave in ("fall", "spring"):
+                    self.assertEqual(self._reason([(self.bareroot, 1)], fulfillment, today, wave), "preorder")
+
+    def test_sold_out_bareroot_with_wave_is_a_preorder(self):
+        self.assertEqual(self._reason([(self.bareroot, 1)], "ship", BEFORE_CUTOVER, "fall"), "preorder")
+
+    def test_potted_only_with_wave_is_never_a_deposit(self):
+        self._stock(self.potted, 5)
+        self.assertIsNone(self._reason([(self.potted, 1)], "pickup", BEFORE_CUTOVER, "fall"))
+        self.assertIsNone(self._reason([(self.potted, 1)], "ship", AFTER_CUTOVER, "fall"))
+
+    def test_no_wave_legacy_rule_unchanged(self):
+        self._stock(self.bareroot, 5)
+        self.assertIsNone(self._reason([(self.bareroot, 1)], "ship", BEFORE_CUTOVER))
+        self.assertEqual(self._reason([(self.bareroot, 1)], "ship", AFTER_CUTOVER), "off-season")
+        self.assertIsNone(self._reason([(self.bareroot, 1)], "pickup", AFTER_CUTOVER))
+
+    def test_order_predicate_reads_the_stored_wave(self):
+        partner = self.env["res.partner"].create({"name": "W", "email": "w@example.com"})
+        order = (
+            self.env["sale.order"]
+            .with_company(self.company)
+            .create(
+                {
+                    "partner_id": partner.id,
+                    "company_id": self.company.id,
+                    "order_line": [(0, 0, {"product_id": self.bareroot.id, "product_uom_qty": 1})],
+                }
+            )
+        )
+        order.grove_fulfillment = "pickup"
+        self._stock(self.bareroot, 3)
+        self.assertFalse(grove_main._order_takes_deposit(order, BEFORE_CUTOVER))
+        order.grove_ship_wave = "fall"
+        self.assertTrue(grove_main._order_takes_deposit(order, BEFORE_CUTOVER))
+        self.assertTrue(grove_main._order_takes_deposit(order, AFTER_CUTOVER))
 
     def test_sold_out_bareroot_is_a_deposit_any_fulfillment(self):
         # No stock anywhere in the pool → the bareroot line is sold out.
@@ -216,6 +258,84 @@ class TestCheckoutQuoteEndpoint(_PoolFixture, GroveTaxFixtureMixin, HttpCase):
             self.assertIsNone(body["amount_due_today"])
         self.assertEqual(body["lines"][0]["free_qty"], 5.0)
         self.assertFalse(body["lines"][0]["sold_out"])
+
+    def _quote_waved(self, items, fulfillment, today=date(2026, 10, 7), **extra):
+        # The wave rules are nursery-only (M1); this fixture posts as goldberry
+        # (main-company pool), so treat it as the nursery for the rule tests.
+        # The real tenant scope is covered by the *_tenant tests below.
+        body = {"items": [{"variant_id": v.id, "quantity": 1} for v in items], "fulfillment": fulfillment}
+        body.update(extra)
+        with (
+            mock.patch.object(grove_main, "_today_utc", return_value=today),
+            mock.patch.object(grove_main, "_is_nursery_website", return_value=True),
+        ):
+            return self._post(body)
+
+    def _post_tenant(self, body, tenant):
+        headers = {
+            "X-Odoo-Database": get_db_name(),
+            "X-Grove-Tenant": tenant,
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        return self.url_open("/grove/api/v1/checkout/quote", data=json.dumps(body).encode(), headers=headers)
+
+    def test_goldberry_tenant_potted_after_oct_15_quotes(self):
+        self._stock(self.potted, 5)
+        body = {"items": [{"variant_id": self.potted.id, "quantity": 1}], "fulfillment": "pickup"}
+        with mock.patch.object(grove_main, "_today_utc", return_value=date(2026, 10, 16)):
+            resp = self._post_tenant(dict(body, ship_wave="fall"), "goldberry")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        self.assertIsNone(resp.json()["ship_wave"])
+
+    def test_nursery_tenant_potted_after_oct_15_rejected(self):
+        # A company-less product so the nursery tenant's variant lookup finds it;
+        # grove_shipping_tier left at its "potted" default.
+        product = self.env["product.product"].create({"name": "Nursery Quote Potted", "type": "consu"})
+        body = {"items": [{"variant_id": product.id, "quantity": 1}], "fulfillment": "pickup"}
+        with mock.patch.object(grove_main, "_today_utc", return_value=date(2026, 10, 16)):
+            resp = self._post_tenant(body, "nursery")
+        self.assertEqual(resp.status_code, 400, resp.text)
+        self.assertIn("sold through oct 15", resp.text.lower())
+
+    def test_wave_quote_is_a_preorder_deposit_for_pickup_and_ship(self):
+        self._stock(self.bareroot, 5)
+        resp = self._quote_waved([self.bareroot], "pickup", ship_wave="fall")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertTrue(body["deposit_now"])
+        self.assertEqual(body["deposit_reason"], "preorder")
+        self.assertEqual(body["amount_due_today"], 10.0)
+        self.assertEqual(body["ship_wave"], "fall")
+        ship = self._quote_waved([self.bareroot], "ship", ship_wave="spring", shipping={"zip": "08014"}).json()
+        self.assertEqual(
+            (ship["deposit_reason"], ship["amount_due_today"], ship["ship_wave"]), ("preorder", 10.0, "spring")
+        )
+
+    def test_wave_quote_ship_without_zip_skips_only_the_zone_check(self):
+        self._stock(self.bareroot, 5)
+        body = self._quote_waved([self.bareroot], "ship", ship_wave="fall").json()
+        self.assertEqual(body["deposit_reason"], "preorder")
+
+    def test_no_wave_quote_reports_null_wave(self):
+        self._stock(self.bareroot, 5)
+        body = self._quote_waved([self.bareroot], "pickup").json()
+        self.assertIsNone(body["ship_wave"])
+
+    def test_wave_quote_rejects_what_the_order_path_rejects(self):
+        self._stock(self.bareroot, 5)
+        self._stock(self.potted, 5)
+        cases = [
+            (self._quote_waved([self.bareroot], "pickup", ship_wave="winter"), "fall or spring"),
+            (self._quote_waved([self.potted], "pickup", ship_wave="fall"), "only applies to bareroot"),
+            (self._quote_waved([self.potted], "pickup", date(2026, 10, 16)), "sold through Oct 15"),
+            (self._quote_waved([self.potted, self.bareroot], "pickup"), "Pre-orders check out on their own"),
+            (self._quote_waved([self.bareroot], "pickup", date(2026, 11, 22), ship_wave="fall"), "closed on"),
+            (self._quote_waved([self.bareroot], "ship", ship_wave="fall", shipping={"zip": "00000"}), "planting zone"),
+        ]
+        for resp, fragment in cases:
+            self.assertEqual(resp.status_code, 400, (fragment, resp.text))
+            self.assertIn(fragment.lower(), resp.text.lower())
 
     def test_validation_and_unknown_variant(self):
         self.assertEqual(self._post({"items": []}).status_code, 400)

@@ -130,8 +130,8 @@ class RateFeedTests(unittest.TestCase):
             self.assertEqual(len(zw["fall"]), 2)
         # Real chart values for a sampled cold + warm zone.
         self.assertEqual(cal["zones"]["2"]["fall"], [[11, 2], [11, 13]])
-        self.assertEqual(cal["zones"]["8"]["spring"], [[3, 1], [4, 30]])
-        self.assertEqual(cal["zones"]["8"]["spring_order_deadline"], [4, 16])
+        self.assertEqual(cal["zones"]["8"]["spring"], [[3, 1], [4, 15]])
+        self.assertEqual(cal["zones"]["8"]["spring_order_deadline"], [2, 22])
 
     def test_calendar_override_flows_through_feed(self):
         # An admin override (the system parameter) narrows a single zone's fall
@@ -152,15 +152,18 @@ class RateFeedTests(unittest.TestCase):
         feed = sz.rate_feed(None, today)
         resolved = feed["calendar"]["resolved"]
         self.assertEqual(set(resolved), {str(z) for z in range(2, 11)})
+        self.assertEqual(resolved["6"]["waves"][0]["wave"], "fall")
         cal = sc.default_calendar()
         for z in range(2, 11):
             expected = sc.resolve_fulfillment(z, today, cal)
             entry = resolved[str(z)]
             self.assertEqual(
                 set(entry),
-                {"mode", "season", "ship_timing", "ship_window", "order_deadline", "fulfillment_days"},
+                {"mode", "season", "ship_timing", "ship_window", "order_deadline", "fulfillment_days", "waves"},
             )
             for key in entry:
+                if key == "waves":
+                    continue
                 self.assertEqual(entry[key], expected[key], f"zone {z} key {key}")
             # Advisory fields are calendar-wide, never duplicated per zone.
             self.assertNotIn("approximate", entry)

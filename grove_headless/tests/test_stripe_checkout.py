@@ -24,6 +24,10 @@ from odoo.tests.common import HttpCase, get_db_name
 from odoo.tools import mute_logger
 from psycopg2 import IntegrityError
 
+# Potted lines only sell May 1 to Oct 15 (checkout season gate), so tests that
+# post default-potted carts pin "today" in season rather than use the real clock.
+_in_season = mock.patch.object(grove_main, "_today_utc", new=lambda: date(2026, 10, 7))
+
 
 @tagged("post_install", "-at_install")
 class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
@@ -855,6 +859,37 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(discounts[0]["amount_cents"], -stripe_gateway.to_cents(10.0))
         self.assertEqual(discounts[0]["name"], "Discount (FLATWOODS)")
 
+    def test_wave_order_in_stock_pickup_takes_flat_deposit_and_blocks_promo(self):
+        """2026-10-07: an in-stock bareroot order carrying a chosen wave is a
+        pre-order deposit even for pickup before the cutover. The line builder
+        records every variant as a preorder (so grove_preorder_variant_ids and
+        setup_future_usage=off_session follow, as for the other deposit reasons)
+        and the promo gate rejects a code on it."""
+        self._make_bareroot()
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=2)
+        order.grove_fulfillment = "pickup"
+        self.assertFalse(grove_main._order_takes_deposit(order, self.BEFORE_CUTOVER))
+        order.grove_ship_wave = "fall"
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        self.assertEqual([li["kind"] for li in line_items], ["deposit"])
+        self.assertEqual(preorder_ids, [self.product.id])
+        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+        self.assertTrue(grove_main._cart_has_preorder(self.env, order, None, today=self.BEFORE_CUTOVER))
+
+        self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
+        payload = self._cart_payload("WV", fulfillment="pickup", promo_code="TESTPROMO", ship_wave="fall")
+        payload["items"] = [{"variant_id": self.product.id, "quantity": 2}]
+        with (
+            mock.patch.object(grove_main, "_today_utc", return_value=date(2026, 10, 7)),
+            # Wave rules are nursery-only (M1); this class runs on the main company.
+            mock.patch.object(grove_main, "_is_nursery_website", return_value=True),
+        ):
+            rejected, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(rejected)
+        self.assertEqual(error.status_code, 400)
+        self.assertIn("preorder", error.data.decode().lower())
+
     def test_cart_has_preorder_agrees_with_line_builder(self):
         """The promo-gate predicate (_cart_has_preorder) must classify a cart the
         same way the charging path (_build_stripe_line_items) does — a deposit
@@ -1061,6 +1096,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         payload.update(extra)
         return payload
 
+    @_in_season
     def test_state_gate_rejects_non_green_destination(self):
         """Defect 1: an unsupported ship-to state is rejected server-side at
         session creation, before any payment. Fixture state = CA (permanently
@@ -1082,6 +1118,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(error.status_code, 409)
         self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
 
+    @_in_season
     def test_potted_ship_order_clears_gate_and_fails_safe_without_rates(self):
         """GOL-2199 potted go-live: a potted SHIP order is no longer 400-blocked
         at the unshippable gate. When no potted shipping charge can be resolved
@@ -1099,6 +1136,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertIn("couldn't calculate shipping", error.data.decode().lower())
         self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
 
+    @_in_season
     def test_potted_ship_order_proceeds_once_shipping_prices(self):
         """GOL-2199: with a potted shipping charge resolvable (rate table carries
         the potted boxes), a potted ship-to order passes the whole ship gate —
@@ -1112,6 +1150,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
 
     # ── explicit fulfillment: pickup vs ship (GOL-1057) ───────────────────
 
+    @_in_season
     def test_pickup_skips_ship_gate_and_adds_no_shipping(self):
         """Farm pickup is the ONE legitimate $0-shipping path. An explicit
         fulfillment='pickup' order clears the ship-to gate even for potted trees
@@ -1137,6 +1176,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertIn("pickup", error.data.decode().lower())
         self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
 
+    @_in_season
     def test_pickup_keeps_wv_tax_despite_out_of_state_address(self):
         """GOL-1303: a pickup order carrying a leftover out-of-state address (buyer
         filled the address, then toggled to pickup) must KEEP the WV default tax —
