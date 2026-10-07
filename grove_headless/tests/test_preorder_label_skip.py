@@ -277,14 +277,23 @@ class TestPreorderWaveLabelGate(GroveTaxFixtureMixin, TransactionCase):
         _a, plan, _m = self._pack_dormancy(self._assigned(), date(2026, 11, 15), dormant=True)
         self.assertTrue(plan)
 
+    def _unassigned_wave_order(self):
+        """Wave set, NOT wave_assigned, non-preorder line: reaches _wave_hold_reason
+        and then the dormancy gate inside _grove_pack_for_label."""
+        order = self._order("fall")
+        order.grove_preorder_variant_ids = False
+        return order
+
     def test_zoneless_wave_order_outside_dormancy_refused(self):
-        order = self._assigned()
+        order = self._unassigned_wave_order()
         order.grove_usda_zone = False
+        self.assertIsNone(order._wave_hold_reason(date(2026, 10, 20)))
         with self.assertRaisesRegex(UserError, "dormant"):
             self._pack_dormancy(order, date(2026, 10, 20), dormant=False)
 
     def test_zone_missing_from_calendar_no_keyerror_dormancy_applies(self):
-        order = self._assigned()
+        order = self._unassigned_wave_order()
         with patch.object(sale_order_module, "preorder_waves", side_effect=KeyError(6)):
+            self.assertIsNone(order._wave_hold_reason(date(2026, 10, 20)))
             with self.assertRaisesRegex(UserError, "dormant"):
                 self._pack_dormancy(order, date(2026, 10, 20), dormant=False)

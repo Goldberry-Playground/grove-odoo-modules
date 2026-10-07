@@ -687,7 +687,9 @@ class SaleOrder(models.Model):
         Only orders with a stored ``grove_ship_wave`` and a known zone are held
         (an order without a wave keeps the legacy gate). The hold lasts until
         ``today`` is inside the chosen wave's ship window for the order's zone,
-        using the same admin calendar override as checkout."""
+        using the same admin calendar override as checkout. When the hold cannot
+        be computed (no zone, or the zone is missing from the calendar) this
+        returns None and the dormancy check in the caller is the fallback."""
         self.ensure_one()
         if not self.grove_ship_wave or not self.grove_usda_zone:
             return None
@@ -697,7 +699,12 @@ class SaleOrder(models.Model):
         try:
             waves = preorder_waves(int(self.grove_usda_zone), today, calendar)
         except (KeyError, ValueError):
-            return None  # zone missing from the calendar: dormancy gate still applies
+            _logger.warning(
+                "%s: zone %s missing from the shipping calendar; wave hold skipped, dormancy gate applies",
+                self.name,
+                self.grove_usda_zone,
+            )
+            return None
         wave = next((w for w in waves if w["wave"] == self.grove_ship_wave), None)
         if wave is None:
             return None
