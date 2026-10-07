@@ -152,15 +152,18 @@ class RateFeedTests(unittest.TestCase):
         feed = sz.rate_feed(None, today)
         resolved = feed["calendar"]["resolved"]
         self.assertEqual(set(resolved), {str(z) for z in range(2, 11)})
+        self.assertEqual(resolved["6"]["waves"][0]["wave"], "fall")
         cal = sc.default_calendar()
         for z in range(2, 11):
             expected = sc.resolve_fulfillment(z, today, cal)
             entry = resolved[str(z)]
             self.assertEqual(
                 set(entry),
-                {"mode", "season", "ship_timing", "ship_window", "order_deadline", "fulfillment_days"},
+                {"mode", "season", "ship_timing", "ship_window", "order_deadline", "fulfillment_days", "waves"},
             )
             for key in entry:
+                if key == "waves":
+                    continue
                 self.assertEqual(entry[key], expected[key], f"zone {z} key {key}")
             # Advisory fields are calendar-wide, never duplicated per zone.
             self.assertNotIn("approximate", entry)

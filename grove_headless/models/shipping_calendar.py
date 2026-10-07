@@ -533,6 +533,49 @@ def resolve_fulfillment(zone, today: date, calendar: dict | None = None) -> dict
     return result
 
 
+# Josh 2026-10-07: both pre-order waves open Sep 1; each closes at the zone's
+# order-by (inclusive). No late bundling past a deadline.
+PREORDER_WAVES_OPEN = (9, 1)
+
+
+def preorder_waves(zone, today: date, calendar: dict | None = None) -> list[dict]:
+    """Fall + spring pre-order availability for one USDA zone on ``today``.
+
+    The fall wave is sold from Sep 1 to the zone's fall order-by. The spring
+    wave is sold from Sep 1 through Dec 31 and Jan 1 to the zone's spring
+    order-by. Outside those spans the wave is returned closed with a reason so
+    the storefront can grey it out instead of hiding it.
+    """
+    calendar = calendar or default_calendar()
+    z = calendar["zones"][int(zone)]
+    t = (today.month, today.day)
+    fall_by = _md(z["fall_order_deadline"])
+    spring_by = _md(z["spring_order_deadline"])
+
+    def entry(wave, window, order_by, open_, reason):
+        return {
+            "wave": wave,
+            "ship_window": [list(_md(window[0])), list(_md(window[1]))],
+            "order_by": list(order_by),
+            "open": open_,
+            "reason": None if open_ else reason,
+        }
+
+    if t >= PREORDER_WAVES_OPEN:
+        fall_open, fall_reason = t <= fall_by, "deadline_passed"
+    else:
+        fall_open, fall_reason = False, "opens_sep_1"
+
+    spring_open = t >= PREORDER_WAVES_OPEN or t <= spring_by
+    # Closed spring: name the deadline that just passed through June, then point
+    # at the Sep 1 reopening for the rest of the summer.
+    spring_reason = "deadline_passed" if t <= (6, 30) else "opens_sep_1"
+    return [
+        entry("fall", z["fall"], fall_by, fall_open, fall_reason),
+        entry("spring", z["spring"], spring_by, spring_open, spring_reason),
+    ]
+
+
 def _prev_day(md: tuple[int, int], year: int = 2001) -> tuple[int, int]:
     """The (month, day) one day before ``md`` — the inclusive end of a preorder
     window that runs up to (but not into) a ship_start.
@@ -630,5 +673,6 @@ def serialize_resolved(calendar: dict | None, today: date) -> dict:
             "ship_window": r["ship_window"],
             "order_deadline": r["order_deadline"],
             "fulfillment_days": r["fulfillment_days"],
+            "waves": preorder_waves(z, today, cal),
         }
     return resolved
