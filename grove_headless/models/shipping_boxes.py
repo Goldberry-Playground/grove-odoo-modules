@@ -432,7 +432,11 @@ def representative_billable_lb(box_id: str) -> int:
 
 # No catalog box may exceed the 70 lb USPS Ground Advantage ceiling at its
 # worst-case fill — fails loudly at import if a future box does (GOL-1906).
-assert all(representative_billable_lb(box_id) <= MAX_SHIP_WEIGHT_LB for box_id in BOXES)
+# Guard on the conservative full-capacity weight, not the calibrated typical
+# (``representative_billable_lb``): a verified box can quote a typical weight
+# under the ceiling while its worst-case packed fill still exceeds it, so only
+# ``conservative_billable_lb`` preserves the original mailability invariant.
+assert all(conservative_billable_lb(box_id) <= MAX_SHIP_WEIGHT_LB for box_id in BOXES)
 
 
 def usable_boxes(length_class: int, mode: str) -> list[str]:
