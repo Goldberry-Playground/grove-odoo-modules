@@ -253,3 +253,38 @@ class TestPreorderWaveLabelGate(GroveTaxFixtureMixin, TransactionCase):
         self.assertIn("this spring", preship_balance_line(grove_main._preorder_ship_season(self.env, order)))
         # No stored wave: unchanged date-based recompute (still a season string).
         self.assertIn(grove_main._preorder_ship_season(self.env, self._order(False)), ("spring", "fall", None))
+
+    def _pack_dormancy(self, order, today, dormant):
+        with (
+            patch.object(fields.Date, "context_today", return_value=today),
+            patch.object(sale_order_module, "pack_for_state", return_value=[SimpleNamespace(box_id="BR_S", count=1)]),
+            patch.object(sale_order_module, "unshippable_reason", return_value=None),
+            patch.object(sale_order_module, "can_ship_bareroot", return_value=dormant),
+        ):
+            return order._grove_pack_for_label()
+
+    def _assigned(self, wave="fall"):
+        order = self._order(wave)
+        order.grove_fulfillment_state = "deposit_paid"
+        order.action_grove_assign_wave(f"2026-{wave}")
+        return order
+
+    def test_wave_assigned_outside_dormancy_still_refused(self):
+        with self.assertRaisesRegex(UserError, "dormant"):
+            self._pack_dormancy(self._assigned(), date(2026, 10, 20), dormant=False)
+
+    def test_wave_in_window_and_dormant_packs(self):
+        _a, plan, _m = self._pack_dormancy(self._assigned(), date(2026, 11, 15), dormant=True)
+        self.assertTrue(plan)
+
+    def test_zoneless_wave_order_outside_dormancy_refused(self):
+        order = self._assigned()
+        order.grove_usda_zone = False
+        with self.assertRaisesRegex(UserError, "dormant"):
+            self._pack_dormancy(order, date(2026, 10, 20), dormant=False)
+
+    def test_zone_missing_from_calendar_no_keyerror_dormancy_applies(self):
+        order = self._assigned()
+        with patch.object(sale_order_module, "preorder_waves", side_effect=KeyError(6)):
+            with self.assertRaisesRegex(UserError, "dormant"):
+                self._pack_dormancy(order, date(2026, 10, 20), dormant=False)

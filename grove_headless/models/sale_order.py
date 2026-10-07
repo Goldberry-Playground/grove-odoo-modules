@@ -694,14 +694,11 @@ class SaleOrder(models.Model):
         from ..controllers.main import _parse_calendar_override
 
         calendar = merge_calendar_override(_parse_calendar_override(self.env))
-        wave = next(
-            (
-                w
-                for w in preorder_waves(int(self.grove_usda_zone), today, calendar)
-                if w["wave"] == self.grove_ship_wave
-            ),
-            None,
-        )
+        try:
+            waves = preorder_waves(int(self.grove_usda_zone), today, calendar)
+        except (KeyError, ValueError):
+            return None  # zone missing from the calendar: dormancy gate still applies
+        wave = next((w for w in waves if w["wave"] == self.grove_ship_wave), None)
         if wave is None:
             return None
         (sm, sd), (em, ed) = wave["ship_window"]
@@ -828,9 +825,10 @@ class SaleOrder(models.Model):
 
         order_dt = self.date_order or fields.Datetime.now()
         order_date = fields.Datetime.context_timestamp(self, order_dt).date()
-        # An order that chose a wave is governed by that wave's window (checked
-        # above), never by the order-date cutover heuristic.
-        held_for_wave = False if self.grove_ship_wave else _after_deposit_cutover(self.env, order_date)
+        # An order that chose a wave is ALWAYS subject to the dormancy check (on
+        # top of the wave-window hold above), never to the order-date cutover
+        # heuristic.
+        held_for_wave = True if self.grove_ship_wave else _after_deposit_cutover(self.env, order_date)
         if held_for_wave and not can_ship_bareroot(today, window):
             raise UserError(
                 f"{self.name}: this order was placed after the season cutover, so its "
