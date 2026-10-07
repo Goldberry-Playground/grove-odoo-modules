@@ -8,7 +8,7 @@ from odoo.exceptions import UserError
 from . import carrier_tracking, shippo_client
 from .shipment_email import normalize_carrier
 from .shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
-from .shipping_calendar import usda_zone_for_zip
+from .shipping_calendar import merge_calendar_override, preorder_waves, usda_zone_for_zip
 from .shipping_zones import pack_for_state, unshippable_reason
 
 _logger = logging.getLogger(__name__)
@@ -681,6 +681,39 @@ class SaleOrder(models.Model):
         with self.env.registry.cursor() as cr:
             self.with_env(self.env(cr=cr)).write(vals)
 
+    def _wave_hold_reason(self, today):
+        """Why a chosen-wave pre-order cannot get a label on ``today``, else None.
+
+        Only orders with a stored ``grove_ship_wave`` and a known zone are held
+        (an order without a wave keeps the legacy gate). The hold lasts until
+        ``today`` is inside the chosen wave's ship window for the order's zone,
+        using the same admin calendar override as checkout."""
+        self.ensure_one()
+        if not self.grove_ship_wave or not self.grove_usda_zone:
+            return None
+        from ..controllers.main import _parse_calendar_override
+
+        calendar = merge_calendar_override(_parse_calendar_override(self.env))
+        wave = next(
+            (
+                w
+                for w in preorder_waves(int(self.grove_usda_zone), today, calendar)
+                if w["wave"] == self.grove_ship_wave
+            ),
+            None,
+        )
+        if wave is None:
+            return None
+        (sm, sd), (em, ed) = wave["ship_window"]
+        t = (today.month, today.day)
+        inside = (sm, sd) <= t <= (em, ed) if (sm, sd) <= (em, ed) else t >= (sm, sd) or t <= (em, ed)
+        if inside:
+            return None
+        return (
+            f"this order is in the {self.grove_ship_wave} wave, which ships "
+            f"{sm}/{sd} to {em}/{ed} for zone {self.grove_usda_zone}; no label until then."
+        )
+
     def _grove_pack_for_label(self):
         """Carrier-neutral shipment plan for ONE order: ``(address, plan, mode)``.
 
@@ -708,6 +741,10 @@ class SaleOrder(models.Model):
         skip_preorder_ids = (
             set() if self.grove_fulfillment_stage == "wave_assigned" else self._preorder_variant_id_set()
         )
+        today = fields.Date.context_today(self)
+        wave_hold = self._wave_hold_reason(today) if self.grove_fulfillment_stage != "wave_assigned" else None
+        if wave_hold:
+            raise UserError(f"{self.name}: {wave_hold}")
         partner = self.partner_shipping_id
         address = {
             "name": partner.name,
@@ -762,7 +799,6 @@ class SaleOrder(models.Model):
         reason = unshippable_reason(items)
         if reason:
             raise UserError(f"{self.name}: {reason}")
-        today = fields.Date.context_today(self)
         # Dormancy window is Odoo-editable (GOL-1906, Josh 2026-09-07) — read it
         # from config here and inject, so the label gate tracks the same dates
         # the storefront quotes. A malformed param raises out of
@@ -792,7 +828,9 @@ class SaleOrder(models.Model):
 
         order_dt = self.date_order or fields.Datetime.now()
         order_date = fields.Datetime.context_timestamp(self, order_dt).date()
-        held_for_wave = _after_deposit_cutover(self.env, order_date)
+        # An order that chose a wave is governed by that wave's window (checked
+        # above), never by the order-date cutover heuristic.
+        held_for_wave = False if self.grove_ship_wave else _after_deposit_cutover(self.env, order_date)
         if held_for_wave and not can_ship_bareroot(today, window):
             raise UserError(
                 f"{self.name}: this order was placed after the season cutover, so its "

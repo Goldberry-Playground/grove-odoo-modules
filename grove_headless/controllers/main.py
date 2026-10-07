@@ -4490,7 +4490,10 @@ def _preorder_ship_season(env, order):
     """Best-effort ship season ('spring' | 'fall') for the order's destination,
     or None when the shipping ZIP/zone is unknown. Used only to word the
     preorder-deposit emails ("...ships this spring"); a None just drops the
-    season word, never blocks the email."""
+    season word, never blocks the email. A wave the shopper chose at checkout
+    (``grove_ship_wave``) always wins over the date-based recompute."""
+    if order.grove_ship_wave:
+        return order.grove_ship_wave
     partner = order.partner_shipping_id or order.partner_id
     zip_code = partner.zip if partner else None
     zone = usda_zone_for_zip(zip_code)
