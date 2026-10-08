@@ -4241,7 +4241,21 @@ def settle_order_at_ship(env, order):
                 address=_stripe_ship_address(env, order),
             )
         except Exception as exc:  # noqa: BLE001 — tax calc is best-effort; a gateway/network error must not break settlement
+            # Safe (the customer is still taxed, on Odoo's own amount_total) but a
+            # degraded tax source on a money path — so it must be VISIBLE, not a log
+            # line nobody reads (GOL-2910). Chatter for the order's audit trail,
+            # Discord so ops knows Stripe Tax is not the source of this balance.
             _logger.warning("Ship-time Stripe Tax calc failed for %s; using Odoo tax: %s", order.name, exc)
+            order.message_post(
+                body=(
+                    f"Stripe Tax calculation failed at ship-time settlement ({exc}); the balance "
+                    f"fell back to Odoo's computed tax (${order.amount_tax or 0.0:.2f})."
+                )
+            )
+            _notify_discord(
+                f":warning: Stripe Tax FALLBACK on {order.name}: ship-time tax calc failed ({exc}); "
+                f"settling on Odoo's tax ${order.amount_tax or 0.0:.2f} instead. Reconcile in Stripe Tax."
+            )
 
     if tax_calc:
         base_cents = sum(int(li["amount"]) * int(li.get("quantity", 1)) for li in tax_line_items)
