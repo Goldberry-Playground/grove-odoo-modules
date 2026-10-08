@@ -270,6 +270,91 @@ class TestDestinationTax(GroveTaxFixtureMixin, TransactionCase):
         gh_main._apply_destination_tax(self.env, order, {"state": ""})
         self.assertAlmostEqual(order.amount_tax, 6.0, places=2)
 
+    # --- GOL-3074: a stray NON-WV-named sales tax must also be stripped out of
+    # state. Eight real orders carried the stock Odoo "15%" tax (account.tax id
+    # 6) on goods/shipping lines; matching on WV names alone let it survive and
+    # overcharged out-of-state customers at checkout and at settlement.
+    def _stray_stock_tax(self):
+        return self.env["account.tax"].create(
+            {
+                "name": "15%",
+                "amount_type": "percent",
+                "amount": 15.0,
+                "type_tax_use": "sale",
+                "company_id": self.company.id,
+            }
+        )
+
+    def _order_with_stray_tax_on_goods_and_shipping(self):
+        """A goods line carrying the stray 15% tax AND a shipping line carrying
+        it — the exact shape of the GOL-3074 orders."""
+        stray = self._stray_stock_tax()
+        goods = self.env["product.product"].create(
+            {
+                "name": "Shagbark Hickory",
+                "type": "consu",
+                "list_price": 40.0,
+                "taxes_id": [(6, 0, stray.ids)],
+            }
+        )
+        ship = self.env["product.product"].create(
+            {"name": "GROVE-SHIP", "type": "service", "list_price": 17.0, "taxes_id": [(6, 0, stray.ids)]}
+        )
+        partner = self.env["res.partner"].create({"name": "Stray Tax Customer"})
+        order = (
+            self.env["sale.order"]
+            .with_company(self.company)
+            .create(
+                {
+                    "partner_id": partner.id,
+                    "company_id": self.company.id,
+                    "order_line": [
+                        (0, 0, {"product_id": goods.id, "product_uom_qty": 1.0, "price_unit": 40.0}),
+                        (0, 0, {"product_id": ship.id, "product_uom_qty": 1.0, "price_unit": 17.0}),
+                    ],
+                }
+            )
+        )
+        # Sanity: both lines start taxed at 15% (40 + 17) * 0.15 = 8.55.
+        self.assertAlmostEqual(order.amount_tax, 8.55, places=2)
+        return order
+
+    def test_out_of_state_strips_stray_stock_tax_on_every_line(self):
+        order = self._order_with_stray_tax_on_goods_and_shipping()
+        gh_main._apply_destination_tax(self.env, order, {"state": "OH"})
+        self.assertFalse(order.order_line.tax_ids, "every tax must be removed out of state, WV-named or not")
+        self.assertAlmostEqual(order.amount_tax, 0.0, places=2)
+        self.assertAlmostEqual(order.amount_total, 57.0, places=2)
+
+    def _us_state(self, code):
+        state = self.env["res.country.state"].search([("country_id.code", "=", "US"), ("code", "=", code)], limit=1)
+        self.assertTrue(state, f"US state {code} must exist")
+        return state
+
+    def test_settlement_recompute_strips_stray_stock_tax(self):
+        # Settlement routes through _recompute_ship_total → _apply_destination_tax
+        # for a SHIP order, so the stray tax must be gone at settlement too.
+        order = self._order_with_stray_tax_on_goods_and_shipping()
+        order.partner_shipping_id.state_id = self._us_state("OH")
+        order.grove_fulfillment = "ship"
+        gh_main._recompute_ship_total(self.env, order)
+        self.assertAlmostEqual(order.amount_tax, 0.0, places=2)
+
+    def test_settlement_recompute_pickup_keeps_wv_tax(self):
+        # A PICKUP order transacts at the WV farm, so the settlement recompute
+        # must NOT de-tax it even when the buyer left an out-of-state address.
+        order = self._order_with_wv_line()
+        order.partner_shipping_id.state_id = self._us_state("OH")
+        order.grove_fulfillment = "pickup"
+        gh_main._recompute_ship_total(self.env, order)
+        self.assertAlmostEqual(order.amount_tax, 6.0, places=2, msg="pickup keeps WV tax")
+
+    def test_wv_order_keeps_wv_tax_with_stray_present(self):
+        # A WV-bound order is untouched by the destination strip: WV tax stays.
+        order = self._order_with_wv_line()
+        gh_main._apply_destination_tax(self.env, order, {"state": "WV"})
+        self.assertAlmostEqual(order.amount_tax, 6.0, places=2, msg="WV destination must keep WV 6%")
+
 
 @tagged("post_install", "-at_install")
 class TestPartnerStateResolution(TransactionCase):
