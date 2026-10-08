@@ -579,6 +579,41 @@ def preorder_waves(zone, today: date, calendar: dict | None = None) -> list[dict
     ]
 
 
+# Josh 2026-10-07: farm PICKUP pre-orders run on a fixed farm schedule for the
+# fall wave (pickup Oct 20 to Oct 31, order by Oct 15 inclusive), not the farm
+# zone's bareroot SHIP calendar. Spring pickup stays on the farm zone (zone 6)
+# schedule. Shipped waves are unaffected (destination-zone calendar).
+PICKUP_FALL_WAVE = {"ship_window": ((10, 20), (10, 31)), "order_by": (10, 15)}
+FARM_USDA_ZONE = 6
+
+
+def pickup_waves(today: date, calendar: dict | None = None, farm_zone: int = FARM_USDA_ZONE) -> list[dict]:
+    """Fall + spring pre-order availability for FARM PICKUP on ``today``.
+
+    Same shape and rules as ``preorder_waves`` for the farm zone, except the
+    fall entry uses ``PICKUP_FALL_WAVE``: it opens Sep 1 (``PREORDER_WAVES_OPEN``)
+    and closes after Oct 15 (inclusive), with reason ``opens_sep_1`` before Sep 1
+    and ``deadline_passed`` after the order-by. Spring is the farm zone's spring
+    entry from ``preorder_waves`` unchanged.
+    """
+    zone_waves = {w["wave"]: w for w in preorder_waves(farm_zone, today, calendar)}
+    t = (today.month, today.day)
+    order_by = _md(PICKUP_FALL_WAVE["order_by"])
+    if t < PREORDER_WAVES_OPEN:
+        fall_open, fall_reason = False, "opens_sep_1"
+    else:
+        fall_open, fall_reason = t <= order_by, "deadline_passed"
+    start, end = PICKUP_FALL_WAVE["ship_window"]
+    fall = {
+        "wave": "fall",
+        "ship_window": [list(_md(start)), list(_md(end))],
+        "order_by": list(order_by),
+        "open": fall_open,
+        "reason": None if fall_open else fall_reason,
+    }
+    return [fall, zone_waves["spring"]]
+
+
 def _prev_day(md: tuple[int, int], year: int = 2001) -> tuple[int, int]:
     """The (month, day) one day before ``md`` — the inclusive end of a preorder
     window that runs up to (but not into) a ship_start.

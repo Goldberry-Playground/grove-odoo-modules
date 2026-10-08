@@ -351,6 +351,8 @@ def rate_feed(calendar_override=None, today=None, consult_deferral_enabled=None)
         today = _date.today()
     calendar_block = shipping_calendar.serialize_calendar(calendar)
     calendar_block["resolved"] = shipping_calendar.serialize_resolved(calendar, today)
+    # Farm pickup pre-order waves (fixed fall pickup schedule, Josh 2026-10-07).
+    calendar_block["pickup_waves"] = shipping_calendar.pickup_waves(today, calendar)
     return {
         "schema": 2,
         "zones": {zone: {box: dict(rule) for box, rule in boxes.items()} for zone, boxes in ZONE_RATES.items()},

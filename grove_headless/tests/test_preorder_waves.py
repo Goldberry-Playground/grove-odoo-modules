@@ -72,5 +72,60 @@ class TestPreorderWaves(unittest.TestCase):
             self.assertEqual(z["spring"][1], sp["ship_end"], zone)
 
 
+def pickup(m, d):
+    return {w["wave"]: w for w in cal.pickup_waves(date(2026, m, d))}
+
+
+class TestPickupWaves(unittest.TestCase):
+    """Josh 2026-10-07: fall farm pickup is a fixed schedule (Oct 20 to Oct 31,
+    order by Oct 15 inclusive); spring pickup stays on the farm zone (zone 6)."""
+
+    def test_window_values_exact(self):
+        w = pickup(10, 7)
+        self.assertEqual(w["fall"]["ship_window"], [[10, 20], [10, 31]])
+        self.assertEqual(w["fall"]["order_by"], [10, 15])
+        self.assertEqual(w["spring"]["ship_window"], [[4, 5], [4, 15]])
+        self.assertEqual(w["spring"]["order_by"], [3, 29])
+        self.assertEqual(w["spring"], waves(6, 10, 7)["spring"])
+
+    def test_oct_7_fall_and_spring_open(self):
+        w = pickup(10, 7)
+        self.assertTrue(w["fall"]["open"])
+        self.assertIsNone(w["fall"]["reason"])
+        self.assertTrue(w["spring"]["open"])
+
+    def test_oct_15_fall_still_open_inclusive(self):
+        self.assertTrue(pickup(10, 15)["fall"]["open"])
+
+    def test_oct_16_fall_closed_spring_open(self):
+        w = pickup(10, 16)
+        self.assertFalse(w["fall"]["open"])
+        self.assertEqual(w["fall"]["reason"], "deadline_passed")
+        self.assertTrue(w["spring"]["open"])
+        # The zone-6 SHIP fall wave is unaffected (order by Nov 21).
+        self.assertTrue(waves(6, 10, 16)["fall"]["open"])
+
+    def test_aug_31_both_closed_opens_sep_1(self):
+        w = pickup(8, 31)
+        self.assertFalse(w["fall"]["open"])
+        self.assertEqual(w["fall"]["reason"], "opens_sep_1")
+        self.assertFalse(w["spring"]["open"])
+        self.assertEqual(w["spring"]["reason"], "opens_sep_1")
+
+    def test_sep_1_fall_opens(self):
+        self.assertTrue(pickup(9, 1)["fall"]["open"])
+
+    def test_shape_matches_preorder_waves(self):
+        out = cal.pickup_waves(date(2026, 9, 15))
+        self.assertEqual([w["wave"] for w in out], ["fall", "spring"])
+        for w in out:
+            self.assertEqual(set(w), {"wave", "ship_window", "order_by", "open", "reason"})
+
+    def test_spring_follows_calendar_override(self):
+        calendar = cal.merge_calendar_override({"zones": {"6": {"spring_order_deadline": [3, 20]}}})
+        w = {x["wave"]: x for x in cal.pickup_waves(date(2026, 10, 7), calendar)}
+        self.assertEqual(w["spring"]["order_by"], [3, 20])
+
+
 if __name__ == "__main__":
     unittest.main()

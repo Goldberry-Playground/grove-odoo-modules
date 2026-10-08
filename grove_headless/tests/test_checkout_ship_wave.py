@@ -183,15 +183,37 @@ class TestCheckoutShipWave(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_ship_wave, "spring")
 
     @mute_logger("odoo.addons.grove_headless.controllers.main")
-    def test_pickup_uses_farm_zone_6(self):
-        # Zone 6 fall order-by is Nov 21; a zone-8 destination ZIP is irrelevant.
+    def test_pickup_fall_closed_after_oct_15(self):
+        # Josh 2026-10-07: fall farm pickup is a fixed farm schedule (pickup
+        # Oct 20 to Oct 31, order by Oct 15); a zone-8 destination ZIP is irrelevant.
         self._assert_400(
-            self._create(self._payload([self.bareroot], "pickup", ship_wave="fall"), date(2026, 11, 22)),
-            "The fall pre-order for zone 6 closed on Nov 21",
+            self._create(self._payload([self.bareroot], "pickup", ship_wave="fall"), date(2026, 10, 16)),
+            "The fall farm pickup pre-order closed on Oct 15",
         )
 
-    def test_pickup_fall_open_before_deadline(self):
-        order, error = self._create(self._payload([self.bareroot], "pickup", ship_wave="fall"), date(2026, 11, 21))
+    def test_pickup_fall_open_on_oct_15(self):
+        order, error = self._create(self._payload([self.bareroot], "pickup", ship_wave="fall"), date(2026, 10, 15))
+        self.assertIsNone(error)
+        self.assertEqual(order.grove_ship_wave, "fall")
+
+    def test_pickup_spring_open_after_fall_pickup_closes(self):
+        order, error = self._create(self._payload([self.bareroot], "pickup", ship_wave="spring"), date(2026, 10, 16))
+        self.assertIsNone(error)
+        self.assertEqual(order.grove_ship_wave, "spring")
+
+    @mute_logger("odoo.addons.grove_headless.controllers.main")
+    def test_pickup_fall_before_sep_1_rejected(self):
+        self._assert_400(
+            self._create(self._payload([self.bareroot], "pickup", ship_wave="fall"), date(2026, 8, 31)),
+            "The fall farm pickup pre-order opens Sep 1",
+        )
+
+    def test_ship_fall_zone_6_unaffected_on_oct_16(self):
+        # Shipped waves keep the destination-zone calendar: zone 6 fall order-by Nov 21.
+        zone6_zip = grove_main._farm_pickup_zip(self.env, self.company)
+        order, error = self._create(
+            self._payload([self.bareroot], "ship", zip_code=zone6_zip, ship_wave="fall"), date(2026, 10, 16)
+        )
         self.assertIsNone(error)
         self.assertEqual(order.grove_ship_wave, "fall")
 

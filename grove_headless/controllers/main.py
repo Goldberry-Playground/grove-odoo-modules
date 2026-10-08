@@ -34,6 +34,7 @@ from ..models.shipping_calendar import (
     LEAFED_WINDOW,
     MODE_PREORDER,
     merge_calendar_override,
+    pickup_waves,
     preorder_waves,
     resolve_fulfillment,
     serialize_ship_options,
@@ -2961,12 +2962,21 @@ def _validate_ship_wave(
     calendar = merge_calendar_override(_parse_calendar_override(env))
     if zone is None or int(zone) not in calendar["zones"]:
         return "We could not find a planting zone for that ZIP code.", None
-    entry = next(w for w in preorder_waves(zone, today, calendar) if w["wave"] == wave)
+    # Farm pickup runs on the fixed farm schedule (fall pickup Oct 20 to Oct 31,
+    # order by Oct 15; spring on the farm zone), Josh 2026-10-07. Ship orders
+    # keep the destination-zone calendar.
+    if fulfillment == "pickup":
+        waves = pickup_waves(today, calendar, farm_zone=int(zone))
+        label = f"{wave} farm pickup pre-order"
+    else:
+        waves = preorder_waves(zone, today, calendar)
+        label = f"{wave} pre-order for zone {int(zone)}"
+    entry = next(w for w in waves if w["wave"] == wave)
     if not entry["open"]:
         if entry["reason"] == "opens_sep_1":
-            return f"The {wave} pre-order for zone {int(zone)} opens Sep 1.", None
+            return f"The {label} opens Sep 1.", None
         month, day = entry["order_by"]
-        msg = f"The {wave} pre-order for zone {int(zone)} closed on {_MONTH_ABBR[month - 1]} {day}."
+        msg = f"The {label} closed on {_MONTH_ABBR[month - 1]} {day}."
         return (msg + " Choose spring." if wave == "fall" else msg), None
     return None, wave
 
