@@ -1210,3 +1210,19 @@ class SaleOrder(models.Model):
                 _apply_delivery_status(
                     order.env, order, new_status, order.grove_tracking_numbers or "", source="carrier_poll"
                 )
+
+
+class SaleOrderLine(models.Model):
+    _inherit = "sale.order.line"
+
+    # Harvest year a seed pre-order line reserves from (GOL-3257). Stamped from
+    # seed_season(..., adding_lb=line weight) when the line is added and
+    # re-checked at checkout: a line that would push past the season cap moves
+    # to next fall and the shopper is shown the change before paying. Feeds the
+    # template's grove_seed_reserved_lb roll-up. 0/unset for non-seed lines.
+    grove_seed_harvest_year = fields.Integer(
+        string="Seed Harvest Year",
+        readonly=True,
+        copy=False,
+        index=True,
+    )

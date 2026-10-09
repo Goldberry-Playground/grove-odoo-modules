@@ -180,5 +180,34 @@ class TestCarveOutFeed(unittest.TestCase):
         json.dumps(pc.carve_out_feed(True))
 
 
+class TestSeedTierExemption(unittest.TestCase):
+    """Seed pre-orders ship everywhere (GOL-3257 §2): the exemption keys on the
+    seed tier, before genus parsing, so a Castanea *seed* clears FL/WA/OR while
+    a Castanea *tree* of the same genus stays blocked."""
+
+    def test_castanea_seed_allowed_into_regulated_states(self):
+        for state in ("FL", "WA", "OR"):
+            reason, failsafe = pc.evaluate_line("Castanea pumila", state, tier="seed")
+            self.assertIsNone(reason, f"Castanea seed should clear {state}")
+            self.assertFalse(failsafe)
+
+    def test_castanea_tree_still_blocked_same_genus(self):
+        for state in ("FL", "WA", "OR"):
+            reason, _ = pc.evaluate_line("Castanea pumila", state, tier="bareroot")
+            self.assertIsNotNone(reason, f"Castanea tree must stay blocked in {state}")
+
+    def test_seed_with_empty_botanical_not_failsafe_blocked(self):
+        # A seed line with no botanical name is NOT the fail-safe block; seed
+        # exemption short-circuits before the empty-name fail-safe.
+        reason, failsafe = pc.evaluate_line("", "FL", tier="seed")
+        self.assertIsNone(reason)
+        self.assertFalse(failsafe)
+
+    def test_empty_botanical_tree_still_failsafe_blocked(self):
+        reason, failsafe = pc.evaluate_line("", "FL", tier="bareroot")
+        self.assertIsNotNone(reason)
+        self.assertTrue(failsafe)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -3327,7 +3327,9 @@ def _create_draft_order(website, env, payload, discount_out=None):
                 order._grove_record_consult_deferral(dest, excluded_taxa_for_state(dest))
                 continue
             botanical = variant.product_tmpl_id.grove_botanical_name or ""
-            block_msg, is_failsafe = compliance_evaluate_line(botanical, dest, ship_state)
+            block_msg, is_failsafe = compliance_evaluate_line(
+                botanical, dest, ship_state, tier=variant.grove_effective_shipping_tier
+            )
             if block_msg:
                 if is_failsafe:
                     _logger.warning(

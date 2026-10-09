@@ -149,12 +149,21 @@ def evaluate_line(
     botanical_name: str | None,
     state_code: str,
     state_label: str | None = None,
+    tier: str | None = None,
 ) -> tuple[str | None, bool]:
     """Evaluate one standalone cart line against the destination state.
 
     ``state_code`` is the canonical 2-letter USPS code (already normalized by
     ``shipping_zones.canonical_state_code``). ``state_label`` is what to show the
     shopper (the state as they typed it); it defaults to ``state_code``.
+
+    ``tier`` is the line's effective shipping tier. A ``"seed"`` line is seed
+    nuts, not a live plant, so it is allowed into every state BEFORE any genus
+    parsing (GOL-3257 spec §2): "it's seed anyways". The exemption keys on the
+    seed product type, not ``grove_compliance_exempt`` and not the botanical
+    name, so a *tree* of the same genus (e.g. a Castanea chestnut) stays blocked
+    exactly as before — only the seed tier is exempt. A seed with an empty
+    botanical name is therefore NOT fail-safe blocked.
 
     Returns ``(reason, is_failsafe)``:
       * ``reason`` is ``None`` when the line may ship, else a plain-English
@@ -165,6 +174,8 @@ def evaluate_line(
 
     Do NOT call this for bundle (phantom-BOM) lines — they ship everywhere.
     """
+    if tier == "seed":
+        return None, False
     label = state_label or state_code
     parsed = parse_taxon(botanical_name)
     if parsed is None:
