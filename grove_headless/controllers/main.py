@@ -28,6 +28,7 @@ from ..models.order_alerts import (
 from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
 from ..models.plant_compliance import excluded_taxa_for_state
 from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
+from ..models.seed_season import seed_season
 from ..models.shipment_email import NOTIFY_STATUSES, delivery_status_from_webhook, shipment_notice_copy
 from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from ..models.shipping_calendar import (
@@ -723,6 +724,30 @@ def _template_rootstock(product):
     return ""
 
 
+def _seed_season_payload(product):
+    """Top-level ``seed_season`` object for a seed pre-order template (GOL-3257 §5).
+
+    Returns ``None`` for any template whose shipping tier is not ``seed`` so the
+    key is simply absent on ordinary products. For a seed template it runs the
+    pure :func:`seed_season` resolver as of today (``adding_lb=0`` — the plain
+    catalog read, no cart context) and serializes its ``date`` fields to ISO
+    ``YYYY-MM-DD`` strings. The storefront gates the "Reserve for $1" CTA on
+    ``open`` and shows the (possibly rolled-over) window from these dates.
+    """
+    if product.grove_shipping_tier != "seed":
+        return None
+    season = seed_season(product, _date.today())
+    return {
+        "year": season["year"],
+        "ship_start": season["ship_start"].isoformat() if season["ship_start"] else None,
+        "ship_end": season["ship_end"].isoformat() if season["ship_end"] else None,
+        "order_by": season["order_by"].isoformat() if season["order_by"] else None,
+        "rolled_over": season["rolled_over"],
+        "reason": season["reason"],
+        "open": season["open"],
+    }
+
+
 def _structure_variant(variant, template_rootstock=""):
     """Structured variant entry: axes parsed into fields, not display-name strings.
 
@@ -755,6 +780,12 @@ def _structure_variant(variant, template_rootstock=""):
         # PDP must not show "sold out" while its potted sibling sits at 30.
         "qty_available": variant.grove_shared_pool_qty("qty_available"),
         "shipping_tier": variant.grove_effective_shipping_tier,
+        # Seed pre-order "Pack size" axis (GOL-3257 §5): the display value sits
+        # beside cultivar/format/rootstock ("" when the product has no Pack size
+        # axis), and pack_lb is the per-pack weight the cap/settlement math uses.
+        # 0.0 on non-seed variants, which the storefront never reads.
+        "pack_size": axis.get("Pack size", ""),
+        "pack_lb": variant.grove_seed_pack_lb or 0.0,
         "image_url": _image_url("product.product", variant, "image_128"),
         # Qualifying-tree count for one unit (GOL-2439): 1 for a nursery plant,
         # the bundle's BoM tree count (Remembrance Grove = 5), 0 for supplies,
@@ -994,6 +1025,16 @@ class GroveHeadlessAPI(http.Controller):
         # so the PDP buy box renders sold-out identically whether it came from
         # stock or from the cap. The frontend never computes the threshold.
         data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
+        # Seed pre-orders (GOL-3257 §5): a seed template carries a top-level
+        # shipping_tier + seed_season object (both absent on ordinary products).
+        # The two signals move together — every variant of a seed template
+        # computes grove_effective_shipping_tier == "seed" — so the storefront's
+        # "seed if seed_season present OR any variant tier seed" check never sees
+        # them disagree.
+        season = _seed_season_payload(product)
+        if season is not None:
+            data["shipping_tier"] = "seed"
+            data["seed_season"] = season
 
         return _json_response(data)
 
