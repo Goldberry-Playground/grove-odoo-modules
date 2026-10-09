@@ -1,0 +1,25 @@
+{
+  "_status": "SCAFFOLD — AWAITING EXACT 5-DIGIT ZIP + PER-LABEL SERVICE FROM ODOO",
+  "_doc": "GOL-3200 (Train #4, Slice 1). The 13 shipped small-box labels that every later slice's golden test asserts price() reproduces to the cent. Values here are transcribed VERBATIM from the 2026-10-06 CEO Odoo-join posted on the GOL-2923 thread (comment e1f99aae) and the 2026-10-07 calibration (comment 6360d2ff). That join deliberately omitted the exact destination ZIP and per-label service (only the state and, for the one outlier, Mariaville ME 04605). Those two fields are load-bearing for a ZIP-keyed calculator, so each row carries `zip` only where the source states it and a `needs` list for the gaps. Finalize by reading grove.label.batch.line for prod batch LB-20261005-01 (zip, box_id, weight_lb, service, actual_cost) once an Odoo read path exists — see docs/superpowers/2026-10-07-zip-shipping-slice1-discovery.md.",
+  "origin_zip": "26651",
+  "batch": "LB-20261005-01",
+  "captured_on": "2026-10-06",
+  "box_catalog_note": "All 13 are the `small` box (24x6x4). billable_weight_lb = ceil(packed_weight_lb) to the carrier pound.",
+  "schema": ["label", "zone", "state", "zip", "box_id", "packed_weight_lb", "billable_weight_lb", "service", "actual_label_cost", "needs"],
+  "labels": [
+    {"label": "L01", "zone": "zone_1", "state": "KY", "zip": null, "box_id": "small", "packed_weight_lb": 6.5, "billable_weight_lb": 7, "service": "UPS Ground", "actual_label_cost": 8.79, "needs": ["zip5"]},
+    {"label": "L02", "zone": "zone_1", "state": "VA", "zip": null, "box_id": "small", "packed_weight_lb": 8.5, "billable_weight_lb": 9, "service": null, "actual_label_cost": 8.52, "needs": ["zip5", "service"]},
+    {"label": "L03", "zone": "zone_1", "state": "NC", "zip": null, "box_id": "small", "packed_weight_lb": 12.5, "billable_weight_lb": 13, "service": null, "actual_label_cost": 13.56, "needs": ["zip5", "service"], "note": "Winston-Salem NC"},
+    {"label": "L04", "zone": "zone_2", "state": "PA", "zip": null, "box_id": "small", "packed_weight_lb": 6.5, "billable_weight_lb": 7, "service": "UPS Ground", "actual_label_cost": 11.15, "needs": ["zip5"]},
+    {"label": "L05", "zone": "zone_2", "state": "MD", "zip": null, "box_id": "small", "packed_weight_lb": 6.5, "billable_weight_lb": 7, "service": null, "actual_label_cost": 11.15, "needs": ["zip5", "service"]},
+    {"label": "L06", "zone": "zone_2", "state": "OH", "zip": null, "box_id": "small", "packed_weight_lb": 6.5, "billable_weight_lb": 7, "service": "UPS Ground", "actual_label_cost": 8.29, "needs": ["zip5"]},
+    {"label": "L07", "zone": "zone_2", "state": "NY", "zip": null, "box_id": "small", "packed_weight_lb": 6.5, "billable_weight_lb": 7, "service": "UPS Ground", "actual_label_cost": 9.84, "needs": ["zip5"]},
+    {"label": "L08", "zone": "zone_2", "state": "NY", "zip": null, "box_id": "small", "packed_weight_lb": 6.5, "billable_weight_lb": 7, "service": "UPS Ground", "actual_label_cost": 11.15, "needs": ["zip5"]},
+    {"label": "L09", "zone": "zone_4", "state": "NH", "zip": null, "box_id": "small", "packed_weight_lb": 8.5, "billable_weight_lb": 9, "service": null, "actual_label_cost": 10.43, "needs": ["zip5", "service"]},
+    {"label": "L10", "zone": "zone_4", "state": "MA", "zip": null, "box_id": "small", "packed_weight_lb": 14.5, "billable_weight_lb": 15, "service": null, "actual_label_cost": 15.70, "needs": ["zip5", "service"], "note": "heavy outlier"},
+    {"label": "L11", "zone": "zone_5", "state": "SC", "zip": null, "box_id": "small", "packed_weight_lb": 6.5, "billable_weight_lb": 7, "service": "UPS Ground", "actual_label_cost": 9.84, "needs": ["zip5"], "note": "Columbia SC"},
+    {"label": "L12", "zone": "zone_5", "state": "SC", "zip": null, "box_id": "small", "packed_weight_lb": 6.5, "billable_weight_lb": 7, "service": null, "actual_label_cost": 9.84, "needs": ["zip5", "service"], "note": "second SC label"},
+    {"label": "L13", "zone": "zone_5", "state": "ME", "zip": "04605", "box_id": "small", "packed_weight_lb": 6.5, "billable_weight_lb": 7, "service": "UPS Ground", "actual_label_cost": 19.38, "needs": [], "note": "Mariaville ME 04605 — THE surcharge ZIP. UPS Ground $19.38 was bought; UPS Ground Saver was $16.89 at the same ZIP/weight (service choice, not a bug — GOL-2923 finding #4). The cheapest-service rule means price() should return the $16.89 Saver quote here."}
+  ],
+  "reproduction_note": "The public pirateship.com/rates calculator (origin 26651, residential) reproduced 7 of 7 checked UPS-Ground labels to the cent in the CEO session: KY $8.79, OH $8.29, NY $9.84, SC $9.84, PA $11.15, NY $11.15, ME $19.38. Extend to 13/13 once exact ZIPs land (see findings doc)."
+}
