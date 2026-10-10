@@ -79,6 +79,7 @@
         "data/enrich_job_cron.xml",
         "data/grove_dormancy_params.xml",
         "data/grove_zone_filters.xml",
+        "data/grove_seed_filters.xml",
     ],
     "installable": True,
     "application": False,
