@@ -7,6 +7,7 @@ module's ``from .stripe_gateway import PREORDER_DEPOSIT`` resolves against the
 ``grove_headless.models`` stub package the root conftest installs.
 """
 
+import datetime
 import importlib.util
 import os
 import sys
@@ -77,6 +78,39 @@ class PreshipLineTests(unittest.TestCase):
         line = pe.preship_balance_line(None)
         self.assertIn("as your trees ship", line)
         self.assertNotIn("None", line)
+
+
+class SeedEmailCopyTests(unittest.TestCase):
+    """Seed pre-order wording (GOL-3257 §8): one $1 deposit, harvest year +
+    ship window, "the rest of the pack price, shipping and handling…"."""
+
+    def test_confirmation_has_dollar_one_harvest_and_window(self):
+        line = pe.seed_confirmation_line(2026, datetime.date(2026, 10, 15), datetime.date(2026, 11, 15))
+        self.assertIn("$1 deposit", line)
+        self.assertIn("fall 2026 harvest", line)
+        self.assertIn("ships approx Oct 15 to Nov 15", line)
+        self.assertIn("rest of the pack price, shipping and handling", line)
+
+    def test_confirmation_tracks_seed_deposit_source_of_truth(self):
+        self.assertIn(pe.deposit_amount_label(sg.SEED_DEPOSIT), pe.seed_confirmation_line(2026))
+
+    def test_confirmation_drops_missing_window_and_harvest(self):
+        line = pe.seed_confirmation_line(None, None, None)
+        self.assertIn("$1 deposit today", line)
+        self.assertNotIn("harvest", line)
+        self.assertNotIn("approx", line)
+        self.assertNotIn("None", line)
+
+    def test_preship_states_the_arrangement(self):
+        line = pe.seed_preship_balance_line(2026)
+        self.assertIn("$1 deposit", line)
+        self.assertIn("fall 2026 harvest", line)
+        self.assertIn("rest of the pack price, shipping and handling", line)
+        self.assertNotIn("None", line)
+
+    def test_no_em_dashes_in_seed_copy(self):
+        self.assertNotIn("—", pe.seed_confirmation_line(2026, datetime.date(2026, 10, 15), datetime.date(2026, 11, 15)))
+        self.assertNotIn("—", pe.seed_preship_balance_line(2026))
 
 
 if __name__ == "__main__":

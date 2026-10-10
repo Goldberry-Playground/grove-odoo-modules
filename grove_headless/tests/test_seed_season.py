@@ -132,5 +132,33 @@ class SeedSeasonSwitchesAndEdits(unittest.TestCase):
         self.assertFalse(r["rolled_over"])
 
 
+class TestSeedCartRefusal(unittest.TestCase):
+    """Pure mixing rule (spec §6): seeds check out on their own."""
+
+    def test_no_seed_in_cart_never_refused(self):
+        self.assertIsNone(ss.seed_cart_refusal({"bareroot", "potted"}, []))
+        self.assertIsNone(ss.seed_cart_refusal(set(), []))
+
+    def test_seeds_one_harvest_year_allowed(self):
+        # Two seed products in the same harvest year share one $1 deposit.
+        self.assertIsNone(ss.seed_cart_refusal({"seed"}, [2026, 2026]))
+        self.assertIsNone(ss.seed_cart_refusal({"seed"}, [2026]))
+
+    def test_seed_mixed_with_tree_refused(self):
+        self.assertEqual(ss.seed_cart_refusal({"seed", "bareroot"}, [2026]), ss.SEED_MIX_REFUSAL)
+        self.assertEqual(ss.seed_cart_refusal({"seed", "potted"}, [2026]), ss.SEED_MIX_REFUSAL)
+
+    def test_two_harvest_years_refused(self):
+        self.assertEqual(ss.seed_cart_refusal({"seed"}, [2026, 2027]), ss.SEED_MIX_REFUSAL)
+
+    def test_zero_and_none_years_ignored(self):
+        # An unstamped/unconfigured line (0 or None) must not count as a second
+        # distinct harvest year and spuriously refuse a single-year cart.
+        self.assertIsNone(ss.seed_cart_refusal({"seed"}, [2026, 0, None]))
+
+    def test_refusal_copy_is_the_ratified_string(self):
+        self.assertEqual(ss.SEED_MIX_REFUSAL, "Seed reservations check out on their own.")
+
+
 if __name__ == "__main__":
     unittest.main()

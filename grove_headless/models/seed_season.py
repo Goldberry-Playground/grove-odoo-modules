@@ -27,6 +27,33 @@ import datetime
 REASON_ORDER_BY_PASSED = "order_by_passed"
 REASON_CAP_REACHED = "cap_reached"
 
+# Refusal shown when a cart breaks the seed mixing rule (spec §6). Seed
+# reservations settle on their own deposit and ship window, so a cart holding
+# seeds cannot also hold trees, nor seeds from two different harvest years.
+# Reuses the GOL-3246 red-message refusal channel on the storefront.
+SEED_MIX_REFUSAL = "Seed reservations check out on their own."
+
+
+def seed_cart_refusal(tiers, harvest_years) -> str | None:
+    """Mixing rule for a seed cart (spec §6), pure so it unit-tests without a DB.
+
+    ``tiers`` is the set (or any iterable) of effective shipping tiers present
+    in the cart; ``harvest_years`` is the harvest years across its seed lines
+    (ints; 0/None are ignored). Returns :data:`SEED_MIX_REFUSAL` when the cart
+    mixes seeds with any non-seed line, or mixes seeds from two harvest years,
+    else ``None``. A cart with no seed line is never refused here (the tree
+    rules live elsewhere); two seed products sharing ONE harvest year ride a
+    single $1 deposit and are allowed.
+    """
+    tiers = set(tiers)
+    if "seed" not in tiers:
+        return None
+    if tiers - {"seed"}:
+        return SEED_MIX_REFUSAL
+    if len({y for y in harvest_years if y}) > 1:
+        return SEED_MIX_REFUSAL
+    return None
+
 
 def _add_year(d: datetime.date, years: int = 1) -> datetime.date:
     """``d`` shifted by whole years, Feb-29 safe.

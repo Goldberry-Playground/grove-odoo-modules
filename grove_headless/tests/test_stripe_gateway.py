@@ -29,6 +29,18 @@ class TestAmounts(unittest.TestCase):
         # 19.999 * 100 == 1999.8999… — must round to 2000, not truncate to 1999
         self.assertEqual(sg.to_cents(19.999), 2000)
 
+    def test_deposit_constants(self):
+        # The two flat per-order deposits (GOL-2233 trees, GOL-3257 seeds).
+        self.assertEqual(sg.PREORDER_DEPOSIT, 10.00)
+        self.assertEqual(sg.SEED_DEPOSIT, 1.00)
+        self.assertEqual(sg.to_cents(sg.SEED_DEPOSIT), 100)
+
+    def test_line_charge_takes_seed_deposit_per_tier(self):
+        # A fully-preorder line charges the deposit passed in per unit; the seed
+        # deposit ($1) flows through the same matrix as the tree deposit.
+        charges = sg.line_charge(unit_price=30.0, quantity=1, free_available=0, deposit=sg.SEED_DEPOSIT)
+        self.assertEqual(charges, [(sg.to_cents(sg.SEED_DEPOSIT), 1, True)])
+
     def test_line_charge_in_stock_full_price(self):
         # free stock covers the quantity -> one full-price sub-charge, no preorder
         self.assertEqual(
