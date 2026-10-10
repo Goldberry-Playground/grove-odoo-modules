@@ -461,12 +461,15 @@ class ProductTemplate(models.Model):
     # (models/shipping_zones.py). Default "potted" = the higher tier, so an
     # untagged product can never be undercharged.
     grove_shipping_tier = fields.Selection(
-        [("bareroot", "Bareroot"), ("potted", "Potted")],
+        [("bareroot", "Bareroot"), ("potted", "Potted"), ("seed", "Seed")],
         string="Grove Shipping Tier",
         default="potted",
         help="Bareroot ships (per-box zone rates, Box Engine v2); potted is "
-        "farm pickup only — it cannot ship. An untagged product defaults to "
-        "potted so it can never ship undercharged.",
+        "farm pickup only — it cannot ship. Seed is a pre-order seed nut: it "
+        "bypasses the leafed-season, zone and wave rules and the plant-shipping "
+        "compliance block, pays a $1 deposit at checkout and settles the "
+        "balance (pack price + actual label + handling + tax) at ship time. An "
+        "untagged product defaults to potted so it can never ship undercharged.",
     )
 
     # Tree length class (Box Engine v2): the minimum box length in inches this
@@ -539,6 +542,71 @@ class ProductTemplate(models.Model):
         "rejects any shipping order that contains it, regardless of shipping "
         "tier. The customer must choose farm pickup or remove it.",
     )
+
+    # ── Seed pre-orders (GOL-3257, Train #3) ────────────────────────────
+    # Per-product season settings for tier="seed" products. Each seed template
+    # carries its own ship window, order-by date and season cap; after the
+    # order-by date or at the cap the season rolls over to next fall (see
+    # models/seed_season.py). No cron: the "current season" is derived from
+    # grove_seed_ship_start and moves when Josh edits the dates forward.
+    grove_seed_open = fields.Boolean(
+        string="Seed pre-orders open",
+        default=False,
+        help='Master switch. Off = not purchasable; the page says "Not taking reservations right now".',
+    )
+    grove_seed_ship_start = fields.Date(
+        string="Seed ship window start",
+        help="First day of this season's ship window.",
+    )
+    grove_seed_ship_end = fields.Date(
+        string="Seed ship window end",
+        help="Last day of this season's ship window.",
+    )
+    grove_seed_order_by = fields.Date(
+        string="Seed order-by date",
+        help="Last day an order reserves this season. After it, the page rolls over to next fall's harvest.",
+    )
+    grove_seed_cap_lb = fields.Float(
+        string="Seed season cap (lb)",
+        default=10.0,
+        help="Season cap in pounds. Confirmed pre-orders count against it by "
+        "pack weight; once reached the season rolls over to next fall.",
+    )
+    grove_seed_reserved_lb = fields.Float(
+        string="Seed reserved this season (lb)",
+        compute="_compute_grove_seed_reserved_lb",
+        help="Sum of pack weight × qty over confirmed, not-cancelled seed order "
+        "lines whose harvest year equals the current season year.",
+    )
+
+    @api.depends("grove_seed_ship_start", "grove_shipping_tier")
+    def _compute_grove_seed_reserved_lb(self):
+        """Reserved weight against this season's cap.
+
+        Current season year is the year of ``grove_seed_ship_start`` (not
+        ``seed_season`` — that would be circular, since it reads this field).
+        Count only confirmed, not-cancelled seed lines stamped with that
+        harvest year; a cancelled or refunded line drops out, so the weight
+        returns to the cap (spec §3). Fail to 0.0 for a template with no season
+        start or whose tier is not ``seed``.
+        """
+        SaleOrderLine = self.env["sale.order.line"]
+        for template in self:
+            if template.grove_shipping_tier != "seed" or not template.grove_seed_ship_start:
+                template.grove_seed_reserved_lb = 0.0
+                continue
+            season_year = template.grove_seed_ship_start.year
+            lines = SaleOrderLine.search(
+                [
+                    ("product_id.product_tmpl_id", "=", template.id),
+                    ("grove_seed_harvest_year", "=", season_year),
+                    ("state", "=", "sale"),
+                    ("product_uom_qty", ">", 0),
+                ]
+            )
+            template.grove_seed_reserved_lb = sum(
+                (line.product_id.grove_seed_pack_lb or 0.0) * line.product_uom_qty for line in lines
+            )
 
     # ── Growing facts (2026-07-13 catalog spec) ─────────────────────────
     # Filterable facts live here (typed); display-only facts stay Char.

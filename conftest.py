@@ -76,4 +76,6 @@ collect_ignore_glob = [
     "grove_headless/tests/test_checkout_compliance_gate.py",
     "grove_headless/tests/test_consult_compliance_gate.py",
     "grove_headless/tests/test_usda_zone.py",
+    "grove_headless/tests/test_seed_checkout.py",
+    "grove_headless/tests/test_seed_settlement.py",
 ]

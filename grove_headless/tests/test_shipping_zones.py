@@ -180,6 +180,19 @@ class TestShippingZoneEngineContract(unittest.TestCase):
     def test_bareroot_has_no_unshippable_reason(self):
         self.assertIsNone(sz.unshippable_reason([("bareroot", 20, 3)]))
 
+    def test_seed_line_is_skipped_not_blocked(self):
+        # Seed pre-orders (GOL-3257) are not quoted at checkout — a seed line is
+        # SKIPPED by packing, not routed through the non-shippable block seam.
+        self.assertIn("seed", sz.TIERS)
+        self.assertNotIn("seed", sz.SHIPPABLE_TIERS)
+        self.assertIsNone(sz.unshippable_reason([("seed", 0, 2)]))
+
+    def test_seed_line_contributes_no_shipping(self):
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+            bareroot_only = sz.compute_order_shipping("WV", [("bareroot", 20, 1)], "leafed")
+            with_seed = sz.compute_order_shipping("WV", [("bareroot", 20, 1), ("seed", 0, 5)], "leafed")
+            self.assertEqual(with_seed, bareroot_only)
+
     def test_zero_qty_potted_line_is_ignored(self):
         self.assertIsNone(sz.unshippable_reason([("potted", 20, 0), ("bareroot", 20, 1)]))
 

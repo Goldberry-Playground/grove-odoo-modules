@@ -125,8 +125,15 @@ RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 6))
 # order with the friendly retry message — potted ship-to carts cannot be
 # under-billed in the window between this flip and the rate-checker's first
 # potted-inclusive table.
-TIERS: tuple[str, ...] = ("bareroot", "potted")
+TIERS: tuple[str, ...] = ("bareroot", "potted", "seed")
 SHIPPABLE_TIERS: frozenset[str] = frozenset({"bareroot", "potted"})
+# Seed pre-orders (GOL-3257) are not quoted at checkout — they pay a $1 deposit
+# and settle the actual label cost at ship time — so seed lines are SKIPPED by
+# box packing and the rate feed entirely, not routed through the fail-closed
+# non-shippable seam the way an unknown future tier is. Seeds also never share a
+# cart with trees (the mixing rule), so a seed line never reaches packing beside
+# a priced line in practice; skipping it is belt-and-braces.
+SKIPPED_TIERS: frozenset[str] = frozenset({"seed"})
 DEFAULT_TIER = "potted"
 
 # Box-geometry authority lives in shipping_boxes; re-exported for callers
@@ -586,6 +593,8 @@ def unshippable_reason(items: list[tuple[str, int, float]]) -> str | None:
         if float(qty) <= 0:
             continue
         tier_key = tier if tier in TIERS else DEFAULT_TIER
+        if tier_key in SKIPPED_TIERS:
+            continue
         if tier_key not in SHIPPABLE_TIERS:
             return (
                 f"{tier_key.capitalize()} trees are available for farm pickup only — "
@@ -621,6 +630,8 @@ def pack_for_state(state: str, items: list[tuple[str, int, float]], mode: str):
         if float(qty) <= 0:
             continue
         tier_key = tier if tier in TIERS else DEFAULT_TIER
+        if tier_key in SKIPPED_TIERS:
+            continue
         if tier_key == "potted":
             potted_units += qty
         else:

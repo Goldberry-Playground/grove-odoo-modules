@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Seed pre-order back-office saved filters (GOL-3257 §8), shipped as data
+         so every database gets them and they are reviewable in git. Global
+         (empty user_ids) so they appear for everyone. Both group by
+         grove_seed_harvest_year (the stored order-level field) so ops sees seed
+         reservations broken down by the fall harvest they ship from.
+
+         Kept in their OWN file, separate from grove_zone_filters.xml: those are
+         the GOL-3056 balance-by-zone filters and test_usda_zone_filters.py pins
+         that file to exactly three zone filters that all group by USDA zone. The
+         seed-specific consistency check lives in test_seed_filters.py. -->
+
+    <record id="ir_filter_grove_seed_by_harvest_year" model="ir.filters">
+        <field name="name">Seed reservations by harvest year</field>
+        <field name="model_id">sale.order</field>
+        <field name="user_ids" eval="[(6, 0, [])]" />
+        <field name="domain">[('grove_seed_harvest_year', '!=', 0)]</field>
+        <field name="context">{'group_by': ['grove_seed_harvest_year']}</field>
+    </record>
+
+    <record id="ir_filter_grove_seed_balance_not_charged" model="ir.filters">
+        <field name="name">Seed balance not charged</field>
+        <field name="model_id">sale.order</field>
+        <field name="user_ids" eval="[(6, 0, [])]" />
+        <field name="domain">[('state', 'in', ['sale', 'done']), ('grove_seed_harvest_year', '!=', 0), ('grove_checkout_status', 'in', ['deposit_paid', 'settlement_failed', 'settlement_error'])]</field>
+        <field name="context">{'group_by': ['grove_seed_harvest_year']}</field>
+    </record>
+
+</odoo>

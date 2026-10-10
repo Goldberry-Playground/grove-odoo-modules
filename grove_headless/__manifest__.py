@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.71.0",
+    "version": "19.0.1.72.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -79,6 +79,7 @@
         "data/enrich_job_cron.xml",
         "data/grove_dormancy_params.xml",
         "data/grove_zone_filters.xml",
+        "data/grove_seed_filters.xml",
     ],
     "installable": True,
     "application": False,

@@ -27,7 +27,13 @@ from ..models.order_alerts import (
 )
 from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
 from ..models.plant_compliance import excluded_taxa_for_state
-from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
+from ..models.preorder_email import (
+    confirmation_deposit_line,
+    preship_balance_line,
+    seed_confirmation_line,
+    seed_preship_balance_line,
+)
+from ..models.seed_season import seed_cart_refusal, seed_season
 from ..models.shipment_email import NOTIFY_STATUSES, delivery_status_from_webhook, shipment_notice_copy
 from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from ..models.shipping_calendar import (
@@ -723,6 +729,30 @@ def _template_rootstock(product):
     return ""
 
 
+def _seed_season_payload(product):
+    """Top-level ``seed_season`` object for a seed pre-order template (GOL-3257 §5).
+
+    Returns ``None`` for any template whose shipping tier is not ``seed`` so the
+    key is simply absent on ordinary products. For a seed template it runs the
+    pure :func:`seed_season` resolver as of today (``adding_lb=0`` — the plain
+    catalog read, no cart context) and serializes its ``date`` fields to ISO
+    ``YYYY-MM-DD`` strings. The storefront gates the "Reserve for $1" CTA on
+    ``open`` and shows the (possibly rolled-over) window from these dates.
+    """
+    if product.grove_shipping_tier != "seed":
+        return None
+    season = seed_season(product, _date.today())
+    return {
+        "year": season["year"],
+        "ship_start": season["ship_start"].isoformat() if season["ship_start"] else None,
+        "ship_end": season["ship_end"].isoformat() if season["ship_end"] else None,
+        "order_by": season["order_by"].isoformat() if season["order_by"] else None,
+        "rolled_over": season["rolled_over"],
+        "reason": season["reason"],
+        "open": season["open"],
+    }
+
+
 def _structure_variant(variant, template_rootstock=""):
     """Structured variant entry: axes parsed into fields, not display-name strings.
 
@@ -755,6 +785,12 @@ def _structure_variant(variant, template_rootstock=""):
         # PDP must not show "sold out" while its potted sibling sits at 30.
         "qty_available": variant.grove_shared_pool_qty("qty_available"),
         "shipping_tier": variant.grove_effective_shipping_tier,
+        # Seed pre-order "Pack size" axis (GOL-3257 §5): the display value sits
+        # beside cultivar/format/rootstock ("" when the product has no Pack size
+        # axis), and pack_lb is the per-pack weight the cap/settlement math uses.
+        # 0.0 on non-seed variants, which the storefront never reads.
+        "pack_size": axis.get("Pack size", ""),
+        "pack_lb": variant.grove_seed_pack_lb or 0.0,
         "image_url": _image_url("product.product", variant, "image_128"),
         # Qualifying-tree count for one unit (GOL-2439): 1 for a nursery plant,
         # the bundle's BoM tree count (Remembrance Grove = 5), 0 for supplies,
@@ -994,6 +1030,16 @@ class GroveHeadlessAPI(http.Controller):
         # so the PDP buy box renders sold-out identically whether it came from
         # stock or from the cap. The frontend never computes the threshold.
         data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
+        # Seed pre-orders (GOL-3257 §5): a seed template carries a top-level
+        # shipping_tier + seed_season object (both absent on ordinary products).
+        # The two signals move together — every variant of a seed template
+        # computes grove_effective_shipping_tier == "seed" — so the storefront's
+        # "seed if seed_season present OR any variant tier seed" check never sees
+        # them disagree.
+        season = _seed_season_payload(product)
+        if season is not None:
+            data["shipping_tier"] = "seed"
+            data["seed_season"] = season
 
         return _json_response(data)
 
@@ -1857,7 +1903,7 @@ class GroveHeadlessAPI(http.Controller):
         wave_error, ship_wave = _validate_ship_wave(
             request.env,
             payload,
-            [SimpleNamespace(display_type=False, product_id=product) for product, _qty in lines],
+            [SimpleNamespace(display_type=False, product_id=product, product_uom_qty=qty) for product, qty in lines],
             "pickup" if fulfillment == "pickup" else "ship",
             shipping.get("zip") or payload.get("zip"),
             _today_utc(),
@@ -1869,24 +1915,34 @@ class GroveHeadlessAPI(http.Controller):
             return _json_response({"error": wave_error}, status=400)
         reason = _deposit_reason_for_lines(request.env, lines, fulfillment, today, ship_wave)
         deposit_now = reason is not None
+        # Seed carts take the $1 deposit (GOL-3257); every other deposit cart
+        # takes the $10 bareroot deposit. Keep the quote's amount in lockstep
+        # with _build_stripe_line_items so the cart preview never disagrees with
+        # the Stripe charge.
+        deposit_amount = stripe_gateway.SEED_DEPOSIT if reason == "seed" else stripe_gateway.PREORDER_DEPOSIT
         line_quotes = []
         for product, qty in lines:
             bareroot, sold_out, free = _line_sold_out(product, qty)
-            line_quotes.append(
-                {
-                    "variant_id": product.id,
-                    "quantity": qty,
-                    "bareroot": bareroot,
-                    "sold_out": sold_out,
-                    "free_qty": free,
-                }
-            )
+            quote = {
+                "variant_id": product.id,
+                "quantity": qty,
+                "bareroot": bareroot,
+                "sold_out": sold_out,
+                "free_qty": free,
+            }
+            if _line_tier(product) == "seed":
+                # Harvest year this line would reserve, authoritative over the
+                # shopper's earlier localStorage cart stamp (Iris contract): the
+                # season may have rolled between add and this re-check.
+                adding_lb = (product.grove_seed_pack_lb or 0.0) * float(qty)
+                quote["seed_harvest_year"] = seed_season(product.product_tmpl_id, today, adding_lb=adding_lb)["year"]
+            line_quotes.append(quote)
         return _json_response(
             {
                 "deposit_now": deposit_now,
                 "deposit_reason": reason,
-                "deposit_amount": stripe_gateway.PREORDER_DEPOSIT,
-                "amount_due_today": stripe_gateway.PREORDER_DEPOSIT if deposit_now else None,
+                "deposit_amount": deposit_amount,
+                "amount_due_today": deposit_amount if deposit_now else None,
                 "after_cutover": _after_deposit_cutover(request.env, today),
                 "ship_wave": ship_wave,
                 "lines": line_quotes,
@@ -2931,11 +2987,25 @@ def _validate_ship_wave(
     """
     if not _is_nursery_website(website):
         return None, None
-    tiers = {
-        line.product_id.grove_effective_shipping_tier
+    real_lines = [
+        line
         for line in lines
         if not line.display_type and line.product_id and line.product_id.product_tmpl_id.type != "service"
-    }
+    ]
+    tiers = {line.product_id.grove_effective_shipping_tier for line in real_lines}
+    # Seed reservations check out on their own (GOL-3257 §6): refuse a cart that
+    # mixes seeds with non-seed lines, or seeds from two harvest years. Checked
+    # before the potted/bareroot gate so a seed+tree cart shows the seed copy.
+    if "seed" in tiers:
+        years = set()
+        for line in real_lines:
+            if line.product_id.grove_effective_shipping_tier != "seed":
+                continue
+            adding_lb = (line.product_id.grove_seed_pack_lb or 0.0) * float(getattr(line, "product_uom_qty", 0) or 0)
+            years.add(seed_season(line.product_id.product_tmpl_id, today, adding_lb=adding_lb)["year"])
+        seed_refusal = seed_cart_refusal(tiers, years)
+        if seed_refusal:
+            return seed_refusal, None
     if "potted" in tiers:
         start, end = LEAFED_WINDOW
         if not (start <= (today.month, today.day) <= end):
@@ -3196,7 +3266,18 @@ def _create_draft_order(website, env, payload, discount_out=None):
     # Stored before the promo gate below: ``_cart_has_preorder`` reads it, so a
     # wave pre-order is a deposit cart and a promo code on it is rejected.
     order.grove_ship_wave = ship_wave
-    if is_ship_to:
+
+    # Seed pre-orders (GOL-3257): seeds are exempt from the live-plant shipping
+    # rules — they ship anywhere (the "Castanea seed into FL/WA/OR allowed"
+    # ruling), are not quoted at checkout, and pay a $1 deposit with the balance
+    # settled at ship. So a seed-only ship cart SKIPS the green-list state gate,
+    # the per-line compliance carve-out, the shipping-rate line and the
+    # no-$0-shipping breaker below. The mixing rule (_validate_ship_wave) has
+    # already guaranteed a seed cart holds only seed lines, so this never lets a
+    # tree slip past those gates. Harvest years are stamped at the end (the
+    # checkout re-check) regardless of fulfilment.
+    is_seed_order = _order_is_seed(order)
+    if is_ship_to and not is_seed_order:
         dest = canonical_state_code(ship_state)
         if dest is None or zone_for_state(dest) is None:
             # (1) Unsupported / non-green-list destination — reject at the source.
@@ -3327,7 +3408,9 @@ def _create_draft_order(website, env, payload, discount_out=None):
                 order._grove_record_consult_deferral(dest, excluded_taxa_for_state(dest))
                 continue
             botanical = variant.product_tmpl_id.grove_botanical_name or ""
-            block_msg, is_failsafe = compliance_evaluate_line(botanical, dest, ship_state)
+            block_msg, is_failsafe = compliance_evaluate_line(
+                botanical, dest, ship_state, tier=variant.grove_effective_shipping_tier
+            )
             if block_msg:
                 if is_failsafe:
                     _logger.warning(
@@ -3379,13 +3462,18 @@ def _create_draft_order(website, env, payload, discount_out=None):
     # maintained by the daily rate-checker. Fail-safe: no rate → no line added.
     # Farm pickup never gets a shipping line even if the buyer left an address on
     # the form — pickup is the one legitimate $0-shipping fulfillment (GOL-1057).
-    shipping_charge = None if is_pickup else _apply_shipping_line(env, order, shipping, current_company)
+    # Seeds are not quoted at checkout (GOL-3257) — the actual label cost is
+    # billed at ship-time settlement — so a seed-only cart adds no rate line and
+    # is exempt from the no-$0-shipping breaker below.
+    shipping_charge = (
+        None if (is_pickup or is_seed_order) else _apply_shipping_line(env, order, shipping, current_company)
+    )
 
     # (3) No-$0-shipping circuit breaker: a ship-to order with shippable goods
     # that produced no positive shipping line is a rate-table gap — never let it
     # reach Stripe under-billed. (unshippable_reason above already cleared potted
     # carts, so reaching here with shippable items and no charge is a real gap.)
-    if is_ship_to:
+    if is_ship_to and not is_seed_order:
         has_shippable = any(qty > 0 for _tier, _length, qty in ship_items)
         if has_shippable and (shipping_charge is None or shipping_charge <= 0):
             order.unlink()
@@ -3466,6 +3554,12 @@ def _create_draft_order(website, env, payload, discount_out=None):
     # state → the pre-1057 $0-shipping local case) carries no shipping line and
     # is never labelled, so it collapses to "pickup" for alerting/label-gating.
     order.grove_fulfillment = "ship" if is_ship_to else "pickup"
+
+    # Re-check (and stamp) the seed harvest year each line reserves from, as of
+    # now (GOL-3257 §6). This is the checkout re-check: the season may have
+    # rolled since the shopper added to cart. No-op for a non-seed order.
+    if is_seed_order:
+        _stamp_seed_harvest_years(order, _today_utc())
 
     return order, None
 
@@ -3635,6 +3729,68 @@ def _deposit_lines(order):
     return pairs
 
 
+def _line_tier(product):
+    """The line's effective shipping tier, per-variant first then the template
+    default (mirrors the ship-to gate / shipping-charge builder)."""
+    if not product:
+        return None
+    return product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier
+
+
+def _order_is_seed(order):
+    """True when ``order`` is a seed pre-order — any real product line is tier
+    ``seed`` (GOL-3257). By the mixing rule a seed cart holds only seed lines,
+    so one seed line is enough to route the whole order onto the $1 deposit."""
+    return any(_line_tier(product) == "seed" for product, _qty in _deposit_lines(order))
+
+
+def _order_deposit_amount(order):
+    """The flat per-order deposit this order takes: $1 for a seed pre-order
+    (GOL-3257), else the $10 bareroot deposit (GOL-2233). A cart never mixes the
+    two (the seed mixing rule), so the choice is unambiguous."""
+    return stripe_gateway.SEED_DEPOSIT if _order_is_seed(order) else stripe_gateway.PREORDER_DEPOSIT
+
+
+def _order_seed_info(order, today=None):
+    """``(harvest_year, ship_start, ship_end)`` for a seed order's emails/UI, or
+    ``None`` when the order carries no seed line. Harvest year is the stamped
+    ``grove_seed_harvest_year`` on the first seed line (the mixing rule keeps
+    one year per cart); the ship window comes from that template's resolved
+    season as of ``today``."""
+    if today is None:
+        today = _date.today()
+    for line in order.order_line:
+        if line.display_type or not line.product_id or line.reward_id:
+            continue
+        if _line_tier(line.product_id) != "seed":
+            continue
+        template = line.product_id.product_tmpl_id
+        season = seed_season(template, today)
+        return (line.grove_seed_harvest_year or season["year"], season["ship_start"], season["ship_end"])
+    return None
+
+
+def _stamp_seed_harvest_years(order, today=None):
+    """Stamp ``grove_seed_harvest_year`` on every seed line (GOL-3257 §6).
+
+    Each seed line's harvest year is ``seed_season(template, today,
+    adding_lb=pack_lb × qty)['year']`` — the season this line reserves from,
+    rolled to next fall if this line alone would push past the order-by date or
+    the season cap. Runs at order create (checkout), which is the re-check the
+    spec asks for; the catalog payload is the shopper's earlier estimate.
+    Non-seed lines are left untouched (default 0)."""
+    if today is None:
+        today = _date.today()
+    for line in order.order_line:
+        if line.display_type or not line.product_id or line.reward_id:
+            continue
+        variant = line.product_id
+        if _line_tier(variant) != "seed":
+            continue
+        adding_lb = (variant.grove_seed_pack_lb or 0.0) * (line.product_uom_qty or 0.0)
+        line.grove_seed_harvest_year = seed_season(variant.product_tmpl_id, today, adding_lb=adding_lb)["year"]
+
+
 def _line_sold_out(product, qty):
     """Is this bareroot line short on free (shared-pool) stock? Free stock is the
     shared pool (GOL-2031: bareroot draws on the potted pool). A shortfall
@@ -3674,7 +3830,16 @@ def _deposit_reason_for_lines(env, lines, fulfillment, today, ship_wave=None):
     on a shipped order carrying bareroot; unset fulfillment counts as ship), or
     ``None`` (charged in full today). Legacy callers that pass no wave keep the
     original rule; sold-out is checked before off-season so the stated reason
-    matches the trigger a shopper can act on."""
+    matches the trigger a shopper can act on.
+
+    Seed pre-orders (GOL-3257) short-circuit to ``"seed"`` first: a seed line
+    makes the WHOLE order a flat $1 deposit (``stripe_gateway.SEED_DEPOSIT``),
+    on the same ship-time-settlement path as the tree deposit but a different
+    amount. The mixing rule guarantees a seed cart carries no trees, so the
+    bareroot branches below never fire for it."""
+    for product, qty in lines:
+        if float(qty) > 0 and _line_tier(product) == "seed":
+            return "seed"
     has_bareroot = False
     for product, qty in lines:
         bareroot, sold_out, _free = _line_sold_out(product, qty)
@@ -3804,11 +3969,14 @@ def _build_stripe_line_items(order, today=None, tax_enabled=False):
 
     if _order_takes_deposit(order, today):
         # One flat deposit for the entire cart, regardless of contents/quantity.
+        # The amount is $1 for a seed pre-order (GOL-3257), else the $10 bareroot
+        # deposit (GOL-2233); a cart never mixes the two.
+        deposit = _order_deposit_amount(order)
         line_items = [
             {
-                "name": "Deposit",
+                "name": "Seed reservation deposit" if _order_is_seed(order) else "Deposit",
                 "kind": "deposit",
-                "amount_cents": stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT),
+                "amount_cents": stripe_gateway.to_cents(deposit),
                 "quantity": 1,
             }
         ]
@@ -3816,7 +3984,7 @@ def _build_stripe_line_items(order, today=None, tax_enabled=False):
         # today, so the oversell guard must skip them all and the ship-time
         # settlement must collect their whole balance.
         preorder_variant_ids = [line.product_id.id for line in product_lines]
-        charged_cents = stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT)
+        charged_cents = stripe_gateway.to_cents(deposit)
         return line_items, preorder_variant_ids, charged_cents
 
     # Ships-now full-charge path: every good at full price + shipping + any
@@ -4042,6 +4210,29 @@ def _recompute_ship_total(env, order):
     invoice's line taxes remain destination-correct. PICKUP orders transfer at
     the WV farm and keep WV tax."""
     ship_line = _settlement_shipping_line(order)
+    if not ship_line and order.grove_fulfillment == "ship" and (order.grove_actual_shipping_cost or 0.0) > 0:
+        # A seed pre-order (GOL-3257) is never quoted at checkout, so it reaches
+        # settlement with NO GROVE-SHIP line. This is where its actual label cost
+        # + handling first lands on the order, so create the line now (WV-taxed;
+        # re-taxed to destination by _apply_destination_tax just below). Priced
+        # on the next statement, so start it at 0.
+        product = _get_shipping_product(env, order.company_id)
+        ship_line = (
+            order.env["sale.order.line"]
+            .sudo()
+            .create(
+                {
+                    "order_id": order.id,
+                    "product_id": product.id,
+                    "name": "Shipping",
+                    "product_uom_qty": 1.0,
+                    "price_unit": 0.0,
+                }
+            )
+        )
+        wv_state = _get_company_wv_state_tax(env, order.company_id)
+        if set(ship_line.tax_ids.ids) != set(wv_state.ids):
+            ship_line.tax_ids = [(6, 0, wv_state.ids)]
     if ship_line:
         ship_line.price_unit = (order.grove_actual_shipping_cost or 0.0) + _shipping_handling_fee(env)
     if order.grove_fulfillment == "ship":
@@ -4543,19 +4734,36 @@ def _notify_preorder_deposit(env, order):
     email = order.partner_id.email
     if not email:
         return
-    season = _preorder_ship_season(env, order)
-    body = (
-        f"<p>Hi {order.partner_id.name or 'there'},</p>"
-        f"<p>Thanks for reserving with us! Your order <strong>{order.name}</strong> "
-        f"includes preorder trees.</p>"
-        f"<p>{confirmation_deposit_line(season)}</p>"
-        f"<p>We'll email you again when your trees ship.</p>"
-        f"<p>Goldberry Grove Nursery</p>"
-    )
+    # Seed pre-orders (GOL-3257 §8) carry their own wording: one $1 deposit, a
+    # harvest year + ship window, and "the rest of the pack price, shipping and
+    # handling are charged when it ships" — not the per-tree spring/fall copy.
+    seed_info = _order_seed_info(order)
+    if seed_info is not None:
+        harvest_year, ship_start, ship_end = seed_info
+        body = (
+            f"<p>Hi {order.partner_id.name or 'there'},</p>"
+            f"<p>Thanks for reserving with us! Your order <strong>{order.name}</strong> "
+            f"is a seed pre-order.</p>"
+            f"<p>{seed_confirmation_line(harvest_year, ship_start, ship_end)}</p>"
+            f"<p>We'll email you again when it ships.</p>"
+            f"<p>Goldberry Grove Nursery</p>"
+        )
+        subject = f"Your seed reservation for {order.name}"
+    else:
+        season = _preorder_ship_season(env, order)
+        body = (
+            f"<p>Hi {order.partner_id.name or 'there'},</p>"
+            f"<p>Thanks for reserving with us! Your order <strong>{order.name}</strong> "
+            f"includes preorder trees.</p>"
+            f"<p>{confirmation_deposit_line(season)}</p>"
+            f"<p>We'll email you again when your trees ship.</p>"
+            f"<p>Goldberry Grove Nursery</p>"
+        )
+        subject = f"Your preorder deposit for {order.name}"
     try:
         env["mail.mail"].sudo().create(
             {
-                "subject": f"Your preorder deposit for {order.name}",
+                "subject": subject,
                 "email_to": email,
                 **mail_from_vals(env, order.company_id),
                 "body_html": body,
@@ -4931,7 +5139,11 @@ def _notify_shipping_status(env, order, status, tracking):
     # never sees a balance line it does not owe.
     balance_line = None
     if status == "transit" and (order.grove_preorder_variant_ids or "").strip():
-        balance_line = preship_balance_line(_preorder_ship_season(env, order))
+        seed_info = _order_seed_info(order)
+        if seed_info is not None:
+            balance_line = seed_preship_balance_line(seed_info[0])
+        else:
+            balance_line = preship_balance_line(_preorder_ship_season(env, order))
     subject, body = shipment_notice_copy(
         status=status,
         order_name=order.name,

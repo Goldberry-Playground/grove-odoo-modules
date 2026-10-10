@@ -161,6 +161,25 @@ class SaleOrder(models.Model):
     grove_stripe_tax_amount = fields.Monetary(readonly=True, copy=False)
     grove_stripe_tax_jurisdictions = fields.Text(readonly=True, copy=False)
 
+    # Order-level seed harvest year (GOL-3257), stored so the back-office saved
+    # filters can group seed reservations by harvest year. A seed cart holds one
+    # harvest year (the mixing rule), so this is the first non-zero line value;
+    # 0 for a non-seed order. Mirrors the per-line grove_seed_harvest_year.
+    grove_seed_harvest_year = fields.Integer(
+        string="Seed Harvest Year",
+        compute="_compute_grove_seed_harvest_year",
+        store=True,
+        copy=False,
+        help="Harvest year this seed reservation ships from (0 for non-seed orders).",
+    )
+
+    @api.depends("order_line.grove_seed_harvest_year")
+    def _compute_grove_seed_harvest_year(self):
+        for order in self:
+            order.grove_seed_harvest_year = next(
+                (y for y in order.order_line.mapped("grove_seed_harvest_year") if y), 0
+            )
+
     # ── Destination USDA zone, as a groupable order field (GOL-3056) ────────
     # Ship windows and labels are batched by the DESTINATION USDA hardiness zone
     # (shipping_calendar.WAVE_SCHEDULE, zones 2-10), so "what preorders are
@@ -1210,3 +1229,19 @@ class SaleOrder(models.Model):
                 _apply_delivery_status(
                     order.env, order, new_status, order.grove_tracking_numbers or "", source="carrier_poll"
                 )
+
+
+class SaleOrderLine(models.Model):
+    _inherit = "sale.order.line"
+
+    # Harvest year a seed pre-order line reserves from (GOL-3257). Stamped from
+    # seed_season(..., adding_lb=line weight) when the line is added and
+    # re-checked at checkout: a line that would push past the season cap moves
+    # to next fall and the shopper is shown the change before paying. Feeds the
+    # template's grove_seed_reserved_lb roll-up. 0/unset for non-seed lines.
+    grove_seed_harvest_year = fields.Integer(
+        string="Seed Harvest Year",
+        readonly=True,
+        copy=False,
+        index=True,
+    )
