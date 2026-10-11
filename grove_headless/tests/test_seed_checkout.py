@@ -30,8 +30,10 @@ class TestSeedCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.company = self.env.ref("base.main_company")
         # Two seed products in the same (2026) season, one bareroot tree, and one
         # seed product whose order-by has already passed so it rolls to 2027.
+        # Prices mirror the locked launch ladder (gom#334): Chinquapin 50-pack
+        # $30, Hazelnut 50-pack $26. Pack weight 0.125 lb is the 50-count rung.
         self.seed_a = self._seed("Chinquapin 50-pack", order_by=date(2026, 11, 1))
-        self.seed_c = self._seed("Hazelnut 50-pack", order_by=date(2026, 11, 1), price=20.0)
+        self.seed_c = self._seed("Hazelnut 50-pack", order_by=date(2026, 11, 1), price=26.0)
         self.seed_rolled = self._seed("Closed-season seed", order_by=date(2026, 10, 1))
         self.bareroot = self.env["product.product"].create(
             {
