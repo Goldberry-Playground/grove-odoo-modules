@@ -1,10 +1,13 @@
-"""Odoo-runtime draft-order / tax tests for Printify carts (spec §5)."""
+"""Odoo-runtime draft-order / tax tests for Printify carts (spec §5-6)."""
 
+import json
+from datetime import datetime, timedelta
 from unittest import mock
 
 from odoo.addons.grove_headless.controllers import main as grove_main
 from odoo.addons.grove_headless.models import printify_client, stripe_gateway
 from odoo.tests import TransactionCase, tagged
+from odoo.tests.common import HttpCase, get_db_name
 
 from .common import GroveTaxFixtureMixin
 
@@ -127,3 +130,70 @@ class TestPrintifyDraftOrder(_PrintifyFixture, GroveTaxFixtureMixin, Transaction
         self.assertEqual(stripe_gateway.TAX_CODE_APPAREL, "txcd_30011000")
         self.assertEqual(grove_main._stripe_tax_code_for(self.shirt), "txcd_30011000")
         self.assertEqual(grove_main._stripe_tax_code_for(self.tree), stripe_gateway.TAX_CODE_GOODS)
+
+
+@tagged("grove_headless", "post_install", "-at_install")
+class TestPrintifyQuoteEndpoint(_PrintifyFixture, GroveTaxFixtureMixin, HttpCase):
+    def setUp(self):
+        super().setUp()
+        self._build()
+        admin = self.env.ref("base.user_admin")
+        try:
+            self.api_key = (
+                self.env["res.users.apikeys"]
+                .with_user(admin)
+                ._generate("rpc", "grove-printify-quote", datetime.now() + timedelta(days=1))
+            )
+        except Exception as exc:  # noqa: BLE001
+            self.skipTest(f"API keys unavailable: {exc}")
+
+    def _post(self, body):
+        headers = {
+            "X-Odoo-Database": get_db_name(),
+            "X-Grove-Tenant": "goldberry",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
+        return self.url_open("/grove/api/v1/checkout/quote", data=json.dumps(body).encode(), headers=headers)
+
+    def _body(self, **extra):
+        body = {
+            "items": [{"variant_id": self.shirt.id, "quantity": 1}],
+            "fulfillment": "ship",
+            "shipping": {"state": "CA", "zip": "90001"},
+        }
+        body.update(extra)
+        return body
+
+    def test_quote_returns_printify_shipping(self):
+        with mock.patch.object(grove_main, "_printify_quote", return_value=4.75):
+            data = json.loads(self._post(self._body()).content)
+        self.assertEqual(data["fulfillment_route"], "printify")
+        self.assertEqual(data["shipping_amount"], 4.75)
+        self.assertFalse(data["deposit_now"])
+
+    def test_quote_without_address_has_null_shipping(self):
+        with mock.patch.object(grove_main, "_printify_quote") as quoted:
+            data = json.loads(self._post(self._body(shipping=None)).content)
+        self.assertIsNone(data["shipping_amount"])
+        quoted.assert_not_called()
+
+    def test_quote_503_when_printify_down(self):
+        with mock.patch.object(grove_main, "_printify_quote", side_effect=printify_client.PrintifyError("x", 503)):
+            resp = self._post(self._body())
+        self.assertEqual(resp.status_code, 503)
+
+    def test_quote_409_mixed(self):
+        resp = self._post(
+            self._body(
+                items=[{"variant_id": self.shirt.id, "quantity": 1}, {"variant_id": self.tree.id, "quantity": 1}]
+            )
+        )
+        self.assertEqual(resp.status_code, 409)
+
+    def test_tree_quote_unchanged(self):
+        data = json.loads(
+            self._post(self._body(items=[{"variant_id": self.tree.id, "quantity": 1}], shipping=None)).content
+        )
+        self.assertEqual(data["fulfillment_route"], "in_house")
+        self.assertIsNone(data["shipping_amount"])

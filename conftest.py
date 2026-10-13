@@ -83,4 +83,7 @@ collect_ignore_glob = [
     "grove_headless/tests/test_printify_product_sync.py",
     "grove_headless/tests/test_printify_catalog.py",
     "grove_headless/tests/test_printify_checkout.py",
+    "grove_headless/tests/test_printify_push.py",
+    "grove_headless/tests/test_printify_webhook.py",
+    "grove_headless/tests/test_printify_exclusions.py",
 ]

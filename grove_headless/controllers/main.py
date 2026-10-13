@@ -1911,6 +1911,37 @@ class GroveHeadlessAPI(http.Controller):
 
         lines = [(by_id[variant_id], qty) for variant_id, qty in parsed_items]
         today = _date.today()
+
+        # Printify merch quote (GOL-3314 §6): a Printify cart takes a LIVE
+        # Printify shipping quote and never mixes with trees. This mirrors the
+        # draft-order path so the storefront's pre-checkout summary matches what
+        # /checkout/session will charge. A cart with no destination yet quotes
+        # null shipping (the storefront re-quotes once the address is entered).
+        route_variants = [v for v in variants if v.product_tmpl_id.type != "service"]
+        printify = [v for v in route_variants if v.product_tmpl_id.grove_fulfillment_route == "printify"]
+        if printify and len(printify) != len(route_variants):
+            return _json_response({"error": PRINTIFY_MIXED_CART_MESSAGE}, status=409)
+        shipping_amount = None
+        if printify:
+            ship_to = payload.get("shipping") if isinstance(payload.get("shipping"), dict) else {}
+            dest = canonical_state_code(ship_to.get("state") or "")
+            if ship_to.get("state") and dest not in printify_client.US_50_AND_DC:
+                return _json_response({"error": PRINTIFY_DESTINATION_MESSAGE}, status=400)
+            if dest and ship_to.get("zip"):
+                qty_by_id = {variant_id: qty for variant_id, qty in parsed_items}
+                line_items = [
+                    {
+                        "product_id": v.product_tmpl_id.printify_product_id,
+                        "variant_id": v.printify_variant_id,
+                        "quantity": int(qty_by_id.get(v.id, 1)),
+                    }
+                    for v in printify
+                ]
+                try:
+                    shipping_amount = _printify_quote(line_items, _printify_address({}, ship_to, dest))
+                except printify_client.PrintifyError:
+                    return _json_response({"error": PRINTIFY_SHIPPING_UNAVAILABLE}, status=503)
+
         # Same potted-season / no-mixing / wave rules _create_draft_order enforces
         # (the quote carries a ZIP only for ship carts that already have one).
         shipping = payload.get("shipping") if isinstance(payload.get("shipping"), dict) else {}
@@ -1964,6 +1995,8 @@ class GroveHeadlessAPI(http.Controller):
             "after_cutover": _after_deposit_cutover(request.env, today),
             "ship_wave": ship_wave,
             "lines": line_quotes,
+            "fulfillment_route": "printify" if printify else "in_house",
+            "shipping_amount": shipping_amount,
         }
         seed_year = seed_cart_harvest_year(q.get("seed_harvest_year") for q in line_quotes)
         if seed_year is not None:
@@ -2319,6 +2352,32 @@ class GroveHeadlessAPI(http.Controller):
             ledger_vals["order_id"] = order.id
         ledger.write(ledger_vals)
         return _json_response({"ok": True, "result": result})
+
+    @http.route("/grove/api/v1/printify/webhook", type="http", auth="public", methods=["POST"], csrf=False)
+    def printify_webhook(self, **_kwargs):
+        """Receive Printify order/shipment webhooks (spec §7, GOL-3314).
+
+        type="http" so Printify sees real status codes and redelivers on 5xx.
+        HMAC-SHA256 verified against the raw body (X-Pfy-Signature: sha256=...),
+        confirmed against developers.printify.com. The handler is idempotent: the
+        tracking write is guarded and _apply_delivery_status dedupes and ranks, so
+        a redelivery or an out-of-order event never double-emails or regresses.
+        """
+        raw = request.httprequest.get_data() or b""
+        secret = os.environ.get("PRINTIFY_WEBHOOK_SECRET", "")
+        signature = request.httprequest.headers.get(PRINTIFY_SIGNATURE_HEADER, "")
+        if not printify_client.verify_signature(secret, raw, signature):
+            return _json_response({"error": "invalid signature"}, status=401)
+        try:
+            event = json.loads(raw or b"{}")
+        except ValueError:
+            return _json_response({"error": "invalid JSON"}, status=400)
+        try:
+            action = _handle_printify_event(request.env, event)
+        except printify_client.PrintifyError:
+            _logger.warning("grove_headless: Printify webhook could not fetch order", exc_info=True)
+            return _json_response({"error": "temporarily unavailable"}, status=503)
+        return _json_response({"ok": True, "action": action})
 
     # ── Newsletter ───────────────────────────────────────────────────────
 
@@ -2805,6 +2864,64 @@ def _printify_quote(line_items, address):
     if not token or not shop_id:
         raise printify_client.PrintifyError("Printify is not configured on this server")
     return printify_client.calculate_shipping(token, shop_id, line_items, address)
+
+
+# Printify sends the HMAC-SHA256 of the raw body as ``X-Pfy-Signature: sha256=...``
+# (developers.printify.com, Webhooks; confirmed 2026-10-13). A shipment event only
+# names the order, so the handler fetches the full order for shipment details and
+# never depends on the event's own shipment fields.
+PRINTIFY_SIGNATURE_HEADER = "X-Pfy-Signature"
+_PRINTIFY_STATE_RANK = {"in_production": 1, "shipped": 2, "delivered": 3}
+
+
+def _printify_set_state(order, state):
+    """Never move a Printify state backwards (delivered stays delivered).
+
+    canceled / on_hold are terminal signals that always apply (an order can be
+    canceled after it was in production); the shipped/delivered ladder only ever
+    advances so a late shipment:created after a delivered event can't regress it.
+    """
+    current = _PRINTIFY_STATE_RANK.get(order.printify_state or "", 0)
+    if _PRINTIFY_STATE_RANK.get(state, 0) >= current or state in ("canceled", "on_hold"):
+        order.sudo().write({"printify_state": state})
+
+
+def _handle_printify_event(env, event):
+    """Fold a Printify webhook event into the order (spec §7). Returns the action
+    taken ("in_production" | "transit" | "delivered" | "canceled" | "on_hold" |
+    "ignored"), for the route and tests."""
+    kind = event.get("type") or ""
+    resource = event.get("resource") or {}
+    order = env["sale.order"].sudo().search([("printify_order_id", "=", str(resource.get("id") or ""))], limit=1)
+    if not order:
+        return "ignored"
+    if kind == "order:sent-to-production":
+        _printify_set_state(order, "in_production")
+        return "in_production"
+    if kind in ("order:shipment:created", "order:shipment:delivered"):
+        token = os.environ.get("PRINTIFY_API_TOKEN", "")
+        shop_id = os.environ.get("PRINTIFY_SHOP_ID", "")
+        shipments = printify_client.get_order(token, shop_id, order.printify_order_id).get("shipments") or []
+        numbers = [s.get("number") for s in shipments if s.get("number")]
+        carriers = [(s.get("carrier") or "").upper() for s in shipments if s.get("number")]
+        # Tracking numbers / carriers FIRST, then the shipment-email path (spec
+        # §7). Guarded so a redelivery with the same tracking is a no-op write.
+        if numbers and order.grove_tracking_numbers != "\n".join(numbers):
+            order.sudo().write(
+                {"grove_tracking_numbers": "\n".join(numbers), "grove_shipping_carriers": "\n".join(carriers)}
+            )
+        status = "delivered" if kind == "order:shipment:delivered" else "transit"
+        _apply_delivery_status(env, order, status, "\n".join(numbers), source="printify")
+        _printify_set_state(order, "delivered" if status == "delivered" else "shipped")
+        return status
+    if kind == "order:updated":
+        status = (resource.get("data") or {}).get("status") or ""
+        if status in ("canceled", "on-hold"):
+            state = "canceled" if status == "canceled" else "on_hold"
+            _printify_set_state(order, state)
+            _notify_discord(f":warning: Printify marked {order.name} {status}. Check the Printify dashboard.")
+            return state
+    return "ignored"
 
 
 def _apply_destination_tax(env, order, shipping):
@@ -4299,6 +4416,12 @@ def _oversold_lines(order):
         product = line.product_id
         if product.default_code == SHIPPING_PRODUCT_CODE or product.id in preorder_ids:
             continue
+        # Printify merch is printed to order: there is no stock to oversell, and
+        # free_qty on a non-storable print-on-demand product is always 0, which
+        # would otherwise auto-refund a legitimately paid shirt (spec Review
+        # Focus 1, GOL-3314).
+        if product.product_tmpl_id.grove_fulfillment_route == "printify":
+            continue
         # Shared pool (GOL-2031): count the potted sibling too, or a paid
         # peat-and-bagged order gets auto-refunded as "oversold" while the
         # trees it ships sit potted on the bench.
@@ -5097,6 +5220,15 @@ def _handle_session_completed(env, session):
     # still notify (Josh). Both are best-effort and must never fail the webhook.
     _notify_new_order(env, order, has_preorder)
     _notify_merchant_email(env, order, has_preorder)
+    # Printify merch is printed and shipped by Printify with no human step
+    # (GOL-3314 §6): queue the paid order for the 5-minute push cron. Best-effort
+    # — the payment is already recorded, so a queue hiccup must never fail the
+    # Stripe webhook (the order can be retried from the back office).
+    if order.grove_is_printify:
+        try:
+            order.sudo().write({"printify_state": "queued"})
+        except Exception:  # noqa: BLE001 — never fail the Stripe webhook
+            _logger.exception("grove_headless: could not queue Printify push for %s", order.name)
     if has_preorder:
         # Deposit explainer alongside the branded receipt (GOL-1666): the
         # standard sale template lists the charged-today totals; this line

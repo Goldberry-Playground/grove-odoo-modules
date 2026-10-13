@@ -41,4 +41,14 @@
         <field name="context">{'group_by': ['grove_usda_zone']}</field>
     </record>
 
+    <!-- Printify orders whose push ran out of retries (GOL-3314): one click to
+         the orders a sales manager must re-queue from the back office. -->
+    <record id="ir_filter_grove_printify_push_failed" model="ir.filters">
+        <field name="name">Printify push failed</field>
+        <field name="model_id">sale.order</field>
+        <field name="user_ids" eval="[(6, 0, [])]" />
+        <field name="domain">[('printify_state', '=', 'push_failed')]</field>
+        <field name="context">{}</field>
+    </record>
+
 </odoo>

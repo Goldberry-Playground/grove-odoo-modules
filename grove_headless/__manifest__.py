@@ -82,6 +82,7 @@
         "data/grove_zone_filters.xml",
         "data/grove_seed_filters.xml",
         "data/printify_actions.xml",
+        "data/printify_cron.xml",
     ],
     "installable": True,
     "application": False,

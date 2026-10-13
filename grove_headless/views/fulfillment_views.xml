@@ -114,6 +114,20 @@
                     />
                 </group>
             </xpath>
+            <!-- Printify fulfilment state (GOL-3314). Shown only on a Printify
+                 order so the back office can see where the print-on-demand push
+                 is, and a sales manager can re-queue a push that failed. -->
+            <xpath expr="//field[@name='order_line']" position="after">
+                <group string="Printify" name="grove_printify" invisible="not grove_is_printify">
+                    <field name="grove_is_printify" invisible="1" />
+                    <field name="printify_order_id" />
+                    <field name="printify_state" />
+                    <field name="printify_push_attempts" />
+                    <button name="action_grove_retry_printify_push" type="object" string="Retry Printify push"
+                            class="btn-danger btn-sm" icon="fa-refresh" invisible="printify_state != 'push_failed'"
+                            groups="sales_team.group_sale_manager" />
+                </group>
+            </xpath>
         </field>
     </record>
 
