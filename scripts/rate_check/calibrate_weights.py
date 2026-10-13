@@ -14,11 +14,11 @@ Input (``--samples PATH``): recorded ``grove.label.batch.line.weight_lb`` per
 box type. Two shapes are accepted so this can read either a hand-grouped export
 or GOL-3200's golden-labels file directly:
 
-  A. ``{"small": [6.5, 8.5, ...], "large": [...]}`` — box_id -> list of weights.
+  A. ``{"p24x10x4": [11.0, 11.5, ...], "p24x10x6": [...]}`` — box_id -> list of weights.
      A weight may be a bare number or ``{"weight_lb": 6.5, "count": 3}`` (the
      optional ``count`` is the packed tree count, which unlocks a tare/per-tree
      least-squares fit below).
-  B. ``{"labels": [{"box_id": "small", "packed_weight_lb": 6.5, ...}, ...]}`` —
+  B. ``{"labels": [{"box_id": "p24x10x4", "packed_weight_lb": 11.5, ...}, ...]}`` —
      the GOL-3200 golden-labels shape; rows are grouped by ``box_id`` on
      ``packed_weight_lb`` (``weight_lb`` also accepted).
 

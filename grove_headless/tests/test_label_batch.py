@@ -33,7 +33,7 @@ _VALID_TRACK = ["1Z999AA10123456784", "1Z999AA10123456785", "9400111899223817200
 
 
 def _box(n):
-    return SimpleNamespace(box_id="small", count=n)
+    return SimpleNamespace(box_id="p24x10x4", count=n)
 
 
 @tagged("post_install", "-at_install")
