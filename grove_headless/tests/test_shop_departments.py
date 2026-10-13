@@ -10,7 +10,9 @@ Run via:
 """
 
 from odoo.addons.grove_headless.hooks import (
+    _DEPARTMENT_COPY,
     add_native_bundle_to_guilds,
+    load_department_copy,
     restructure_department_tree,
 )
 from odoo.tests.common import TransactionCase, tagged
@@ -252,6 +254,80 @@ class TestDepartmentRestructure(GroveTaxFixtureMixin, TransactionCase):
         )
         dept = _product_department(product)
         self.assertEqual(dept, {"slug": "orchard-food-forest", "name": "Orchard & food forest"})
+
+    # ── approved department copy (GOL-3292) ─────────────────────────────
+
+    def test_department_copy_loaded_onto_five_rows(self):
+        restructure_department_tree(self.env)
+        load_department_copy(self.env)
+        # The four department roots + the Guilds collection each carry their
+        # approved teaser, verbatim from _DEPARTMENT_COPY.
+        for slug in ("orchard-food-forest", "mycoforestry", "forest-farming", "seed-and-scion", "guilds"):
+            row = self._by_slug(slug)
+            self.assertTrue(row, f"{slug} row should exist after restructure")
+            self.assertEqual(row.grove_teaser, _DEPARTMENT_COPY[slug]["teaser"], f"{slug} teaser")
+        # Distinctive phrases guard against an accidental edit to the copy.
+        self.assertIn("hardy Appalachian stock", self._by_slug("orchard-food-forest").grove_teaser)
+        self.assertIn("wild-simulated ginseng", self._by_slug("forest-farming").grove_teaser)
+        self.assertIn("plan for where each tree goes", self._by_slug("guilds").grove_teaser)
+        # No em dash slipped into the loaded copy (storefront no-em-dash rule).
+        for slug in ("orchard-food-forest", "mycoforestry", "forest-farming", "seed-and-scion", "guilds"):
+            self.assertNotIn("—", self._by_slug(slug).grove_teaser or "")
+
+    def test_department_coming_lists_have_expected_item_counts(self):
+        restructure_department_tree(self.env)
+        load_department_copy(self.env)
+        self.assertEqual(len(self._by_slug("mycoforestry").grove_coming_items()), 5)
+        self.assertEqual(len(self._by_slug("forest-farming").grove_coming_items()), 4)
+        self.assertEqual(len(self._by_slug("seed-and-scion").grove_coming_items()), 5)
+        # Orchard (live) and Guilds carry no "What's coming" list.
+        self.assertEqual(self._by_slug("orchard-food-forest").grove_coming_items(), [])
+        self.assertEqual(self._by_slug("guilds").grove_coming_items(), [])
+        # A parsed item splits on the first pipe into name + detail.
+        first = self._by_slug("forest-farming").grove_coming_items()[0]
+        self.assertEqual(first["name"], "Goldenseal")
+        self.assertEqual(first["detail"], "root divisions: three to five years to a harvestable root")
+
+    def test_department_copy_does_not_clobber_edited_field_on_rerun(self):
+        restructure_department_tree(self.env)
+        load_department_copy(self.env)
+        myco = self._by_slug("mycoforestry")
+        # Simulate an edit made later in Odoo, then re-run the migration helper.
+        myco.grove_teaser = "Hand-edited teaser"
+        myco.grove_coming_list = "Only item | kept as-is"
+        load_department_copy(self.env)
+        self.assertEqual(myco.grove_teaser, "Hand-edited teaser", "a non-empty teaser must survive a re-run")
+        self.assertEqual(myco.grove_coming_list, "Only item | kept as-is", "a non-empty coming list must survive")
+        # A field left untouched still carries the approved copy (idempotent fill).
+        self.assertEqual(self._by_slug("guilds").grove_teaser, _DEPARTMENT_COPY["guilds"]["teaser"])
+
+    def test_department_copy_surfaces_in_catalog_nav(self):
+        restructure_department_tree(self.env)
+        load_department_copy(self.env)
+        # Orchard is live, so it needs a published product to render in the nav.
+        self.env["product.template"].create(
+            {
+                "name": "Honeycrisp Apple",
+                "website_published": True,
+                "public_categ_ids": [(6, 0, [self.original["Fruit Trees"]])],
+            }
+        )
+        nav = _catalog_nav(self.env, self.env.company)
+        by_slug = {d["slug"]: d for d in nav["departments"]}
+        self.assertIn("hardy Appalachian stock", by_slug["orchard-food-forest"]["teaser"])
+        # Forest farming (coming_soon) surfaces its teaser + 4-item coming list.
+        ff = by_slug["forest-farming"]
+        self.assertIn("wild-simulated ginseng", ff["teaser"])
+        self.assertEqual(len(ff["coming_list"]), 4)
+        self.assertEqual(ff["coming_list"][1]["name"], "American ginseng")
+        # The Guilds collection lede replaces the storefront fallback.
+        self.assertIn("plan for where each tree goes", nav["guilds"]["teaser"])
+
+    def test_department_copy_noops_for_missing_slug(self):
+        # Without a restructured tree there are no department rows; the loader
+        # must no-op cleanly rather than raise.
+        load_department_copy(self.env)
+        self.assertFalse(self._by_slug("mycoforestry"))
 
     # ── notify-me waitlist tag ──────────────────────────────────────────
 
