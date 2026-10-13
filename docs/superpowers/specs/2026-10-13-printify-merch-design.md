@@ -56,7 +56,7 @@ Mapping fields:
 |---|---|---|
 | `product.template` | `printify_product_id` (Char, indexed) | Printify product id. |
 | `product.product` | `printify_variant_id` (Integer) | Printify variant id (one per size/color). |
-| `product.template` | `printify_provider_lead_days` (Char, read-only) | Production time text from the print provider, shown on the PDP. |
+| `product.template` | `printify_lead_time` (Char, default "3 to 7 business days") | Production time shown on the PDP and confirmation. Editable per shirt: the Printify product payload carries no production time. |
 | `sale.order` | `grove_is_printify` (Boolean, computed, stored) | True when any goods line is on a `printify` product. Used to keep Printify orders out of in-house fulfillment (section 8). |
 
 ### 3. Sync from Printify (action, re-runnable)
@@ -75,7 +75,7 @@ Respect Printify limits (600 req/min global, 5% error-rate cap): no tight retry 
 
 `build_product_domain` gets one rule for the goldberry tenant: a product with `company_id = False` is included only if `grove_fulfillment_route = printify`. Shared trees (American Chestnut, PawPaw) stop appearing on the farm shop with no change to their company. Nursery and woodworking domains are unchanged.
 
-Printify product payloads carry `fulfillment_route: "printify"` and `lead_time` (from `printify_provider_lead_days`) through `_fulfillment_flags`, on both list and detail. Each serialized variant gains `color` and `size` from its Color and Size attribute values (empty string when absent), next to `cultivar` / `format` / `rootstock`. The farm-tenant rule applies to `product_detail`'s inline domain too.
+Printify product payloads carry `fulfillment_route: "printify"` and `lead_time` (from `printify_lead_time`) through `_fulfillment_flags`, on both list and detail. Each serialized variant gains `color` and `size` from its Color and Size attribute values (empty string when absent), next to `cultivar` / `format` / `rootstock`. The farm-tenant rule applies to `product_detail`'s inline domain too.
 
 ### 5. Cart and checkout
 
@@ -85,7 +85,7 @@ In `_create_draft_order` and `/checkout/quote`:
 - **Destinations:** an all-Printify order may ship to any of the 50 states + DC; it skips the 32-state live-tree green list. `canonical_state_code` also accepts PR, VI, GU, AS and MP, so the check is an explicit 51-code set. Territories, non-US or unrecognized destinations get a plain 400 "Shirts ship to the 50 US states and DC."
 - **Mixed carts:** an order with both `printify` and non-`printify` goods lines is refused with 409 "Shirts check out separately from trees."
 - **Shipping line:** for an all-Printify order, call `POST /shops/{shop_id}/orders/shipping.json` with the line variant ids, quantities and address; use the `standard` amount as the shipping line. This satisfies the existing "no $0 shipping" 409 check unchanged.
-- **Quote twice, charge the server's:** `/checkout/quote` returns `shipping_amount` (float, or null for non-Printify carts, whose response is otherwise unchanged) and `fulfillment_route` for display, and needs a `ship_to` address in the request for Printify carts; `checkout_session` quotes again server-side and that amount is charged. `_apply_shipping_line` is not used for Printify orders; a dedicated branch writes the GROVE-SHIP line.
+- **Quote twice, charge the server's:** `/checkout/quote` returns `shipping_amount` (float, or null for non-Printify carts, whose response is otherwise unchanged) and `fulfillment_route` for display, and quotes Printify carts once the request's `shipping` carries `state` and `zip` (null until then); `checkout_session` quotes again server-side and that amount is charged. `_apply_shipping_line` is not used for Printify orders; a dedicated branch writes the GROVE-SHIP line.
 - **Timeout:** 5 s. Timeout or non-2xx → 503 "Shipping is temporarily unavailable. Try again in a few minutes." No fallback price.
 - **Tax:** Stripe Tax through the existing `automatic_tax` path when `GROVE_STRIPE_TAX_GOLDBERRY` is on. Apparel lines use tax code `txcd_30011000`; the shipping line follows the existing shipping tax code.
 
@@ -135,7 +135,7 @@ A one-shot script (or server action) registers these webhooks through `POST /sho
 1. **Remove the demo catalog:** delete `data/mock-products.ts`, the "placeholders" banner, and the Flour / Freeze-dried / Jams / Mushrooms tabs (`SHOP_CATEGORIES`, `filterByCategory`). On Odoo failure or an empty list, show "The shop is restocking. Check back soon." instead of fake products.
 2. **Shop grid** from `odoo.products.list` only.
 3. **PDP:** Color and Size pickers mapped to Odoo variants, size-chart note, "Printed to order, ships in {leadTime}" line from the payload. No format, wave, deposit or zone UI (already nursery-only).
-4. **Cart:** live shipping from `/checkout/quote` with a "Calculating…" state; render the 503 and 409 messages in the existing refusal channel; the Check out button does nothing while the quote is unavailable.
+4. **Checkout page:** live shipping from `/checkout/quote` once the shopper has entered state and ZIP ("Enter your address" until then); render the 503 and 409 messages in the existing refusal channel; submit is blocked while the quote is unavailable. The cart page keeps "At checkout" because it has no address.
 5. **Confirmation:** "Your shirt is printed to order and usually ships in {leadTime}. We'll email tracking when it's on the way."
 6. Copy follows the listing style rules (no em dashes, plain tone).
 
