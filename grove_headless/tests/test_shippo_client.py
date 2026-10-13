@@ -26,17 +26,17 @@ class TestShippoClient(unittest.TestCase):
     }
 
     def test_payload_uses_box_parcel(self):
-        p = sp.build_shipment_payload(self.ADDR, "large", 4, "leafed")
+        p = sp.build_shipment_payload(self.ADDR, "p24x10x6", 4, "leafed")
         self.assertEqual(p["parcels"][0]["length"], "24")
-        self.assertEqual(p["parcels"][0]["width"], "9")
+        self.assertEqual(p["parcels"][0]["width"], "10")
         self.assertEqual(p["parcels"][0]["height"], "6")
-        # carton 3.1 + paper 5.0 + 4 x 2.0 leafed = 16.1 lb declared actual weight.
-        self.assertEqual(p["parcels"][0]["weight"], "16.1")
+        # carton 1.5 (no separate paper term) + 4 x 2.0 leafed = 9.5 lb declared.
+        self.assertEqual(p["parcels"][0]["weight"], "9.5")
         self.assertTrue(p["address_to"]["is_residential"])
         self.assertEqual(p["address_from"]["zip"], "26651")
 
     def test_payload_weight_never_below_one_pound(self):
-        p = sp.build_shipment_payload(self.ADDR, "small", 0, "dormant")
+        p = sp.build_shipment_payload(self.ADDR, "p24x10x4", 0, "dormant")
         self.assertGreaterEqual(float(p["parcels"][0]["weight"]), 1.0)
 
     @staticmethod
@@ -63,7 +63,7 @@ class TestShippoClient(unittest.TestCase):
         }
         posts = self._posts(shipment, self.TXN)
         out = sp.buy_cheapest_ground_label(
-            "key", sp.build_shipment_payload(self.ADDR, "small", 4, "leafed"), post=posts
+            "key", sp.build_shipment_payload(self.ADDR, "p24x10x4", 4, "leafed"), post=posts
         )
         self.assertEqual(out["tracking_number"], "1Z999")
         self.assertEqual(out["carrier"], "UPS")
@@ -85,7 +85,7 @@ class TestShippoClient(unittest.TestCase):
         }
         posts = self._posts(shipment, self.TXN)
         out = sp.buy_cheapest_ground_label(
-            "key", sp.build_shipment_payload(self.ADDR, "small", 4, "leafed"), post=posts
+            "key", sp.build_shipment_payload(self.ADDR, "p24x10x4", 4, "leafed"), post=posts
         )
         # The transaction call must reference the cheaper USPS rate object.
         bought = posts.call_args_list[1].kwargs["json"]["rate"]
@@ -107,7 +107,7 @@ class TestShippoClient(unittest.TestCase):
         }
         posts = self._posts(shipment, self.TXN)
         out = sp.buy_cheapest_ground_label(
-            "key", sp.build_shipment_payload(self.ADDR, "small", 4, "leafed"), post=posts
+            "key", sp.build_shipment_payload(self.ADDR, "p24x10x4", 4, "leafed"), post=posts
         )
         self.assertEqual(out["carrier"], "USPS")
 
@@ -121,7 +121,9 @@ class TestShippoClient(unittest.TestCase):
         }
         posts = mock.Mock(return_value=mock.Mock(status_code=201, json=lambda: shipment, raise_for_status=lambda: None))
         with self.assertRaises(sp.ShippoError):
-            sp.buy_cheapest_ground_label("key", sp.build_shipment_payload(self.ADDR, "small", 4, "leafed"), post=posts)
+            sp.buy_cheapest_ground_label(
+                "key", sp.build_shipment_payload(self.ADDR, "p24x10x4", 4, "leafed"), post=posts
+            )
 
 
 class TestCheapestGroundSelector(unittest.TestCase):
@@ -237,7 +239,7 @@ class TestShipFromOrigin(unittest.TestCase):
             self.assertEqual(reloaded.ORIGIN["street1"], "1 Override Way")
 
     def test_payload_ships_from_the_origin(self):
-        payload = sp.build_shipment_payload(TestShippoClient.ADDR, "small", 4, "leafed")
+        payload = sp.build_shipment_payload(TestShippoClient.ADDR, "p24x10x4", 4, "leafed")
         self.assertEqual(payload["address_from"]["zip"], "26651")
         self.assertNotIn("SET_AT_DEPLOY", payload["address_from"]["street1"])
 
@@ -265,6 +267,6 @@ class TestShipFromOrigin(unittest.TestCase):
             spec = importlib.util.spec_from_file_location("grove_shippo_reload", _MODULE_PATH)
             reloaded = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(reloaded)
-            payload = reloaded.build_shipment_payload(TestShippoClient.ADDR, "small", 4, "leafed")
+            payload = reloaded.build_shipment_payload(TestShippoClient.ADDR, "p24x10x4", 4, "leafed")
             self.assertEqual(payload["address_from"]["phone"], "3045551212")
             self.assertNotEqual(payload["address_from"]["email"].strip(), "")
