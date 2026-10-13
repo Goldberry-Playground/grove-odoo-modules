@@ -33,6 +33,7 @@ DEFAULT_TIMEOUT = 30
 TAX_CODE_GOODS = "txcd_99999999"  # General — Tangible Goods
 TAX_CODE_SHIPPING = "txcd_92010001"  # Shipping
 TAX_CODE_GIFT_CARD = "txcd_10401000"  # Gift card (non-taxable at sale)
+TAX_CODE_APPAREL = "txcd_30011000"  # Clothing (Printify merch)
 
 # Deposit rule (GOL-2233, ratified by Josh in the 2026-09-07 release-train
 # session): an order that triggers a deposit — sold-out bareroot OR any order

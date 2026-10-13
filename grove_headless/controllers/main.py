@@ -15,7 +15,7 @@ from odoo import fields, http
 from odoo.http import Response, request
 
 from ..hooks import _get_company_wv_state_tax
-from ..models import bundle_substitution, promotions, stripe_gateway
+from ..models import bundle_substitution, printify_client, promotions, stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
 from ..models.mail_from import mail_from_vals
@@ -2728,6 +2728,18 @@ def _apply_shipping_line(env, order, shipping, company):
             )
         return None
 
+    return _add_shipping_line(env, order, charge, state, company)
+
+
+def _add_shipping_line(env, order, charge, state, company):
+    """Write the GROVE-SHIP line with the WV state tax forced (GOL-2449). Shared by
+    the Box Engine path (`_apply_shipping_line`) and the Printify quote path (§5).
+
+    Force the WV 6% state tax on the shipping line regardless of the product's tax
+    data — shipping is taxable at the same rate as goods. For an out-of-state
+    destination `_apply_destination_tax` strips it again right after this line is
+    added.
+    """
     product = _get_shipping_product(env, company)
     ship_line = (
         env["sale.order.line"]
@@ -2742,15 +2754,57 @@ def _apply_shipping_line(env, order, shipping, company):
             }
         )
     )
-    # Force the WV 6% state tax on the shipping line regardless of the product's
-    # tax data (GOL-2449) — shipping is taxable at the same rate as goods. For an
-    # out-of-state destination `_apply_destination_tax` strips it again right
-    # after this line is added.
     wv_state = _get_company_wv_state_tax(env, company)
     if set(ship_line.tax_ids.ids) != set(wv_state.ids):
         ship_line.tax_ids = [(6, 0, wv_state.ids)]
     order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
     return charge
+
+
+# ── Printify merch checkout (spec 2026-10-13-printify-merch-design.md §5) ──
+PRINTIFY_MIXED_CART_MESSAGE = "Shirts check out separately from trees."
+PRINTIFY_DESTINATION_MESSAGE = "Shirts ship to the 50 US states and DC."
+PRINTIFY_SHIPPING_UNAVAILABLE = "Shipping is temporarily unavailable. Try again in a few minutes."
+PRINTIFY_PICKUP_MESSAGE = "Shirts ship to you. Farm pickup isn't available for them."
+
+
+def _printify_address(contact, shipping, state):
+    name = (contact.get("name") or "").strip()
+    first, _, last = name.partition(" ")
+    return {
+        "first_name": first or name,
+        "last_name": last or first or name,
+        "email": contact.get("email") or "",
+        "phone": contact.get("phone") or "",
+        "country": "US",
+        "region": state,
+        "address1": shipping.get("street") or "",
+        "address2": shipping.get("street2") or "",
+        "city": shipping.get("city") or "",
+        "zip": shipping.get("zip") or "",
+    }
+
+
+def _printify_line_items(order):
+    return [
+        {
+            "product_id": line.product_id.product_tmpl_id.printify_product_id,
+            "variant_id": line.product_id.printify_variant_id,
+            "quantity": int(line.product_uom_qty),
+        }
+        for line in order.order_line
+        if not line.display_type
+        and line.product_id
+        and line.product_id.product_tmpl_id.grove_fulfillment_route == "printify"
+    ]
+
+
+def _printify_quote(line_items, address):
+    token = os.environ.get("PRINTIFY_API_TOKEN", "")
+    shop_id = os.environ.get("PRINTIFY_SHOP_ID", "")
+    if not token or not shop_id:
+        raise printify_client.PrintifyError("Printify is not configured on this server")
+    return printify_client.calculate_shipping(token, shop_id, line_items, address)
 
 
 def _apply_destination_tax(env, order, shipping):
@@ -2850,7 +2904,10 @@ def _stripe_tax_code_for(product):
     non-taxable at sale (tax lands on redemption) so a product in a Gift Card
     category gets the gift-card code; everything else is General Tangible Goods.
     The storefront sells no gift cards today, so this is a forward-looking hook —
-    plants always resolve to the goods code."""
+    plants always resolve to the goods code. Printify apparel uses the clothing
+    code (spec 2026-10-13-printify-merch-design.md §5)."""
+    if getattr(product, "grove_fulfillment_route", None) == "printify":
+        return stripe_gateway.TAX_CODE_APPAREL
     categ = product.categ_id
     name = (getattr(categ, "complete_name", "") or categ.name or "").lower()
     if "gift card" in name:
@@ -3335,7 +3392,41 @@ def _create_draft_order(website, env, payload, discount_out=None):
                     "or farm pickup."
                 )
             return None, _json_response({"error": error}, status=400)
-    if is_ship_to and not is_seed_order:
+
+    # Printify merch (spec 2026-10-13-printify-merch-design.md §5): one fulfillment
+    # route per order; shirts skip every plant rule and take a live Printify
+    # shipping quote instead of the Box Engine. ``ship_items`` stays [] for a
+    # Printify order so the no-$0 breaker below is a no-op (the quote is the line).
+    goods_lines = [
+        line
+        for line in order.order_line
+        if not line.display_type and line.product_id and line.product_id.product_tmpl_id.type != "service"
+    ]
+    printify_goods = [ln for ln in goods_lines if ln.product_id.product_tmpl_id.grove_fulfillment_route == "printify"]
+    is_printify = bool(printify_goods)
+    if is_printify and len(printify_goods) != len(goods_lines):
+        order.unlink()
+        return None, _json_response({"error": PRINTIFY_MIXED_CART_MESSAGE}, status=409)
+    printify_charge = None
+    ship_items = []
+    if is_printify:
+        if is_pickup or not is_ship_to:
+            order.unlink()
+            return None, _json_response({"error": PRINTIFY_PICKUP_MESSAGE}, status=400)
+        dest = canonical_state_code(ship_state)
+        if dest not in printify_client.US_50_AND_DC:
+            order.unlink()
+            return None, _json_response({"error": PRINTIFY_DESTINATION_MESSAGE}, status=400)
+        try:
+            printify_charge = _printify_quote(
+                _printify_line_items(order), _printify_address(payload.get("contact") or {}, shipping, dest)
+            )
+        except printify_client.PrintifyError:
+            _logger.warning("grove_headless: Printify shipping quote failed for draft %s", order.name, exc_info=True)
+            order.unlink()
+            return None, _json_response({"error": PRINTIFY_SHIPPING_UNAVAILABLE}, status=503)
+
+    if is_ship_to and not is_seed_order and not is_printify:
         dest = canonical_state_code(ship_state)
         if dest is None or zone_for_state(dest) is None:
             # (1) Unsupported / non-green-list destination — reject at the source.
@@ -3522,10 +3613,16 @@ def _create_draft_order(website, env, payload, discount_out=None):
     # the form — pickup is the one legitimate $0-shipping fulfillment (GOL-1057).
     # Seeds are not quoted at checkout (GOL-3257) — the actual label cost is
     # billed at ship-time settlement — so a seed-only cart adds no rate line and
-    # is exempt from the no-$0-shipping breaker below.
-    shipping_charge = (
-        None if (is_pickup or is_seed_order) else _apply_shipping_line(env, order, shipping, current_company)
-    )
+    # is exempt from the no-$0-shipping breaker below. Printify shirts carry the
+    # live Printify quote as their ship line (GOL-3314) instead of the Box Engine.
+    if is_printify:
+        shipping_charge = _add_shipping_line(
+            env, order, printify_charge, canonical_state_code(ship_state), current_company
+        )
+    else:
+        shipping_charge = (
+            None if (is_pickup or is_seed_order) else _apply_shipping_line(env, order, shipping, current_company)
+        )
 
     # (3) No-$0-shipping circuit breaker: a ship-to order with shippable goods
     # that produced no positive shipping line is a rate-table gap — never let it

@@ -82,4 +82,5 @@ collect_ignore_glob = [
     "grove_headless/tests/test_seed_settlement.py",
     "grove_headless/tests/test_printify_product_sync.py",
     "grove_headless/tests/test_printify_catalog.py",
+    "grove_headless/tests/test_printify_checkout.py",
 ]
