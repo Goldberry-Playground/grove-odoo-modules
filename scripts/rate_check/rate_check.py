@@ -335,8 +335,8 @@ def load_manual_quotes(path: str) -> tuple:
     Shape::
 
         {"_quoted_on": "2026-09-29",
-         "zone_1": {"small": {"quote": 9.84, "carrier": "UPS", "service": "03",
-                              "service_title": "UPS Ground"}, ...}, ...}
+         "zone_1": {"p24x10x4": {"quote": 9.84, "carrier": "UPS", "service": "03",
+                                 "service_title": "UPS Ground"}, ...}, ...}
 
     ``carrier``/``service``/``service_title`` are REQUIRED per cell: schema 3
     exists so "which carrier set this rate" is always answerable, and
@@ -681,9 +681,9 @@ def main(argv=None) -> int:
         "ground [UPS Ground / UPS Ground Saver / USPS Ground Advantage] at the "
         "box's representative billable weight + per-box packaging + 2.00 buffer). "
         "Each cell records the winning carrier/service (schema 3); the Odoo loader "
-        "reads `base` only. Carries BOTH shippable catalogs (GOL-2199): bareroot "
-        "small/large and potted/peat-and-bagged p24x10x4/p24x10x6. "
-        "Design: spec 2026-09-09-pirateship-fulfillment-design.md (GOL-2270).",
+        "reads `base` only. Both shippable tiers (bareroot + potted/peat-and-bagged) "
+        "pack into the SAME p24x10x4 / p24x10x6 cartons (GOL-3285) and share these "
+        "rate rows. Design: spec 2026-09-09-pirateship-fulfillment-design.md (GOL-2270).",
         "_schema": 3,
         # Provenance the freshness guard reads (scripts/rate_check/staleness.py,
         # GOL-2641): the date these numbers were actually quoted, and from where.

@@ -115,10 +115,13 @@ RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 6))
 # Product tiers survive v2 as the shippability gate. GOL-2199 potted go-live
 # (CEO directive 2026-09-08): potted / peat-and-bagged now SHIPS on its own
 # engine (POTTED_BOXES, packed by unit count via pack_potted — GOL-2031),
-# alongside bareroot (packed by length class via pack_order). DEFAULT_TIER
-# stays potted: a mistagged product now ships at POTTED rates, the pricier
-# catalog at every weight point (12/22 lb potted vs 7/14 lb dormant bareroot),
-# so the never-undercharge property is preserved.
+# alongside bareroot (packed by length class via pack_order). Since GOL-3285
+# both engines pack into the SAME p24x10x4 / p24x10x6 cartons at the same
+# 12/22 lb representative points, so they quote the same rate rows. DEFAULT_TIER
+# stays potted: a mistagged product ships at POTTED rates, whose packed fill is
+# never lighter than bareroot's for a given carton (potted 2.0 lb/unit vs
+# bareroot 1.0 lb/whip, and potted holds fewer units), so the never-undercharge
+# property is preserved.
 # Fail-safe until the rate feed carries potted rows: pack_potted returns None
 # when no potted box has a zone rate, compute_order_shipping propagates the
 # None, and the checkout's $0-shipping circuit breaker (GOL-1036) blocks the
@@ -279,12 +282,12 @@ def rate_feed(calendar_override=None, today=None, consult_deferral_enabled=None)
 
         {
           "schema": 2,
-          "zones": {"zone_1": {"small": {"base": 22.0}, "large": {...}}, ...},
+          "zones": {"zone_1": {"p24x10x4": {"base": 20.0}, "p24x10x6": {...}}, ...},
           "zone_by_state": {"WV": "zone_1", ...},
           "green_states": ["CT", "DE", ...],
           "packing": {
-            "boxes": {"small": {"length": 24, "width": 6, "height": 4,
-                                "capacity": {"dormant": 5, "leafed": 5}}, ...},
+            "boxes": {"p24x10x4": {"length": 24, "width": 10, "height": 4,
+                                   "capacity": {"dormant": 10, "leafed": 10}}, ...},
             "length_classes": [16, 20],
             "modes": ["dormant", "leafed"],
           },
