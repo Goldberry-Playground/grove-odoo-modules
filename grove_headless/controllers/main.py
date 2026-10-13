@@ -33,7 +33,7 @@ from ..models.preorder_email import (
     seed_confirmation_line,
     seed_preship_balance_line,
 )
-from ..models.seed_season import seed_cart_refusal, seed_season
+from ..models.seed_season import seed_cart_harvest_year, seed_cart_refusal, seed_season
 from ..models.shipment_email import NOTIFY_STATUSES, delivery_status_from_webhook, shipment_notice_copy
 from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from ..models.shipping_calendar import (
@@ -50,6 +50,8 @@ from ..models.shipping_calendar import (
 )
 from ..models.shipping_zones import (
     GREEN_STATES,
+    SEED_SHIP_EXCLUDED_STATES,
+    SEED_SHIP_STATES,
     canonical_state_code,
     compute_order_shipping,
     rate_feed,
@@ -1937,17 +1939,24 @@ class GroveHeadlessAPI(http.Controller):
                 adding_lb = (product.grove_seed_pack_lb or 0.0) * float(qty)
                 quote["seed_harvest_year"] = seed_season(product.product_tmpl_id, today, adding_lb=adding_lb)["year"]
             line_quotes.append(quote)
-        return _json_response(
-            {
-                "deposit_now": deposit_now,
-                "deposit_reason": reason,
-                "deposit_amount": deposit_amount,
-                "amount_due_today": deposit_amount if deposit_now else None,
-                "after_cutover": _after_deposit_cutover(request.env, today),
-                "ship_wave": ship_wave,
-                "lines": line_quotes,
-            }
-        )
+        # Publish the order's single harvest year at the TOP LEVEL too (GOL-3257,
+        # Josh 2026-10-13): the storefront (GOL-3258) reads it there to show/refuse
+        # on a rollover. The per-line value stays. The mixing rule above (via
+        # _validate_ship_wave) has already rejected any cart with two harvest
+        # years, so a seed cart that reaches here carries exactly one.
+        response = {
+            "deposit_now": deposit_now,
+            "deposit_reason": reason,
+            "deposit_amount": deposit_amount,
+            "amount_due_today": deposit_amount if deposit_now else None,
+            "after_cutover": _after_deposit_cutover(request.env, today),
+            "ship_wave": ship_wave,
+            "lines": line_quotes,
+        }
+        seed_year = seed_cart_harvest_year(q.get("seed_harvest_year") for q in line_quotes)
+        if seed_year is not None:
+            response["seed_harvest_year"] = seed_year
+        return _json_response(response)
 
     @http.route(
         "/grove/api/v1/checkout/session",
@@ -3269,16 +3278,38 @@ def _create_draft_order(website, env, payload, discount_out=None):
     # wave pre-order is a deposit cart and a promo code on it is rejected.
     order.grove_ship_wave = ship_wave
 
-    # Seed pre-orders (GOL-3257): seeds are exempt from the live-plant shipping
-    # rules — they ship anywhere (the "Castanea seed into FL/WA/OR allowed"
-    # ruling), are not quoted at checkout, and pay a $1 deposit with the balance
-    # settled at ship. So a seed-only ship cart SKIPS the green-list state gate,
-    # the per-line compliance carve-out, the shipping-rate line and the
-    # no-$0-shipping breaker below. The mixing rule (_validate_ship_wave) has
-    # already guaranteed a seed cart holds only seed lines, so this never lets a
-    # tree slip past those gates. Harvest years are stamped at the end (the
-    # checkout re-check) regardless of fulfilment.
+    # Seed pre-orders (GOL-3257): seeds are exempt from the live-plant green-list
+    # (the "Castanea seed into FL/WA/OR allowed" ruling), are not quoted at
+    # checkout, and pay a $1 deposit with the balance settled at ship. So a
+    # seed-only ship cart SKIPS the live-plant green-list state gate, the
+    # per-line compliance carve-out, the shipping-rate line and the no-$0-shipping
+    # breaker below. The mixing rule (_validate_ship_wave) has already guaranteed
+    # a seed cart holds only seed lines, so this never lets a tree slip past those
+    # gates. Harvest years are stamped at the end (the checkout re-check)
+    # regardless of fulfilment.
+    #
+    # Seeds are NOT shippable literally anywhere, though: they ship to every US
+    # state + DC except Hawaii and Alaska (Josh 2026-10-13). A seed ship-to
+    # order to a non-allowed destination is refused here with a plain-English
+    # 400, in place of the green-list gate it skips.
     is_seed_order = _order_is_seed(order)
+    if is_ship_to and is_seed_order:
+        dest = canonical_state_code(ship_state)
+        if dest not in SEED_SHIP_STATES:
+            order.unlink()
+            if dest in SEED_SHIP_EXCLUDED_STATES:
+                error = (
+                    f"We can't ship seeds to {ship_state} — seed pre-orders ship to every "
+                    "US state and DC except Hawaii and Alaska. Choose another ship-to "
+                    "state or farm pickup."
+                )
+            else:
+                error = (
+                    f"We can't ship seeds to {ship_state}. Seed pre-orders ship to every "
+                    "US state and DC except Hawaii and Alaska — choose a US ship-to state "
+                    "or farm pickup."
+                )
+            return None, _json_response({"error": error}, status=400)
     if is_ship_to and not is_seed_order:
         dest = canonical_state_code(ship_state)
         if dest is None or zone_for_state(dest) is None:
@@ -4192,14 +4223,24 @@ def _shipping_handling_fee(env):
     return DEFAULT_SHIPPING_HANDLING_FEE
 
 
+def _order_handling_fee(env, order):
+    """The flat shipping-handling fee this order bills at settlement: $0 for a
+    seed pre-order (GOL-3257, Josh 2026-10-13 — seeds carry the actual label
+    cost only, no $5 handling), the standard ``_shipping_handling_fee`` for a
+    tree order."""
+    return 0.0 if _order_is_seed(order) else _shipping_handling_fee(env)
+
+
 def _recompute_ship_total(env, order):
     """Rewrite the GROVE-SHIP line to the ACTUAL packed shipping cost plus the
     flat S&H fee so settlement bills what really shipped, not the checkout
     estimate.
 
     The customer-facing GROVE-SHIP line becomes ``grove_actual_shipping_cost +
-    _shipping_handling_fee`` (GOL-2895, Josh 2026-10-02). The raw carrier spend
-    stays on ``grove_actual_shipping_cost`` for reporting; because the fee rides
+    _order_handling_fee`` (GOL-2895, Josh 2026-10-02) — the handling fee is $5
+    for a tree order and $0 for a seed pre-order (GOL-3257, Josh 2026-10-13: a
+    seed balance is goods + actual label + tax, no handling). The raw carrier
+    spend stays on ``grove_actual_shipping_cost`` for reporting; because the fee rides
     on the line price_unit, both ``amount_total`` and the Stripe Tax line items
     (which read ``price_subtotal``) include it, so the balance and tax are
     computed on actual shipping + fee.
@@ -4236,7 +4277,7 @@ def _recompute_ship_total(env, order):
         if set(ship_line.tax_ids.ids) != set(wv_state.ids):
             ship_line.tax_ids = [(6, 0, wv_state.ids)]
     if ship_line:
-        ship_line.price_unit = (order.grove_actual_shipping_cost or 0.0) + _shipping_handling_fee(env)
+        ship_line.price_unit = (order.grove_actual_shipping_cost or 0.0) + _order_handling_fee(env, order)
     if order.grove_fulfillment == "ship":
         state = order.partner_shipping_id.state_id.code or None
         _apply_destination_tax(env, order, {"state": state})
@@ -4765,11 +4806,14 @@ def settle_order_at_ship(env, order):
     # old blanket "actual shipping $0.00 + $5.00 handling" wording misled ops into
     # thinking a handling line existed. For pickup, report just the captured balance
     # and tax. Label the tax honestly (GOL-3074): "Stripe tax" only when Stripe Tax
-    # actually ran, else Odoo's own destination-rule "sales tax".
+    # actually ran, else Odoo's own destination-rule "sales tax". Handling is
+    # order-aware (GOL-3257): $0 for a seed pre-order, so omit the clause when zero.
     if _settlement_shipping_line(order):
+        handling = _order_handling_fee(env, order)
+        handling_note = f" + ${handling:.2f} handling" if handling else ""
         breakdown = (
-            f" — actual shipping ${order.grove_actual_shipping_cost or 0.0:.2f} + "
-            f"${_shipping_handling_fee(env):.2f} handling, {tax_label} ${settled_tax or 0.0:.2f}"
+            f" — actual shipping ${order.grove_actual_shipping_cost or 0.0:.2f}"
+            f"{handling_note}, {tax_label} ${settled_tax or 0.0:.2f}"
         )
     else:
         breakdown = f" (farm pickup — no shipping), {tax_label} ${settled_tax or 0.0:.2f}"
@@ -4971,8 +5015,9 @@ def _notify_preorder_deposit(env, order):
     if not email:
         return
     # Seed pre-orders (GOL-3257 §8) carry their own wording: one $1 deposit, a
-    # harvest year + ship window, and "the rest of the pack price, shipping and
-    # handling are charged when it ships" — not the per-tree spring/fall copy.
+    # harvest year + ship window, and "the rest of the pack price and shipping
+    # are charged when it ships" (no handling fee on seeds, Josh 2026-10-13) —
+    # not the per-tree spring/fall copy.
     seed_info = _order_seed_info(order)
     if seed_info is not None:
         harvest_year, ship_start, ship_end = seed_info

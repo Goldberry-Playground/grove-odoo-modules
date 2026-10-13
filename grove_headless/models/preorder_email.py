@@ -59,8 +59,9 @@ def preship_balance_line(season=None, amount=PREORDER_DEPOSIT):
 # ── Seed pre-orders (GOL-3257 §8) ───────────────────────────────────────────
 # Seeds use the SAME deposit + ship-time-settlement arrangement as the tree
 # pre-orders, but the shopper pays one $1 deposit per order (not per tree), the
-# balance is "the rest of the pack price, shipping and handling" (seeds are not
-# quoted at checkout), and the thing we promise is a harvest year and a ship
+# balance is "the rest of the pack price, shipping and tax" (seeds are not
+# quoted at checkout and carry NO handling fee — GOL-3257, Josh 2026-10-13),
+# and the thing we promise is a harvest year and a ship
 # window, not a spring/fall tree wave. House voice rule still applies: no em
 # dashes anywhere in customer-facing copy.
 
@@ -82,18 +83,17 @@ def seed_confirmation_line(harvest_year=None, ship_start=None, ship_end=None, am
     """One-line seed-deposit explainer for the order-confirmation email (§8).
 
     e.g. "$1 deposit today for your fall 2026 harvest (ships approx Oct 15 to
-    Nov 15). The rest of the pack price, shipping and handling are charged when
-    it ships." Drops the harvest clause when the year is unknown and the ship
-    window when the dates are missing, so a half-configured product still sends.
+    Nov 15). The rest of the pack price and shipping are charged when it ships."
+    Drops the harvest clause when the year is unknown and the ship window when
+    the dates are missing, so a half-configured product still sends. Seeds carry
+    NO handling fee (GOL-3257, Josh 2026-10-13), so the copy says "shipping",
+    not "shipping and handling".
     """
     label = deposit_amount_label(amount)
     harvest = f" for your fall {int(harvest_year)} harvest" if harvest_year else ""
     window = _ship_window_phrase(ship_start, ship_end)
     window = f" ({window})" if window else ""
-    return (
-        f"{label} deposit today{harvest}{window}. The rest of the pack price, "
-        f"shipping and handling are charged when it ships."
-    )
+    return f"{label} deposit today{harvest}{window}. The rest of the pack price and shipping are charged when it ships."
 
 
 def seed_preship_balance_line(harvest_year=None, amount=SEED_DEPOSIT):
@@ -104,6 +104,6 @@ def seed_preship_balance_line(harvest_year=None, amount=SEED_DEPOSIT):
     harvest = f" from the fall {int(harvest_year)} harvest" if harvest_year else ""
     return (
         f"This was a seed pre-order{harvest}. You paid a {label} deposit at "
-        f"checkout; the rest of the pack price, shipping and handling settle on "
+        f"checkout; the rest of the pack price and shipping settle on "
         f"your saved card when it ships."
     )

@@ -468,7 +468,7 @@ class ProductTemplate(models.Model):
         "farm pickup only — it cannot ship. Seed is a pre-order seed nut: it "
         "bypasses the leafed-season, zone and wave rules and the plant-shipping "
         "compliance block, pays a $1 deposit at checkout and settles the "
-        "balance (pack price + actual label + handling + tax) at ship time. An "
+        "balance (pack price + actual label + tax, no handling fee) at ship time. An "
         "untagged product defaults to potted so it can never ship undercharged.",
     )
 

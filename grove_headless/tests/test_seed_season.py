@@ -160,5 +160,27 @@ class TestSeedCartRefusal(unittest.TestCase):
         self.assertEqual(ss.SEED_MIX_REFUSAL, "Seed reservations check out on their own.")
 
 
+class TestSeedCartHarvestYear(unittest.TestCase):
+    """The order's single top-level harvest year for the quote (GOL-3257, Josh
+    2026-10-13) — the storefront reads it to show/refuse on a rollover."""
+
+    def test_no_seed_line_is_none(self):
+        self.assertIsNone(ss.seed_cart_harvest_year([]))
+        self.assertIsNone(ss.seed_cart_harvest_year([0, None]))
+
+    def test_single_year_is_published(self):
+        self.assertEqual(ss.seed_cart_harvest_year([2026]), 2026)
+        self.assertEqual(ss.seed_cart_harvest_year([2026, 2026]), 2026)
+
+    def test_zero_and_none_ignored(self):
+        self.assertEqual(ss.seed_cart_harvest_year([2026, 0, None]), 2026)
+
+    def test_latest_year_when_more_than_one(self):
+        # The mixing rule normally prevents two years reaching the quote; if one
+        # slips through, publish the later (rolled) year so the ship date is not
+        # under-promised.
+        self.assertEqual(ss.seed_cart_harvest_year([2026, 2027]), 2027)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -337,6 +337,44 @@ class TestCheckoutQuoteEndpoint(_PoolFixture, GroveTaxFixtureMixin, HttpCase):
             self.assertEqual(resp.status_code, 400, (fragment, resp.text))
             self.assertIn(fragment.lower(), resp.text.lower())
 
+    def test_seed_quote_publishes_a_top_level_harvest_year(self):
+        # A seed cart's quote carries the harvest year per line AND at the top
+        # level (GOL-3257, Josh 2026-10-13), so the storefront (GOL-3258) can
+        # show/refuse a rollover. Season set far in the future so the resolved
+        # year is stable regardless of the test's run date.
+        seed = self.env["product.product"].create(
+            {
+                "name": "Quote Chinquapin seed (50-pack)",
+                "type": "consu",
+                "is_storable": True,
+                "sale_ok": True,
+                "list_price": 30.0,
+                "company_id": self.company.id,
+                "grove_shipping_tier": "seed",
+                "grove_seed_pack_lb": 0.125,
+                "grove_seed_open": True,
+                "grove_seed_ship_start": date(2030, 10, 15),
+                "grove_seed_ship_end": date(2030, 11, 15),
+                "grove_seed_order_by": date(2030, 11, 1),
+                "grove_seed_cap_lb": 10.0,
+            }
+        )
+        resp = self._post({"items": [{"variant_id": seed.id, "quantity": 1}], "fulfillment": "ship"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()
+        self.assertEqual(body["deposit_reason"], "seed")
+        self.assertEqual(body["amount_due_today"], stripe_gateway.SEED_DEPOSIT)
+        # Top-level year is present and equals the single per-line year.
+        self.assertEqual(body["seed_harvest_year"], 2030)
+        self.assertEqual(body["lines"][0]["seed_harvest_year"], 2030)
+
+    def test_non_seed_quote_omits_the_top_level_harvest_year(self):
+        # A tree cart carries no seed_harvest_year key at all (top level or line).
+        self._stock(self.bareroot, 5)
+        body = self._post({"items": [{"variant_id": self.bareroot.id, "quantity": 1}]}).json()
+        self.assertNotIn("seed_harvest_year", body)
+        self.assertNotIn("seed_harvest_year", body["lines"][0])
+
     def test_validation_and_unknown_variant(self):
         self.assertEqual(self._post({"items": []}).status_code, 400)
         self.assertEqual(self._post({"items": [{"variant_id": "x", "quantity": 1}]}).status_code, 400)

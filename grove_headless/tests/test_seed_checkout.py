@@ -133,6 +133,22 @@ class TestSeedCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertIsNone(error, "two seed products in the same harvest year may share one $1 deposit")
         self.assertEqual(order.grove_seed_harvest_year, 2026)
 
+    # ── seed destinations: every state + DC except HI/AK (Josh 2026-10-13) ──
+
+    @mute_logger("odoo.addons.grove_headless.controllers.main")
+    def test_seed_refused_to_hawaii_and_alaska(self):
+        for state in ("HI", "AK"):
+            order, error = self._create(self._payload([self.seed_a], state=state))
+            self.assertIsNone(order, f"seeds must not ship to {state}")
+            self.assertEqual(error.status_code, 400)
+            self.assertIn("hawaii and alaska", error.data.decode().lower())
+
+    def test_seed_ships_to_a_far_non_green_state(self):
+        # California is neither green-list nor HI/AK: seeds reach it.
+        order, error = self._create(self._payload([self.seed_a], state="CA"))
+        self.assertIsNone(error, "seeds ship to every US state except HI/AK")
+        self.assertTrue(grove_main._order_is_seed(order))
+
     # ── mixing refusals ─────────────────────────────────────────────────────
 
     @mute_logger("odoo.addons.grove_headless.controllers.main")

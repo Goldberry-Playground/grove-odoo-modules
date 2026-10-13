@@ -55,6 +55,22 @@ def seed_cart_refusal(tiers, harvest_years) -> str | None:
     return None
 
 
+def seed_cart_harvest_year(harvest_years) -> int | None:
+    """The single harvest year a seed cart resolves to (GOL-3257, Josh
+    2026-10-13), pure so it unit-tests without a DB.
+
+    ``harvest_years`` is the harvest years across the cart's seed lines (ints;
+    0/None ignored). The mixing rule (:func:`seed_cart_refusal`) guarantees a
+    seed cart that reaches checkout carries exactly one harvest year, so the
+    order has a single year to publish at the top of the quote response for the
+    storefront. Returns that year, or ``None`` when the cart has no seed line.
+    Defensively returns the latest year if more than one somehow slips through,
+    so the storefront never under-promises the ship date.
+    """
+    years = {int(y) for y in harvest_years if y}
+    return max(years) if years else None
+
+
 def _add_year(d: datetime.date, years: int = 1) -> datetime.date:
     """``d`` shifted by whole years, Feb-29 safe.
 

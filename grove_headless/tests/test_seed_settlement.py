@@ -2,12 +2,13 @@
 
 A seed order takes a $1 deposit at checkout (``deposit_paid``) and is never
 quoted shipping, so it reaches ship-time settlement with NO GROVE-SHIP line. The
-settlement engine must create that line from the actual label cost + the flat
-shipping_handling_fee, then charge the deferred balance off-session on the same
-path the tree pre-orders use (GOL-2053/2895) — no new charge code.
+settlement engine must create that line from the ACTUAL label cost — with NO $5
+handling fee on seed orders (GOL-3257, Josh 2026-10-13; tree orders still carry
+it) — then charge the deferred balance off-session on the same path the tree
+pre-orders use (GOL-2053/2895) — no new charge code.
 
 Acceptance (spec Testing): a chinquapin 50-pack reserved for $1, then shipped
-with a real label, settles to ``$29 + label + handling + tax``.
+with a real label, settles to ``$29 + label + tax`` (no handling).
 
 Runs under Odoo's --test-enable runner (needs a DB for sale.order), so it is
 listed in tests/__init__.py AND excluded from pytest in conftest.py (GOL-1936).
@@ -74,10 +75,11 @@ class TestSeedSettlement(GroveTaxFixtureMixin, TransactionCase):
         base.update(vals)
         return self.env["sale.order"].with_company(self.company).create(base)
 
-    def test_seed_balance_is_goods_minus_deposit_plus_label_and_handling(self):
-        """The acceptance math: $30 goods, $1 deposit, $8 label, $5 handling and
-        no tax (out-of-state, Stripe Tax off) settle to $42 = $29 + $8 + $5.
-        The charge is the single off-session capture; no second charge code."""
+    def test_seed_balance_is_goods_minus_deposit_plus_label_no_handling(self):
+        """The acceptance math: $30 goods, $1 deposit, $8 label, NO handling fee
+        (seeds carry none — Josh 2026-10-13) and no tax (out-of-state, Stripe Tax
+        off) settle to $37 = $29 + $8. The charge is the single off-session
+        capture; no second charge code."""
         order = self._deposit_seed_order()
         charges = []
 
@@ -93,14 +95,15 @@ class TestSeedSettlement(GroveTaxFixtureMixin, TransactionCase):
 
         self.assertEqual(result, "settled")
         self.assertEqual(order.grove_checkout_status, "settled")
-        # Settlement created the GROVE-SHIP line from actual label + handling.
+        # Settlement created the GROVE-SHIP line from the actual label alone — no
+        # $5 handling fee on a seed order.
         ship = order.order_line.filtered(lambda ol: ol.product_id.default_code == "GROVE-SHIP")
         self.assertEqual(len(ship), 1, "settlement must add one shipping line for a seed order")
-        self.assertAlmostEqual(ship.price_unit, 13.0, places=2)  # $8 label + $5 handling
+        self.assertAlmostEqual(ship.price_unit, 8.0, places=2)  # $8 label, no handling
         # One off-session charge for the whole deferred balance.
         self.assertEqual(len(charges), 1)
-        # $29 goods balance ($30 - $1 deposit) + $8 label + $5 handling + $0 tax.
-        self.assertEqual(charges[0]["amount_cents"], stripe_gateway.to_cents(42.00))
+        # $29 goods balance ($30 - $1 deposit) + $8 label + $0 handling + $0 tax.
+        self.assertEqual(charges[0]["amount_cents"], stripe_gateway.to_cents(37.00))
         # And it is exactly amount_total minus what was taken today — the shared
         # settlement predicate, not a seed-specific charge code.
         self.assertEqual(

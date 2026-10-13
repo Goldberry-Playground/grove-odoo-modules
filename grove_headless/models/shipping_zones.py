@@ -110,6 +110,20 @@ US_STATES: tuple[str, ...] = (
     "MP",
 )
 
+# The five US territories within US_STATES (everything that is not one of the
+# 50 states or DC). Named so the "50 states + DC" universe can be derived
+# without re-typing it.
+US_TERRITORIES: frozenset[str] = frozenset({"PR", "VI", "GU", "AS", "MP"})
+
+# Seed pre-orders ship to every US state + DC EXCEPT Hawaii and Alaska
+# (GOL-3257, Josh 2026-10-13). Seeds are exempt from the live-plant green-list
+# (the "Castanea seed into FL/WA/OR allowed" ruling), so they reach far more of
+# the country than trees — but not HI/AK, and not the territories (not a
+# "state + DC"). This is the authoritative seed destination universe; the
+# checkout gate refuses anything outside it with a 400.
+SEED_SHIP_EXCLUDED_STATES: frozenset[str] = frozenset({"HI", "AK"})
+SEED_SHIP_STATES: frozenset[str] = frozenset(US_STATES) - US_TERRITORIES - SEED_SHIP_EXCLUDED_STATES
+
 RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 6))
 
 # Product tiers survive v2 as the shippability gate. GOL-2199 potted go-live
