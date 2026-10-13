@@ -57,7 +57,7 @@ Mapping fields:
 | `product.template` | `printify_product_id` (Char, indexed) | Printify product id. |
 | `product.product` | `printify_variant_id` (Integer) | Printify variant id (one per size/color). |
 | `product.template` | `printify_provider_lead_days` (Char, read-only) | Production time text from the print provider, shown on the PDP. |
-| `sale.order` | `grove_is_printify` (Boolean, computed, stored) | True when any goods line is on a `printify` product. Used to keep Printify orders out of in-house fulfillment (section 9). |
+| `sale.order` | `grove_is_printify` (Boolean, computed, stored) | True when any goods line is on a `printify` product. Used to keep Printify orders out of in-house fulfillment (section 8). |
 
 ### 3. Sync from Printify (action, re-runnable)
 
@@ -119,12 +119,12 @@ Unknown events: 200 and ignore. Duplicate events are harmless (status writes are
 
 A one-shot script (or server action) registers these webhooks through `POST /shops/{shop_id}/webhooks.json` with the prod URL and secret. No dashboard clicking.
 
-### 9. Keep Printify orders out of in-house fulfillment
+### 8. Keep Printify orders out of in-house fulfillment
 
 - Pirate Ship label batch (`label_batch._eligible_orders`): add `("grove_is_printify", "=", False)`. A paid shirt order sits at `awaiting_label` and would otherwise be packed in-house.
 - UPS/USPS carrier poll (`sale_order._poll_carrier_tracking`): add the same term. Printify webhooks own those orders' status.
 
-### 8. Back office
+### 9. Back office
 
 - Sale order: "Printify" group showing `printify_order_id`, `printify_state`, and the Retry button.
 - Saved filter: "Printify push failed".
@@ -159,7 +159,7 @@ Reference mockup: brainstorm widget `goldberry_printify_checkout_mockup` (2026-1
 
 ## Rollout and risks
 
-- **Tight freeze:** spec approved 10-13, freeze Fri 10-16. Ada (Odoo, sections 1 to 8) and Iris (storefront) build in parallel. If the Odoo half misses freeze, the storefront cleanup (item 1) can still ship alone, and **shirts stay unpublished** until the push is live (never sell what cannot be fulfilled). Next chance: Train #4 (up 11-02).
+- **Tight freeze:** spec approved 10-13, freeze Fri 10-16. Ada (Odoo, sections 1 to 9) and Iris (storefront) build in parallel. If the Odoo half misses freeze, the storefront cleanup (item 1) can still ship alone, and **shirts stay unpublished** until the push is live (never sell what cannot be fulfilled). Next chance: Train #4 (up 11-02).
 - **Prod fragility:** `grove_headless` update on prod must pass QA first (severed external IDs history). New fields only; no data migration of existing records.
 - **Printify error-rate cap (5%):** bounded retries keep the account under it.
 - **Live quote dependency:** a Printify outage blocks shirt checkout (by decision). Tree checkout is unaffected.
