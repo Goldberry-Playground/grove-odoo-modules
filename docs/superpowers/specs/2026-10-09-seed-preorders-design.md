@@ -20,14 +20,16 @@ Ruled during brainstorm, do not re-open:
 
 ## Launch catalog
 
-Both species run about 400 nuts per lb. Prices are Josh's (2026-10-09).
+Both species run about 400 nuts per lb. Prices are Josh's (2026-10-11).
 
-| Product | Botanical | Pack of 10 | Pack of 50 | 1/2 lb (~200) | 1 lb (~400) |
-|---|---|---|---|---|---|
-| Allegheny Chinquapin seed nuts | *Castanea pumila* | $20 | $30 | $100 | $180 |
-| American Hazelnut seed nuts | *Corylus americana* | $7 | $20 | $36 | $65 |
+| Product | Botanical | Pack of 20 | Pack of 50 | Pack of 100 | 1/2 lb (~200) | 1 lb (~400) |
+|---|---|---|---|---|---|---|
+| Allegheny Chinquapin seed nuts | *Castanea pumila* | $14 | $30 | $55 | $100 | $180 |
+| American Hazelnut seed nuts | *Corylus americana* | $12 | $26 | $47 | $86 | $154 |
 
-Pack weights for the cap: 0.025 / 0.125 / 0.5 / 1.0 lb.
+Ladder revised by Josh 2026-10-11: smallest pack is 20; hazelnut uses the same per-nut discount steps as chinquapin (−14% / −21% / −29% / −36% vs the 20-pack).
+
+Pack weights for the cap: 0.05 / 0.125 / 0.25 / 0.5 / 1.0 lb.
 Chinquapin season: ship window Oct 15 to Nov 15, order by Nov 1, cap 10 lb. Hazelnut season values are entered by Josh at data entry; the code needs no hazelnut-specific value.
 
 ## Non-goals
