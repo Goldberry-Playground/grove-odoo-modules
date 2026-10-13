@@ -27,8 +27,20 @@ class TestSeedSettlement(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.ref("base.main_company")
+        # An OUT-OF-STATE (non-WV) ship-to, so _apply_destination_tax strips the
+        # default WV sales tax and the acceptance math is tax-free (the test's
+        # documented "out-of-state, Stripe Tax off" case). Without a resolvable
+        # ship-to state, _apply_destination_tax conservatively KEEPS WV tax and
+        # the balance picks up a spurious 6% (GOL-3257, Josh 2026-10-13).
+        ohio = self.env["res.country.state"].search([("country_id.code", "=", "US"), ("code", "=", "OH")], limit=1)
         self.partner = self.env["res.partner"].create(
-            {"name": "Seed Customer", "email": "seed@example.com", "company_id": self.company.id}
+            {
+                "name": "Seed Customer",
+                "email": "seed@example.com",
+                "company_id": self.company.id,
+                "country_id": ohio.country_id.id,
+                "state_id": ohio.id,
+            }
         )
         # Allegheny Chinquapin seed nuts, 50-pack = $30 (spec Launch catalog).
         self.seed = self.env["product.product"].create(
