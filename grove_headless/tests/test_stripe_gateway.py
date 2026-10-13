@@ -328,6 +328,36 @@ class TestPaymentIntent(unittest.TestCase):
             self._charge(post)
         self.assertNotIsInstance(ctx.exception, sg.StripeCardError)
 
+    def test_non_card_error_carries_status_and_type_for_classification(self):
+        # GOL-3011: a non-card failure surfaces its HTTP status + error.type so the
+        # settlement caller can split known-not-charged (4xx invalid_request) from
+        # an outcome-unknown 5xx.
+        post = mock.Mock(return_value=_ok(403, {"error": {"type": "invalid_request_error", "message": "no perms"}}))
+        with self.assertRaises(sg.StripeError) as ctx:
+            self._charge(post)
+        self.assertEqual(ctx.exception.http_status, 403)
+        self.assertEqual(ctx.exception.error_type, "invalid_request_error")
+
+    def test_card_error_is_tagged_http_402(self):
+        body = {"error": {"type": "card_error", "code": "card_declined", "message": "no"}}
+        post = mock.Mock(return_value=_ok(402, body))
+        with self.assertRaises(sg.StripeCardError) as ctx:
+            self._charge(post)
+        self.assertEqual(ctx.exception.http_status, 402)
+
+    def test_transport_error_is_unknown_outcome(self):
+        # GOL-3011: a timeout / connection reset means NO response was received, so
+        # the charge outcome is UNKNOWN — surfaced as a StripeError with
+        # http_status=None (the reconcile-before-retry bucket), never a raw
+        # requests exception leaking past the gateway.
+        def boom(*a, **k):
+            raise sg.requests.exceptions.ConnectionError("reset by peer")
+
+        with self.assertRaises(sg.StripeError) as ctx:
+            self._charge(boom)
+        self.assertIsNone(ctx.exception.http_status)
+        self.assertEqual(ctx.exception.error_type, "connection_error")
+
 
 class TestRetrievePaymentIntent(unittest.TestCase):
     """GOL-2053: read the deposit intent back to recover the saved card ids."""
@@ -353,6 +383,33 @@ class TestRetrievePaymentIntent(unittest.TestCase):
         get = mock.Mock(return_value=_ok(404, {"error": {"message": "No such payment_intent"}}))
         with self.assertRaises(sg.StripeError):
             sg.retrieve_payment_intent("sk", "pi_missing", get=get)
+
+
+class TestSearchPaymentIntents(unittest.TestCase):
+    """GOL-3011: reconcile read for an outcome-unknown settlement."""
+
+    def test_returns_data_list_and_passes_query(self):
+        get = mock.Mock(return_value=_ok(200, {"data": [{"id": "pi_1", "status": "succeeded"}]}))
+        out = sg.search_payment_intents("sk_test", "metadata['order_ref']:'S00357'", get=get)
+        self.assertEqual(out, [{"id": "pi_1", "status": "succeeded"}])
+        self.assertTrue(get.call_args.args[0].endswith("/v1/payment_intents/search"))
+        self.assertEqual(get.call_args.kwargs["params"], {"query": "metadata['order_ref']:'S00357'"})
+        self.assertEqual(get.call_args.kwargs["auth"], ("sk_test", ""))
+
+    def test_empty_result_is_empty_list(self):
+        get = mock.Mock(return_value=_ok(200, {"data": []}))
+        self.assertEqual(sg.search_payment_intents("sk", "q", get=get), [])
+
+    def test_missing_key_raises_before_network(self):
+        get = mock.Mock()
+        with self.assertRaises(sg.StripeError):
+            sg.search_payment_intents("", "q", get=get)
+        get.assert_not_called()
+
+    def test_non_2xx_raises_stripe_error(self):
+        get = mock.Mock(return_value=_ok(400, {"error": {"message": "search not enabled"}}))
+        with self.assertRaises(sg.StripeError):
+            sg.search_payment_intents("sk", "q", get=get)
 
 
 class TestWebhookSignature(unittest.TestCase):

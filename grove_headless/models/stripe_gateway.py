@@ -50,7 +50,21 @@ SIG_TOLERANCE = 300
 
 
 class StripeError(Exception):
-    """Raised on any non-2xx Stripe API response or malformed webhook."""
+    """Raised on any non-2xx Stripe API response, transport failure, or malformed
+    webhook.
+
+    Carries the HTTP status and Stripe ``error.type`` (when there was a response)
+    so a caller can classify the failure (GOL-3011): a 4xx ``invalid_request`` /
+    ``authentication`` error means Stripe rejected the request BEFORE charging (no
+    money moved → safe to retry with a new key), while a timeout / connection
+    reset / 5xx / rate-limit leaves the outcome UNKNOWN (the charge may have
+    succeeded → must reconcile before any retry). ``http_status`` is ``None`` for a
+    transport error (no response was received)."""
+
+    def __init__(self, message, *, http_status=None, error_type=None):
+        super().__init__(message)
+        self.http_status = http_status
+        self.error_type = error_type
 
 
 class StripeCardError(StripeError):
@@ -63,7 +77,7 @@ class StripeCardError(StripeError):
     """
 
     def __init__(self, message, *, code=None, decline_code=None, payment_intent=None):
-        super().__init__(message)
+        super().__init__(message, http_status=402, error_type="card_error")
         self.code = code
         self.decline_code = decline_code
         self.payment_intent = payment_intent
@@ -404,13 +418,24 @@ def create_payment_intent(
     if metadata:
         nested["metadata"] = metadata
     headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
-    resp = post(
-        f"{STRIPE_API_BASE}/v1/payment_intents",
-        data=_flatten("", nested, {}),
-        auth=(secret_key, ""),
-        headers=headers,
-        timeout=timeout,
-    )
+    try:
+        resp = post(
+            f"{STRIPE_API_BASE}/v1/payment_intents",
+            data=_flatten("", nested, {}),
+            auth=(secret_key, ""),
+            headers=headers,
+            timeout=timeout,
+        )
+    except requests.exceptions.RequestException as exc:
+        # Timeout / connection reset / DNS failure: the request may or may not
+        # have reached Stripe, so the charge OUTCOME IS UNKNOWN (GOL-3011).
+        # http_status=None marks the reconcile-before-retry bucket — the caller
+        # must never blindly re-charge, as the first attempt may have succeeded.
+        raise StripeError(
+            f"Stripe payment intent: no response ({type(exc).__name__}: {exc})",
+            http_status=None,
+            error_type="connection_error",
+        ) from exc
     return _parse(resp, "payment intent")
 
 
@@ -432,6 +457,30 @@ def retrieve_payment_intent(secret_key, payment_intent_id, *, get=requests.get, 
         timeout=timeout,
     )
     return _parse(resp, "payment intent")
+
+
+def search_payment_intents(secret_key, query, *, get=requests.get, timeout=DEFAULT_TIMEOUT):
+    """Search PaymentIntents with a Stripe Search query; returns the ``data`` list.
+
+    The reconciliation read for an outcome-UNKNOWN settlement (GOL-3011): after a
+    timeout / 5xx we cannot know whether the off-session charge actually landed,
+    so before any retry we look up the intents Stripe holds for this order
+    (``metadata['order_ref']:'S00357' AND metadata['purpose']:'ship_settlement'``)
+    and only re-charge when none already succeeded. Search has no 24h TTL (unlike
+    idempotency replay), so it stays authoritative past the cron's daily cadence;
+    it is eventually-consistent (a just-created intent can lag ~1 min), which the
+    stable idempotency key covers for the fresh-charge case. Raises StripeError on
+    any non-2xx; a transport failure propagates so the caller leaves the order
+    parked as still-reconciling rather than charging blind."""
+    if not secret_key:
+        raise StripeError("Stripe secret key is not configured")
+    resp = get(
+        f"{STRIPE_API_BASE}/v1/payment_intents/search",
+        params={"query": query},
+        auth=(secret_key, ""),
+        timeout=timeout,
+    )
+    return (_parse(resp, "payment intent search") or {}).get("data", []) or []
 
 
 # ── Customer (Stripe Tax address carrier) ───────────────────────────────────
@@ -604,14 +653,18 @@ def _parse(resp, what):
     try:
         body = resp.json()
     except Exception as exc:  # noqa: BLE001 — any decode failure is a gateway error
-        raise StripeError(f"Stripe {what}: unparseable response (HTTP {status})") from exc
+        # An unparseable body on a non-2xx leaves the outcome UNKNOWN (we never
+        # saw Stripe's verdict); surface the HTTP status so the caller classifies
+        # a 5xx as reconcile-before-retry (GOL-3011).
+        raise StripeError(f"Stripe {what}: unparseable response (HTTP {status})", http_status=status or None) from exc
     if status < 200 or status >= 300:
         error = (body or {}).get("error", {}) or {}
         message = error.get("message", f"HTTP {status}")
+        err_type = error.get("type")
         # A declined card (typically HTTP 402, error.type card_error) is
         # recoverable: raise the card-specific error so an off-session
         # settlement can dun-and-retry rather than treat it as a hard failure.
-        if status == 402 or error.get("type") == "card_error":
+        if status == 402 or err_type == "card_error":
             pi = error.get("payment_intent") or {}
             raise StripeCardError(
                 f"Stripe {what} declined: {message}",
@@ -619,7 +672,7 @@ def _parse(resp, what):
                 decline_code=error.get("decline_code"),
                 payment_intent=pi.get("id") if isinstance(pi, dict) else pi,
             )
-        raise StripeError(f"Stripe {what} failed: {message}")
+        raise StripeError(f"Stripe {what} failed: {message}", http_status=status, error_type=err_type)
     return body
 
 
