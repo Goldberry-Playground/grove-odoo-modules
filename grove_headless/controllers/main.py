@@ -67,7 +67,7 @@ from ..models.shipping_zones import (
     zone_for_state,
 )
 from ..models.shippo_client import is_valid_tracking
-from .product_domain import build_product_domain, slugify, zone_response
+from .product_domain import build_product_domain, company_domain, slugify, zone_response
 
 # Grove has sales-tax nexus only in West Virginia, so the WV 6% state tax (the
 # product default set by hooks.setup_wv_sales_tax) legally applies only to a
@@ -503,6 +503,11 @@ def _fulfillment_flags(product, phantom_boms=None):
         "compliance_exempt": bool(product.grove_compliance_exempt),
         "consult_built": bool(product.grove_consult_built),
         "ships_all_green_states": _ships_all_green_states(product, phantom_boms),
+        # Printify merch (spec 2026-10-13-printify-merch-design.md §4): the route
+        # drives the storefront branch; lead_time renders "ships in ..." on
+        # Printify products and is None for every in-house product.
+        "fulfillment_route": product.grove_fulfillment_route or "in_house",
+        "lead_time": product.printify_lead_time if product.grove_fulfillment_route == "printify" else None,
     }
 
 
@@ -787,6 +792,9 @@ def _structure_variant(variant, template_rootstock=""):
         # template-wide no_variant value (see _template_rootstock). Absent -> "",
         # which the storefront reads as "no rootstock pill / selector" (GOL-1112).
         "rootstock": axis.get("Rootstock", "") or template_rootstock,
+        # Printify merch axes (spec 2026-10-13-printify-merch-design.md §4). Empty for plants.
+        "color": axis.get("Color", ""),
+        "size": axis.get("Size", ""),
         "price": variant.lst_price,
         # Shared-pool availability (GOL-2031 peat & bagged): a Bareroot variant
         # ships the potted stock too (de-potted + bagged at packing), so the
@@ -903,6 +911,7 @@ class GroveHeadlessAPI(http.Controller):
             current_company.id,
             cat_category_ids=cat_category_ids,
             dept_category_ids=dept_category_ids,
+            tenant=website.grove_tenant_slug(),
         )
 
         limit = min(int(kwargs.get("limit", 40)), 200)
@@ -992,11 +1001,8 @@ class GroveHeadlessAPI(http.Controller):
             .sudo()
             .with_company(current_company)
             .search(
-                [
-                    ("id", "=", product_id),
-                    ("website_published", "=", True),
-                    ("company_id", "in", [current_company.id, False]),
-                ],
+                [("id", "=", product_id), ("website_published", "=", True)]
+                + company_domain(current_company.id, website.grove_tenant_slug()),
                 limit=1,
             )
         )

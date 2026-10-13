@@ -42,6 +42,7 @@ from . import (
     test_potting_batch,  # noqa: F401
     test_preorder_cap,  # noqa: F401
     test_preorder_label_skip,  # noqa: F401
+    test_printify_catalog,  # noqa: F401
     test_printify_client,  # noqa: F401
     test_printify_product_sync,  # noqa: F401
     test_printify_sync_map,  # noqa: F401
