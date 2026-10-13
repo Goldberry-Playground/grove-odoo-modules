@@ -33,7 +33,9 @@ company cannot be bound. The same entry point runs from the post-migration
 script so an ``-u grove_headless`` upgrade converges an already installed DB.
 """
 
+import html
 import logging
+import re
 
 _logger = logging.getLogger(__name__)
 
@@ -919,6 +921,125 @@ def load_department_copy(env):
             wrote |= _load_copy_field(record, "grove_coming_list", copy["coming_list"])
         if wrote:
             _logger.info("grove_headless: loaded approved copy for %r (GOL-3292)", slug)
+
+
+# ── Guild card purpose lines (GOL-3304) ─────────────────────────────────────
+#
+# Sora's approved one-line guild descriptions (GOL-2746 comment 8df5c928,
+# approved 2026-09-30; em dashes already swapped per GOL-589). Each line is
+# prepended to the matched guild template's description_ecommerce as a NEW first
+# <p>. The storefront Guilds-page card purpose line is
+# ``guildPurpose(description_html)`` = the first sentence of the PDP description
+# (grove-sites), and description_html is description_ecommerce
+# (controllers/main.py), so this is what fixes the Guilds-page card copy —
+# e.g. tmpl 140's factual error ("...redbud for pollination": redbud brings
+# pollinators in, it does not pollinate the pears).
+#
+# Matched by product NAME, case-insensitive prefix (prod names carry a
+# "(... Trees)" style suffix), NOT by raw product.template id: GOL-3292 Part B
+# keyed the six lines on ids 22/132/133/140/135/134, which are not stable across
+# QA and prod, so it was dropped and re-scoped here.
+#
+# The "Chestnut Grove" bundle (prod tmpl 22, the GOL-2750 native bundle) is the
+# template Sora wrote the "Remembrance Grove" line for; confirmed against prod
+# 2026-10-13 that tmpl 22 is this bundle before keying the row on its real
+# catalog name rather than Sora's working title.
+_GUILD_CARD_LINES = (
+    (
+        "Chestnut Grove",
+        "Five natives to put in the ground in someone's memory: chestnut, "
+        "persimmon, plum, serviceberry and mulberry, each one still feeding "
+        "something long after the planting day.",
+    ),
+    (
+        "Mountain Mama Package",
+        "The Appalachian starter: two chestnuts, two pawpaws and a mountain "
+        "laurel. The hillside's own plant list, in one box.",
+    ),
+    (
+        "Pollinator Bundle",
+        "Eastern redbud anchors it and blooms before almost anything else, with "
+        "four supporting natives to keep the bees fed the rest of the season.",
+    ),
+    (
+        "Heirloom Fruit Package",
+        "Two pears, two persimmons, and a redbud that flowers ahead of them to "
+        "bring the pollinators in before the fruit trees open.",
+    ),
+    (
+        "At the Grove Food Forest",
+        "Fifty seedlings at our bulk seedling rate, plus a half-hour consult on "
+        "what to plant where; the honest starting point for a food forest.",
+    ),
+    (
+        "Centennial Food Forest",
+        "A hundred trees for the people planting something their grandkids will be the ones to harvest.",
+    ),
+)
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+def _visible_text(fragment):
+    """Collapse an HTML fragment to its visible text for comparison.
+
+    Strips tags, unescapes entities, turns ``&nbsp;`` into a space and collapses
+    whitespace runs. Used to tell whether the first paragraph already reads the
+    approved line, so a re-run is a no-op.
+    """
+    without_tags = _TAG_RE.sub(" ", fragment or "")
+    unescaped = html.unescape(without_tags).replace("\xa0", " ")
+    return _WS_RE.sub(" ", unescaped).strip()
+
+
+def _first_paragraph_html(description):
+    """Return the first ``<p>...</p>`` fragment of ``description``, or "" if none."""
+    match = re.search(r"<p\b[^>]*>.*?</p>", description or "", re.IGNORECASE | re.DOTALL)
+    return match.group(0) if match else ""
+
+
+def _prepend_guild_card_line(record, line):
+    """Prepend ``line`` as a new first ``<p>`` of description_ecommerce.
+
+    Writes nothing (returns False) when the current first paragraph already reads
+    the approved line, so the upgrade is idempotent. Returns True when it wrote.
+    """
+    current = record.description_ecommerce or ""
+    if _visible_text(_first_paragraph_html(current)) == line:
+        return False
+    record.description_ecommerce = f"<p>{line}</p>{current}"
+    return True
+
+
+def load_guild_card_lines(env):
+    """Load Sora's approved guild card purpose lines (GOL-3304).
+
+    Prepends each approved line (``_GUILD_CARD_LINES``) to the matching guild
+    template's description_ecommerce as a new first ``<p>``, matched by product
+    name (case-insensitive prefix). Asserts exactly one template per name; a name
+    that is absent is logged and skipped (QA may not carry every bundle, and a
+    fresh install carries none) rather than failing the upgrade. Idempotent: a
+    re-run whose first paragraph already reads the approved line writes nothing.
+
+    description_ecommerce carries no ``translate=True`` here, and the write stamps
+    no grove_facts_provenance, so the model's write override treats it as a human
+    edit: it marks the field provenance ``human`` (protecting the editorial line)
+    and never clears the Facts-reviewed sign-off or re-gates publishing.
+    """
+    Product = env["product.template"].sudo()
+    for prefix, line in _GUILD_CARD_LINES:
+        matches = Product.search([("name", "=ilike", prefix + "%")])
+        if not matches:
+            _logger.info("grove_headless: no guild template for %r; skipping card line (GOL-3304)", prefix)
+            continue
+        if len(matches) != 1:
+            raise ValueError(
+                f"grove_headless (GOL-3304): guild name prefix {prefix!r} matched "
+                f"{len(matches)} templates ({matches.mapped('name')!r}); expected exactly one"
+            )
+        if _prepend_guild_card_line(matches, line):
+            _logger.info("grove_headless: prepended approved card line to %r (GOL-3304)", matches.name)
 
 
 def post_init_hook(env):
