@@ -9,11 +9,12 @@ Sell tree seed nuts on atthegrovenursery.com as real products with a pack-size c
 Ruled during brainstorm, do not re-open:
 
 - **Pre-order, $1 deposit per order** (flat, not per line or unit), not charge-in-full.
-- **Balance at ship time = rest of the pack price + actual label cost + the existing handling fee** (`grove_headless.shipping_handling_fee`, $5.00 default, GOL-2895 / GOL-2923) + tax. The 10-09 payment links' $5 flat shipping does NOT apply to the site.
+- **Balance at ship time = rest of the pack price + actual label cost + tax. NO handling fee on seed orders** (Josh 2026-10-13: seeds do not carry the $5 `grove_headless.shipping_handling_fee`; tree orders are unchanged). The 10-09 payment links' $5 flat shipping does NOT apply to the site.
 - **Per-product season settings**, editable in Odoo: open switch, ship window, order-by date, season cap.
 - **After order-by or at the cap: roll over to next fall automatically** (option B), with the shopper clearly told which harvest they are buying from.
 - **Season cap defaults to 10 lb per product**, overridable per product in Odoo. Pre-orders count against it by pack weight.
 - **Seeds are exempt from the state plant-shipping restrictions** ("it's seed anyways"). The exemption keys on the seed product type, not the per-template `grove_compliance_exempt` flag, so trees of the same genus stay blocked.
+- **Seed destinations: every US state + DC except Hawaii and Alaska** (Josh 2026-10-13). Seeds skip the live-plant green-list, but a seed ship-to order to HI/AK (or a non-US / unrecognized destination) is refused with a plain-English 400. The Castanea seed carve-out (seeds only) stays.
 - **Department: keep "Seed & scion"** (slug `seed-and-scion`) and list seeds under its **Seed** category. No rename.
 - **Button copy:** in season **"Reserve for $1"**; past the season **"Pre-order for fall YYYY, $1"**.
 - **Seeds check out on their own**: a cart holding seeds cannot also hold trees or seeds from another harvest year.
@@ -87,18 +88,18 @@ Each seed product payload carries `shippingTier: "seed"` and a `seedSeason` obje
 ### 6. Cart and checkout
 
 - **Deposit:** a seed order charges `SEED_DEPOSIT = 1.00` (USD, flat per order) in `stripe_gateway`, beside `PREORDER_DEPOSIT`. `line_charge` takes the deposit per tier.
-- **Harvest year:** each seed `sale.order.line` stores `grove_seed_harvest_year` from `seed_season(..., adding_lb=line weight)` at add time and is re-checked at checkout (a line that would push past the cap moves to next season and the shopper is shown the change before paying).
+- **Harvest year:** each seed `sale.order.line` stores `grove_seed_harvest_year` from `seed_season(..., adding_lb=line weight)` at add time and is re-checked at checkout (a line that would push past the cap moves to next season and the shopper is shown the change before paying). The `/checkout/quote` response publishes the order's single harvest year **both** at the top level (`seed_harvest_year`, the one year the mixing rule guarantees) **and** per `lines[]` entry, so the storefront (GOL-3258) sees a rollover (Josh 2026-10-13).
 - **Mixing rule:** refuse an add that would put seeds with trees, or seeds of two harvest years, in one cart. Two seed products in the same harvest year may share a cart (one $1 deposit). Refusal copy: "Seed reservations check out on their own." Reuse the existing refusal channel (grove-sites#1034 red message).
 - **Stripe Tax:** the $1 deposit follows the same tax treatment as the $10 tree deposit today.
 
 ### 7. Ship-time settlement
 
-Seed orders settle through the existing off-session balance charge on mark-shipped / tracking import (GOL-2053, GOL-2895): balance = seed goods total − the $1 deposit + `grove_actual_shipping_cost` + `_shipping_handling_fee` + tax on the balance. No new charge code; extend the deposit-order predicate to include seed orders. Settlement failures use GOL-3011 handling.
+Seed orders settle through the existing off-session balance charge on mark-shipped / tracking import (GOL-2053, GOL-2895): balance = seed goods total − the $1 deposit + `grove_actual_shipping_cost` + tax on the balance. **No handling fee on seeds** (Josh 2026-10-13: `_order_handling_fee` returns $0 for a seed order, the standard `_shipping_handling_fee` for a tree order). No new charge code; extend the deposit-order predicate to include seed orders. Settlement failures use GOL-3011 handling.
 
 ### 8. Back office
 
 - Saved filters: "Seed reservations by harvest year", "Seed balance not charged".
-- Confirmation and pre-ship emails (`preorder_email.py`): seed wording, `$1` deposit label, harvest year and ship window, "the rest of the pack price, shipping and handling are charged when it ships".
+- Confirmation and pre-ship emails (`preorder_email.py`): seed wording, `$1` deposit label, harvest year and ship window, "the rest of the pack price and shipping are charged when it ships" (no handling on seeds, Josh 2026-10-13).
 
 ## Storefront (`grove-sites`, apps/nursery, Iris)
 
@@ -120,9 +121,9 @@ Two templates (tier `seed`, botanical names, photos, short descriptions), Pack s
 
 ## Testing
 
-- **Odoo unit:** `seed_season` (before order-by, after it, at cap, cap freed by cancel, open=false, date edit moves the season); deposit = $1 per order; mixing refusals; settlement total; compliance allows a Castanea seed into FL/WA/OR while a Castanea tree stays blocked; seed lines skipped by `pack_for_state`.
+- **Odoo unit:** `seed_season` (before order-by, after it, at cap, cap freed by cancel, open=false, date edit moves the season); deposit = $1 per order; mixing refusals; settlement total; compliance allows a Castanea seed into FL/WA/OR while a Castanea tree stays blocked; seed lines skipped by `pack_for_state`; a seed order ships to a far non-green state but is refused to HI/AK with a 400 (Josh 2026-10-13); the quote publishes a top-level `seed_harvest_year`.
 - **Storefront unit/DOM:** CTA and badge switch on `rolledOver`; no zone/Format/wave sections on a seed PDP; pack picker selects the right variant; cart refusal shows.
-- **QA e2e (Train #3 gate):** reserve a chinquapin 50-pack for $1 → mark shipped with a test label → balance charged = $29 + label + handling + tax. This also covers the deposit path that no gate exercises today (GOL-2910).
+- **QA e2e (Train #3 gate):** reserve a chinquapin 50-pack for $1 → mark shipped with a test label → balance charged = $29 + label + tax (NO handling on seeds, Josh 2026-10-13). This also covers the deposit path that no gate exercises today (GOL-2910).
 
 ## Rollout and risks
 
