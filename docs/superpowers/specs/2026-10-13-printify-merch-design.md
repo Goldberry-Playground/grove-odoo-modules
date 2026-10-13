@@ -57,6 +57,7 @@ Mapping fields:
 | `product.template` | `printify_product_id` (Char, indexed) | Printify product id. |
 | `product.product` | `printify_variant_id` (Integer) | Printify variant id (one per size/color). |
 | `product.template` | `printify_provider_lead_days` (Char, read-only) | Production time text from the print provider, shown on the PDP. |
+| `sale.order` | `grove_is_printify` (Boolean, computed, stored) | True when any goods line is on a `printify` product. Used to keep Printify orders out of in-house fulfillment (section 9). |
 
 ### 3. Sync from Printify (action, re-runnable)
 
@@ -74,17 +75,17 @@ Respect Printify limits (600 req/min global, 5% error-rate cap): no tight retry 
 
 `build_product_domain` gets one rule for the goldberry tenant: a product with `company_id = False` is included only if `grove_fulfillment_route = printify`. Shared trees (American Chestnut, PawPaw) stop appearing on the farm shop with no change to their company. Nursery and woodworking domains are unchanged.
 
-Printify product payloads carry `fulfillmentRoute: "printify"` and `leadTime` (from `printify_provider_lead_days`).
+Printify product payloads carry `fulfillment_route: "printify"` and `lead_time` (from `printify_provider_lead_days`) through `_fulfillment_flags`, on both list and detail. Each serialized variant gains `color` and `size` from its Color and Size attribute values (empty string when absent), next to `cultivar` / `format` / `rootstock`. The farm-tenant rule applies to `product_detail`'s inline domain too.
 
 ### 5. Cart and checkout
 
 In `_create_draft_order` and `/checkout/quote`:
 
 - **Skip plant rules:** `printify` lines are skipped by the tier/box loop, genus compliance, deposit/preorder logic and the leafed-season gate, the same way `service` lines are skipped today.
-- **Destinations:** an all-Printify order may ship to any of the 50 states + DC; it skips the 32-state live-tree green list. Non-US or unrecognized destinations get a plain 400.
+- **Destinations:** an all-Printify order may ship to any of the 50 states + DC; it skips the 32-state live-tree green list. `canonical_state_code` also accepts PR, VI, GU, AS and MP, so the check is an explicit 51-code set. Territories, non-US or unrecognized destinations get a plain 400 "Shirts ship to the 50 US states and DC."
 - **Mixed carts:** an order with both `printify` and non-`printify` goods lines is refused with 409 "Shirts check out separately from trees."
 - **Shipping line:** for an all-Printify order, call `POST /shops/{shop_id}/orders/shipping.json` with the line variant ids, quantities and address; use the `standard` amount as the shipping line. This satisfies the existing "no $0 shipping" 409 check unchanged.
-- **Quote twice, charge the server's:** `/checkout/quote` returns the quote for display; `checkout_session` quotes again server-side and that amount is charged.
+- **Quote twice, charge the server's:** `/checkout/quote` returns `shipping_amount` (float, or null for non-Printify carts, whose response is otherwise unchanged) and `fulfillment_route` for display, and needs a `ship_to` address in the request for Printify carts; `checkout_session` quotes again server-side and that amount is charged. `_apply_shipping_line` is not used for Printify orders; a dedicated branch writes the GROVE-SHIP line.
 - **Timeout:** 5 s. Timeout or non-2xx → 503 "Shipping is temporarily unavailable. Try again in a few minutes." No fallback price.
 - **Tax:** Stripe Tax through the existing `automatic_tax` path when `GROVE_STRIPE_TAX_GOLDBERRY` is on. Apparel lines use tax code `txcd_30011000`; the shipping line follows the existing shipping tax code.
 
@@ -110,13 +111,18 @@ New route `POST /grove/api/v1/printify/webhook`, auth = HMAC-SHA256 signature of
 | Event | Action |
 |---|---|
 | `order:sent-to-production` | `printify_state = in_production` |
-| `order:shipment:created` | Write carrier + tracking, call `_apply_delivery_status(env, order, "shipped", tracking, source="printify")` so the existing shipment email, fulfillment stage and digests work unchanged. |
+| `order:shipment:created` | Write `grove_tracking_numbers` and `grove_shipping_carriers` (newline-joined, index-aligned, as the hand-label path does) FIRST, then call `_apply_delivery_status(env, order, "transit", tracking, source="printify")`. `"transit"` (not `"shipped"`, which the function does not rank) moves the order to shipped and sends the existing shipment email. |
 | `order:shipment:delivered` | `_apply_delivery_status(..., "delivered", ..., source="printify")` |
 | `order:updated` with canceled / on-hold | Update `printify_state`, Discord alert. |
 
 Unknown events: 200 and ignore. Duplicate events are harmless (status writes are idempotent).
 
 A one-shot script (or server action) registers these webhooks through `POST /shops/{shop_id}/webhooks.json` with the prod URL and secret. No dashboard clicking.
+
+### 9. Keep Printify orders out of in-house fulfillment
+
+- Pirate Ship label batch (`label_batch._eligible_orders`): add `("grove_is_printify", "=", False)`. A paid shirt order sits at `awaiting_label` and would otherwise be packed in-house.
+- UPS/USPS carrier poll (`sale_order._poll_carrier_tracking`): add the same term. Printify webhooks own those orders' status.
 
 ### 8. Back office
 
