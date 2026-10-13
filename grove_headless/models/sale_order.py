@@ -204,6 +204,38 @@ class SaleOrder(models.Model):
                 (y for y in order.order_line.mapped("grove_seed_harvest_year") if y), 0
             )
 
+    # ── Printify merch (spec 2026-10-13-printify-merch-design.md §6-8) ──────
+    # grove_is_printify gates every Printify branch: it keeps these orders out of
+    # in-house fulfillment (label batch, carrier poll) and routes checkout/push.
+    grove_is_printify = fields.Boolean(compute="_compute_grove_is_printify", store=True, index=True)
+    printify_order_id = fields.Char(readonly=True, copy=False, index=True)
+    printify_state = fields.Selection(
+        [
+            ("queued", "Queued"),
+            ("created", "Created"),
+            ("in_production", "In production"),
+            ("shipped", "Shipped"),
+            ("delivered", "Delivered"),
+            ("canceled", "Canceled"),
+            ("on_hold", "On hold"),
+            ("push_failed", "Push failed"),
+        ],
+        readonly=True,
+        copy=False,
+        index=True,
+    )
+    printify_push_attempts = fields.Integer(readonly=True, copy=False, default=0)
+    printify_push_last_attempt = fields.Datetime(readonly=True, copy=False)
+
+    @api.depends("order_line.product_id")
+    def _compute_grove_is_printify(self):
+        for order in self:
+            order.grove_is_printify = any(
+                line.product_id.product_tmpl_id.grove_fulfillment_route == "printify"
+                for line in order.order_line
+                if not line.display_type and line.product_id
+            )
+
     # ── Destination USDA zone, as a groupable order field (GOL-3056) ────────
     # Ship windows and labels are batched by the DESTINATION USDA hardiness zone
     # (shipping_calendar.WAVE_SCHEDULE, zones 2-10), so "what preorders are

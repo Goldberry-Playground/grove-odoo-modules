@@ -81,6 +81,7 @@
         "data/grove_dormancy_params.xml",
         "data/grove_zone_filters.xml",
         "data/grove_seed_filters.xml",
+        "data/printify_actions.xml",
     ],
     "installable": True,
     "application": False,
