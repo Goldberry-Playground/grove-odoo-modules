@@ -788,6 +788,139 @@ def add_native_bundle_to_guilds(env):
     _logger.info("grove_headless: added %r to the Guilds collection (GOL-2882)", bundle.name)
 
 
+# ── Approved department copy (GOL-3292 / GOL-2746) ──────────────────────────
+#
+# The GOL-2744 restructure built the department tree but left every
+# grove_teaser = "" and every grove_coming_list empty. This loads Sora's
+# approved teasers + "What's coming" lists (GOL-2746 comment 8df5c928) and the
+# Guilds lede, matched by grove_slug.
+#
+# Each field is written ONLY when it is currently empty, so any edit later made
+# in Odoo survives a re-run (the Train #3 ``-u grove_headless`` upgrade and
+# every upgrade after it). Both fields are ``translate=True``; the copy is
+# written in the default ``en_US`` context so it lands on the source term.
+#
+# The text is Sora's §1/§2 verbatim except punctuation: em dashes became
+# colons, semicolons or commas (storefront no-em-dash rule, GOL-589; the
+# storefront prints these fields as-is). grove_coming_list is one
+# ``Name | detail`` item per line (parsed by grove_coming_items).
+_DEPARTMENT_COPY = {
+    "orchard-food-forest": {
+        "teaser": (
+            "Fruit, nut and native trees for the orchard or food forest you're "
+            "putting in: the same hardy Appalachian stock we plant on our own hill."
+        ),
+    },
+    "mycoforestry": {
+        "teaser": (
+            "Host trees that come with their fungal partner already on the roots: "
+            "pecan truffle and porcini, on white oak, hybrid chestnut and American "
+            "hazelnut. The tree is the crop you can count on; the mushrooms are the "
+            "long game, and whether they show up depends on your soil, your pH and "
+            "your patience. We're growing the first batch out now."
+        ),
+        "coming_list": "\n".join(
+            (
+                "White oak, pecan truffle | inoculated seedling: a shade tree now, truffle ground later",
+                "White oak, porcini | the same oak with porcini instead; you pick which fungus rides on the roots",
+                "Hybrid chestnut, porcini | nuts off the tree, porcini out of the ground under it",
+                (
+                    "American hazelnut, pecan truffle | bears young and stays shrub-sized, "
+                    "the quickest way into a truffle planting"
+                ),
+                "Block plantings, ten trees and up | bulk rates for putting in a stand instead of one specimen tree",
+            )
+        ),
+    },
+    "forest-farming": {
+        "teaser": (
+            "The woodland crops that grow in the shade you already have: goldenseal, "
+            "American ginseng, ramps, black cohosh. These are slow, three to five "
+            "years for goldenseal and closer to a decade for wild-simulated ginseng, "
+            "so what we'll sell is planting stock, not dug root. If you've got "
+            "north-facing hardwood with trillium and bloodroot coming up under it, "
+            "you've got the site for it."
+        ),
+        "coming_list": "\n".join(
+            (
+                "Goldenseal | root divisions: three to five years to a harvestable root",
+                (
+                    "American ginseng | shade-grown planting stock; seven to eleven years "
+                    "wild-simulated, and harvest is state-regulated"
+                ),
+                "Ramps | two to three years to your first harvest from bulblets, five to seven from seed",
+                "Black cohosh | root divisions: three to five years, the quickest of the four",
+            )
+        ),
+    },
+    "seed-and-scion": {
+        "teaser": (
+            "For the people who'd rather graft it themselves: dormant scion wood cut "
+            "while the trees are still asleep, seed cleaned and stratified over "
+            "winter, and rootstock to put it all on. Scion only travels well "
+            "dormant, so this one opens for a short season rather than year-round; "
+            "the notify list is how you'll hear it's open. Same stock as the rest of "
+            "the nursery, sold a step earlier."
+        ),
+        "coming_list": "\n".join(
+            (
+                "Apple scion wood | dormant cuttings for grafting onto your own rootstock",
+                "Pear scion wood | same idea, cut from the pears we grow here",
+                "Fig cuttings | figs root straight from dormant wood, no grafting needed",
+                "Chestnut and pawpaw seed | cold-stratified over winter, sold ready to plant",
+                "Rootstock | bare-root stock to graft your own trees onto",
+            )
+        ),
+    },
+    "guilds": {
+        "teaser": (
+            "Sets we'd actually plant together: something to bloom early, something "
+            "to feed you later, something to hold the soil. One box, and a plan for "
+            "where each tree goes."
+        ),
+    },
+}
+
+
+def _load_copy_field(record, field, value):
+    """Write ``value`` to ``field`` on ``record`` only when it is empty today.
+
+    Returns True when it wrote, False when it left an existing value alone. The
+    guard reads the stored value so a re-run never clobbers an Odoo-side edit.
+    """
+    if (record[field] or "").strip():
+        return False
+    record.write({field: value})
+    return True
+
+
+def load_department_copy(env):
+    """Load the approved department teasers + coming lists (GOL-3292).
+
+    Matches departments / the Guilds collection by grove_slug and fills
+    grove_teaser / grove_coming_list from ``_DEPARTMENT_COPY``, writing each
+    field only when it is currently empty. Idempotent: a second run is a no-op,
+    and a teaser later edited in Odoo is never overwritten. No-ops cleanly for
+    any slug missing from the DB (fresh install / QA before the tree is seeded).
+
+    ``translate=True`` fields are written in the ``en_US`` context so the copy
+    lands on the source language regardless of the upgrade user's language.
+    """
+    Category = env["product.public.category"].with_context(lang="en_US").sudo()
+    for slug, copy in _DEPARTMENT_COPY.items():
+        record = Category.search([("grove_slug", "=", slug)], limit=1)
+        if not record:
+            _logger.info("grove_headless: no category for slug %r; skipping copy (GOL-3292)", slug)
+            continue
+        wrote = False
+        if copy.get("teaser"):
+            wrote |= _load_copy_field(record, "grove_teaser", copy["teaser"])
+        if copy.get("coming_list"):
+            wrote |= _load_copy_field(record, "grove_coming_list", copy["coming_list"])
+        if wrote:
+            _logger.info("grove_headless: loaded approved copy for %r (GOL-3292)", slug)
+
+
 def post_init_hook(env):
     """Run on fresh install of grove_headless."""
     setup_wv_sales_tax(env)
