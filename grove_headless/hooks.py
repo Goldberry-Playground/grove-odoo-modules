@@ -973,7 +973,7 @@ _GUILD_CARD_LINES = (
     ),
     (
         "Centennial Food Forest",
-        "A hundred trees for the people planting something their grandkids will " "be the ones to harvest.",
+        "A hundred trees for the people planting something their grandkids will be the ones to harvest.",
     ),
 )
 
