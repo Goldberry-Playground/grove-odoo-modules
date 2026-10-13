@@ -543,6 +543,60 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents((order.amount_total or 0.0) - 20.0))
         self.assertFalse(order.grove_stripe_tax_amount)
 
+    def test_settlement_tax_calc_failure_falls_back_and_alerts(self):
+        """GOL-2910: flag ON but the ship-time Stripe Tax calc raises. Settlement
+        still runs on Odoo's own tax (safe — the customer is taxed), but the
+        degraded tax source is made VISIBLE: one Discord alert naming the order
+        and the fallback, plus a chatter note. grove_stripe_tax_amount stays
+        unset so nobody reads the balance as Stripe-computed."""
+        order = self._settleable_order()  # deposit_paid, WV-taxed, $20 deposit
+        captured = {}
+        pings = []
+
+        def fake_pi(secret_key, **kwargs):
+            captured.update(kwargs)
+            return {"id": "pi_fallback", "status": "succeeded"}
+
+        with (
+            mock.patch.object(grove_main, "_stripe_tax_enabled", return_value=True),
+            mock.patch.object(
+                stripe_gateway, "create_tax_calculation", side_effect=stripe_gateway.StripeError("tax calc 500")
+            ),
+            mock.patch.object(stripe_gateway, "create_tax_transaction") as txn,
+            mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            mock.patch.object(grove_main, "_notify_discord", side_effect=pings.append),
+            mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
+        ):
+            self.assertEqual(grove_main.settle_order_at_ship(self.env, order), "settled")
+
+        # Fallback balance: Odoo's amount_total less the deposit, no Stripe Tax record.
+        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents((order.amount_total or 0.0) - 20.0))
+        self.assertFalse(order.grove_stripe_tax_amount)
+        txn.assert_not_called()
+        fallback = [m for m in pings if "Stripe Tax FALLBACK" in m]
+        self.assertEqual(len(fallback), 1, pings)
+        self.assertIn(order.name, fallback[0])
+        self.assertIn("tax calc 500", fallback[0])
+        self.assertTrue(
+            any("Stripe Tax calculation failed" in (m.body or "") for m in order.message_ids),
+            "fallback must leave a chatter note on the order",
+        )
+
+    def test_settlement_flag_off_never_raises_fallback_alert(self):
+        """Flag OFF is the designed Odoo-tax path, not a degradation — no alert."""
+        order = self._settleable_order()
+        pings = []
+        with (
+            mock.patch.object(grove_main, "_stripe_tax_enabled", return_value=False),
+            mock.patch.object(
+                stripe_gateway, "create_payment_intent", return_value={"id": "pi_off", "status": "succeeded"}
+            ),
+            mock.patch.object(grove_main, "_notify_discord", side_effect=pings.append),
+            mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
+        ):
+            self.assertEqual(grove_main.settle_order_at_ship(self.env, order), "settled")
+        self.assertFalse([m for m in pings if "FALLBACK" in m], pings)
+
     def test_pickup_deposit_has_no_shipping_line_to_defer(self):
         """A farm-pickup deposit order never had a shipping line; the flat $10
         deposit stands alone."""
