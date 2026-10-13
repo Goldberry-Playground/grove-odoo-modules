@@ -275,9 +275,15 @@ class TestDestinationTax(GroveTaxFixtureMixin, TransactionCase):
     # 6) on goods/shipping lines; matching on WV names alone let it survive and
     # overcharged out-of-state customers at checkout and at settlement.
     def _stray_stock_tax(self):
+        # Name must be distinctive: the chartless CI DB enforces account.tax
+        # name-uniqueness globally (no country_id to disambiguate — see
+        # tests/common.py), and a plain "15%" collides with the stock tax
+        # already present. The destination strip keys off the ship-to rule, not
+        # the tax NAME (that is the whole GOL-3074 fix), so the exact name does
+        # not matter to what we assert — only the 15% amount and sale use do.
         return self.env["account.tax"].create(
             {
-                "name": "15%",
+                "name": "Stray stock tax 15% (test)",
                 "amount_type": "percent",
                 "amount": 15.0,
                 "type_tax_use": "sale",
