@@ -243,9 +243,9 @@
                     >
                         <div class="alert alert-info" role="alert" colspan="2">
                             Seed nuts sell as a <b>$1 pre-order</b>: the shopper pays $1 at
-                            checkout and the rest of the pack price, the actual label cost, the
-                            handling fee and tax are charged when the order ships. Each seed
-                            product has its own ship window, order-by date and season cap. After
+                            checkout and the rest of the pack price, the actual label cost and
+                            tax are charged when the order ships (no handling fee on seed orders).
+                            Each seed product has its own ship window, order-by date and season cap. After
                             the order-by date <b>or</b> once the cap is reached, the storefront
                             rolls over to next fall's harvest automatically and tells the shopper.
                         </div>
