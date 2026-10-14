@@ -97,6 +97,22 @@ class TestRegulatedStates(unittest.TestCase):
         self.assertEqual(pc.REGULATED_STATES, frozenset({"WA", "OR", "FL", "AZ", "NM", "IN", "OH", "WI", "CA"}))
 
 
+class TestExcludedTaxaForState(unittest.TestCase):
+    """The per-state constraint list a consult-built deferral records (GOL-3019
+    AC4), derived from the same CARVE_OUTS map the checkout blocks with."""
+
+    def test_fl_excludes_chestnut_and_dogwood(self):
+        self.assertEqual(pc.excluded_taxa_for_state("FL"), ["castanea", "cornus"])
+
+    def test_in_oh_wi_exclude_only_white_mulberry(self):
+        for state in ("IN", "OH", "WI"):
+            self.assertEqual(pc.excluded_taxa_for_state(state), ["morus alba"])
+
+    def test_unregulated_state_excludes_nothing(self):
+        self.assertEqual(pc.excluded_taxa_for_state("WV"), [])
+        self.assertEqual(pc.excluded_taxa_for_state("GA"), [])
+
+
 class TestEvaluateLine(unittest.TestCase):
     def test_blocked_line_returns_message_not_failsafe(self):
         msg, failsafe = pc.evaluate_line("Castanea mollissima", "FL", "Florida")
@@ -139,15 +155,58 @@ class TestEvaluateLine(unittest.TestCase):
 class TestCarveOutFeed(unittest.TestCase):
     def test_feed_shape(self):
         feed = pc.carve_out_feed()
-        self.assertEqual(feed["schema"], 1)
+        self.assertEqual(feed["schema"], 2)
         self.assertEqual(feed["carve_outs"]["castanea"], {"kind": "block", "states": ["FL", "OR", "WA"]})
         self.assertEqual(feed["carve_outs"]["diospyros"]["kind"], "block")
         self.assertEqual(feed["regulated_states"], sorted(pc.REGULATED_STATES))
+
+    def test_consult_deferral_absent_by_default(self):
+        # GOL-3055: the armed state is an env fact the pure builder can't read,
+        # so a caller that does not inject it gets the key omitted — the
+        # storefront's safe "unknown -> cautious" default.
+        self.assertNotIn("consult_deferral_enabled", pc.carve_out_feed())
+        self.assertNotIn("consult_deferral_enabled", pc.carve_out_feed(None))
+
+    def test_consult_deferral_reflects_injected_armed_state(self):
+        # GOL-3055: True -> deposit will be taken (reservation copy); False ->
+        # it will be refused (cautious copy). Normalized to a plain bool.
+        self.assertIs(pc.carve_out_feed(True)["consult_deferral_enabled"], True)
+        self.assertIs(pc.carve_out_feed(False)["consult_deferral_enabled"], False)
 
     def test_feed_is_json_serializable(self):
         import json
 
         json.dumps(pc.carve_out_feed())
+        json.dumps(pc.carve_out_feed(True))
+
+
+class TestSeedTierExemption(unittest.TestCase):
+    """Seed pre-orders ship everywhere (GOL-3257 §2): the exemption keys on the
+    seed tier, before genus parsing, so a Castanea *seed* clears FL/WA/OR while
+    a Castanea *tree* of the same genus stays blocked."""
+
+    def test_castanea_seed_allowed_into_regulated_states(self):
+        for state in ("FL", "WA", "OR"):
+            reason, failsafe = pc.evaluate_line("Castanea pumila", state, tier="seed")
+            self.assertIsNone(reason, f"Castanea seed should clear {state}")
+            self.assertFalse(failsafe)
+
+    def test_castanea_tree_still_blocked_same_genus(self):
+        for state in ("FL", "WA", "OR"):
+            reason, _ = pc.evaluate_line("Castanea pumila", state, tier="bareroot")
+            self.assertIsNotNone(reason, f"Castanea tree must stay blocked in {state}")
+
+    def test_seed_with_empty_botanical_not_failsafe_blocked(self):
+        # A seed line with no botanical name is NOT the fail-safe block; seed
+        # exemption short-circuits before the empty-name fail-safe.
+        reason, failsafe = pc.evaluate_line("", "FL", tier="seed")
+        self.assertIsNone(reason)
+        self.assertFalse(failsafe)
+
+    def test_empty_botanical_tree_still_failsafe_blocked(self):
+        reason, failsafe = pc.evaluate_line("", "FL", tier="bareroot")
+        self.assertIsNotNone(reason)
+        self.assertTrue(failsafe)
 
 
 if __name__ == "__main__":

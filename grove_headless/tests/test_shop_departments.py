@@ -10,7 +10,12 @@ Run via:
 """
 
 from odoo.addons.grove_headless.hooks import (
+    _DEPARTMENT_COPY,
+    _GUILD_CARD_LINES,
+    _visible_text,
     add_native_bundle_to_guilds,
+    load_department_copy,
+    load_guild_card_lines,
     restructure_department_tree,
 )
 from odoo.tests.common import TransactionCase, tagged
@@ -253,6 +258,80 @@ class TestDepartmentRestructure(GroveTaxFixtureMixin, TransactionCase):
         dept = _product_department(product)
         self.assertEqual(dept, {"slug": "orchard-food-forest", "name": "Orchard & food forest"})
 
+    # ── approved department copy (GOL-3292) ─────────────────────────────
+
+    def test_department_copy_loaded_onto_five_rows(self):
+        restructure_department_tree(self.env)
+        load_department_copy(self.env)
+        # The four department roots + the Guilds collection each carry their
+        # approved teaser, verbatim from _DEPARTMENT_COPY.
+        for slug in ("orchard-food-forest", "mycoforestry", "forest-farming", "seed-and-scion", "guilds"):
+            row = self._by_slug(slug)
+            self.assertTrue(row, f"{slug} row should exist after restructure")
+            self.assertEqual(row.grove_teaser, _DEPARTMENT_COPY[slug]["teaser"], f"{slug} teaser")
+        # Distinctive phrases guard against an accidental edit to the copy.
+        self.assertIn("hardy Appalachian stock", self._by_slug("orchard-food-forest").grove_teaser)
+        self.assertIn("wild-simulated ginseng", self._by_slug("forest-farming").grove_teaser)
+        self.assertIn("plan for where each tree goes", self._by_slug("guilds").grove_teaser)
+        # No em dash slipped into the loaded copy (storefront no-em-dash rule).
+        for slug in ("orchard-food-forest", "mycoforestry", "forest-farming", "seed-and-scion", "guilds"):
+            self.assertNotIn("—", self._by_slug(slug).grove_teaser or "")
+
+    def test_department_coming_lists_have_expected_item_counts(self):
+        restructure_department_tree(self.env)
+        load_department_copy(self.env)
+        self.assertEqual(len(self._by_slug("mycoforestry").grove_coming_items()), 5)
+        self.assertEqual(len(self._by_slug("forest-farming").grove_coming_items()), 4)
+        self.assertEqual(len(self._by_slug("seed-and-scion").grove_coming_items()), 5)
+        # Orchard (live) and Guilds carry no "What's coming" list.
+        self.assertEqual(self._by_slug("orchard-food-forest").grove_coming_items(), [])
+        self.assertEqual(self._by_slug("guilds").grove_coming_items(), [])
+        # A parsed item splits on the first pipe into name + detail.
+        first = self._by_slug("forest-farming").grove_coming_items()[0]
+        self.assertEqual(first["name"], "Goldenseal")
+        self.assertEqual(first["detail"], "root divisions: three to five years to a harvestable root")
+
+    def test_department_copy_does_not_clobber_edited_field_on_rerun(self):
+        restructure_department_tree(self.env)
+        load_department_copy(self.env)
+        myco = self._by_slug("mycoforestry")
+        # Simulate an edit made later in Odoo, then re-run the migration helper.
+        myco.grove_teaser = "Hand-edited teaser"
+        myco.grove_coming_list = "Only item | kept as-is"
+        load_department_copy(self.env)
+        self.assertEqual(myco.grove_teaser, "Hand-edited teaser", "a non-empty teaser must survive a re-run")
+        self.assertEqual(myco.grove_coming_list, "Only item | kept as-is", "a non-empty coming list must survive")
+        # A field left untouched still carries the approved copy (idempotent fill).
+        self.assertEqual(self._by_slug("guilds").grove_teaser, _DEPARTMENT_COPY["guilds"]["teaser"])
+
+    def test_department_copy_surfaces_in_catalog_nav(self):
+        restructure_department_tree(self.env)
+        load_department_copy(self.env)
+        # Orchard is live, so it needs a published product to render in the nav.
+        self.env["product.template"].create(
+            {
+                "name": "Honeycrisp Apple",
+                "website_published": True,
+                "public_categ_ids": [(6, 0, [self.original["Fruit Trees"]])],
+            }
+        )
+        nav = _catalog_nav(self.env, self.env.company)
+        by_slug = {d["slug"]: d for d in nav["departments"]}
+        self.assertIn("hardy Appalachian stock", by_slug["orchard-food-forest"]["teaser"])
+        # Forest farming (coming_soon) surfaces its teaser + 4-item coming list.
+        ff = by_slug["forest-farming"]
+        self.assertIn("wild-simulated ginseng", ff["teaser"])
+        self.assertEqual(len(ff["coming_list"]), 4)
+        self.assertEqual(ff["coming_list"][1]["name"], "American ginseng")
+        # The Guilds collection lede replaces the storefront fallback.
+        self.assertIn("plan for where each tree goes", nav["guilds"]["teaser"])
+
+    def test_department_copy_noops_for_missing_slug(self):
+        # Without a restructured tree there are no department rows; the loader
+        # must no-op cleanly rather than raise.
+        load_department_copy(self.env)
+        self.assertFalse(self._by_slug("mycoforestry"))
+
     # ── notify-me waitlist tag ──────────────────────────────────────────
 
     def test_waitlist_resolver_maps_slug_to_department_name(self):
@@ -262,3 +341,115 @@ class TestDepartmentRestructure(GroveTaxFixtureMixin, TransactionCase):
         # End to end through the tag builder: readable "Waitlist: <Dept>" tag.
         tags = newsletter_tag_names("nursery", ["waitlist:mycoforestry"], waitlist_names=resolved)
         self.assertIn("Waitlist: Mycoforestry", tags)
+
+
+@tagged("grove_headless", "shop_departments", "post_install", "-at_install")
+class TestGuildCardLines(GroveTaxFixtureMixin, TransactionCase):
+    """Approved guild card purpose lines (GOL-3304).
+
+    load_guild_card_lines prepends Sora's approved one-liner to each guild
+    template's description_ecommerce as a new first <p>, matched by product name
+    (case-insensitive prefix, so prod's "(... Trees)" suffixes match), writing
+    only when the first paragraph does not already read the line.
+    """
+
+    # Prod catalog names, keyed by the _GUILD_CARD_LINES prefix they match.
+    PROD_NAMES = {
+        "Chestnut Grove": "Chestnut Grove (5-Tree Native Bundle)",
+        "Mountain Mama Package": "Mountain Mama Package (5-Tree Appalachian Mix)",
+        "Pollinator Bundle": "Pollinator Bundle (5 Seedlings)",
+        "Heirloom Fruit Package": "Heirloom Fruit Package (5 Trees)",
+        "At the Grove Food Forest": "At the Grove Food Forest (50)",
+        "Centennial Food Forest": "Centennial Food Forest (100 Trees)",
+    }
+
+    def setUp(self):
+        super().setUp()
+        self.Product = self.env["product.template"]
+
+    def _make(self, name, description):
+        return self.Product.create({"name": name, "description_ecommerce": description})
+
+    def _first_line(self, record):
+        from odoo.addons.grove_headless.hooks import _first_paragraph_html
+
+        return _visible_text(_first_paragraph_html(record.description_ecommerce))
+
+    def test_lines_prepended_to_each_guild_by_prefix(self):
+        # Stand up all six guild bundles under their suffixed prod names, each
+        # with a pre-existing storefront paragraph.
+        products = {}
+        for prefix, prod_name in self.PROD_NAMES.items():
+            products[prefix] = self._make(prod_name, "<p data-oe-version='2.0'>Original copy.</p>")
+        load_guild_card_lines(self.env)
+        for prefix, line in _GUILD_CARD_LINES:
+            rec = products[prefix]
+            # First paragraph now reads the approved line verbatim...
+            self.assertEqual(self._first_line(rec), line, f"{prefix} first paragraph")
+            self.assertTrue(rec.description_ecommerce.startswith(f"<p>{line}</p>"), f"{prefix} literal first <p>")
+            # ...and the original copy is kept (prepend is additive).
+            self.assertIn("Original copy.", rec.description_ecommerce, f"{prefix} keeps original body")
+            # No em dash slipped into the approved line (storefront no-em-dash rule).
+            self.assertNotIn("—", line)
+
+    def test_food_forest_lines_do_not_cross_contaminate(self):
+        # Both food-forest bundles share the "Food Forest" substring; prefix
+        # anchoring must land each line on its own template, not the sibling.
+        fifty = self._make(self.PROD_NAMES["At the Grove Food Forest"], "<p>fifty body</p>")
+        hundred = self._make(self.PROD_NAMES["Centennial Food Forest"], "<p>hundred body</p>")
+        load_guild_card_lines(self.env)
+        lines = dict(_GUILD_CARD_LINES)
+        self.assertEqual(self._first_line(fifty), lines["At the Grove Food Forest"])
+        self.assertEqual(self._first_line(hundred), lines["Centennial Food Forest"])
+
+    def test_match_is_case_insensitive(self):
+        rec = self._make("pollinator bundle (5 seedlings)", "<p>body</p>")
+        load_guild_card_lines(self.env)
+        self.assertEqual(self._first_line(rec), dict(_GUILD_CARD_LINES)["Pollinator Bundle"])
+
+    def test_rerun_is_idempotent(self):
+        rec = self._make(self.PROD_NAMES["Pollinator Bundle"], "<p>body</p>")
+        load_guild_card_lines(self.env)
+        after_first = rec.description_ecommerce
+        load_guild_card_lines(self.env)
+        self.assertEqual(rec.description_ecommerce, after_first, "a second run must not duplicate the paragraph")
+        line = dict(_GUILD_CARD_LINES)["Pollinator Bundle"]
+        self.assertEqual(rec.description_ecommerce.count(f"<p>{line}</p>"), 1)
+
+    def test_rerun_after_edit_reprepends_without_duplicating(self):
+        # If the shop later edits the body but the approved line is still the
+        # first paragraph, the loader leaves it alone.
+        rec = self._make(self.PROD_NAMES["Heirloom Fruit Package"], "<p>body</p>")
+        load_guild_card_lines(self.env)
+        line = dict(_GUILD_CARD_LINES)["Heirloom Fruit Package"]
+        rec.description_ecommerce = f"<p>{line}</p><p>a freshly edited body</p>"
+        load_guild_card_lines(self.env)
+        self.assertEqual(rec.description_ecommerce.count(f"<p>{line}</p>"), 1)
+        self.assertIn("a freshly edited body", rec.description_ecommerce)
+
+    def test_empty_description_gets_the_line(self):
+        rec = self._make(self.PROD_NAMES["Mountain Mama Package"], False)
+        load_guild_card_lines(self.env)
+        line = dict(_GUILD_CARD_LINES)["Mountain Mama Package"]
+        self.assertEqual(rec.description_ecommerce, f"<p>{line}</p>")
+
+    def test_absent_name_is_skipped_not_fatal(self):
+        # QA may not carry every bundle; a missing name must no-op, not raise.
+        rec = self._make(self.PROD_NAMES["Pollinator Bundle"], "<p>body</p>")
+        load_guild_card_lines(self.env)  # only Pollinator exists; the other five are absent
+        self.assertEqual(self._first_line(rec), dict(_GUILD_CARD_LINES)["Pollinator Bundle"])
+
+    def test_ambiguous_prefix_raises(self):
+        # Two templates sharing a prefix is a data surprise; refuse to guess.
+        self._make(self.PROD_NAMES["Pollinator Bundle"], "<p>a</p>")
+        self._make("Pollinator Bundle (10 Seedlings)", "<p>b</p>")
+        with self.assertRaises(ValueError):
+            load_guild_card_lines(self.env)
+
+    def test_write_does_not_clear_facts_reviewed(self):
+        # The write carries no provenance stamp, so it is a human-style edit: it
+        # must not clear a prior Facts-reviewed sign-off.
+        rec = self._make(self.PROD_NAMES["Pollinator Bundle"], "<p>body</p>")
+        rec.grove_facts_reviewed = True
+        load_guild_card_lines(self.env)
+        self.assertTrue(rec.grove_facts_reviewed, "editorial prepend must not drop the Facts-reviewed flag")

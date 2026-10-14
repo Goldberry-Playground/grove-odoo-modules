@@ -1,0 +1,5 @@
+{
+  "_doc": "Example --samples input for calibrate_weights.py (GOL-3201). GOL-3285: bareroot now packs into the p24x10x4 / p24x10x6 cartons, and WEIGHT_CALIBRATION ships EMPTY, so both boxes start unverified and quote the conservative full-capacity weight (p24x10x4 12 lb, p24x10x6 22 lb). `p24x10x4` here carries 3 samples (< MIN_CALIBRATION_SAMPLES) so it stays unverified; `p24x10x6` is force-conservative so it stays unverified regardless of sample count. This reproduces the published all-conservative calibration -> no change needed. Weights are lb; a sample may be a bare number or {\"weight_lb\": x, \"count\": n}.",
+  "p24x10x4": [11.0, 11.5, 12.0],
+  "p24x10x6": [20.0, 21.0]
+}

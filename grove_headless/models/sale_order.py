@@ -4,10 +4,12 @@ from datetime import timedelta
 
 from odoo import api, fields, models
 from odoo.exceptions import UserError
+from odoo.tools import config
 
 from . import carrier_tracking, shippo_client
 from .shipment_email import normalize_carrier
 from .shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
+from .shipping_calendar import merge_calendar_override, preorder_waves, usda_zone_for_zip
 from .shipping_zones import pack_for_state, unshippable_reason
 
 _logger = logging.getLogger(__name__)
@@ -58,6 +60,16 @@ class SaleOrder(models.Model):
         copy=False,
     )
 
+    # Bareroot pre-order wave the shopper chose at checkout (hotfix 2026-10-07).
+    # Validated server-side in _create_draft_order against the zone's order-by
+    # deadline; False for immediate orders and for legacy payloads that sent no
+    # ship_wave.
+    grove_ship_wave = fields.Selection(
+        [("fall", "Fall"), ("spring", "Spring")],
+        readonly=True,
+        copy=False,
+    )
+
     # Per-state bundle component substitution the warehouse MUST honour when
     # packing (GOL-2237). Written at checkout by _stamp_bundle_substitution when
     # a bundle (phantom-BOM kit) ships into a state that restricts one of its
@@ -78,6 +90,20 @@ class SaleOrder(models.Model):
     # human can satisfy the gate (the stock.picking mirror stays read-only).
     grove_substitution_note = fields.Text(copy=False)
 
+    # Consult-built deposit deferral (GOL-3019). Set at checkout when a
+    # consult-built mix (product.grove_consult_built, empty botanical) took its
+    # $10 deposit into a destination where the taxon-level compliance decision
+    # was DEFERRED to mix time instead of hard-blocked at the deposit. Recorded
+    # (never implied): grove_consult_deferred_state is the canonical 2-letter
+    # destination so Wesley can read the constraint at consult time without
+    # asking anyone, and a chatter note names the taxa constrained there. These
+    # are audit fields ONLY — deliberately separate from grove_substitution_note
+    # so the deferral never satisfies the GOL-3007 ship-commit gate (see
+    # _grove_record_consult_deferral). copy=False so a duplicated order never
+    # inherits a stale deferral.
+    grove_consult_compliance_deferred = fields.Boolean(readonly=True, copy=False)
+    grove_consult_deferred_state = fields.Char(readonly=True, copy=False)
+
     # Stripe Checkout linkage (GOL-642). Written when a checkout session is
     # created; read by the webhook to reconcile session.completed/expired back
     # to this order. copy=False so a duplicated order never inherits a payment.
@@ -94,7 +120,8 @@ class SaleOrder(models.Model):
             ("paid", "Paid"),
             ("deposit_paid", "Deposit paid (balance due at ship)"),
             ("settled", "Settled (balance charged at ship)"),
-            ("settlement_failed", "Shipped — settlement failed"),
+            ("settlement_failed", "Shipped — settlement failed (card declined)"),
+            ("settlement_error", "Shipped — settlement error (retrying)"),
             ("expired", "Checkout expired"),
             ("refunded_oversell", "Refunded (oversold)"),
         ],
@@ -125,6 +152,28 @@ class SaleOrder(models.Model):
     grove_stripe_payment_method = fields.Char(readonly=True, copy=False)
     grove_settlement_payment_intent = fields.Char(readonly=True, copy=False)
     grove_settlement_attempts = fields.Integer(readonly=True, copy=False, default=0)
+    # Settlement-failure classification scaffolding (GOL-3011). Every settlement
+    # outcome falls into one of three buckets and these three fields record which:
+    #   • card declined       → status settlement_failed  (dun + daily auto-retry)
+    #   • known-not-charged   → status settlement_error, reconcile=False
+    #   • outcome UNKNOWN     → status settlement_error, reconcile=True (+ idem_key)
+    # grove_settlement_idem_key — the Stripe Idempotency-Key of the last charge
+    #   attempt. It is REUSED (not regenerated) while an outcome is unknown so a
+    #   replay within Stripe's 24h window returns the original result instead of
+    #   creating a second charge; it rotates to a fresh key only once we KNOW no
+    #   charge was made (a clean decline or a known-not-charged rejection).
+    # grove_settlement_reconcile — the "outcome unknown, reconciling" ops flag: the
+    #   retry path must look the order up at Stripe and confirm no charge landed
+    #   before it may re-charge.
+    # grove_settlement_needs_customer — an SCA / authentication_required decline an
+    #   off-session retry can never clear; the cron skips it and the customer pays
+    #   via the dunning link.
+    # grove_settlement_last_attempt — when the last charge ran, so the retry cron
+    #   backs off (does not re-hit the same order more than once per backoff window).
+    grove_settlement_idem_key = fields.Char(readonly=True, copy=False)
+    grove_settlement_reconcile = fields.Boolean(readonly=True, copy=False, default=False)
+    grove_settlement_needs_customer = fields.Boolean(readonly=True, copy=False, default=False)
+    grove_settlement_last_attempt = fields.Datetime(readonly=True, copy=False)
     # Stripe Tax authoritative charge record (GOL-2568, Josh ruling 2026-09-29).
     # Sales tax moved to Stripe Tax: Stripe computes destination tax on the
     # Checkout Session (and on the ship-time /v1/tax/calculations), and we record
@@ -135,6 +184,84 @@ class SaleOrder(models.Model):
     # registers) for filing/audit.
     grove_stripe_tax_amount = fields.Monetary(readonly=True, copy=False)
     grove_stripe_tax_jurisdictions = fields.Text(readonly=True, copy=False)
+
+    # Order-level seed harvest year (GOL-3257), stored so the back-office saved
+    # filters can group seed reservations by harvest year. A seed cart holds one
+    # harvest year (the mixing rule), so this is the first non-zero line value;
+    # 0 for a non-seed order. Mirrors the per-line grove_seed_harvest_year.
+    grove_seed_harvest_year = fields.Integer(
+        string="Seed Harvest Year",
+        compute="_compute_grove_seed_harvest_year",
+        store=True,
+        copy=False,
+        help="Harvest year this seed reservation ships from (0 for non-seed orders).",
+    )
+
+    @api.depends("order_line.grove_seed_harvest_year")
+    def _compute_grove_seed_harvest_year(self):
+        for order in self:
+            order.grove_seed_harvest_year = next(
+                (y for y in order.order_line.mapped("grove_seed_harvest_year") if y), 0
+            )
+
+    # ── Destination USDA zone, as a groupable order field (GOL-3056) ────────
+    # Ship windows and labels are batched by the DESTINATION USDA hardiness zone
+    # (shipping_calendar.WAVE_SCHEDULE, zones 2-10), so "what preorders are
+    # outstanding, by zone" is the natural ops cut. The zone already exists as
+    # pure Python — shipping_calendar.usda_zone_for_zip() off the vendored PHZM
+    # matrix, used by checkout and the weekly digest — but ONLY in Python, so
+    # Odoo could not filter / group / pivot by it. This stores it on the order.
+    #
+    # Reuses usda_zone_for_zip() verbatim so the zone here can NEVER drift from
+    # the zone checkout and the digest resolve. Keyed off the shipping ZIP for a
+    # ship order, and off the FARM's ZIP for a pickup order (we lift on our own
+    # schedule, not the buyer's — GOL-1669; same rule order_rollup already
+    # applies via controllers.main._farm_pickup_zip). Unknown / missing ZIP ->
+    # False, which groups under Odoo's "None" bucket. A Selection (not a raw int)
+    # so groups read "Zone 5" and sort by the declared 2..10 order — "Zone 10"
+    # after "Zone 9", never the lexical "10 < 2" a Char would give.
+    grove_usda_zone = fields.Selection(
+        selection=[(str(z), f"Zone {z}") for z in range(2, 11)],
+        string="USDA Zone",
+        compute="_compute_grove_usda_zone",
+        store=True,
+        index=True,
+        help="Destination USDA hardiness zone (2-10) that decides this order's "
+        "ship wave: the shipping ZIP for a shipped order, the farm's ZIP for a "
+        "pickup. Empty when the ZIP is unknown. Stored so it can be grouped, "
+        "filtered and pivoted; recomputes on a shipping-address edit.",
+    )
+
+    # The 'balance still due' checkout states, defined ONCE (GOL-3056 item 4) so
+    # every zone view and saved filter stays in sync. A deposit-only preorder
+    # (deposit_paid) and a shipped order whose off-session balance has not landed
+    # (settlement_failed = declined; settlement_error = unknown/errored, retrying
+    # — added by GOL-3011) all still owe their balance; settled / paid do not.
+    # Shipped as-is into the ir.filters domains in data/grove_zone_filters.xml;
+    # test_usda_zone asserts those XML domains match this tuple so a new retry
+    # state can never silently drop orders out of a filter.
+    GROVE_BALANCE_DUE_STATES = ("deposit_paid", "settlement_failed", "settlement_error")
+
+    @api.depends("grove_fulfillment", "partner_shipping_id.zip", "company_id")
+    def _compute_grove_usda_zone(self):
+        """Resolve the destination USDA zone from the order's governing ZIP.
+
+        Pickup orders key off the FARM origin ZIP (controllers.main._farm_pickup_zip,
+        the same precedence the digest uses); shipped orders off the customer's
+        shipping ZIP. Deferred import of the controller helper mirrors
+        _grove_settle_at_ship and avoids the controller→models load cycle.
+        """
+        from ..controllers.main import _farm_pickup_zip
+
+        for order in self:
+            if order.grove_fulfillment == "pickup":
+                zip_code = _farm_pickup_zip(order.env, order.company_id)
+            else:
+                partner = order.partner_shipping_id
+                zip_code = partner.zip if partner else None
+            zone = usda_zone_for_zip((zip_code or "").strip() or None)
+            order.grove_usda_zone = str(zone) if zone is not None else False
+
     # ── Terminal fulfilment state machine (GOL-1981) ────────────────────────
     # Odoo is the system of record for "what is outstanding". Payment
     # (grove_checkout_status) and raw label substatus (grove_delivery_status)
@@ -231,12 +358,12 @@ class SaleOrder(models.Model):
             return "cancelled"
         if checkout == "deposit_paid":
             return "deposit_paid"
-        # settled / settlement_failed (GOL-2053) are post-payment ship-path
-        # statuses: settlement runs after every label is bought, so the
-        # watermark is normally already set — but if it is unset (legacy row,
-        # partial write) a shipped order must not derive back to
+        # settled / settlement_failed / settlement_error (GOL-2053/3011) are
+        # post-payment ship-path statuses: settlement runs after every label is
+        # bought, so the watermark is normally already set — but if it is unset
+        # (legacy row, partial write) a shipped order must not derive back to
         # "awaiting_payment".
-        if checkout in ("paid", "settled", "settlement_failed"):
+        if checkout in ("paid", "settled", "settlement_failed", "settlement_error"):
             if self.grove_fulfillment == "pickup":
                 return "reserved"
             if self.grove_delivery_status == "label_purchased":
@@ -463,6 +590,90 @@ class SaleOrder(models.Model):
         )
         return True
 
+    def action_grove_record_historical_label(
+        self, tracking_number, carrier=None, actual_cost=0.0, service=None, label_date=None, delivered=True
+    ):
+        """Record a label that was bought AND shipped (usually delivered) by hand
+        WEEKS AGO, for the one-time legacy reconcile (GOL-3091, split from GOL-3083).
+
+        This is deliberately NOT the vanilla hand-label flow. ``action_grove_record_hand_label``
+        lands the order at ``label_purchased`` and the normal ship path then fires
+        the branded shipment email + runs ship-time settlement — the exact harm
+        GOL-3083 is about (four customers were re-emailed a tracking notice for an
+        order delivered weeks earlier, and a card could be re-settled). A legacy
+        order has already run its course offline, so recording its historical label
+        must be silent: stamp the tracking/carrier/cost, walk the fulfilment
+        watermark straight to ``delivered`` (or ``shipped``) through
+        ``_grove_advance_state`` — which only writes internal chatter, never the
+        customer email — and skip settlement entirely. The customer shipment email
+        lives in ``_operator_mark_shipped`` (the controller orchestration), which we
+        never call here, so "no customer email" holds by construction rather than by
+        a notify flag threaded through the live ship path.
+
+        ``label_date`` (a datetime / ``fields.Datetime``-parseable value) stamps
+        ``grove_label_purchased_at`` to when the label was actually bought so the
+        carrier poll's 30-day stop and any audit stay honest; when absent it falls
+        back to now(). Validation mirrors ``action_grove_record_hand_label`` and
+        raises ``UserError`` so the wizard surfaces it visibly. Returns True."""
+        self.ensure_one()
+        # No consult-compliance assert and no settlement here: the order already
+        # delivered offline, so there is nothing fresh to ship or capture — this is
+        # a records-only backfill. Re-asserting/settling weeks later is exactly the
+        # money/notification harm this reconcile exists to avoid.
+        if self.grove_fulfillment == "pickup":
+            raise UserError(f"{self.name}: farm-pickup orders buy no shipping label.")
+        if self.grove_tracking_numbers:
+            raise UserError(f"{self.name} already has tracking; clear the label fields to re-record.")
+        tracking = (tracking_number or "").strip()
+        if not shippo_client.is_valid_tracking(tracking):
+            raise UserError(f"{self.name}: {tracking!r} is not a valid tracking number.")
+        carrier_key = self._grove_infer_carrier(tracking, fallback=carrier)
+        if not carrier_key:
+            raise UserError(f"{self.name}: could not determine the carrier for {tracking!r}; pick UPS or USPS.")
+        try:
+            cost = round(float(actual_cost or 0.0), 2)
+        except (TypeError, ValueError):
+            raise UserError(f"{self.name}: actual shipping cost {actual_cost!r} is not a number.")
+        if cost < 0:
+            raise UserError(f"{self.name}: actual shipping cost cannot be negative.")
+        stage = self.grove_fulfillment_stage
+        if stage not in ("awaiting_label", "wave_assigned"):
+            raise UserError(f"{self.name}: not awaiting a label (stage {stage}); assign it to a ship wave first.")
+        service_token = service or ("ups_ground" if carrier_key == "UPS" else "usps_ground_advantage")
+        # Stamp the historical label date BEFORE advancing: _grove_advance_state
+        # only now()-stamps grove_label_purchased_at when it is still unset, so
+        # pre-setting it preserves the real purchase date from the export.
+        if label_date:
+            self.grove_label_purchased_at = label_date
+        # Walk the legal machine: awaiting_label/wave_assigned -> label_purchased ->
+        # shipped -> (delivered). Every hop is a _grove_advance_state call, which
+        # posts internal chatter only — no customer email, no settlement — so a
+        # legacy order lands silently out of the eligible pool.
+        self._grove_advance_state("label_purchased", source="historical_reconcile")
+        self.write(
+            {
+                "grove_tracking_numbers": tracking,
+                "grove_shipping_carriers": carrier_key,
+                "grove_shipping_services": service_token,
+                "grove_label_urls": "",  # label printed from Pirate Ship, not stored here
+                "grove_actual_shipping_cost": cost,
+                "grove_delivery_status": "label_purchased",
+            }
+        )
+        self._grove_advance_state("shipped", source="historical_reconcile")
+        if delivered:
+            self._grove_advance_state("delivered", source="historical_reconcile")
+        self.message_post(
+            body=(
+                "Historical label reconciled from the Pirate Ship Shipments export (GOL-3091): "
+                f"{carrier_key} {tracking}, ${cost:.2f}, landed at "
+                f"{'delivered' if delivered else 'shipped'}. "
+                "No customer email was sent and the balance was NOT auto-settled "
+                "(records-only backfill of an order already shipped by hand)."
+            )
+        )
+        return True
+
     def _grove_mark_shipped_and_settle(self, operator=None):
         """Model entry point for the Odoo "Mark shipped" server action (GOL-2895).
 
@@ -513,6 +724,43 @@ class SaleOrder(models.Model):
         with self.env.registry.cursor() as cr:
             self.with_env(self.env(cr=cr)).write(vals)
 
+    def _wave_hold_reason(self, today):
+        """Why a chosen-wave pre-order cannot get a label on ``today``, else None.
+
+        Only orders with a stored ``grove_ship_wave`` and a known zone are held
+        (an order without a wave keeps the legacy gate). The hold lasts until
+        ``today`` is inside the chosen wave's ship window for the order's zone,
+        using the same admin calendar override as checkout. When the hold cannot
+        be computed (no zone, or the zone is missing from the calendar) this
+        returns None and the dormancy check in the caller is the fallback."""
+        self.ensure_one()
+        if not self.grove_ship_wave or not self.grove_usda_zone:
+            return None
+        from ..controllers.main import _parse_calendar_override
+
+        calendar = merge_calendar_override(_parse_calendar_override(self.env))
+        try:
+            waves = preorder_waves(int(self.grove_usda_zone), today, calendar)
+        except (KeyError, ValueError):
+            _logger.warning(
+                "%s: zone %s missing from the shipping calendar; wave hold skipped, dormancy gate applies",
+                self.name,
+                self.grove_usda_zone,
+            )
+            return None
+        wave = next((w for w in waves if w["wave"] == self.grove_ship_wave), None)
+        if wave is None:
+            return None
+        (sm, sd), (em, ed) = wave["ship_window"]
+        t = (today.month, today.day)
+        inside = (sm, sd) <= t <= (em, ed) if (sm, sd) <= (em, ed) else t >= (sm, sd) or t <= (em, ed)
+        if inside:
+            return None
+        return (
+            f"this order is in the {self.grove_ship_wave} wave, which ships "
+            f"{sm}/{sd} to {em}/{ed} for zone {self.grove_usda_zone}; no label until then."
+        )
+
     def _grove_pack_for_label(self):
         """Carrier-neutral shipment plan for ONE order: ``(address, plan, mode)``.
 
@@ -540,6 +788,10 @@ class SaleOrder(models.Model):
         skip_preorder_ids = (
             set() if self.grove_fulfillment_stage == "wave_assigned" else self._preorder_variant_id_set()
         )
+        today = fields.Date.context_today(self)
+        wave_hold = self._wave_hold_reason(today) if self.grove_fulfillment_stage != "wave_assigned" else None
+        if wave_hold:
+            raise UserError(f"{self.name}: {wave_hold}")
         partner = self.partner_shipping_id
         address = {
             "name": partner.name,
@@ -594,7 +846,6 @@ class SaleOrder(models.Model):
         reason = unshippable_reason(items)
         if reason:
             raise UserError(f"{self.name}: {reason}")
-        today = fields.Date.context_today(self)
         # Dormancy window is Odoo-editable (GOL-1906, Josh 2026-09-07) — read it
         # from config here and inject, so the label gate tracks the same dates
         # the storefront quotes. A malformed param raises out of
@@ -624,7 +875,10 @@ class SaleOrder(models.Model):
 
         order_dt = self.date_order or fields.Datetime.now()
         order_date = fields.Datetime.context_timestamp(self, order_dt).date()
-        held_for_wave = _after_deposit_cutover(self.env, order_date)
+        # An order that chose a wave is ALWAYS subject to the dormancy check (on
+        # top of the wave-window hold above), never to the order-date cutover
+        # heuristic.
+        held_for_wave = True if self.grove_ship_wave else _after_deposit_cutover(self.env, order_date)
         if held_for_wave and not can_ship_bareroot(today, window):
             raise UserError(
                 f"{self.name}: this order was placed after the season cutover, so its "
@@ -790,6 +1044,59 @@ class SaleOrder(models.Model):
         if self._grove_consult_compliance_missing():
             raise UserError(self.GROVE_CONSULT_COMPLIANCE_MSG)
 
+    # Config flag that arms the GOL-3019 deposit-time deferral. Default-absent =
+    # off: deposit-time blocking stays until it is explicitly set True (the CEO
+    # money-flow GO, done after 1.63.0 + grove_consult_built are live on prod).
+    # Flipping it back to False restores deposit-time blocking with no data
+    # migration (GOL-3019 AC5).
+    GROVE_CONSULT_DEFERRAL_PARAM = "grove_headless.consult_deferral_enabled"
+
+    def _grove_consult_deferral_armed(self):
+        """GOL-3019 §3 self-guard. The deposit-time deferral for a consult-built
+        mix is honest ONLY while the GOL-3007 ship-commit assert is live to
+        catch the mix at ship time; without it the deferral would be a third
+        silent hole in the gate. Returns True iff BOTH:
+
+          (a) the reversibility flag ``grove_headless.consult_deferral_enabled``
+              is set (one config param flips the whole feature back to
+              deposit-time blocking — AC5), AND
+          (b) the GOL-3007 assert is actually present on this record at runtime,
+
+        so a code rollback that drops ``_grove_assert_consult_compliance`` makes
+        this return False, re-arming the deposit-time fail-safe — a 3007 revert
+        can never silently open a regulated state."""
+        self.ensure_one()
+        if not callable(getattr(self, "_grove_assert_consult_compliance", None)):
+            return False
+        enabled = self.env["ir.config_parameter"].sudo().get_param(self.GROVE_CONSULT_DEFERRAL_PARAM, "False")
+        return str(enabled).strip().lower() in ("1", "true", "yes", "on")
+
+    def _grove_record_consult_deferral(self, state_code, excluded_taxa):
+        """Record — never imply — that a consult-built mix took its $10 deposit
+        into ``state_code`` with the taxon-level compliance decision deferred to
+        mix time (GOL-3019 AC2/AC4). Sets the audit fields and posts a chatter
+        line naming the destination and the taxa constrained there, so Wesley
+        reads the constraint at consult time without asking anyone.
+
+        Deliberately does NOT write grove_substitution_note: that field is the
+        key the GOL-3007 ship-commit gate reads, so writing it here would
+        satisfy _grove_assert_consult_compliance and let the order settle / ship
+        with no human check (AC2 forbids it). The deferral and the ship-commit
+        gate stay on separate surfaces on purpose."""
+        self.ensure_one()
+        self.grove_consult_compliance_deferred = True
+        self.grove_consult_deferred_state = state_code
+        taxa = ", ".join(excluded_taxa) if excluded_taxa else "none for this state"
+        self.message_post(
+            body=(
+                "⏸️ <b>Consult compliance deferred</b> (GOL-3019). Deposit taken for a "
+                f"consult-built mix shipping to <b>{state_code or '?'}</b>. "
+                f"Constrained taxa for this state: <b>{taxa}</b>. Agree a compliant species "
+                "list with the customer, then record the check in 'Compliance check / "
+                "substitutions' before the balance can be charged or the order shipped."
+            )
+        )
+
     def _grove_settle_at_ship(self):
         """Capture the deferred preorder balance off-session at ship time.
 
@@ -804,22 +1111,103 @@ class SaleOrder(models.Model):
             return settle_order_at_ship(self.env, self)
         except Exception:  # noqa: BLE001 — settlement must never fail the ship
             _logger.exception("Ship-time settlement crashed for %s", self.name)
+            # An unexpected crash may have straddled the Stripe charge, so the
+            # outcome is UNKNOWN: park the order retryable and flag it to reconcile
+            # before any retry can charge, instead of silently stranding it in
+            # deposit_paid where the retry cron would never select it (GOL-3011).
+            # Only move a not-yet-settled order (never clobber a settled one). Guard
+            # the write: if the crash aborted the DB transaction this cannot run, and
+            # settlement must never raise, so swallow a secondary failure.
+            try:
+                if self.grove_checkout_status in ("deposit_paid", "settlement_failed", "settlement_error"):
+                    self.write({"grove_checkout_status": "settlement_error", "grove_settlement_reconcile": True})
+            except Exception:  # noqa: BLE001 — best-effort; the ship must not fail on the bookkeeping write
+                _logger.exception("Could not park %s as settlement_error after a settlement crash", self.name)
             return "settlement_error"
 
+    # Exponential backoff (hours) between automatic settlement retries, indexed by
+    # attempts already made (GOL-3011). The cron runs daily, so this only ever
+    # DELAYS a retry past one day — it never retries faster than the cron fires.
+    # Capped so a long-lived error still gets its daily poke.
+    _SETTLEMENT_BACKOFF_HOURS = (0, 1, 6, 24)
+
+    def _settlement_retry_due(self, now=None):
+        """True when this order's backoff window since its last attempt has
+        elapsed (GOL-3011). A never-attempted order (no timestamp) is always due."""
+        self.ensure_one()
+        last = self.grove_settlement_last_attempt
+        if not last:
+            return True
+        attempts = self.grove_settlement_attempts or 0
+        idx = min(attempts, len(self._SETTLEMENT_BACKOFF_HOURS) - 1)
+        wait = self._SETTLEMENT_BACKOFF_HOURS[idx]
+        now = now or fields.Datetime.now()
+        return (now - last) >= timedelta(hours=wait)
+
     def _cron_retry_settlements(self):
-        """Re-attempt every shipped-but-unsettled order whose card can still be
-        auto-charged (GOL-2053 retry policy). Orders that have exhausted
-        grove_headless.settlement_max_retries are left for manual re-trigger and
-        stay in the ops queue via their Discord escalation."""
+        """Re-attempt every shipped-but-unsettled order that is still auto-retryable
+        (GOL-2053 retry policy, extended by GOL-3011).
+
+        Selects BOTH recoverable states: ``settlement_failed`` (a card decline — a
+        later retry may clear a transient bank hold) and ``settlement_error`` (a
+        known-not-charged rejection or an outcome-unknown gateway error — the
+        reconcile-then-charge path in ``settle_order_at_ship`` makes the unknown
+        case safe to re-run). Skips orders that need the customer
+        (``authentication_required`` / SCA — an off-session retry can never
+        succeed) and honours a per-order exponential backoff so a hard-stuck order
+        is not re-hit every single day's run at full rate. Orders that have
+        exhausted ``grove_headless.settlement_max_retries`` are left for manual
+        re-trigger and stay in the ops queue via their Discord escalation.
+
+        Settles one order per committed transaction so a crash on order N never
+        rolls back the successful settlements of 1..N-1 — and the row lock inside
+        ``settle_order_at_ship`` makes a cron retry safe to run concurrently with a
+        manual ``Retry settlement`` on the same order (GOL-3011)."""
         max_retries = int(self.env["ir.config_parameter"].sudo().get_param("grove_headless.settlement_max_retries", 3))
         stuck = self.sudo().search(
             [
-                ("grove_checkout_status", "=", "settlement_failed"),
+                ("grove_checkout_status", "in", ("settlement_failed", "settlement_error")),
                 ("grove_settlement_attempts", "<", max_retries),
+                ("grove_settlement_needs_customer", "=", False),
             ]
         )
+        now = fields.Datetime.now()
+        # Odoo 19 dropped Registry.in_test_mode(); the test runner sets the
+        # ``test_enable`` config flag for the whole process, which is exactly the
+        # signal we want — skip the per-order commit below so a TestCursor stays
+        # isolated and rolls back.
+        in_test = bool(config["test_enable"])
         for order in stuck:
+            if not order._settlement_retry_due(now=now):
+                continue
             order._grove_settle_at_ship()
+            # Commit per order so a later failure (or a crash on order N) cannot
+            # unwind the successful settlements of 1..N-1 — each settled balance is a
+            # real Stripe charge that must not be orphaned by a rollback. Skipped
+            # under the test runner so a TransactionCase stays isolated/rolled back.
+            if not in_test:
+                self.env.cr.commit()
+
+    def action_grove_retry_settlement(self):
+        """Operator 'Retry settlement' server action (GOL-3011).
+
+        The in-Odoo replacement for the odoo-shell ``_grove_settle_at_ship()``
+        workaround: runs the SAME reconcile-then-charge path as the cron on every
+        selected order and posts the outcome to the chatter, so Josh/Wesley can
+        heal a failed or errored settlement from the order list/form. Callable on a
+        shipped or collected order and on ``settlement_failed`` / ``settlement_error``
+        orders; ``settle_order_at_ship`` is a no-op (``already_settled`` /
+        ``not_applicable``) for anything with nothing to charge, so a stray
+        multi-select selection is harmless. Idempotent and concurrency-safe against
+        the cron via the row lock inside the settlement engine."""
+        for order in self:
+            # A retry an operator asked for must clear the SCA skip so it is tried
+            # (the customer may have just completed authentication on the pay link).
+            if order.grove_settlement_needs_customer:
+                order.grove_settlement_needs_customer = False
+            result = order._grove_settle_at_ship()
+            order.message_post(body=f"Manual retry settlement → {result}.")
+        return True
 
     # ── Carrier-tracking poll (GOL-2272, Pirate Ship C) ─────────────────────
 
@@ -946,3 +1334,19 @@ class SaleOrder(models.Model):
                 _apply_delivery_status(
                     order.env, order, new_status, order.grove_tracking_numbers or "", source="carrier_poll"
                 )
+
+
+class SaleOrderLine(models.Model):
+    _inherit = "sale.order.line"
+
+    # Harvest year a seed pre-order line reserves from (GOL-3257). Stamped from
+    # seed_season(..., adding_lb=line weight) when the line is added and
+    # re-checked at checkout: a line that would push past the season cap moves
+    # to next fall and the shopper is shown the change before paying. Feeds the
+    # template's grove_seed_reserved_lb roll-up. 0/unset for non-seed lines.
+    grove_seed_harvest_year = fields.Integer(
+        string="Seed Harvest Year",
+        readonly=True,
+        copy=False,
+        index=True,
+    )
