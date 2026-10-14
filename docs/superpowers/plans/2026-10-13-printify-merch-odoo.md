@@ -2169,3 +2169,47 @@ PR title: `feat(grove_headless): Printify T-shirts on the farm storefront (Train
 ## Prod setup (after promote, Josh)
 
 Env vars without `PRINTIFY_DRY_RUN`; farm Stripe Tax setup with `goldberry_stripe_key` (Grove Prod / `stripe`), first call confirms the key can write tax settings; sync, price, publish; register webhooks with the prod URL; one real order to Josh.
+
+---
+
+## Josh's 2026-10-14 rulings on #341 — applied
+
+**1. Stripe Tax for the farm (goldberry) storefront — config path, no hardcoded keys.**
+The apparel tax route already exists and is tenant generic: `_stripe_tax_code_for`
+stamps `txcd_30011000` on every Printify line and `_stripe_tax_enabled` /
+`_tenant_secret_key` key off the order's tenant slug exactly like the nursery's
+Stripe Tax route (GOL-2568). No code hardcodes a key. The exact settings Josh
+fills on the goldberry deployment (compose `environment:` block, Terra wires the
+vars; values live in 1Password, never in the repo):
+
+- `stripe_secret_key_goldberry` — the goldberry LLC's Stripe **secret** key, so
+  shirt charges and refunds land in the farm's own account. (If goldberry shares
+  one Stripe account in single-merchant mode instead, leave the per-tenant var
+  unset and pin the fallback with `stripe_legacy_key_tenant=goldberry`.)
+- `GROVE_STRIPE_TAX_GOLDBERRY=1` — flips Stripe Tax ON for the farm storefront
+  (Customer + `automatic_tax` on the session, no explicit WV tax line).
+- Stripe Dashboard (Stripe side, not Odoo): Stripe Tax must be **activated** on
+  that account with an origin address + registration, same as the nursery setup.
+
+Coverage: `test_apparel_tax_code_rides_stripe_tax_line_items` asserts the shirt
+goods line carries the apparel code when Stripe Tax is on.
+
+**2. Shipping passes through at cost; shirts never get the tree $5 handling fee.**
+`_order_handling_fee` now returns $0 for a Printify order (as it already does for
+seeds). Coverage: `test_shirts_never_get_the_tree_handling_fee`.
+
+**3. Printify-side cancellation → auto-refund + email (paid, pre-production only).**
+`_printify_cancel_order` (wired from the `order:updated` canceled branch):
+- Refunds the full charge in Stripe, idempotent two ways — a `printify_refund_id`
+  recorded on the order short-circuits a redelivered webhook, and the refund
+  carries an `Idempotency-Key` of `printify-cancel-refund:{SO name}:{intent}`.
+- Marks the Odoo sale order cancelled (`state=cancel` + `printify_state=canceled`).
+  Printify lines are non-storable, so no tree stock is restored.
+- Emails the customer a short branded apology (no em dashes), via
+  `_notify_printify_cancel_customer`.
+- Alerts Discord with the order ref + reason, no customer PII.
+- An order already **in production / shipped** per Printify is never auto-refunded
+  — Discord alert only, for manual handling.
+Coverage: `test_paid_cancel_refunds_once_and_emails`,
+`test_redelivered_cancel_does_not_refund_twice`,
+`test_in_production_cancel_alerts_only_no_refund`.

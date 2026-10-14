@@ -131,6 +131,27 @@ class TestPrintifyDraftOrder(_PrintifyFixture, GroveTaxFixtureMixin, Transaction
         self.assertEqual(grove_main._stripe_tax_code_for(self.shirt), "txcd_30011000")
         self.assertEqual(grove_main._stripe_tax_code_for(self.tree), stripe_gateway.TAX_CODE_GOODS)
 
+    def test_apparel_tax_code_rides_stripe_tax_line_items(self):
+        # With Stripe Tax ON for the farm (GROVE_STRIPE_TAX_GOLDBERRY=1, Josh
+        # 2026-10-14) the shirt goods line carries the apparel code so Stripe Tax
+        # taxes it as clothing — the same automatic_tax route the nursery uses.
+        order, error, _quoted = self._draft(self._payload("CA"))
+        self.assertIsNone(error)
+        items, _preorder_ids, _charged = grove_main._build_stripe_line_items(order, tax_enabled=True)
+        shirt_line = next(i for i in items if i["kind"] == "goods")
+        self.assertEqual(shirt_line["tax_code"], stripe_gateway.TAX_CODE_APPAREL)
+
+    def test_shirts_never_get_the_tree_handling_fee(self):
+        # Printify shirts pass the live Printify shipping quote through AT COST;
+        # they never get the flat $5 tree shipping-and-handling fee (Josh
+        # 2026-10-14). The quote (4.75) lands on the GROVE-SHIP line verbatim.
+        order, error, _quoted = self._draft(self._payload("CA"))
+        self.assertIsNone(error)
+        self.assertTrue(order.grove_is_printify)
+        self.assertEqual(grove_main._order_handling_fee(self.env, order), 0.0)
+        ship = order.order_line.filtered(lambda ln: ln.product_id.default_code == grove_main.SHIPPING_PRODUCT_CODE)
+        self.assertEqual(ship.price_unit, 4.75)
+
     def test_fractional_qty_refused_400(self):
         # Printify prints whole shirts: a 1.5 qty would bill 1.5 in Odoo while
         # int(1.5)=1 ships (GOL-3314 review 2026-10-14).

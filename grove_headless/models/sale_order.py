@@ -226,6 +226,10 @@ class SaleOrder(models.Model):
     )
     printify_push_attempts = fields.Integer(readonly=True, copy=False, default=0)
     printify_push_last_attempt = fields.Datetime(readonly=True, copy=False)
+    # Stripe refund id for a Printify-side cancellation (Josh 2026-10-14). Set
+    # the moment an auto-refund succeeds so a redelivered cancel webhook is a
+    # no-op and the customer is never refunded twice.
+    printify_refund_id = fields.Char(readonly=True, copy=False)
 
     @api.depends("order_line.product_id")
     def _compute_grove_is_printify(self):

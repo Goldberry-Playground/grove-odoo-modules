@@ -2941,13 +2941,138 @@ def _handle_printify_event(env, event):
         _printify_set_state(order, "delivered" if status == "delivered" else "shipped")
         return status
     if kind == "order:updated":
-        status = (resource.get("data") or {}).get("status") or ""
-        if status in ("canceled", "on-hold"):
-            state = "canceled" if status == "canceled" else "on_hold"
-            _printify_set_state(order, state)
-            _notify_discord(f":warning: Printify marked {order.name} {status}. Check the Printify dashboard.")
-            return state
+        data = resource.get("data") or {}
+        status = data.get("status") or ""
+        if status == "canceled":
+            # Provider out of stock, address rejected, admin cancel — Printify
+            # names the reason on the event when it has one (spec §7).
+            reason = data.get("reason") or data.get("cancel_reason") or "canceled"
+            return _printify_cancel_order(env, order, reason)
+        if status == "on-hold":
+            _printify_set_state(order, "on_hold")
+            _notify_discord(f":warning: Printify put {order.name} on hold. Check the Printify dashboard.")
+            return "on_hold"
     return "ignored"
+
+
+# printify_state values that mean Printify has already committed the order to
+# print; a cancel at or after this point is NOT auto-refunded (Josh 2026-10-14)
+# because the merch may already have been produced or shipped.
+_PRINTIFY_NO_REFUND_STATES = ("in_production", "shipped", "delivered")
+
+
+def _printify_cancel_order(env, order, reason):
+    """Handle a Printify-side order cancellation (spec §7 + Josh 2026-10-14).
+
+    A cancel on a PAID, not-yet-in-production order is auto-refunded in full, the
+    sale order is cancelled, the customer gets a short branded apology, and ops
+    is pinged on Discord. A cancel once the order is in production/shipped is
+    never auto-refunded (the merch may already exist) — ops is alerted to handle
+    it by hand. Printify lines are non-storable, so there is no tree stock to
+    restore in any branch.
+
+    Idempotent two ways: a refund id already recorded on the order short-circuits
+    a redelivered webhook, and the Stripe refund carries an Idempotency-Key keyed
+    on the order + payment intent so a redelivery that races the first write
+    still only refunds once. Returns "canceled" (refunded / already handled /
+    refund failed), "canceled_in_production" (alert only), or "canceled_unpaid".
+    """
+    reason = reason or "canceled"
+    # Already refunded (redelivered webhook): never refund or email a second time.
+    if order.printify_refund_id:
+        return "canceled"
+    # In production / shipped: do not auto-refund, alert for manual handling.
+    if order.printify_state in _PRINTIFY_NO_REFUND_STATES:
+        _printify_set_state(order, "canceled")
+        _notify_discord(
+            f":rotating_light: Printify cancelled {order.name} ({reason}) after it went to "
+            f"production/shipping. No auto-refund issued; review and refund by hand."
+        )
+        return "canceled_in_production"
+    paid = order.grove_checkout_status in ("paid", "deposit_paid", "settled")
+    payment_intent = order.grove_stripe_payment_intent
+    if not paid or not payment_intent:
+        # Checkout never completed a charge: cancel the order, nothing to refund.
+        _printify_set_state(order, "canceled")
+        _grove_cancel_sale_order(order)
+        _notify_discord(f":warning: Printify cancelled {order.name} ({reason}); order was unpaid, no refund needed.")
+        return "canceled_unpaid"
+    # The payment_intent lives in the account that charged it, so the refund must
+    # use that same tenant's key (GOL-1766). The order carries its originating
+    # website, so resolve the tenant from it rather than the ambient env.
+    tenant = order.website_id.grove_tenant_slug() if order.website_id else None
+    secret_key = _tenant_secret_key(tenant)
+    refunded = False
+    try:
+        refund = stripe_gateway.create_refund(
+            secret_key,
+            payment_intent,
+            reason="requested_by_customer",
+            metadata={"order_ref": order.name, "reason": f"printify_cancel:{reason}"},
+            idempotency_key=f"printify-cancel-refund:{order.name}:{payment_intent}",
+        )
+        order.sudo().write({"printify_refund_id": refund.get("id") or payment_intent})
+        refunded = True
+    except stripe_gateway.StripeError as exc:
+        _logger.error("Printify cancel refund failed for %s: %s", order.name, exc)
+    _printify_set_state(order, "canceled")
+    _grove_cancel_sale_order(order)
+    if refunded:
+        order.message_post(body=f"Printify cancelled this order ({reason}); payment refunded in full.")
+        _notify_printify_cancel_customer(env, order)
+        _notify_discord(f":warning: Printify cancelled {order.name} ({reason}); full refund issued.")
+    else:
+        order.message_post(body=f"Printify cancelled this order ({reason}); refund FAILED, needs manual action.")
+        _notify_discord(f":rotating_light: Printify cancelled {order.name} ({reason}); refund FAILED, refund by hand.")
+    return "canceled"
+
+
+def _grove_cancel_sale_order(order):
+    """Set a sale order to the cancelled state without the back-office wizard.
+
+    Printify lines are non-storable services, so cancelling restores no tree
+    stock (Josh 2026-10-14). Best-effort: a failure here must never break the
+    webhook — the refund is already recorded on the order and in Stripe."""
+    try:
+        order.sudo().with_context(disable_cancel_warning=True)._action_cancel()
+    except Exception:  # noqa: BLE001 — fall back to a direct state write
+        _logger.warning(
+            "Printify cancel: _action_cancel failed for %s; writing state directly", order.name, exc_info=True
+        )
+        try:
+            order.sudo().write({"state": "cancel"})
+        except Exception:  # noqa: BLE001
+            _logger.exception("Printify cancel: could not cancel %s", order.name)
+
+
+def _notify_printify_cancel_customer(env, order):
+    """Short branded apology for a Printify-cancelled, fully-refunded order
+    (Josh 2026-10-14). No em dashes. Best-effort: never fatal, the refund and
+    chatter note stand on their own if outgoing mail is unconfigured."""
+    email = order.partner_id.email
+    if not email:
+        return
+    body = (
+        f"<p>Hi {order.partner_id.name or 'there'},</p>"
+        f"<p>We're sorry: your order {order.name} was cancelled and could not be printed, "
+        f"so we have refunded your payment in full. The refund will appear on your original "
+        f"payment method within a few business days.</p>"
+        f"<p>If you have any questions, just reply to this email and we'll be glad to help.</p>"
+        f"<p>Thank you,</p>"
+        f"<p>Goldberry Grove</p>"
+    )
+    try:
+        env["mail.mail"].sudo().create(
+            {
+                "subject": f"Your order {order.name} was cancelled and refunded",
+                "email_to": email,
+                **mail_from_vals(env, order.company_id),
+                "body_html": body,
+                "auto_delete": True,
+            }
+        ).send()
+    except Exception:  # noqa: BLE001 — apology email is best-effort
+        _logger.warning("Printify cancel apology email failed for %s", order.name, exc_info=True)
 
 
 def _apply_destination_tax(env, order, shipping):
@@ -4553,9 +4678,13 @@ def _shipping_handling_fee(env):
 def _order_handling_fee(env, order):
     """The flat shipping-handling fee this order bills at settlement: $0 for a
     seed pre-order (GOL-3257, Josh 2026-10-13 — seeds carry the actual label
-    cost only, no $2.50 handling), the standard ``_shipping_handling_fee`` for a
+    cost only, no $2.50 handling) and $0 for a Printify order (GOL-3314, Josh
+    2026-10-14 — shirts pass the live Printify shipping quote through at cost,
+    never the tree handling fee), the standard ``_shipping_handling_fee`` for a
     tree order."""
-    return 0.0 if _order_is_seed(order) else _shipping_handling_fee(env)
+    if order.grove_is_printify or _order_is_seed(order):
+        return 0.0
+    return _shipping_handling_fee(env)
 
 
 def _recompute_ship_total(env, order):
