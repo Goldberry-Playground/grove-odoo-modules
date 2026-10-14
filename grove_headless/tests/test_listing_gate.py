@@ -145,6 +145,71 @@ class TestListingGate(GroveTaxFixtureMixin, TransactionCase):
         self.assertFalse(plant.grove_listing_complete)
         self.assertIn("Facts reviewed", plant.grove_listing_missing)
 
+    # ── Spec-text format gate (GOL-2906) ────────────────────────────────
+
+    def test_unitless_dimension_is_flagged_not_blocked(self):
+        # Live defects from GOL-2896: 91 spacing "30", 91 mature size "25",
+        # 133 mature spread "25 - 35", 133 spacing "12". All render as bare
+        # numbers; each must surface as a warning without blocking publish.
+        for field, value, label in (
+            ("grove_spacing", "30", "Plant Spacing (needs a unit)"),
+            ("grove_mature_size", "25", "Mature Size (needs a unit)"),
+            ("grove_mature_spread", "25 - 35", "Mature Spread (needs a unit)"),
+            ("grove_spacing", "12", "Plant Spacing (needs a unit)"),
+        ):
+            plant = self._complete_plant(**{field: value})
+            self.assertIn(label, plant.grove_listing_missing)
+            self.assertFalse(plant.grove_listing_complete)
+
+    def test_prose_dimensions_with_units_pass(self):
+        # "up to 100 ft" and "30 to 60 ft" are correct prose and must not trip
+        # the unit check; neither must any value carrying letters.
+        plant = self._complete_plant(
+            grove_mature_size="up to 100 ft",
+            grove_mature_spread="15 – 30 ft",
+            grove_spacing="30 to 60 ft",
+        )
+        self.assertFalse(plant.grove_listing_missing)
+        self.assertTrue(plant.grove_listing_complete)
+
+    def test_unitless_defect_does_not_block_publish(self):
+        # The signed-off call is warn-only: a complete, gated plant with only a
+        # format defect still publishes (the publish gate reads missing FACTS,
+        # not format warnings) — a live listing never goes dark over a unit.
+        plant = self._complete_plant(grove_spacing="30")
+        plant.website_published = True  # must not raise
+        self.assertTrue(plant.website_published)
+        self.assertFalse(plant.grove_listing_complete)
+        self.assertIn("Plant Spacing (needs a unit)", plant.grove_listing_missing)
+
+    def test_junk_wildlife_is_flagged(self):
+        # 93 American Chestnut "All" (one word), 91 PawPaw "Wildlife and
+        # butterflies" (three words but all stop-words).
+        for value in ("All", "Wildlife and butterflies"):
+            plant = self._complete_plant(grove_wildlife=value)
+            self.assertIn("Wildlife (too generic)", plant.grove_listing_missing)
+            self.assertFalse(plant.grove_listing_complete)
+
+    def test_specific_wildlife_passes(self):
+        # 4 American Persimmon's value — several specific animals survive the
+        # stop-word strip, so it says something.
+        plant = self._complete_plant(grove_wildlife="Deer, turkey, raccoons, opossums, foxes & many birds")
+        self.assertFalse(plant.grove_listing_missing)
+        self.assertTrue(plant.grove_listing_complete)
+
+    def test_blank_wildlife_is_not_junk(self):
+        # Empty hides the PDP row; only a non-blank generic value is worse than
+        # empty. A complete plant with no wildlife stays complete.
+        plant = self._complete_plant(grove_wildlife="")
+        self.assertNotIn("Wildlife", plant.grove_listing_missing)
+        self.assertTrue(plant.grove_listing_complete)
+
+    def test_double_space_in_spec_text_is_flagged(self):
+        # 133 soil "Humus rich and  well-drained" renders the double space.
+        plant = self._complete_plant(grove_soil="Humus rich and  well-drained")
+        self.assertIn("Soil (double space)", plant.grove_listing_missing)
+        self.assertFalse(plant.grove_listing_complete)
+
     # ── Publish gate ────────────────────────────────────────────────────
 
     def test_publish_complete_plant_succeeds(self):
