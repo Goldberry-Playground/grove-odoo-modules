@@ -93,6 +93,36 @@ class TestPrintifySync(GroveTaxFixtureMixin, TransactionCase):
         self.assertFalse(variant.active)
         self.assertEqual(result["archived"], 1)
 
+    def test_later_added_size_is_priced_above_base(self):
+        # First sync WITHOUT the 2XL variants, then a sync that adds them: the new
+        # size must price above base (its Printify upcharge), never at base and
+        # possibly below cost (GOL-3314 review 2026-10-14). The operator's edited
+        # base list_price still wins.
+        first = dict(RAW, variants=[v for v in RAW["variants"] if v["id"] in (11001, 11003)])
+        self._sync([first])
+        self._tmpl().list_price = 30.0  # operator sets the base after first sync
+        self._sync([RAW])
+        by_id = {
+            v.printify_variant_id: v
+            for v in self._tmpl().with_context(active_test=False).product_variant_ids
+            if v.printify_variant_id
+        }
+        # Printify base is $28 (min enabled); 2XL is $31 => +$3 above the base.
+        self.assertEqual(by_id[11002].lst_price, 33.0)
+        self.assertEqual(by_id[11001].lst_price, 30.0)
+
+    def test_preexisting_no_variant_size_attribute_does_not_starve_variants(self):
+        # A pre-existing "Size" attribute that does NOT spin up variants must not
+        # leave the shirt with no variants (GOL-3314 review 2026-10-14).
+        self.env["product.attribute"].create({"name": "Size", "create_variant": "no_variant"})
+        self._sync()
+        mapped = {
+            v.printify_variant_id
+            for v in self._tmpl().with_context(active_test=False).product_variant_ids
+            if v.printify_variant_id
+        }
+        self.assertEqual(mapped, {11001, 11002, 11003})
+
     def test_missing_config_raises(self):
         from odoo.exceptions import UserError
 

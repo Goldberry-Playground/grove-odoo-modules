@@ -8,6 +8,7 @@ from unittest import mock
 from odoo import fields
 from odoo.addons.grove_headless.controllers import main as grove_main
 from odoo.addons.grove_headless.models import printify_client
+from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
 
 from .common import GroveTaxFixtureMixin
@@ -76,6 +77,35 @@ class TestPrintifyPush(_PrintifyFixture, GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(self.order.printify_state, "push_failed")
         discord.assert_called_once()
 
+    def test_send_failure_resets_to_queued_for_retry(self):
+        # create SUCCEEDS (po_1 persisted) but send_to_production raises: the order
+        # must reset to "queued" so the cron retries it, NOT stay stuck at
+        # "created" which the cron never picks up (GOL-3314 review 2026-10-14).
+        _c, _s, _discord = self._run(send=printify_client.PrintifyError("send boom", 500))
+        self.assertEqual(self.order.printify_order_id, "po_1")
+        self.assertEqual(self.order.printify_state, "queued")
+        self.assertEqual(self.order.printify_push_attempts, 1)
+
+    def test_send_failure_parks_and_alerts_after_three(self):
+        for attempt in range(1, 4):
+            _c, _s, discord = self._run(send=printify_client.PrintifyError("send boom", 500))
+            self.assertEqual(self.order.printify_push_attempts, attempt)
+        self.assertEqual(self.order.printify_state, "push_failed")
+        discord.assert_called_once()
+
+    def test_cron_counts_unexpected_crash_and_parks(self):
+        # A non-PrintifyError bug in the push path must not retry every 5 minutes
+        # forever: the cron counts the crash and parks/alerts at the cap.
+        for attempt in range(1, 4):
+            self.order.write({"printify_state": "queued", "printify_push_last_attempt": False})
+            p_env, p_find, _p_create, p_send, p_discord = self._patches()
+            crash = mock.patch.object(printify_client, "create_order", side_effect=RuntimeError("bug"))
+            with p_env, p_find, crash, p_send, p_discord as discord:
+                self.env["sale.order"]._cron_printify_push()
+            self.assertEqual(self.order.printify_push_attempts, attempt)
+        self.assertEqual(self.order.printify_state, "push_failed")
+        discord.assert_called_once()
+
     def test_cron_respects_backoff(self):
         self.order.write({"printify_push_attempts": 1, "printify_push_last_attempt": fields.Datetime.now()})
         p_env, p_find, p_create, p_send, p_discord = self._patches()
@@ -91,6 +121,13 @@ class TestPrintifyPush(_PrintifyFixture, GroveTaxFixtureMixin, TransactionCase):
         self.order.write({"printify_state": "push_failed", "printify_push_attempts": 3})
         self.order.action_grove_retry_printify_push()
         self.assertEqual((self.order.printify_state, self.order.printify_push_attempts), ("queued", 0))
+
+    def test_retry_action_refuses_non_push_failed(self):
+        # Only a push_failed Printify order may be re-queued — never one that
+        # already printed/shipped (GOL-3314 review 2026-10-14).
+        self.order.write({"printify_state": "in_production"})
+        with self.assertRaises(UserError):
+            self.order.action_grove_retry_printify_push()
 
     def test_paid_printify_order_not_oversold(self):
         self.assertEqual(grove_main._oversold_lines(self.order), [])

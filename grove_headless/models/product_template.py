@@ -1602,9 +1602,14 @@ class ProductTemplate(models.Model):
     @api.model
     def _grove_printify_attribute_value(self, attr_name, value_name):
         Attribute = self.env["product.attribute"].sudo()
-        attribute = Attribute.search([("name", "=", attr_name)], limit=1) or Attribute.create(
-            {"name": attr_name, "create_variant": "always"}
-        )
+        # Bind only to an attribute that actually spins up variants. A pre-existing
+        # "Color"/"Size" attribute configured with create_variant != "always" (a
+        # no-variant or dynamic attribute) would leave the shirt with NO variants
+        # to price or push (GOL-3314 review 2026-10-14), so we scope the match to
+        # create_variant="always" and create our own if none qualifies.
+        attribute = Attribute.search(
+            [("name", "=", attr_name), ("create_variant", "=", "always")], limit=1
+        ) or Attribute.create({"name": attr_name, "create_variant": "always"})
         Value = self.env["product.attribute.value"].sudo()
         value = Value.search([("attribute_id", "=", attribute.id), ("name", "=", value_name)], limit=1)
         return attribute, value or Value.create({"attribute_id": attribute.id, "name": value_name})
@@ -1665,7 +1670,6 @@ class ProductTemplate(models.Model):
                     resp = fetch(mapped["image_url"], timeout=15)
                     if resp.status_code == 200:
                         tmpl.image_1920 = base64.b64encode(resp.content)
-                first_create = True
             else:
                 for attribute, vals in values.items():
                     line = tmpl.attribute_line_ids.filtered(lambda ln, a=attribute: ln.attribute_id == a)
@@ -1673,10 +1677,13 @@ class ProductTemplate(models.Model):
                     if line and missing:
                         line.value_ids = [(4, val.id) for val in missing]
                 result["updated"] += 1
-                first_create = False
 
             by_combo = {(v["color"], v["size"]): v for v in mapped["variants"]}
-            base_price = tmpl.list_price
+            # Anchor per-variant upcharges to PRINTIFY's own base (its cheapest
+            # enabled variant), not tmpl.list_price: that keeps the extra an
+            # upcharge ABOVE whatever base the operator has set (spec §3, "Odoo
+            # price wins after first sync") while still pricing 2XL/3XL correctly.
+            printify_base = min(v["price"] for v in enabled)
             for variant in tmpl.with_context(active_test=False).product_variant_ids:
                 axis = {ptav.attribute_id.name: ptav.name for ptav in variant.product_template_attribute_value_ids}
                 pv = by_combo.get((axis.get("Color", ""), axis.get("Size", "")))
@@ -1695,12 +1702,22 @@ class ProductTemplate(models.Model):
                     vals["active"] = True
                 if vals:
                     variant.write(vals)
-                if first_create and pv["price"] > base_price:
-                    size_ptav = variant.product_template_attribute_value_ids.filtered(
-                        lambda p: p.attribute_id.name == "Size"
-                    )
-                    if size_ptav and size_ptav.price_extra != pv["price"] - base_price:
-                        size_ptav.price_extra = pv["price"] - base_price
+                # Keep every enabled variant's upcharge in lockstep with Printify's
+                # variant price on EVERY sync, not just first create: a size or
+                # colour added in Printify after the first sync (2XL, 3XL) would
+                # otherwise sell at the base price, possibly below cost (GOL-3314
+                # review 2026-10-14). The base list_price stays Odoo's (spec §3,
+                # "Odoo price wins after first sync") — only the per-variant extra
+                # tracks Printify. The extra sits on the Size axis when present
+                # (shirt pricing is size-driven), else Colour, so colour-driven
+                # price differences are captured too rather than only Size.
+                extra = round(pv["price"] - printify_base, 2)
+                target_ptav = (
+                    variant.product_template_attribute_value_ids.filtered(lambda p: p.attribute_id.name == "Size")
+                    or variant.product_template_attribute_value_ids.filtered(lambda p: p.attribute_id.name == "Color")
+                )[:1]
+                if target_ptav and target_ptav.price_extra != extra:
+                    target_ptav.price_extra = extra
         return result
 
     def action_grove_printify_sync(self):

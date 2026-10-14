@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import timezone as _timezone
@@ -1938,7 +1939,7 @@ class GroveHeadlessAPI(http.Controller):
                     for v in printify
                 ]
                 try:
-                    shipping_amount = _printify_quote(line_items, _printify_address({}, ship_to, dest))
+                    shipping_amount = _printify_quote_cached(line_items, _printify_address({}, ship_to, dest))
                 except printify_client.PrintifyError:
                     return _json_response({"error": PRINTIFY_SHIPPING_UNAVAILABLE}, status=503)
 
@@ -2825,6 +2826,7 @@ PRINTIFY_MIXED_CART_MESSAGE = "Shirts check out separately from trees."
 PRINTIFY_DESTINATION_MESSAGE = "Shirts ship to the 50 US states and DC."
 PRINTIFY_SHIPPING_UNAVAILABLE = "Shipping is temporarily unavailable. Try again in a few minutes."
 PRINTIFY_PICKUP_MESSAGE = "Shirts ship to you. Farm pickup isn't available for them."
+PRINTIFY_FRACTIONAL_QTY_MESSAGE = "Shirts are sold in whole units. Enter a whole number quantity."
 
 
 def _printify_address(contact, shipping, state):
@@ -2864,6 +2866,30 @@ def _printify_quote(line_items, address):
     if not token or not shop_id:
         raise printify_client.PrintifyError("Printify is not configured on this server")
     return printify_client.calculate_shipping(token, shop_id, line_items, address)
+
+
+_PRINTIFY_QUOTE_TTL = 180  # seconds
+_printify_quote_cache: dict = {}
+
+
+def _printify_quote_cached(line_items, address):
+    """Memoize the live Printify shipping quote briefly, keyed by (region, ZIP,
+    lines), so the storefront's repeated /checkout/quote polls for the same cart
+    and destination don't hit Printify on every keystroke (GOL-3314 review
+    2026-10-14). Best-effort and per-worker; /checkout/session always takes a
+    fresh authoritative quote (via _printify_quote) before charging."""
+    key = (
+        address.get("region") or "",
+        address.get("zip") or "",
+        tuple(sorted((li["product_id"], li["variant_id"], li["quantity"]) for li in line_items)),
+    )
+    now = time.monotonic()
+    hit = _printify_quote_cache.get(key)
+    if hit and now - hit[0] < _PRINTIFY_QUOTE_TTL:
+        return hit[1]
+    amount = _printify_quote(line_items, address)
+    _printify_quote_cache[key] = (now, amount)
+    return amount
 
 
 # Printify sends the HMAC-SHA256 of the raw body as ``X-Pfy-Signature: sha256=...``
@@ -3527,6 +3553,13 @@ def _create_draft_order(website, env, payload, discount_out=None):
     printify_charge = None
     ship_items = []
     if is_printify:
+        # Printify prints whole shirts only. A fractional qty would charge the
+        # customer for e.g. 1.5 in Odoo while Printify received int(1.5)=1, so the
+        # buyer is billed for a unit that never prints (GOL-3314 review
+        # 2026-10-14). Refuse a non-integer Printify line outright.
+        if any(ln.product_uom_qty != int(ln.product_uom_qty) for ln in printify_goods):
+            order.unlink()
+            return None, _json_response({"error": PRINTIFY_FRACTIONAL_QTY_MESSAGE}, status=400)
         if is_pickup or not is_ship_to:
             order.unlink()
             return None, _json_response({"error": PRINTIFY_PICKUP_MESSAGE}, status=400)
@@ -3534,6 +3567,37 @@ def _create_draft_order(website, env, payload, discount_out=None):
         if dest not in printify_client.US_50_AND_DC:
             order.unlink()
             return None, _json_response({"error": PRINTIFY_DESTINATION_MESSAGE}, status=400)
+        # Ship to the address quoted at THIS checkout, not a returning customer's
+        # stored address: _create_draft_order reuses an existing partner by email
+        # without mutating it (deliberate, for security), so a repeat buyer's
+        # shirt would otherwise auto-ship to their OLD saved address. Printify
+        # fulfilment is fully automatic — no human re-checks the address — so we
+        # attach a dedicated delivery contact built from the checkout payload and
+        # point the order's shipping partner at it (GOL-3314 review 2026-10-14).
+        # The destination gate above already refused a missing/out-of-region state.
+        us_country = env["res.country"].sudo().search([("code", "=", "US")], limit=1)
+        dest_state = (
+            env["res.country.state"].sudo().search([("country_id", "=", us_country.id), ("code", "=", dest)], limit=1)
+            if us_country
+            else env["res.country.state"].sudo().browse()
+        )
+        delivery = Partner.create(
+            {
+                "name": contact.get("name"),
+                "email": contact.get("email"),
+                "phone": contact.get("phone") or False,
+                "street": shipping.get("street") or False,
+                "street2": shipping.get("street2") or False,
+                "city": shipping.get("city") or False,
+                "zip": shipping.get("zip") or False,
+                "country_id": us_country.id if us_country else False,
+                "state_id": dest_state.id if dest_state else False,
+                "parent_id": partner.id,
+                "type": "delivery",
+                "company_id": current_company.id,
+            }
+        )
+        order.partner_shipping_id = delivery.id
         try:
             printify_charge = _printify_quote(
                 _printify_line_items(order), _printify_address(payload.get("contact") or {}, shipping, dest)

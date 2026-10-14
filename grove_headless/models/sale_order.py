@@ -304,13 +304,36 @@ class SaleOrder(models.Model):
         except printify_client.PrintifyError as exc:
             attempts = (self.printify_push_attempts or 0) + 1
             vals = {"printify_push_attempts": attempts, "printify_push_last_attempt": fields.Datetime.now()}
-            if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
-                vals["printify_state"] = "push_failed"
+            # Reset to "queued" (not left at whatever partial state the try wrote)
+            # so the cron picks the order up again: a create that SUCCEEDED but
+            # whose send_to_production then raised has already written
+            # printify_state="created" above, and the cron only retries "queued".
+            # Without this reset such an order would never print, never reach
+            # push_failed and never alert (GOL-3314 review 2026-10-14).
+            vals["printify_state"] = "push_failed" if attempts >= self._PRINTIFY_MAX_ATTEMPTS else "queued"
             self.sudo().write(vals)
             self.message_post(body=f"Printify push attempt {attempts} failed: {exc}")
             if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
                 _notify_discord(f":rotating_light: Printify push FAILED on {self.name} after {attempts} tries: {exc}")
             return False
+
+    def _printify_record_push_crash(self, exc):
+        """Count an UNEXPECTED (non-PrintifyError) push crash against the retry
+        budget and park/alert at the cap. Without this an order that trips a bug
+        in the push path would sit at "queued" and the cron would retry it every
+        5 minutes forever, silently (GOL-3314 review 2026-10-14)."""
+        from ..controllers.main import _notify_discord
+
+        self.ensure_one()
+        attempts = (self.printify_push_attempts or 0) + 1
+        vals = {
+            "printify_push_attempts": attempts,
+            "printify_push_last_attempt": fields.Datetime.now(),
+            "printify_state": "push_failed" if attempts >= self._PRINTIFY_MAX_ATTEMPTS else "queued",
+        }
+        self.sudo().write(vals)
+        if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
+            _notify_discord(f":rotating_light: Printify push CRASHED on {self.name} after {attempts} tries: {exc}")
 
     @api.model
     def _cron_printify_push(self):
@@ -321,14 +344,30 @@ class SaleOrder(models.Model):
                 continue
             try:
                 order._grove_printify_push()
-            except Exception:  # noqa: BLE001 — the cron must never raise
+            except Exception as exc:  # noqa: BLE001 — the cron must never raise
                 _logger.exception("Printify push crashed for %s", order.name)
+                # Roll back the half-written row from the crashed push, then count
+                # the crash so a persistently broken order parks instead of
+                # retrying forever (see _printify_record_push_crash).
+                if not config["test_enable"]:
+                    self.env.cr.rollback()
+                order._printify_record_push_crash(exc)
             if not config["test_enable"]:
                 self.env.cr.commit()
 
     def action_grove_retry_printify_push(self):
-        """Re-queue a push_failed (or any) Printify order from the back office."""
-        for order in self:
+        """Re-queue a push_failed Printify order from the back office. Only a
+        push_failed Printify order is eligible — never a non-Printify order and
+        never one that already printed, shipped or delivered (GOL-3314 review
+        2026-10-14). The server action is additionally sales-manager gated."""
+        eligible = self.filtered(lambda o: o.grove_is_printify and o.printify_state == "push_failed")
+        skipped = self - eligible
+        if skipped:
+            raise UserError(
+                "Retry Printify push only applies to Printify orders whose push has failed. "
+                "These are not eligible: %s" % ", ".join(skipped.mapped("name"))
+            )
+        for order in eligible:
             order.sudo().write(
                 {"printify_state": "queued", "printify_push_attempts": 0, "printify_push_last_attempt": False}
             )

@@ -81,22 +81,28 @@ def get_order(token, shop_id, order_id, get=requests.get):
     return _call(get, f"{BASE_URL}/shops/{shop_id}/orders/{order_id}.json", token, DEFAULT_TIMEOUT)
 
 
-def find_order_by_external_id(token, shop_id, external_id, get=requests.get, pages=3):
-    """Printify's order list has no external_id filter; scan the newest pages.
-    A retry happens within hours of the first push, so 3 pages of 10 is plenty."""
-    for page in range(1, pages + 1):
+def find_order_by_external_id(token, shop_id, external_id, get=requests.get, max_pages=50):
+    """Find a shop order by its external_id (the sale-order name, used for push
+    idempotency). Printify's order list has no external_id filter, so scan pages
+    newest-first until the order is found or the list is exhausted — never only a
+    fixed head of recent orders, or a push retry could miss an already-created
+    order and duplicate it (GOL-3314 review 2026-10-14). limit=50 keeps the page
+    count low; max_pages caps a runaway scan on a very large shop."""
+    page = 1
+    while page <= max_pages:
         body = _call(
             get,
             f"{BASE_URL}/shops/{shop_id}/orders.json",
             token,
             DEFAULT_TIMEOUT,
-            params={"page": page, "limit": 10},
+            params={"page": page, "limit": 50},
         )
         for order in body.get("data") or []:
             if order.get("external_id") == external_id:
                 return order
         if page >= int(body.get("last_page") or 1):
             return None
+        page += 1
     return None
 
 

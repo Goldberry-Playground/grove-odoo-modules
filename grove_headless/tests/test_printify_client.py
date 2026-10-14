@@ -74,6 +74,22 @@ class TestPrintifyClient(unittest.TestCase):
         get = mock.Mock(return_value=_resp(200, {"last_page": 1, "data": []}))
         self.assertIsNone(pc.find_order_by_external_id("tok", "42", "S1", get=get))
 
+    def test_find_order_scans_every_page_not_just_a_fixed_head(self):
+        # Order on the LAST of five pages must still be found so a push retry never
+        # misses an already-created order and duplicates it (GOL-3314 review).
+        pages = [_resp(200, {"last_page": 5, "data": [{"id": f"po_{p}", "external_id": f"S{p}"}]}) for p in range(1, 6)]
+        get = mock.Mock(side_effect=pages)
+        self.assertEqual(pc.find_order_by_external_id("tok", "42", "S5", get=get)["id"], "po_5")
+        self.assertEqual(get.call_count, 5)
+        self.assertEqual(get.call_args_list[0].kwargs["params"]["limit"], 50)
+
+    def test_find_order_stops_at_max_pages(self):
+        # A shop with more pages than max_pages stops scanning (bounded) rather
+        # than looping unboundedly.
+        get = mock.Mock(return_value=_resp(200, {"last_page": 999, "data": []}))
+        self.assertIsNone(pc.find_order_by_external_id("tok", "42", "S1", get=get, max_pages=3))
+        self.assertEqual(get.call_count, 3)
+
     def test_send_to_production_posts(self):
         post = mock.Mock(return_value=_resp(200, {"id": "po_1"}))
         pc.send_to_production("tok", "42", "po_1", post=post)
