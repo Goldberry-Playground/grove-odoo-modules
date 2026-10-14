@@ -168,7 +168,7 @@ Result:  { status: "ok" | "partial" | "empty",
 - site: `wet` requires `tolerates.wet`; `poor` requires `tolerates.poor_soil`; `shade` requires `tolerates.shade`; `open` requires nothing.
 - state: `state` not in `blocked_states`. A blocked plant with a `substitute_id` is replaced by its substitute at filter time and a substitution is recorded; a blocked plant without one is dropped.
 - deer track only: `wildlife_value` is `high` or `medium`.
-- not `pickup_only` and tier is `bareroot` (potted cannot ship).
+- not `pickup_only` and `tier` in the shippable set (`SHIPPABLE_TIERS` = bareroot and potted; potted ships on its own box engine since GOL-2199 and is the default tier, so excluding it would drop most of the catalog). Seeds are not plants and are never in the feed.
 
 In-stock candidates go to the pool; out-of-stock or cap-reached candidates go to `notify`.
 
@@ -219,7 +219,7 @@ score = 100
 - Headline by status: "Your 20-tree food forest, first harvest in about N years" (N = min `years_to_fruit_min` across lines) / deer: "Something dropping from Sep to Jan".
 - A layer strip (canopy over understory over shrub) with each line placed in its layer, so the customer sees why there are eight shrubs and two canopy trees.
 - Lines: image, name, qty stepper, price, slot tag, note. Substitutions appear inline: "Florida: shagbark hickory ships in place of chestnut".
-- Ship timing from `GET /grove/api/v1/shipping/options?zip=` (`ship_timing` string, already built for the PDP), and the deposit sentence from the existing pre-order copy when the mode is `bareroot-preorder`.
+- Ship timing from `GET /grove/api/v1/shipping/options?zip=` (`ship_timing` string, already built for the PDP), called once per tier present in the plan. Bareroot lines show the dormant-window copy and, when the mode is `bareroot-preorder`, the existing $10 per order deposit sentence; potted lines show the `peat-and-bagged` ships-now copy. A plan with both tiers says so in one line ("your potted trees ship now, your bareroot trees in your spring window"). The planner does not change the cart's existing format rules (one wave per order, no mixing where the format gate forbids it): Build my order adds the lines and the cart applies its own checks; if the cart rejects a mix, the card groups the lines by tier and offers to build the potted order first and the bareroot order second.
 - `notify` chips: "Fig, back in stock soon, notify me" wired to the newsletter subscribe route with a `product_id` tag.
 - Primary button: **Build my order** (adds every line through `POST /api/cart`, then opens the mini cart). Secondary when `consult`: "Talk it through first" linking to the consult section.
 - `empty` state: "Nothing we grow fits a wet, shaded spot in zone 3 yet" plus the drier-site retry button and the consult link.
@@ -292,7 +292,7 @@ Prod state on 2026-10-14, 29 sale templates:
 4. One review sitting in Odoo: list view of products with `grove_listing_missing != ""` or `grove_planner_ready = False`, Josh or Wesley sets `grove_facts_reviewed` and `grove_guide_ready`.
 5. `seed_bundle_boms.py` for 22, 132, 140 so the feed can expand them (GOL-2589). 133, 134, 135 stay custom mix.
 
-Done means the catalog feed serves at least 20 planner-ready plants on prod before Train #4 promotes.
+Done means the catalog feed serves at least 20 planner-ready plants on prod before Train #4 promotes, counting both tiers (potted is the default tier and the larger share of the catalog; the planner filter in C.2 admits it).
 
 ---
 
