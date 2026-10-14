@@ -110,23 +110,47 @@ US_STATES: tuple[str, ...] = (
     "MP",
 )
 
+# The five US territories within US_STATES (everything that is not one of the
+# 50 states or DC). Named so the "50 states + DC" universe can be derived
+# without re-typing it.
+US_TERRITORIES: frozenset[str] = frozenset({"PR", "VI", "GU", "AS", "MP"})
+
+# Seed pre-orders ship to every US state + DC EXCEPT Hawaii and Alaska
+# (GOL-3257, Josh 2026-10-13). Seeds are exempt from the live-plant green-list
+# (the "Castanea seed into FL/WA/OR allowed" ruling), so they reach far more of
+# the country than trees — but not HI/AK, and not the territories (not a
+# "state + DC"). This is the authoritative seed destination universe; the
+# checkout gate refuses anything outside it with a 400.
+SEED_SHIP_EXCLUDED_STATES: frozenset[str] = frozenset({"HI", "AK"})
+SEED_SHIP_STATES: frozenset[str] = frozenset(US_STATES) - US_TERRITORIES - SEED_SHIP_EXCLUDED_STATES
+
 RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 6))
 
 # Product tiers survive v2 as the shippability gate. GOL-2199 potted go-live
 # (CEO directive 2026-09-08): potted / peat-and-bagged now SHIPS on its own
 # engine (POTTED_BOXES, packed by unit count via pack_potted — GOL-2031),
-# alongside bareroot (packed by length class via pack_order). DEFAULT_TIER
-# stays potted: a mistagged product now ships at POTTED rates, the pricier
-# catalog at every weight point (12/22 lb potted vs 7/14 lb dormant bareroot),
-# so the never-undercharge property is preserved.
+# alongside bareroot (packed by length class via pack_order). Since GOL-3285
+# both engines pack into the SAME p24x10x4 / p24x10x6 cartons at the same
+# 12/22 lb representative points, so they quote the same rate rows. DEFAULT_TIER
+# stays potted: a mistagged product ships at POTTED rates, whose packed fill is
+# never lighter than bareroot's for a given carton (potted 2.0 lb/unit vs
+# bareroot 1.0 lb/whip, and potted holds fewer units), so the never-undercharge
+# property is preserved.
 # Fail-safe until the rate feed carries potted rows: pack_potted returns None
 # when no potted box has a zone rate, compute_order_shipping propagates the
 # None, and the checkout's $0-shipping circuit breaker (GOL-1036) blocks the
 # order with the friendly retry message — potted ship-to carts cannot be
 # under-billed in the window between this flip and the rate-checker's first
 # potted-inclusive table.
-TIERS: tuple[str, ...] = ("bareroot", "potted")
+TIERS: tuple[str, ...] = ("bareroot", "potted", "seed")
 SHIPPABLE_TIERS: frozenset[str] = frozenset({"bareroot", "potted"})
+# Seed pre-orders (GOL-3257) are not quoted at checkout — they pay a $1 deposit
+# and settle the actual label cost at ship time — so seed lines are SKIPPED by
+# box packing and the rate feed entirely, not routed through the fail-closed
+# non-shippable seam the way an unknown future tier is. Seeds also never share a
+# cart with trees (the mixing rule), so a seed line never reaches packing beside
+# a priced line in practice; skipping it is belt-and-braces.
+SKIPPED_TIERS: frozenset[str] = frozenset({"seed"})
 DEFAULT_TIER = "potted"
 
 # Box-geometry authority lives in shipping_boxes; re-exported for callers
@@ -279,12 +303,12 @@ def rate_feed(calendar_override=None, today=None, consult_deferral_enabled=None)
 
         {
           "schema": 2,
-          "zones": {"zone_1": {"small": {"base": 22.0}, "large": {...}}, ...},
+          "zones": {"zone_1": {"p24x10x4": {"base": 20.0}, "p24x10x6": {...}}, ...},
           "zone_by_state": {"WV": "zone_1", ...},
           "green_states": ["CT", "DE", ...],
           "packing": {
-            "boxes": {"small": {"length": 24, "width": 6, "height": 4,
-                                "capacity": {"dormant": 5, "leafed": 5}}, ...},
+            "boxes": {"p24x10x4": {"length": 24, "width": 10, "height": 4,
+                                   "capacity": {"dormant": 10, "leafed": 10}}, ...},
             "length_classes": [16, 20],
             "modes": ["dormant", "leafed"],
           },
@@ -351,6 +375,8 @@ def rate_feed(calendar_override=None, today=None, consult_deferral_enabled=None)
         today = _date.today()
     calendar_block = shipping_calendar.serialize_calendar(calendar)
     calendar_block["resolved"] = shipping_calendar.serialize_resolved(calendar, today)
+    # Farm pickup pre-order waves (fixed fall pickup schedule, Josh 2026-10-07).
+    calendar_block["pickup_waves"] = shipping_calendar.pickup_waves(today, calendar)
     return {
         "schema": 2,
         "zones": {zone: {box: dict(rule) for box, rule in boxes.items()} for zone, boxes in ZONE_RATES.items()},
@@ -374,6 +400,13 @@ def rate_feed(calendar_override=None, today=None, consult_deferral_enabled=None)
                     "width": b["width"],
                     "height": b["height"],
                     "capacity": dict(b["capacity"]),
+                    # Packed-weight model (GOL-3201): the billable weight the
+                    # rate quote is priced at, and whether that weight is
+                    # calibrated off recorded shipped labels (``verified``) or
+                    # the conservative full-capacity worst case (``unverified``).
+                    # The storefront can flag an unverified quote as an estimate.
+                    "billable_weight_lb": shipping_boxes.representative_billable_lb(box_id),
+                    "weight_basis": shipping_boxes.weight_basis(box_id),
                 }
                 for box_id, b in shipping_boxes.BOXES.items()
             },
@@ -602,6 +635,8 @@ def unshippable_reason(items: list[tuple[str, int, float]]) -> str | None:
         if float(qty) <= 0:
             continue
         tier_key = tier if tier in TIERS else DEFAULT_TIER
+        if tier_key in SKIPPED_TIERS:
+            continue
         if tier_key not in SHIPPABLE_TIERS:
             return (
                 f"{tier_key.capitalize()} trees are available for farm pickup only — "
@@ -637,6 +672,8 @@ def pack_for_state(state: str, items: list[tuple[str, int, float]], mode: str):
         if float(qty) <= 0:
             continue
         tier_key = tier if tier in TIERS else DEFAULT_TIER
+        if tier_key in SKIPPED_TIERS:
+            continue
         if tier_key == "potted":
             potted_units += qty
         else:

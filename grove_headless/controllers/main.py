@@ -7,13 +7,14 @@ import re
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import timezone as _timezone
+from types import SimpleNamespace
 
 import psycopg2
 import requests
-from odoo import http
+from odoo import fields, http
 from odoo.http import Response, request
 
-from ..hooks import WV_GROUP_NAME, WV_MUNI_NAME, WV_STATE_NAME, _get_company_wv_state_tax
+from ..hooks import _get_company_wv_state_tax
 from ..models import bundle_substitution, promotions, stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
@@ -26,7 +27,13 @@ from ..models.order_alerts import (
 )
 from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
 from ..models.plant_compliance import excluded_taxa_for_state
-from ..models.preorder_email import confirmation_deposit_line, preship_balance_line
+from ..models.preorder_email import (
+    confirmation_deposit_line,
+    preship_balance_line,
+    seed_confirmation_line,
+    seed_preship_balance_line,
+)
+from ..models.seed_season import seed_cart_harvest_year, seed_cart_refusal, seed_season
 from ..models.shipment_email import NOTIFY_STATUSES, delivery_status_from_webhook, shipment_notice_copy
 from ..models.shipping_boxes import (
     SHIPPING_HANDLING_FEE,
@@ -35,8 +42,11 @@ from ..models.shipping_boxes import (
     packing_mode,
 )
 from ..models.shipping_calendar import (
+    LEAFED_WINDOW,
     MODE_PREORDER,
     merge_calendar_override,
+    pickup_waves,
+    preorder_waves,
     resolve_fulfillment,
     serialize_ship_options,
     ship_options,
@@ -45,6 +55,8 @@ from ..models.shipping_calendar import (
 )
 from ..models.shipping_zones import (
     GREEN_STATES,
+    SEED_SHIP_EXCLUDED_STATES,
+    SEED_SHIP_STATES,
     canonical_state_code,
     compute_order_shipping,
     rate_feed,
@@ -58,11 +70,11 @@ from .product_domain import build_product_domain, slugify, zone_response
 
 # Grove has sales-tax nexus only in West Virginia, so the WV 6% state tax (the
 # product default set by hooks.setup_wv_sales_tax) legally applies only to a
-# WV-destination shipment. Any order shipping elsewhere must have the WV tax
-# stripped — see _apply_destination_tax. The set also includes the legacy 7%
-# group + 1% municipal names so a line left on an old order carrying either is
-# still caught and stripped out of state (GOL-2449).
-WV_TAX_NAMES = frozenset({WV_GROUP_NAME, WV_STATE_NAME, WV_MUNI_NAME})
+# WV-destination shipment. Any order shipping elsewhere must have EVERY sales
+# tax stripped from EVERY line — not only the WV-named ones — see
+# _apply_destination_tax. Matching on WV names alone let a stray stock "15%" tax
+# (account.tax id 6) survive on out-of-state orders and overcharge customers
+# (GOL-3074); out of state is $0 tax regardless of what tax a line carries.
 WV_NEXUS_STATE = "WV"
 
 _logger = logging.getLogger(__name__)
@@ -724,6 +736,30 @@ def _template_rootstock(product):
     return ""
 
 
+def _seed_season_payload(product):
+    """Top-level ``seed_season`` object for a seed pre-order template (GOL-3257 §5).
+
+    Returns ``None`` for any template whose shipping tier is not ``seed`` so the
+    key is simply absent on ordinary products. For a seed template it runs the
+    pure :func:`seed_season` resolver as of today (``adding_lb=0`` — the plain
+    catalog read, no cart context) and serializes its ``date`` fields to ISO
+    ``YYYY-MM-DD`` strings. The storefront gates the "Reserve for $1" CTA on
+    ``open`` and shows the (possibly rolled-over) window from these dates.
+    """
+    if product.grove_shipping_tier != "seed":
+        return None
+    season = seed_season(product, _date.today())
+    return {
+        "year": season["year"],
+        "ship_start": season["ship_start"].isoformat() if season["ship_start"] else None,
+        "ship_end": season["ship_end"].isoformat() if season["ship_end"] else None,
+        "order_by": season["order_by"].isoformat() if season["order_by"] else None,
+        "rolled_over": season["rolled_over"],
+        "reason": season["reason"],
+        "open": season["open"],
+    }
+
+
 def _structure_variant(variant, template_rootstock=""):
     """Structured variant entry: axes parsed into fields, not display-name strings.
 
@@ -756,6 +792,12 @@ def _structure_variant(variant, template_rootstock=""):
         # PDP must not show "sold out" while its potted sibling sits at 30.
         "qty_available": variant.grove_shared_pool_qty("qty_available"),
         "shipping_tier": variant.grove_effective_shipping_tier,
+        # Seed pre-order "Pack size" axis (GOL-3257 §5): the display value sits
+        # beside cultivar/format/rootstock ("" when the product has no Pack size
+        # axis), and pack_lb is the per-pack weight the cap/settlement math uses.
+        # 0.0 on non-seed variants, which the storefront never reads.
+        "pack_size": axis.get("Pack size", ""),
+        "pack_lb": variant.grove_seed_pack_lb or 0.0,
         "image_url": _image_url("product.product", variant, "image_128"),
         # Qualifying-tree count for one unit (GOL-2439): 1 for a nursery plant,
         # the bundle's BoM tree count (Remembrance Grove = 5), 0 for supplies,
@@ -995,6 +1037,16 @@ class GroveHeadlessAPI(http.Controller):
         # so the PDP buy box renders sold-out identically whether it came from
         # stock or from the cap. The frontend never computes the threshold.
         data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
+        # Seed pre-orders (GOL-3257 §5): a seed template carries a top-level
+        # shipping_tier + seed_season object (both absent on ordinary products).
+        # The two signals move together — every variant of a seed template
+        # computes grove_effective_shipping_tier == "seed" — so the storefront's
+        # "seed if seed_season present OR any variant tier seed" check never sees
+        # them disagree.
+        season = _seed_season_payload(product)
+        if season is not None:
+            data["shipping_tier"] = "seed"
+            data["seed_season"] = season
 
         return _json_response(data)
 
@@ -1852,30 +1904,64 @@ class GroveHeadlessAPI(http.Controller):
 
         lines = [(by_id[variant_id], qty) for variant_id, qty in parsed_items]
         today = _date.today()
-        reason = _deposit_reason_for_lines(request.env, lines, fulfillment, today)
+        # Same potted-season / no-mixing / wave rules _create_draft_order enforces
+        # (the quote carries a ZIP only for ship carts that already have one).
+        shipping = payload.get("shipping") if isinstance(payload.get("shipping"), dict) else {}
+        wave_error, ship_wave = _validate_ship_wave(
+            request.env,
+            payload,
+            [SimpleNamespace(display_type=False, product_id=product, product_uom_qty=qty) for product, qty in lines],
+            "pickup" if fulfillment == "pickup" else "ship",
+            shipping.get("zip") or payload.get("zip"),
+            _today_utc(),
+            company,
+            require_zone=False,
+            website=request.website,
+        )
+        if wave_error:
+            return _json_response({"error": wave_error}, status=400)
+        reason = _deposit_reason_for_lines(request.env, lines, fulfillment, today, ship_wave)
         deposit_now = reason is not None
+        # Seed carts take the $1 deposit (GOL-3257); every other deposit cart
+        # takes the $10 bareroot deposit. Keep the quote's amount in lockstep
+        # with _build_stripe_line_items so the cart preview never disagrees with
+        # the Stripe charge.
+        deposit_amount = stripe_gateway.SEED_DEPOSIT if reason == "seed" else stripe_gateway.PREORDER_DEPOSIT
         line_quotes = []
         for product, qty in lines:
             bareroot, sold_out, free = _line_sold_out(product, qty)
-            line_quotes.append(
-                {
-                    "variant_id": product.id,
-                    "quantity": qty,
-                    "bareroot": bareroot,
-                    "sold_out": sold_out,
-                    "free_qty": free,
-                }
-            )
-        return _json_response(
-            {
-                "deposit_now": deposit_now,
-                "deposit_reason": reason,
-                "deposit_amount": stripe_gateway.PREORDER_DEPOSIT,
-                "amount_due_today": stripe_gateway.PREORDER_DEPOSIT if deposit_now else None,
-                "after_cutover": _after_deposit_cutover(request.env, today),
-                "lines": line_quotes,
+            quote = {
+                "variant_id": product.id,
+                "quantity": qty,
+                "bareroot": bareroot,
+                "sold_out": sold_out,
+                "free_qty": free,
             }
-        )
+            if _line_tier(product) == "seed":
+                # Harvest year this line would reserve, authoritative over the
+                # shopper's earlier localStorage cart stamp (Iris contract): the
+                # season may have rolled between add and this re-check.
+                adding_lb = (product.grove_seed_pack_lb or 0.0) * float(qty)
+                quote["seed_harvest_year"] = seed_season(product.product_tmpl_id, today, adding_lb=adding_lb)["year"]
+            line_quotes.append(quote)
+        # Publish the order's single harvest year at the TOP LEVEL too (GOL-3257,
+        # Josh 2026-10-13): the storefront (GOL-3258) reads it there to show/refuse
+        # on a rollover. The per-line value stays. The mixing rule above (via
+        # _validate_ship_wave) has already rejected any cart with two harvest
+        # years, so a seed cart that reaches here carries exactly one.
+        response = {
+            "deposit_now": deposit_now,
+            "deposit_reason": reason,
+            "deposit_amount": deposit_amount,
+            "amount_due_today": deposit_amount if deposit_now else None,
+            "after_cutover": _after_deposit_cutover(request.env, today),
+            "ship_wave": ship_wave,
+            "lines": line_quotes,
+        }
+        seed_year = seed_cart_harvest_year(q.get("seed_harvest_year") for q in line_quotes)
+        if seed_year is not None:
+            response["seed_harvest_year"] = seed_year
+        return _json_response(response)
 
     @http.route(
         "/grove/api/v1/checkout/session",
@@ -2661,15 +2747,18 @@ def _apply_shipping_line(env, order, shipping, company):
 
 
 def _apply_destination_tax(env, order, shipping):
-    """Strip the WV sales tax from every line when the order ships out of state.
+    """Strip EVERY sales tax from every line when the order ships out of state.
 
     The product default (hooks.setup_wv_sales_tax) puts the "WV State Sales Tax
     6%" tax on every line (GOL-2449: 6% state only, no municipal, no group),
     which is only lawful for a WV-destination shipment — Grove's sole sales-tax
-    nexus. For any other ship-to state (e.g. Ohio) any WV tax (by name, incl. a
-    legacy "7%" group left on an old order) is removed so the customer is not
-    wrongly charged WV tax. Called after the shipping line is added so that line
-    is de-taxed too when out of state.
+    nexus. For any other ship-to state (e.g. Ohio) the destination tax is $0, so
+    we remove ALL taxes from every line (goods and shipping), not only the
+    WV-named ones. Matching on name alone (the pre-GOL-3074 behaviour) let a
+    stray stock "15%" tax (account.tax id 6, left on a product or line) survive
+    out of state and overcharge the customer at both checkout and the ship-time
+    settlement recompute. Called after the shipping line is added so that line is
+    de-taxed too when out of state.
 
     Ship-to state is canonicalized identically to the shipping path. If it can't
     be determined we conservatively leave the default WV tax in place rather than
@@ -2682,9 +2771,8 @@ def _apply_destination_tax(env, order, shipping):
     for line in order.order_line:
         if line.display_type or not line.product_id:
             continue
-        wv_taxes = line.tax_ids.filtered(lambda t: t.name in WV_TAX_NAMES)
-        if wv_taxes:
-            line.tax_ids = [(3, tax.id) for tax in wv_taxes]
+        if line.tax_ids:
+            line.tax_ids = [(5, 0, 0)]
             changed = True
     if changed:
         order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
@@ -2875,6 +2963,108 @@ def _stamp_exempt_bundle_note(kit_line, state_label):
     )
     prior = order.grove_substitution_note or ""
     order.grove_substitution_note = (prior + "\n\n" + note) if prior else note
+
+
+_SHIP_WAVES = ("fall", "spring")
+_MONTH_ABBR = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+
+
+def _is_nursery_website(website):
+    """True when ``website`` is the nursery tenant (At The Grove Nursery).
+
+    The pre-order wave and potted-season rules are nursery business rules:
+    ``grove_shipping_tier`` defaults to "potted" for every product, so applying
+    them to the Goldberry / GGG storefronts would reject their carts after
+    Oct 15. Tenant identity is the website, same as ``grove_tenant_slug``.
+    """
+    return bool(website) and website.grove_tenant_slug() == "nursery"
+
+
+def _validate_ship_wave(
+    env, payload, lines, fulfillment, zip_code, today, company=None, require_zone=True, website=None
+):
+    """Server-side pre-order wave / potted-season gate for ``_create_draft_order``.
+
+    Returns ``(error_message, ship_wave)``; ``error_message`` is None when the
+    cart passes, and ``ship_wave`` is the validated wave to store (None when the
+    payload carried no ``ship_wave``).
+
+    Nursery only: for any other tenant (``website`` not the nursery) every rule
+    below is skipped and ``(None, None)`` is returned, so a stray ``ship_wave``
+    is ignored and nothing is stored.
+
+    Always enforced (with or without ``ship_wave``): potted-tier lines only sell
+    inside ``LEAFED_WINDOW`` (inclusive), and a cart never mixes a potted-tier
+    line with a bareroot line. The wave checks apply only when the payload sends
+    ``ship_wave``, so a legacy client keeps today's behaviour (nothing stored).
+    ``fulfillment`` is "pickup" for farm pickup, anything else for ship.
+    ``require_zone=False`` (the quote preview) skips ONLY the zone/open check for
+    a ship cart that carries no ZIP yet.
+    """
+    if not _is_nursery_website(website):
+        return None, None
+    real_lines = [
+        line
+        for line in lines
+        if not line.display_type and line.product_id and line.product_id.product_tmpl_id.type != "service"
+    ]
+    tiers = {line.product_id.grove_effective_shipping_tier for line in real_lines}
+    # Seed reservations check out on their own (GOL-3257 §6): refuse a cart that
+    # mixes seeds with non-seed lines, or seeds from two harvest years. Checked
+    # before the potted/bareroot gate so a seed+tree cart shows the seed copy.
+    if "seed" in tiers:
+        years = set()
+        for line in real_lines:
+            if line.product_id.grove_effective_shipping_tier != "seed":
+                continue
+            adding_lb = (line.product_id.grove_seed_pack_lb or 0.0) * float(getattr(line, "product_uom_qty", 0) or 0)
+            years.add(seed_season(line.product_id.product_tmpl_id, today, adding_lb=adding_lb)["year"])
+        seed_refusal = seed_cart_refusal(tiers, years)
+        if seed_refusal:
+            return seed_refusal, None
+    if "potted" in tiers:
+        start, end = LEAFED_WINDOW
+        if not (start <= (today.month, today.day) <= end):
+            return "Potted trees are sold through Oct 15. Choose a bareroot pre-order.", None
+        if "bareroot" in tiers:
+            return (
+                "Pre-orders check out on their own. Remove the trees that ship now, or check them out first.",
+                None,
+            )
+
+    raw = payload.get("ship_wave")
+    if raw is None:
+        return None, None
+    wave = raw.strip().lower() if isinstance(raw, str) else None
+    if wave not in _SHIP_WAVES:
+        return "Choose a fall or spring pre-order wave.", None
+    if "bareroot" not in tiers:
+        return "A pre-order wave only applies to bareroot pre-orders.", None
+
+    if require_zone is False and fulfillment != "pickup" and not zip_code:
+        return None, wave
+    wave_zip = _farm_pickup_zip(env, company) if fulfillment == "pickup" else zip_code
+    zone = usda_zone_for_zip(wave_zip)
+    calendar = merge_calendar_override(_parse_calendar_override(env))
+    if zone is None or int(zone) not in calendar["zones"]:
+        return "We could not find a planting zone for that ZIP code.", None
+    # Farm pickup runs on the fixed farm schedule (fall pickup Oct 20 to Oct 31,
+    # order by Oct 15; spring on the farm zone), Josh 2026-10-07. Ship orders
+    # keep the destination-zone calendar.
+    if fulfillment == "pickup":
+        waves = pickup_waves(today, calendar, farm_zone=int(zone))
+        label = f"{wave} farm pickup pre-order"
+    else:
+        waves = preorder_waves(zone, today, calendar)
+        label = f"{wave} pre-order for zone {int(zone)}"
+    entry = next(w for w in waves if w["wave"] == wave)
+    if not entry["open"]:
+        if entry["reason"] == "opens_sep_1":
+            return f"The {label} opens Sep 1.", None
+        month, day = entry["order_by"]
+        msg = f"The {label} closed on {_MONTH_ABBR[month - 1]} {day}."
+        return (msg + " Choose spring." if wave == "fall" else msg), None
+    return None, wave
 
 
 def _create_draft_order(website, env, payload, discount_out=None):
@@ -3075,7 +3265,57 @@ def _create_draft_order(website, env, payload, discount_out=None):
             status=400,
         )
     is_ship_to = not is_pickup and bool(ship_state)
-    if is_ship_to:
+    # Potted-season, mixed-cart and pre-order wave gate (hotfix 2026-10-07).
+    wave_error, ship_wave = _validate_ship_wave(
+        env,
+        payload,
+        order.order_line,
+        "pickup" if is_pickup else "ship",
+        (shipping or {}).get("zip"),
+        _today_utc(),
+        current_company,
+        website=website,
+    )
+    if wave_error:
+        order.unlink()
+        return None, _json_response({"error": wave_error}, status=400)
+    # Stored before the promo gate below: ``_cart_has_preorder`` reads it, so a
+    # wave pre-order is a deposit cart and a promo code on it is rejected.
+    order.grove_ship_wave = ship_wave
+
+    # Seed pre-orders (GOL-3257): seeds are exempt from the live-plant green-list
+    # (the "Castanea seed into FL/WA/OR allowed" ruling), are not quoted at
+    # checkout, and pay a $1 deposit with the balance settled at ship. So a
+    # seed-only ship cart SKIPS the live-plant green-list state gate, the
+    # per-line compliance carve-out, the shipping-rate line and the no-$0-shipping
+    # breaker below. The mixing rule (_validate_ship_wave) has already guaranteed
+    # a seed cart holds only seed lines, so this never lets a tree slip past those
+    # gates. Harvest years are stamped at the end (the checkout re-check)
+    # regardless of fulfilment.
+    #
+    # Seeds are NOT shippable literally anywhere, though: they ship to every US
+    # state + DC except Hawaii and Alaska (Josh 2026-10-13). A seed ship-to
+    # order to a non-allowed destination is refused here with a plain-English
+    # 400, in place of the green-list gate it skips.
+    is_seed_order = _order_is_seed(order)
+    if is_ship_to and is_seed_order:
+        dest = canonical_state_code(ship_state)
+        if dest not in SEED_SHIP_STATES:
+            order.unlink()
+            if dest in SEED_SHIP_EXCLUDED_STATES:
+                error = (
+                    f"We can't ship seeds to {ship_state} — seed pre-orders ship to every "
+                    "US state and DC except Hawaii and Alaska. Choose another ship-to "
+                    "state or farm pickup."
+                )
+            else:
+                error = (
+                    f"We can't ship seeds to {ship_state}. Seed pre-orders ship to every "
+                    "US state and DC except Hawaii and Alaska — choose a US ship-to state "
+                    "or farm pickup."
+                )
+            return None, _json_response({"error": error}, status=400)
+    if is_ship_to and not is_seed_order:
         dest = canonical_state_code(ship_state)
         if dest is None or zone_for_state(dest) is None:
             # (1) Unsupported / non-green-list destination — reject at the source.
@@ -3206,7 +3446,9 @@ def _create_draft_order(website, env, payload, discount_out=None):
                 order._grove_record_consult_deferral(dest, excluded_taxa_for_state(dest))
                 continue
             botanical = variant.product_tmpl_id.grove_botanical_name or ""
-            block_msg, is_failsafe = compliance_evaluate_line(botanical, dest, ship_state)
+            block_msg, is_failsafe = compliance_evaluate_line(
+                botanical, dest, ship_state, tier=variant.grove_effective_shipping_tier
+            )
             if block_msg:
                 if is_failsafe:
                     _logger.warning(
@@ -3258,13 +3500,18 @@ def _create_draft_order(website, env, payload, discount_out=None):
     # maintained by the daily rate-checker. Fail-safe: no rate → no line added.
     # Farm pickup never gets a shipping line even if the buyer left an address on
     # the form — pickup is the one legitimate $0-shipping fulfillment (GOL-1057).
-    shipping_charge = None if is_pickup else _apply_shipping_line(env, order, shipping, current_company)
+    # Seeds are not quoted at checkout (GOL-3257) — the actual label cost is
+    # billed at ship-time settlement — so a seed-only cart adds no rate line and
+    # is exempt from the no-$0-shipping breaker below.
+    shipping_charge = (
+        None if (is_pickup or is_seed_order) else _apply_shipping_line(env, order, shipping, current_company)
+    )
 
     # (3) No-$0-shipping circuit breaker: a ship-to order with shippable goods
     # that produced no positive shipping line is a rate-table gap — never let it
     # reach Stripe under-billed. (unshippable_reason above already cleared potted
     # carts, so reaching here with shippable items and no charge is a real gap.)
-    if is_ship_to:
+    if is_ship_to and not is_seed_order:
         has_shippable = any(qty > 0 for _tier, _length, qty in ship_items)
         if has_shippable and (shipping_charge is None or shipping_charge <= 0):
             order.unlink()
@@ -3346,6 +3593,12 @@ def _create_draft_order(website, env, payload, discount_out=None):
     # is never labelled, so it collapses to "pickup" for alerting/label-gating.
     order.grove_fulfillment = "ship" if is_ship_to else "pickup"
 
+    # Re-check (and stamp) the seed harvest year each line reserves from, as of
+    # now (GOL-3257 §6). This is the checkout re-check: the season may have
+    # rolled since the shopper added to cart. No-op for a non-seed order.
+    if is_seed_order:
+        _stamp_seed_harvest_years(order, _today_utc())
+
     return order, None
 
 
@@ -3390,8 +3643,8 @@ def _bareroot_ships_now(window_zip, tier, today, window=None):
 
     Nursery-dormancy override (GOL-1906, Josh 2026-09-07): bareroot NEVER ships
     outside the nursery dormancy window, whatever the destination zone's Arbor
-    Day window says — the default per-zone spring windows run to Jun 6, well past
-    the Apr 15 dormancy end, so a naive in-window read would ship a leafed
+    Day window says — a zone window overridden past the Apr 15 dormancy end (the defaults
+    now all end Apr 15) would otherwise ship a leafed
     (~2x heavier) parcel now and buy a leafed label against the dormant-priced
     rate table (a systematic undercharge, and the label path now refuses it
     outright). So when the nursery cannot ship bareroot today, the line fails
@@ -3514,6 +3767,68 @@ def _deposit_lines(order):
     return pairs
 
 
+def _line_tier(product):
+    """The line's effective shipping tier, per-variant first then the template
+    default (mirrors the ship-to gate / shipping-charge builder)."""
+    if not product:
+        return None
+    return product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier
+
+
+def _order_is_seed(order):
+    """True when ``order`` is a seed pre-order — any real product line is tier
+    ``seed`` (GOL-3257). By the mixing rule a seed cart holds only seed lines,
+    so one seed line is enough to route the whole order onto the $1 deposit."""
+    return any(_line_tier(product) == "seed" for product, _qty in _deposit_lines(order))
+
+
+def _order_deposit_amount(order):
+    """The flat per-order deposit this order takes: $1 for a seed pre-order
+    (GOL-3257), else the $10 bareroot deposit (GOL-2233). A cart never mixes the
+    two (the seed mixing rule), so the choice is unambiguous."""
+    return stripe_gateway.SEED_DEPOSIT if _order_is_seed(order) else stripe_gateway.PREORDER_DEPOSIT
+
+
+def _order_seed_info(order, today=None):
+    """``(harvest_year, ship_start, ship_end)`` for a seed order's emails/UI, or
+    ``None`` when the order carries no seed line. Harvest year is the stamped
+    ``grove_seed_harvest_year`` on the first seed line (the mixing rule keeps
+    one year per cart); the ship window comes from that template's resolved
+    season as of ``today``."""
+    if today is None:
+        today = _date.today()
+    for line in order.order_line:
+        if line.display_type or not line.product_id or line.reward_id:
+            continue
+        if _line_tier(line.product_id) != "seed":
+            continue
+        template = line.product_id.product_tmpl_id
+        season = seed_season(template, today)
+        return (line.grove_seed_harvest_year or season["year"], season["ship_start"], season["ship_end"])
+    return None
+
+
+def _stamp_seed_harvest_years(order, today=None):
+    """Stamp ``grove_seed_harvest_year`` on every seed line (GOL-3257 §6).
+
+    Each seed line's harvest year is ``seed_season(template, today,
+    adding_lb=pack_lb × qty)['year']`` — the season this line reserves from,
+    rolled to next fall if this line alone would push past the order-by date or
+    the season cap. Runs at order create (checkout), which is the re-check the
+    spec asks for; the catalog payload is the shopper's earlier estimate.
+    Non-seed lines are left untouched (default 0)."""
+    if today is None:
+        today = _date.today()
+    for line in order.order_line:
+        if line.display_type or not line.product_id or line.reward_id:
+            continue
+        variant = line.product_id
+        if _line_tier(variant) != "seed":
+            continue
+        adding_lb = (variant.grove_seed_pack_lb or 0.0) * (line.product_uom_qty or 0.0)
+        line.grove_seed_harvest_year = seed_season(variant.product_tmpl_id, today, adding_lb=adding_lb)["year"]
+
+
 def _line_sold_out(product, qty):
     """Is this bareroot line short on free (shared-pool) stock? Free stock is the
     shared pool (GOL-2031: bareroot draws on the potted pool). A shortfall
@@ -3540,33 +3855,51 @@ def _sold_out_bareroot(order):
     return any(_line_sold_out(product, qty)[1] for product, qty in _deposit_lines(order))
 
 
-def _deposit_reason_for_lines(env, lines, fulfillment, today):
-    """The GOL-2233 rule over bare ``(product, qty)`` pairs, independent of any
-    sale.order — the single predicate behind ``_order_takes_deposit`` (the
-    checkout session) and ``/checkout/quote`` (the pre-checkout preview), so
-    the two can never disagree.
+def _deposit_reason_for_lines(env, lines, fulfillment, today, ship_wave=None):
+    """GOL-2233 as amended 2026-10-07, over bare ``(product, qty)`` pairs,
+    independent of any sale.order: the single predicate behind
+    ``_order_takes_deposit`` (the checkout session) and ``/checkout/quote`` (the
+    pre-checkout preview), so the two can never disagree.
 
-    Returns ``"sold-out"`` (a bareroot line short on free stock — any
-    fulfillment, any date), ``"off-season"`` (after the season cutover on a
-    shipped order carrying bareroot; unset fulfillment counts as ship), or
-    ``None`` (charged in full today). Sold-out is checked first so the stated
-    reason matches the trigger a shopper can act on."""
-    judged = [_line_sold_out(product, qty) for product, qty in lines]
-    if any(sold_out for _bareroot, sold_out, _free in judged):
-        return "sold-out"
-    if not _after_deposit_cutover(env, today):
+    Returns ``"preorder"`` (a bareroot line with a customer-chosen wave: the flat
+    deposit for ship or pickup, before or after the cutover, in stock or not),
+    ``"sold-out"`` (legacy, no wave: a bareroot line short on free stock, any
+    fulfillment, any date), ``"off-season"`` (legacy, no wave: after the cutover
+    on a shipped order carrying bareroot; unset fulfillment counts as ship), or
+    ``None`` (charged in full today). Legacy callers that pass no wave keep the
+    original rule; sold-out is checked before off-season so the stated reason
+    matches the trigger a shopper can act on.
+
+    Seed pre-orders (GOL-3257) short-circuit to ``"seed"`` first: a seed line
+    makes the WHOLE order a flat $1 deposit (``stripe_gateway.SEED_DEPOSIT``),
+    on the same ship-time-settlement path as the tree deposit but a different
+    amount. The mixing rule guarantees a seed cart carries no trees, so the
+    bareroot branches below never fire for it."""
+    for product, qty in lines:
+        if float(qty) > 0 and _line_tier(product) == "seed":
+            return "seed"
+    has_bareroot = False
+    for product, qty in lines:
+        bareroot, sold_out, _free = _line_sold_out(product, qty)
+        if not bareroot:
+            continue
+        has_bareroot = True
+        if ship_wave:
+            return "preorder"
+        if sold_out:
+            return "sold-out"
+    if not has_bareroot or not _after_deposit_cutover(env, today) or fulfillment == "pickup":
         return None
-    if fulfillment == "pickup":
-        return None
-    if any(bareroot for bareroot, _sold_out, _free in judged):
-        return "off-season"
-    return None
+    return "off-season"
 
 
 def _order_takes_deposit(order, today=None):
     """Does this order take the flat $10 deposit (GOL-2233)?
 
-    True when EITHER trigger fires:
+    True when ANY trigger fires:
+      * pre-order (2026-10-07) — the order stores a customer-chosen
+        ``grove_ship_wave`` and carries a bareroot line (ship or pickup, any
+        date, in stock or not), OR
       * sold-out bareroot — a bareroot line short on free stock (any
         fulfillment, any date), OR
       * the order is placed after the season cutover (default Oct 15) AND is a
@@ -3584,7 +3917,14 @@ def _order_takes_deposit(order, today=None):
     tree onto the deposit path."""
     if today is None:
         today = _date.today()
-    return _deposit_reason_for_lines(order.env, _deposit_lines(order), order.grove_fulfillment, today) is not None
+    reason = _deposit_reason_for_lines(
+        order.env,
+        _deposit_lines(order),
+        order.grove_fulfillment,
+        today,
+        ship_wave=order.grove_ship_wave or None,
+    )
+    return reason is not None
 
 
 def _cart_has_preorder(env, order, payload=None, today=None):
@@ -3667,11 +4007,14 @@ def _build_stripe_line_items(order, today=None, tax_enabled=False):
 
     if _order_takes_deposit(order, today):
         # One flat deposit for the entire cart, regardless of contents/quantity.
+        # The amount is $1 for a seed pre-order (GOL-3257), else the $10 bareroot
+        # deposit (GOL-2233); a cart never mixes the two.
+        deposit = _order_deposit_amount(order)
         line_items = [
             {
-                "name": "Deposit",
+                "name": "Seed reservation deposit" if _order_is_seed(order) else "Deposit",
                 "kind": "deposit",
-                "amount_cents": stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT),
+                "amount_cents": stripe_gateway.to_cents(deposit),
                 "quantity": 1,
             }
         ]
@@ -3679,7 +4022,7 @@ def _build_stripe_line_items(order, today=None, tax_enabled=False):
         # today, so the oversell guard must skip them all and the ship-time
         # settlement must collect their whole balance.
         preorder_variant_ids = [line.product_id.id for line in product_lines]
-        charged_cents = stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT)
+        charged_cents = stripe_gateway.to_cents(deposit)
         return line_items, preorder_variant_ids, charged_cents
 
     # Ships-now full-charge path: every good at full price + shipping + any
@@ -3890,14 +4233,24 @@ def _shipping_handling_fee(env):
     return DEFAULT_SHIPPING_HANDLING_FEE
 
 
+def _order_handling_fee(env, order):
+    """The flat shipping-handling fee this order bills at settlement: $0 for a
+    seed pre-order (GOL-3257, Josh 2026-10-13 — seeds carry the actual label
+    cost only, no $5 handling), the standard ``_shipping_handling_fee`` for a
+    tree order."""
+    return 0.0 if _order_is_seed(order) else _shipping_handling_fee(env)
+
+
 def _recompute_ship_total(env, order):
     """Rewrite the GROVE-SHIP line to the ACTUAL packed shipping cost plus the
     flat S&H fee so settlement bills what really shipped, not the checkout
     estimate.
 
     The customer-facing GROVE-SHIP line becomes ``grove_actual_shipping_cost +
-    _shipping_handling_fee`` (GOL-2895, Josh 2026-10-02). The raw carrier spend
-    stays on ``grove_actual_shipping_cost`` for reporting; because the fee rides
+    _order_handling_fee`` (GOL-2895, Josh 2026-10-02) — the handling fee is $5
+    for a tree order and $0 for a seed pre-order (GOL-3257, Josh 2026-10-13: a
+    seed balance is goods + actual label + tax, no handling). The raw carrier
+    spend stays on ``grove_actual_shipping_cost`` for reporting; because the fee rides
     on the line price_unit, both ``amount_total`` and the Stripe Tax line items
     (which read ``price_subtotal``) include it, so the balance and tax are
     computed on actual shipping + fee.
@@ -3910,8 +4263,31 @@ def _recompute_ship_total(env, order):
     invoice's line taxes remain destination-correct. PICKUP orders transfer at
     the WV farm and keep WV tax."""
     ship_line = _settlement_shipping_line(order)
+    if not ship_line and order.grove_fulfillment == "ship" and (order.grove_actual_shipping_cost or 0.0) > 0:
+        # A seed pre-order (GOL-3257) is never quoted at checkout, so it reaches
+        # settlement with NO GROVE-SHIP line. This is where its actual label cost
+        # + handling first lands on the order, so create the line now (WV-taxed;
+        # re-taxed to destination by _apply_destination_tax just below). Priced
+        # on the next statement, so start it at 0.
+        product = _get_shipping_product(env, order.company_id)
+        ship_line = (
+            order.env["sale.order.line"]
+            .sudo()
+            .create(
+                {
+                    "order_id": order.id,
+                    "product_id": product.id,
+                    "name": "Shipping",
+                    "product_uom_qty": 1.0,
+                    "price_unit": 0.0,
+                }
+            )
+        )
+        wv_state = _get_company_wv_state_tax(env, order.company_id)
+        if set(ship_line.tax_ids.ids) != set(wv_state.ids):
+            ship_line.tax_ids = [(6, 0, wv_state.ids)]
     if ship_line:
-        ship_line.price_unit = (order.grove_actual_shipping_cost or 0.0) + _shipping_handling_fee(env)
+        ship_line.price_unit = (order.grove_actual_shipping_cost or 0.0) + _order_handling_fee(env, order)
     if order.grove_fulfillment == "ship":
         state = order.partner_shipping_id.state_id.code or None
         _apply_destination_tax(env, order, {"state": state})
@@ -4036,26 +4412,171 @@ def _send_dunning_email(env, order, amount_due, pay_url):
         _logger.warning("Dunning email failed for %s", order.name, exc_info=True)
 
 
-def _mark_settlement_failed(env, order, secret_key, amount_cents, *, reason):
-    """Record a shipped-but-unsettled order and start the dunning path: flag the
-    status, post chatter, alert ops on Discord, and email the customer a hosted
-    payment link. The order STAYS shipped — the decline never rolls back the
-    fulfilment (GOL-2053 acceptance 4)."""
+def _settlement_max_retries(env):
+    """CEO-tunable automatic-retry cap (ir.config_parameter, default 3)."""
+    return int(env["ir.config_parameter"].sudo().get_param("grove_headless.settlement_max_retries", 3))
+
+
+def _mark_settlement_failed(env, order, secret_key, amount_cents, *, reason, needs_customer=False):
+    """BUCKET 1 — the card could not be charged (GOL-3011).
+
+    A decline / expired card / insufficient funds / no saved card / SCA
+    (``authentication_required``). Flag the status, post chatter, alert ops on
+    Discord, and email the customer a hosted payment link. The order STAYS shipped
+    — the decline never rolls back the fulfilment (GOL-2053 acceptance 4).
+
+    The chatter/alert now state what ACTUALLY happens next (GOL-3011) rather than a
+    blanket 'will retry': an SCA decline needs the customer to authenticate, so an
+    off-session auto-retry is disabled and we wait on the pay link; an ordinary
+    decline auto-retries daily until ``settlement_max_retries`` is hit, after which
+    it is manual-only."""
     balance = round(amount_cents / 100.0, 2)
     order.write({"grove_checkout_status": "settlement_failed"})
+    attempts = order.grove_settlement_attempts or 0
+    max_retries = _settlement_max_retries(env)
+    if needs_customer:
+        next_action = (
+            "authentication (SCA) is required — an automatic retry cannot clear this; "
+            "awaiting the customer's payment via the link"
+        )
+    elif attempts < max_retries:
+        next_action = f"will auto-retry on the next daily run (attempt {attempts} of {max_retries})"
+    else:
+        next_action = (
+            f"auto-retries exhausted ({attempts} of {max_retries}); awaiting the "
+            "customer's payment via the link or a manual Retry settlement"
+        )
     note = (
         f"Ship-time settlement of ${balance:.2f} failed ({reason}). Order stays "
-        f"SHIPPED; customer has been emailed a payment link. Attempt "
-        f"{order.grove_settlement_attempts}."
+        f"SHIPPED; customer has been emailed a payment link. {next_action.capitalize()}."
     )
     order.message_post(body=note)
     _notify_discord(
         f":rotating_light: Settlement FAILED on {order.name} — ${balance:.2f} unpaid "
-        f"({reason}). Shipped but unsettled; customer dunned. Attempt "
-        f"{order.grove_settlement_attempts}."
+        f"({reason}). Shipped but unsettled; customer dunned. {next_action.capitalize()}."
     )
     pay_url = _settlement_pay_link(env, order, secret_key, amount_cents)
     _send_dunning_email(env, order, balance, pay_url)
+
+
+# Stripe ``error.type`` values that mean Stripe REJECTED the request before any
+# charge was attempted — no money moved, so a retry (with a fresh idempotency key)
+# is safe and the customer must NOT be dunned (GOL-3011 bucket 2). Everything else
+# with a received-but-failed response, plus a transport error where we got no
+# response at all, leaves the outcome UNKNOWN (bucket 3 — reconcile first).
+_KNOWN_NOT_CHARGED_TYPES = frozenset({"invalid_request_error", "authentication_error", "idempotency_error"})
+
+
+def _classify_gateway_error(exc):
+    """Split a non-card ``StripeError`` into 'known_not_charged' | 'unknown' (GOL-3011).
+
+    known_not_charged — Stripe rejected the request before processing it (4xx
+    invalid_request / authentication / permission / config, e.g. the restricted
+    rk_live key that lacked Payment Intents: Write on S00357). No charge exists.
+
+    unknown — no response (timeout / connection reset), a 5xx, a rate-limit, or an
+    ``api_error``: Stripe may have processed the charge before we lost the answer,
+    so we must reconcile before ever retrying. Default to 'unknown' when unsure —
+    the safe side is never to double-charge."""
+    status = exc.http_status
+    etype = exc.error_type
+    if status is None:  # no response received at all → outcome unverifiable
+        return "unknown"
+    if status >= 500 or status == 429 or etype == "api_error":
+        return "unknown"
+    if etype in _KNOWN_NOT_CHARGED_TYPES or 400 <= status < 500:
+        return "known_not_charged"
+    return "unknown"
+
+
+def _mark_settlement_error(env, order, amount_cents, *, reason, reconcile):
+    """BUCKET 2 & 3 — an error where no charge was made (known_not_charged) or the
+    outcome is UNKNOWN (reconcile) (GOL-3011).
+
+    Distinct from ``settlement_failed``: the customer is NOT at fault, so we do NOT
+    dun them. The order parks in ``settlement_error`` (``grove_settlement_reconcile``
+    flags the unknown-outcome case for ops), the retry cron picks it up with
+    backoff, and Discord names the order / amount / error once and escalates to ops
+    once auto-retries are exhausted."""
+    balance = round(amount_cents / 100.0, 2)
+    order.write({"grove_checkout_status": "settlement_error"})
+    attempts = order.grove_settlement_attempts or 0
+    max_retries = _settlement_max_retries(env)
+    exhausted = attempts >= max_retries
+    if reconcile:
+        next_action = "outcome UNKNOWN — the retry will reconcile with Stripe before charging (never double-charges)"
+    elif exhausted:
+        next_action = f"auto-retries exhausted ({attempts} of {max_retries}); needs a manual Retry settlement"
+    else:
+        next_action = f"will auto-retry on the next daily run (attempt {attempts} of {max_retries})"
+    order.message_post(
+        body=(
+            f"Ship-time settlement ERROR on ${balance:.2f} ({reason}). Order stays "
+            f"SHIPPED; the customer was NOT charged and was NOT dunned (not their "
+            f"fault). {next_action.capitalize()}."
+        )
+    )
+    if exhausted and not reconcile:
+        _notify_discord(
+            f":rotating_light: Settlement ERROR on {order.name} — ${balance:.2f} ({reason}). "
+            f"Auto-retries EXHAUSTED ({attempts} of {max_retries}); ops must run Retry settlement."
+        )
+    else:
+        _notify_discord(
+            f":warning: Settlement error on {order.name} — ${balance:.2f} ({reason}). {next_action.capitalize()}."
+        )
+
+
+def _reconcile_settlement(env, order, secret_key):
+    """Look an outcome-UNKNOWN order up at Stripe and decide whether it is safe to
+    (re-)charge (GOL-3011 bucket 3). Returns one of:
+
+      settled       — a prior settlement charge already SUCCEEDED; the order is
+                      marked settled and NO new charge must be made.
+      still_pending — a prior charge exists but is not yet final, OR Stripe could
+                      not be reached; hold and do not charge.
+      none          — Stripe confirms no settlement charge exists; safe to charge.
+
+    Searches by the metadata we stamp on every off-session settlement intent
+    (``order_ref`` + ``purpose=ship_settlement``). Search has no 24h TTL so it
+    stays authoritative past the idempotency window; its ~1 min indexing lag is
+    covered by the stable idempotency key the caller reuses for the fresh charge."""
+    query = f"metadata['order_ref']:'{order.name}' AND metadata['purpose']:'ship_settlement'"
+    try:
+        intents = stripe_gateway.search_payment_intents(secret_key, query)
+    except Exception as exc:  # noqa: BLE001 — any search failure means we cannot confirm; stay parked
+        _logger.warning("Settlement reconcile search failed for %s; staying parked: %s", order.name, exc)
+        order.message_post(
+            body=f"Settlement reconcile could not reach Stripe; still reconciling (no charge made): {exc}"
+        )
+        return "still_pending"
+    succeeded = next((pi for pi in intents if pi.get("status") == "succeeded"), None)
+    if succeeded:
+        order.write(
+            {
+                "grove_checkout_status": "settled",
+                "grove_settlement_payment_intent": succeeded.get("id") or order.grove_settlement_payment_intent,
+                "grove_settlement_reconcile": False,
+                "grove_settlement_needs_customer": False,
+            }
+        )
+        order.message_post(
+            body=(
+                f"Reconciled with Stripe: a prior settlement charge already SUCCEEDED "
+                f"(intent {succeeded.get('id')}); marked settled, no new charge made."
+            )
+        )
+        _notify_discord(
+            f":white_check_mark: Settlement reconciled on {order.name} — prior charge succeeded; no double-charge."
+        )
+        return "settled"
+    not_final = {"processing", "requires_capture", "requires_action", "requires_confirmation"}
+    if any(pi.get("status") in not_final for pi in intents):
+        order.message_post(
+            body="Reconciled with Stripe: a prior settlement charge is still processing; holding, no new charge."
+        )
+        return "still_pending"
+    return "none"
 
 
 def settle_order_at_ship(env, order):
@@ -4072,13 +4593,30 @@ def settle_order_at_ship(env, order):
       settlement_failed | settlement_error
     """
     order.ensure_one()
+    # Serialise this order's settlement so a retry cron run and a manual "Retry
+    # settlement" (or two cron ticks) can never charge concurrently (GOL-3011):
+    # the second caller blocks on FOR UPDATE, then re-reads the committed status
+    # below and short-circuits if the first already settled it. Re-locking a row
+    # already locked earlier in the same txn (the mark-shipped / collect paths)
+    # is a harmless no-op.
+    env.cr.execute("SELECT id FROM sale_order WHERE id = %s FOR UPDATE", (order.id,))
+    order.invalidate_recordset(
+        [
+            "grove_checkout_status",
+            "grove_settlement_attempts",
+            "grove_settlement_reconcile",
+            "grove_settlement_idem_key",
+            "grove_settlement_needs_customer",
+            "grove_settlement_payment_intent",
+        ]
+    )
     status = order.grove_checkout_status
     if status == "settled":
         return "already_settled"
-    # Only a deposit-only order (or one whose earlier settlement failed) has a
-    # deferred balance. A fully-in-stock order already collected shipping+tax at
-    # checkout, and a non-checkout order has nothing to settle.
-    if status not in ("deposit_paid", "settlement_failed"):
+    # Only a deposit-only order (or one whose earlier settlement failed/errored)
+    # has a deferred balance. A fully-in-stock order already collected
+    # shipping+tax at checkout, and a non-checkout order has nothing to settle.
+    if status not in ("deposit_paid", "settlement_failed", "settlement_error"):
         return "not_applicable"
 
     # Consult-built backstop (GOL-3007), non-raising half. The operator ship-commit
@@ -4119,7 +4657,21 @@ def settle_order_at_ship(env, order):
                 address=_stripe_ship_address(env, order),
             )
         except Exception as exc:  # noqa: BLE001 — tax calc is best-effort; a gateway/network error must not break settlement
+            # Safe (the customer is still taxed, on Odoo's own amount_total) but a
+            # degraded tax source on a money path — so it must be VISIBLE, not a log
+            # line nobody reads (GOL-2910). Chatter for the order's audit trail,
+            # Discord so ops knows Stripe Tax is not the source of this balance.
             _logger.warning("Ship-time Stripe Tax calc failed for %s; using Odoo tax: %s", order.name, exc)
+            order.message_post(
+                body=(
+                    f"Stripe Tax calculation failed at ship-time settlement ({exc}); the balance "
+                    f"fell back to Odoo's computed tax (${order.amount_tax or 0.0:.2f})."
+                )
+            )
+            _notify_discord(
+                f":warning: Stripe Tax FALLBACK on {order.name}: ship-time tax calc failed ({exc}); "
+                f"settling on Odoo's tax ${order.amount_tax or 0.0:.2f} instead. Reconcile in Stripe Tax."
+            )
 
     if tax_calc:
         base_cents = sum(int(li["amount"]) * int(li.get("quantity", 1)) for li in tax_line_items)
@@ -4144,51 +4696,95 @@ def settle_order_at_ship(env, order):
         order.message_post(body="Ship-time settlement could not run: Stripe key is not configured.")
         return "no_key"
 
+    now = fields.Datetime.now()
     attempts = (order.grove_settlement_attempts or 0) + 1
     customer, payment_method = _resolve_saved_card(secret_key, order)
     if not customer or not payment_method:
-        order.write({"grove_settlement_attempts": attempts})
+        # Bucket 1 (card could not be charged): no card on file. No charge was
+        # attempted, so no reconcile and no idempotency key to preserve.
+        order.write(
+            {
+                "grove_settlement_attempts": attempts,
+                "grove_settlement_last_attempt": now,
+                "grove_settlement_reconcile": False,
+            }
+        )
         _mark_settlement_failed(env, order, secret_key, amount_cents, reason="no saved card on file")
         return "settlement_failed"
 
-    # Per-ATTEMPT idempotency key (GOL-2053/2054). Stripe caches a response —
-    # including a card-decline error — against an idempotency key for 24h, so a
-    # key that is stable across retries would make every retry within the day
-    # replay the ORIGINAL decline instead of re-charging, silently defeating the
-    # ratified daily×3 auto-retry (GOL-2054 ruling 2). Scoping the key to the
-    # attempt number gives each retry a genuinely new charge while still deduping
-    # a concurrent double-fire of the SAME attempt (label-purchase + mark-shipped
-    # both compute attempts=N from the same committed value → identical key). The
-    # primary double-charge guard is the status=="settled" short-circuit above.
-    idem = f"grove-settle-{order.id}-{attempts}"
+    # Reconcile-before-charge (GOL-3011 bucket 3): if a prior attempt left the
+    # outcome UNKNOWN, confirm with Stripe that no charge landed before we ever
+    # create another one. A confirmed success settles here; a pending charge or an
+    # unreachable Stripe keeps the order parked (no second charge).
+    if order.grove_settlement_reconcile:
+        verdict = _reconcile_settlement(env, order, secret_key)
+        if verdict == "settled":
+            return "settled"
+        if verdict == "still_pending":
+            order.write({"grove_settlement_last_attempt": now})
+            return "settlement_error"
+        # verdict == "none": Stripe confirms no charge exists → safe to charge.
+
+    # Idempotency key (GOL-2053/2054/3011). Stripe caches a response against an
+    # Idempotency-Key for 24h, so replaying the SAME key returns the ORIGINAL
+    # result instead of charging again. We exploit that two ways:
+    #   • While reconciling an unknown outcome, REUSE the stored key so a replay
+    #     within 24h dedupes even if Search's ~1 min index lag hid a just-created
+    #     intent — the belt to Search's suspenders.
+    #   • Otherwise a per-ATTEMPT key gives each retry of a clean decline /
+    #     known-not-charged a genuinely new charge, while still deduping a
+    #     concurrent double-fire of the SAME attempt (label-purchase + mark-shipped
+    #     compute the same attempts=N → identical key).
+    # The primary double-charge guard remains the status=="settled" short-circuit
+    # above, now under a row lock.
+    if order.grove_settlement_reconcile and order.grove_settlement_idem_key:
+        idem = order.grove_settlement_idem_key
+    else:
+        idem = f"grove-settle-{order.id}-{attempts}"
     try:
         intent = stripe_gateway.create_payment_intent(
             secret_key,
             amount_cents=amount_cents,
             customer=customer,
             payment_method=payment_method,
-            metadata={"order_ref": order.name, "purpose": "ship_settlement"},
+            metadata={"order_ref": order.name, "order_id": order.id, "purpose": "ship_settlement"},
             idempotency_key=idem,
             description=f"Ship-time balance for {order.name}",
         )
     except stripe_gateway.StripeCardError as exc:
+        # Bucket 1: the card could not be charged. An authentication_required (SCA)
+        # decline can NEVER clear off-session, so it goes straight to the pay link
+        # with auto-retry disabled; any other decline keeps the daily auto-retry.
+        sca = "authentication_required" in (exc.code or "", exc.decline_code or "")
         order.write(
             {
                 "grove_settlement_attempts": attempts,
+                "grove_settlement_last_attempt": now,
+                "grove_settlement_idem_key": idem,
+                "grove_settlement_reconcile": False,
+                "grove_settlement_needs_customer": sca,
                 "grove_settlement_payment_intent": exc.payment_intent or order.grove_settlement_payment_intent,
             }
         )
-        _mark_settlement_failed(
-            env, order, secret_key, amount_cents, reason=f"card declined ({exc.decline_code or exc.code or 'declined'})"
-        )
+        decline_reason = f"card declined ({exc.decline_code or exc.code or 'declined'})"
+        reason = "authentication required (SCA)" if sca else decline_reason
+        _mark_settlement_failed(env, order, secret_key, amount_cents, reason=reason, needs_customer=sca)
         return "settlement_failed"
     except stripe_gateway.StripeError as exc:
-        # Transport/config error (not a decline) — retryable. Keep the order in
-        # its current status so the retry cron / manual re-trigger tries again.
-        order.write({"grove_settlement_attempts": attempts})
-        _logger.error("Ship-time settlement gateway error for %s: %s", order.name, exc)
-        order.message_post(body=f"Ship-time settlement could not reach Stripe (will retry): {exc}")
-        _notify_discord(f":warning: Settlement gateway error on {order.name} (${balance:.2f}) — will retry: {exc}")
+        # Bucket 2 (known not charged) vs bucket 3 (outcome unknown). Keep the order
+        # retryable in settlement_error; never dun the customer (not their fault).
+        bucket = _classify_gateway_error(exc)
+        reconcile = bucket == "unknown"
+        order.write(
+            {
+                "grove_settlement_attempts": attempts,
+                "grove_settlement_last_attempt": now,
+                "grove_settlement_idem_key": idem,
+                "grove_settlement_reconcile": reconcile,
+            }
+        )
+        _logger.error("Ship-time settlement gateway error for %s (%s): %s", order.name, bucket, exc)
+        _mark_settlement_error(env, order, amount_cents, reason=str(exc), reconcile=reconcile)
         return "settlement_error"
 
     # Record a tax/transaction from the calculation (GOL-2568) so Stripe Tax's
@@ -4205,16 +4801,33 @@ def settle_order_at_ship(env, order):
             "grove_checkout_status": "settled",
             "grove_settlement_payment_intent": intent.get("id") or order.grove_settlement_payment_intent,
             "grove_settlement_attempts": attempts,
+            "grove_settlement_last_attempt": now,
+            "grove_settlement_reconcile": False,
+            "grove_settlement_needs_customer": False,
         }
     )
+    # Name the tax source honestly: only call it "Stripe tax" when Stripe Tax
+    # actually ran (tax_calc present). With the flag OFF the figure is Odoo's own
+    # destination-rule tax, so label it "sales tax" (GOL-3074).
     settled_tax = order.grove_stripe_tax_amount if tax_calc else order.amount_tax
-    order.message_post(
-        body=(
-            f"Ship-time settlement captured ${balance:.2f} off-session — actual shipping "
-            f"${order.grove_actual_shipping_cost or 0.0:.2f} + ${_shipping_handling_fee(env):.2f} handling, "
-            f"Stripe tax ${settled_tax or 0.0:.2f}."
+    tax_label = "Stripe tax" if tax_calc else "sales tax"
+    # Only describe shipping + handling when the order actually carried a GROVE-SHIP
+    # line (GOL-3011): a PICKUP order has none — it transfers at the farm — so the
+    # old blanket "actual shipping $0.00 + $5.00 handling" wording misled ops into
+    # thinking a handling line existed. For pickup, report just the captured balance
+    # and tax. Label the tax honestly (GOL-3074): "Stripe tax" only when Stripe Tax
+    # actually ran, else Odoo's own destination-rule "sales tax". Handling is
+    # order-aware (GOL-3257): $0 for a seed pre-order, so omit the clause when zero.
+    if _settlement_shipping_line(order):
+        handling = _order_handling_fee(env, order)
+        handling_note = f" + ${handling:.2f} handling" if handling else ""
+        breakdown = (
+            f" — actual shipping ${order.grove_actual_shipping_cost or 0.0:.2f}"
+            f"{handling_note}, {tax_label} ${settled_tax or 0.0:.2f}"
         )
-    )
+    else:
+        breakdown = f" (farm pickup — no shipping), {tax_label} ${settled_tax or 0.0:.2f}"
+    order.message_post(body=f"Ship-time settlement captured ${balance:.2f} off-session{breakdown}.")
     return "settled"
 
 
@@ -4389,7 +5002,10 @@ def _preorder_ship_season(env, order):
     """Best-effort ship season ('spring' | 'fall') for the order's destination,
     or None when the shipping ZIP/zone is unknown. Used only to word the
     preorder-deposit emails ("...ships this spring"); a None just drops the
-    season word, never blocks the email."""
+    season word, never blocks the email. A wave the shopper chose at checkout
+    (``grove_ship_wave``) always wins over the date-based recompute."""
+    if order.grove_ship_wave:
+        return order.grove_ship_wave
     partner = order.partner_shipping_id or order.partner_id
     zip_code = partner.zip if partner else None
     zone = usda_zone_for_zip(zip_code)
@@ -4408,19 +5024,37 @@ def _notify_preorder_deposit(env, order):
     email = order.partner_id.email
     if not email:
         return
-    season = _preorder_ship_season(env, order)
-    body = (
-        f"<p>Hi {order.partner_id.name or 'there'},</p>"
-        f"<p>Thanks for reserving with us! Your order <strong>{order.name}</strong> "
-        f"includes preorder trees.</p>"
-        f"<p>{confirmation_deposit_line(season)}</p>"
-        f"<p>We'll email you again when your trees ship.</p>"
-        f"<p>Goldberry Grove Nursery</p>"
-    )
+    # Seed pre-orders (GOL-3257 §8) carry their own wording: one $1 deposit, a
+    # harvest year + ship window, and "the rest of the pack price and shipping
+    # are charged when it ships" (no handling fee on seeds, Josh 2026-10-13) —
+    # not the per-tree spring/fall copy.
+    seed_info = _order_seed_info(order)
+    if seed_info is not None:
+        harvest_year, ship_start, ship_end = seed_info
+        body = (
+            f"<p>Hi {order.partner_id.name or 'there'},</p>"
+            f"<p>Thanks for reserving with us! Your order <strong>{order.name}</strong> "
+            f"is a seed pre-order.</p>"
+            f"<p>{seed_confirmation_line(harvest_year, ship_start, ship_end)}</p>"
+            f"<p>We'll email you again when it ships.</p>"
+            f"<p>Goldberry Grove Nursery</p>"
+        )
+        subject = f"Your seed reservation for {order.name}"
+    else:
+        season = _preorder_ship_season(env, order)
+        body = (
+            f"<p>Hi {order.partner_id.name or 'there'},</p>"
+            f"<p>Thanks for reserving with us! Your order <strong>{order.name}</strong> "
+            f"includes preorder trees.</p>"
+            f"<p>{confirmation_deposit_line(season)}</p>"
+            f"<p>We'll email you again when your trees ship.</p>"
+            f"<p>Goldberry Grove Nursery</p>"
+        )
+        subject = f"Your preorder deposit for {order.name}"
     try:
         env["mail.mail"].sudo().create(
             {
-                "subject": f"Your preorder deposit for {order.name}",
+                "subject": subject,
                 "email_to": email,
                 **mail_from_vals(env, order.company_id),
                 "body_html": body,
@@ -4796,7 +5430,11 @@ def _notify_shipping_status(env, order, status, tracking):
     # never sees a balance line it does not owe.
     balance_line = None
     if status == "transit" and (order.grove_preorder_variant_ids or "").strip():
-        balance_line = preship_balance_line(_preorder_ship_season(env, order))
+        seed_info = _order_seed_info(order)
+        if seed_info is not None:
+            balance_line = seed_preship_balance_line(seed_info[0])
+        else:
+            balance_line = preship_balance_line(_preorder_ship_season(env, order))
     subject, body = shipment_notice_copy(
         status=status,
         order_name=order.name,

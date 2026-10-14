@@ -99,6 +99,11 @@ class RateFeedTests(unittest.TestCase):
             src = sz.shipping_boxes.BOXES[box_id]
             self.assertEqual(box["length"], src["length"])
             self.assertEqual(box["capacity"], src["capacity"])
+            # GOL-3201: the billable weight the quote is priced at + whether it
+            # is calibrated (verified) or conservative (unverified).
+            self.assertEqual(box["billable_weight_lb"], sz.shipping_boxes.representative_billable_lb(box_id))
+            self.assertEqual(box["weight_basis"], sz.shipping_boxes.weight_basis(box_id))
+            self.assertIn(box["weight_basis"], ("verified", "unverified"))
         self.assertEqual(packing["length_classes"], list(sz.shipping_boxes.LENGTH_CLASSES))
         self.assertEqual(packing["modes"], list(sz.shipping_boxes.MODES))
         # dormant_window was replaced by the top-level per-zone calendar (GOL-1172).
@@ -120,6 +125,7 @@ class RateFeedTests(unittest.TestCase):
                 "weather_hold_note",
                 "zones",
                 "resolved",  # GOL-1386: per-zone server-resolved mode
+                "pickup_waves",  # 2026-10-07: fixed farm-pickup fall schedule
             },
         )
         # GOL-2957: the green list spans USDA zones 3-10 (derived from the
@@ -139,8 +145,8 @@ class RateFeedTests(unittest.TestCase):
             self.assertEqual(len(zw["fall"]), 2)
         # Real chart values for a sampled cold + warm zone.
         self.assertEqual(cal["zones"]["2"]["fall"], [[11, 2], [11, 13]])
-        self.assertEqual(cal["zones"]["8"]["spring"], [[3, 1], [4, 30]])
-        self.assertEqual(cal["zones"]["8"]["spring_order_deadline"], [4, 16])
+        self.assertEqual(cal["zones"]["8"]["spring"], [[3, 1], [4, 15]])
+        self.assertEqual(cal["zones"]["8"]["spring_order_deadline"], [2, 22])
 
     def test_calendar_override_flows_through_feed(self):
         # An admin override (the system parameter) narrows a single zone's fall
@@ -161,19 +167,34 @@ class RateFeedTests(unittest.TestCase):
         feed = sz.rate_feed(None, today)
         resolved = feed["calendar"]["resolved"]
         self.assertEqual(set(resolved), {str(z) for z in range(2, 11)})
+        self.assertEqual(resolved["6"]["waves"][0]["wave"], "fall")
         cal = sc.default_calendar()
         for z in range(2, 11):
             expected = sc.resolve_fulfillment(z, today, cal)
             entry = resolved[str(z)]
             self.assertEqual(
                 set(entry),
-                {"mode", "season", "ship_timing", "ship_window", "order_deadline", "fulfillment_days"},
+                {"mode", "season", "ship_timing", "ship_window", "order_deadline", "fulfillment_days", "waves"},
             )
             for key in entry:
+                if key == "waves":
+                    continue
                 self.assertEqual(entry[key], expected[key], f"zone {z} key {key}")
             # Advisory fields are calendar-wide, never duplicated per zone.
             self.assertNotIn("approximate", entry)
             self.assertNotIn("weather_hold_note", entry)
+
+    def test_pickup_waves_in_calendar_block(self):
+        # Josh 2026-10-07: the storefront renders farm-pickup waves from the feed.
+        feed = sz.rate_feed(None, datetime.date(2026, 10, 16))
+        waves = {w["wave"]: w for w in feed["calendar"]["pickup_waves"]}
+        self.assertEqual(waves["fall"]["ship_window"], [[10, 20], [10, 31]])
+        self.assertEqual(waves["fall"]["order_by"], [10, 15])
+        self.assertFalse(waves["fall"]["open"])
+        self.assertEqual(waves["fall"]["reason"], "deadline_passed")
+        self.assertTrue(waves["spring"]["open"])
+        self.assertEqual(waves["spring"]["order_by"], [3, 29])
+        json.dumps(feed)
 
     def test_resolved_is_json_serializable(self):
         # The whole feed (resolved block included) must round-trip through JSON —
@@ -218,10 +239,10 @@ class RateFeedTests(unittest.TestCase):
 
     def test_returned_dict_is_decoupled_copy(self):
         # Mutating the feed must never corrupt the engine's live tables.
-        self.feed["zones"]["zone_1"]["small"]["base"] = 9999
+        self.feed["zones"]["zone_1"]["p24x10x4"]["base"] = 9999
         self.feed["zone_by_state"]["WV"] = "zone_5"
         fresh = sz.rate_feed()
-        self.assertNotEqual(fresh["zones"]["zone_1"]["small"]["base"], 9999)
+        self.assertNotEqual(fresh["zones"]["zone_1"]["p24x10x4"]["base"], 9999)
         self.assertEqual(fresh["zone_by_state"]["WV"], "zone_1")
 
 

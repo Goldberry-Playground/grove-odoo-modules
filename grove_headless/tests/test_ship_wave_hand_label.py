@@ -24,6 +24,7 @@ listed in tests/__init__.py AND excluded from pytest in conftest.py (GOL-1936).
 """
 
 import os
+from datetime import date
 from types import SimpleNamespace
 from unittest import mock
 from unittest.mock import patch
@@ -424,3 +425,55 @@ class TestSeasonalLabelGate(GroveTaxFixtureMixin, TransactionCase):
         ):
             _address, plan, _mode = order._grove_pack_for_label()
         self.assertTrue(plan)  # the November dormant wave ships normally
+
+
+@tagged("post_install", "-at_install")
+class TestWaveOrderIgnoresCutover(GroveTaxFixtureMixin, TransactionCase):
+    """A wave order placed ON/BEFORE the Oct 15 cutover must not take the legacy
+    'ships now as peat-and-bagged' path: its stored wave decides."""
+
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.ref("base.main_company")
+        partner = self.env["res.partner"].create(
+            {
+                "name": "Cutover Wave",
+                "street": "1 Grove Way",
+                "city": "Summersville",
+                "zip": "26651",
+                "email": "c@example.com",
+            }
+        )
+        self.product = self.env["product.product"].create(
+            {
+                "name": "Cutover Tree",
+                "type": "consu",
+                "list_price": 48.0,
+                "grove_shipping_tier": "bareroot",
+                "grove_tree_length": "20",
+            }
+        )
+        self.order = (
+            self.env["sale.order"]
+            .with_company(self.company)
+            .create(
+                {
+                    "partner_id": partner.id,
+                    "company_id": self.company.id,
+                    "date_order": "2026-10-07 12:00:00",
+                    "grove_fulfillment": "ship",
+                    "order_line": [(0, 0, {"product_id": self.product.id, "product_uom_qty": 1.0, "price_unit": 48.0})],
+                }
+            )
+        )
+
+    def test_pre_cutover_wave_order_held_outside_its_window(self):
+        from odoo import fields
+
+        self.order.grove_ship_wave = "spring"
+        with (
+            patch.object(fields.Date, "context_today", return_value=date(2026, 11, 15)),
+            patch.object(sale_order_module, "can_ship_bareroot", return_value=True),
+            self.assertRaisesRegex(UserError, "spring wave"),
+        ):
+            self.order._grove_pack_for_label()

@@ -13,6 +13,7 @@ from . import (
     test_carrier_tracking_cron,  # noqa: F401
     test_checkout_compliance_gate,  # noqa: F401
     test_checkout_quote,  # noqa: F401
+    test_checkout_ship_wave,  # noqa: F401
     test_consult_compliance_gate,  # noqa: F401
     test_content_draft_request,  # noqa: F401
     test_detail_serialization,  # noqa: F401
@@ -43,6 +44,10 @@ from . import (
     test_product_slug,  # noqa: F401
     test_promotions,  # noqa: F401
     test_publish_event,  # noqa: F401
+    test_seed_checkout,  # noqa: F401
+    test_seed_season,  # noqa: F401
+    test_seed_settlement,  # noqa: F401
+    test_settlement_failure_handling,  # noqa: F401
     test_shared_pool_qty,  # noqa: F401
     test_ship_wave_hand_label,  # noqa: F401
     test_shipping_calendar,  # noqa: F401

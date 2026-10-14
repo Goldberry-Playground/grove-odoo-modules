@@ -7,13 +7,22 @@ same. Design: vault wiki/Software/Grove Shipping (Box Engine v2, 2026-07-31;
 recalibrated off UPS-only billing to the USPS/UPS least-cost race, GOL-1906;
 catalog descoped to two SKUs by CEO directive 2026-09-07).
 
-**Two-SKU catalog (CEO directive, 2026-09-07).** The bulk 12x12 boxes and the
-graduated 8x8 length ladder are retired; the near-term catalog is exactly two
-boxes, both 24" long, selected by tree COUNT (contiguous, non-overlapping
-ranges) rather than by tree height:
+**Shared p-box catalog (Josh ruling 2026-10-13, GOL-3285).** The bulk 12x12
+boxes and the graduated 8x8 length ladder were retired first (CEO directive
+2026-09-07); the short-lived bareroot-only 24x6x4 / 24x9x6 ``small`` / ``large``
+cartons are retired now too. Bareroot ships in the SAME physical cartons as
+peat-and-bagged — the ``POTTED_BOXES`` p24x10x4 / p24x10x6 — selected by tree
+COUNT (contiguous, non-overlapping ranges) rather than by tree height:
 
-* ``small`` — 24x6x4, holds 1-5 trees.
-* ``large`` — 24x9x6, holds 6-10 trees.
+* ``p24x10x4`` — 24x10x4, holds 1-10 whips (vs 1-5 peat-and-bagged units).
+* ``p24x10x6`` — 24x10x6, holds 11-20 whips (vs 6-10 peat-and-bagged units).
+
+A bareroot whip is bare-stemmed, so one carton holds twice as many as the same
+carton of peat-and-bagged stock and weighs about half per tree — hence the
+doubled capacity and ``PER_TREE_LB`` dormant 1.0 (half of ``POTTED_UNIT_LB``).
+The two engines share box ids (and therefore the zone RATE rows) but keep their
+own capacity/weight axes; ``BOXES`` holds the bareroot facts and an assert after
+``POTTED_BOXES`` pins the shared geometry/tare so the two cannot drift.
 
 Because both boxes share one length (24"), the packer no longer walks a length
 ladder for a box tall enough; it pools the whole cart and picks the cheapest
@@ -22,9 +31,10 @@ has no box in this catalog and fails safe (no shipping line).
 
 Two packing modes, resolved from the ship date (trees are dormant or leafed
 out at the nursery — it is a property of the season, not the product). The mode
-does not change how many trees fit the descoped boxes (Josh's 1-5 / 6-10 ranges
-are season-independent); it only changes the estimated packed WEIGHT the rate
-probe declares (leafed foliage is heavier), via ``PER_TREE_LB``.
+does not change how many trees fit the cartons (the count ranges are
+season-independent); it only changes the estimated packed WEIGHT the rate
+probe declares (a pre-cutover bareroot order ships peat-and-bagged / leafed and
+is heavier), via ``PER_TREE_LB``.
 
 Pure Python, no Odoo imports — same testability contract as
 ``shipping_zones.py`` (see ``tests/test_shipping_boxes.py``). The one function
@@ -53,8 +63,8 @@ MODES: tuple[str, ...] = ("dormant", "leafed")
 # equivalent) and is farm-pickup only, so no leafed-weight parcel is ever bought.
 # ``representative_billable_lb`` must therefore quote the DORMANT parcel only;
 # taking max() across all modes let the heavier leafed weight (PER_TREE_LB 2.0)
-# drive the table, inflating small to 11 lb / large to 22 lb against a real
-# dormant 7 lb / 14 lb — a systematic OVERCHARGE off a parcel that can't be
+# drive the table, inflating p24x10x4 to 22 lb / p24x10x6 to 42 lb against a real
+# dormant 12 lb / 22 lb — a systematic OVERCHARGE off a parcel that can't be
 # ordered. (Josh phrased this as "capacity keys ∩ SHIPPABLE_TIERS"; because
 # modes and tiers are different axes that literal intersection is empty, so this
 # constant encodes the intent — the shippable/quotable modes — directly.)
@@ -206,69 +216,66 @@ DEFAULT_LENGTH = 20
 
 # ── Shipping & handling fee ──────────────────────────────────────────────────
 # Flat handling added on top of the raw carrier (Pirate Ship) cost. THE single
-# source of truth shared by the checkout rate table (scripts/rate_check) and
-# ship-time settlement (grove_headless.controllers.main's
-# DEFAULT_SHIPPING_HANDLING_FEE, which imports this), so the two paths can never
+# source of truth shared by the checkout rate path (shipping_zones.
+# compute_order_shipping), the storefront rate feed (``shipping_handling_fee``)
+# and ship-time settlement (grove_headless.controllers.main's
+# DEFAULT_SHIPPING_HANDLING_FEE, which imports this), so the paths can never
 # drift. Josh ruling 2026-10-02 (GOL-2923): "$5 handling charge baked into
 # shipping cost moving forward" — shipping charged to a customer = carrier cost +
-# this one flat amount, and checkout and settlement must agree. Replaces the old
-# per-box ``packaging_usd`` + $2.00 buffer the rate checker used to add. Applied
-# per ORDER at settlement and per BOX in the rate table — they agree for the
-# single-box order (the common case); multi-box orders are flagged (GOL-2923)
-# until Josh rules per-order vs per-box for the table.
+# this one flat amount, added ONCE PER ORDER (never per packed box). Replaces the
+# old per-box ``packaging_usd`` + $2.00 buffer the rate checker used to add, so the
+# zone rate cells are raw carrier cost only. Seed pre-orders carry NO handling
+# (GOL-3257, Josh 2026-10-13): they never take a checkout shipping quote, and
+# settlement bills them via controllers.main._order_handling_fee, which returns
+# $0 for a seed order.
 SHIPPING_HANDLING_FEE = 5.00
 
 # ── Box catalog ─────────────────────────────────────────────────────────────
-# Two SKUs, selected by tree COUNT (CEO directive 2026-09-07). capacity: trees
-# per box, by mode — Josh's 1-5 / 6-10 ranges are season-independent, so both
-# modes carry the same count. packaging_usd: wholesale box + consumables
+# Bareroot ships in the SAME physical cartons as peat-and-bagged (Josh ruling
+# 2026-10-13, GOL-3285): the p24x10x4 / p24x10x6 boxes below ARE the
+# ``POTTED_BOXES`` geometry. Bareroot trees are bare-stemmed whips, so one box
+# holds TWICE as many as the same box of peat-and-bagged stock and each weighs
+# about HALF: capacity 10 / 20 (vs potted 5 / 10) and PER_TREE_LB dormant 1.0
+# (vs POTTED_UNIT_LB 2.0). The two engines therefore share box ids — and so the
+# zone RATE rows — while packing on their own capacity/weight axes; the catalog
+# carries the bareroot facts here and the shared geometry/tare is pinned to
+# ``POTTED_BOXES`` by an assert after that dict so the two can never drift.
+#
+# capacity: trees per box, by mode — the count ranges are season-independent, so
+# both modes carry the same count. packaging_usd: wholesale box + consumables
 # (biodegradable bag, packing paper, corrugate, rubber bands, tape, sticker,
 # care card, thank-you note). NOTE: no longer part of the customer shipping
 # charge — GOL-2923 folded packaging into the flat SHIPPING_HANDLING_FEE above.
 # Retained only because the GOL-2128 one-shot scripts/rate_check/probe_states.py
 # still references it; the production rate path (rate_check.target_rate) does not.
 #
-# Packed weight is modelled as three explicit terms (Josh bench-measurement,
-# 2026-09-07): ``tare_lb`` = the empty CARTON alone; ``paper_lb`` = the void-fill
-# packing paper (a real, non-trivial term — a full small box carries ~2.5 lb of
-# paper, more than the trees themselves); and ``PER_TREE_LB[mode] * count`` for
-# the stock. Keeping paper as its own field rather than burying it in tare makes
-# the estimate auditable and each box tunable independently as boxes are weighed.
-#   small: carton 2.0 + paper 2.5 + 5*0.5 dormant trees = 7.0 lb (Josh measured
-#          the small box full at ~7 lb: 2.5 lb seedlings + 2.0 lb carton + paper).
-#   large: carton 3.1 + paper 5.0 + 10*0.5 dormant trees = 13.1 lb -> quoted 14.
-#          DERIVED by physical scaling from the small box (surface area for the
-#          carton, void volume for the paper), NOT yet measured — Josh to weigh a
-#          full large box to confirm; over-quote is the safe side (GOL-1906).
+# Packed weight reuses the potted model for these shared cartons: ``tare_lb``
+# (the empty carton, box-only — Josh bench tare 2026-09-06, independent of
+# contents) + ``PER_TREE_LB[mode] * count`` for the stock. There is no separate
+# ``paper_lb`` term (the retired bareroot-only 24x6x4 / 24x9x6 cartons carried
+# one; the p-boxes do not — void fill is absorbed into the per-tree figure), so
+# ``actual_weight_lb`` treats a missing ``paper_lb`` as 0.
+#   p24x10x4: carton 1.4 + 10*1.0 dormant whips = 11.4 lb -> quoted 12.
+#   p24x10x6: carton 1.5 + 20*1.0 dormant whips = 21.5 lb -> quoted 22.
+# Both land on the SAME representative points as the potted 5/10-packs of the
+# same cartons (1.4+5*2.0=11.4->12; 1.5+10*2.0=21.5->22), so bareroot reuses the
+# existing p24x10x4 / p24x10x6 zone rate rows with no rate re-derive (GOL-3285).
 BOXES: dict[str, dict] = {
-    "small": {
+    "p24x10x4": {
         "length": 24,
-        "width": 6,
+        "width": 10,
         "height": 4,
-        "capacity": {"dormant": 5, "leafed": 5},  # holds 1-5 trees
+        "capacity": {"dormant": 10, "leafed": 10},  # holds 1-10 whips
         "packaging_usd": 3.50,
-        "tare_lb": 2.0,  # empty carton, measured (Josh 2026-09-07)
-        "paper_lb": 2.5,  # void-fill packing paper, measured
-        # MEASURED median packed weight of small boxes actually shipped (GOL-2923,
-        # Josh 2026-10-06): batch LB-20261005-01, 13 rows — 9×6.5, 2×8.5, 1×12.5,
-        # 1×14.5 -> median 6.5 lb. This (not full capacity) is what the rate probe
-        # quotes at; see representative_billable_lb. Refresh as more batches ship.
-        "median_packed_lb": 6.5,
+        "tare_lb": 1.4,  # empty carton, box-only tare (Josh 2026-09-06) — mirrors POTTED_BOXES
     },
-    "large": {
+    "p24x10x6": {
         "length": 24,
-        "width": 9,
+        "width": 10,
         "height": 6,
-        "capacity": {"dormant": 10, "leafed": 10},  # holds 6-10 trees
+        "capacity": {"dormant": 20, "leafed": 20},  # holds 11-20 whips
         "packaging_usd": 4.50,
-        "tare_lb": 3.1,  # empty carton, DERIVED (scaled by surface area) — weigh to confirm
-        "paper_lb": 5.0,  # void-fill packing paper, DERIVED (scaled by void volume)
-        # No large box has shipped yet, so this is Josh's stated median (GOL-2923,
-        # 2026-10-07: "large box weights median at around 12lbs"), not a measured
-        # one. The 12 lb quotes in shipping_rates.json were read at this weight, so
-        # the next rate-check regenerates at 12 lb, not the ~14 lb full-capacity
-        # model. Replace with the measured median once a large-box batch ships.
-        "median_packed_lb": 12.0,
+        "tare_lb": 1.5,  # empty carton, box-only tare (back-solved) — mirrors POTTED_BOXES
     },
 }
 
@@ -279,8 +286,8 @@ BOXES: dict[str, dict] = {
 # loudly at import if a future box is added over-size. USPS is the binding
 # constraint in the least-cost race: it has the tighter combined-size limit, so
 # a box that clears USPS also clears UPS Ground's own 165" length+girth ceiling.
-# Both descoped boxes clear it with room: small = 24 + 2*(6+4) = 44"; large =
-# 24 + 2*(9+6) = 54".
+# Both shared p-boxes clear it with room: p24x10x4 = 24 + 2*(10+4) = 52";
+# p24x10x6 = 24 + 2*(10+6) = 56".
 #
 # NOTE — nonstandard-LENGTH surcharge applies to BOTH boxes. USPS surcharges any
 # parcel over 22" on its longest side; both catalog boxes are 24" long, so EVERY
@@ -291,7 +298,7 @@ BOXES: dict[str, dict] = {
 #   * length 22"-30"           -> nonstandard length (hits BOTH boxes)
 #   * length over 30"          -> higher nonstandard length (no catalog box)
 #   * volume over 2 cu ft      -> cubic surcharge (no catalog box; the largest,
-#                                 large at 24x9x6 = 1,296 cu in, is under 2 cu ft)
+#                                 p24x10x6 at 24x10x6 = 1,440 cu in, is under 2 cu ft)
 # Length and shape surcharges do not stack (higher applies); the >2 cu ft
 # surcharge would stack on top. Because both boxes cross the 22" line, the rate
 # table MUST be regenerated from a live probe that includes the fee — carrying
@@ -317,8 +324,8 @@ assert all(length_plus_girth_in(b) <= MAX_LENGTH_PLUS_GIRTH_IN for b in BOXES.va
 # USPS Ground Advantage dimensional-weight rule (GOL-1906). Source: Shippo,
 # "USPS Ground Advantage" service guide. Dimensional weight = L*W*H / divisor,
 # but ONLY for packages over 1 cubic foot (1,728 cu in); at or below 1 cu ft
-# USPS bills on actual scale weight alone. Both descoped boxes are under 1 cu ft
-# (small = 576 cu in, large = 1,296 cu in), so NEITHER takes a dimensional
+# USPS bills on actual scale weight alone. Both shared p-boxes are under 1 cu ft
+# (p24x10x4 = 960 cu in, p24x10x6 = 1,440 cu in), so NEITHER takes a dimensional
 # penalty — they bill on actual scale weight. (This differs from UPS, which
 # applied DIM to every package regardless of size.)
 #
@@ -334,10 +341,15 @@ assert all(length_plus_girth_in(b) <= MAX_LENGTH_PLUS_GIRTH_IN for b in BOXES.va
 DIM_DIVISOR = 139
 DIM_APPLIES_ABOVE_CU_IN = 1728  # 1 cubic foot
 
-# Estimated per-tree weight in the box, by mode (root wrap + damp sphagnum;
-# leafed adds soil-free rootball moisture + foliage). Open question flagged
-# in the vault: weigh real packed boxes in the first season and tune.
-PER_TREE_LB = {"dormant": 0.5, "leafed": 2.0}
+# Estimated per-tree weight in the box, by mode. ``dormant`` 1.0 is a dormant
+# bareroot whip (root wrap + damp sphagnum) — Josh ruled bareroot weighs about
+# HALF a peat-and-bagged unit of the same carton (GOL-3285, 2026-10-13), i.e.
+# half of POTTED_UNIT_LB (2.0). ``leafed`` 2.0 is the peat-and-bagged weight a
+# pre-cutover bareroot-tier order ships at this fall (sale_order packs those in
+# ``packing_mode(today)`` = leafed outside the dormancy window); it must never
+# under-declare that parcel, so it stays at the full potted per-unit figure.
+# Only ``dormant`` (the one QUOTABLE mode) prices the published rate table.
+PER_TREE_LB = {"dormant": 1.0, "leafed": 2.0}
 
 
 def dim_weight_lb(box_id: str) -> float:
@@ -358,12 +370,14 @@ def dim_weight_lb(box_id: str) -> float:
 def actual_weight_lb(box_id: str, count: int, mode: str) -> float:
     """Estimated scale weight of a packed box (what the label declares).
 
-    Three terms: empty carton (``tare_lb``) + void-fill packing paper
-    (``paper_lb``) + stock (``PER_TREE_LB[mode] * count``). Paper is a real,
-    measured component — ~2.5 lb in a full small box — not rolled into tare.
+    Empty carton (``tare_lb``) + stock (``PER_TREE_LB[mode] * count``). The
+    shared p-boxes carry no separate void-fill term, so ``paper_lb`` is absent
+    and treated as 0; the retired bareroot-only cartons declared one, hence the
+    ``get`` default rather than a hard key (kept so a future paper-bearing box
+    still tots up correctly).
     """
     b = BOXES[box_id]
-    return round(b["tare_lb"] + b["paper_lb"] + PER_TREE_LB[mode] * max(0, count), 1)
+    return round(b["tare_lb"] + b.get("paper_lb", 0.0) + PER_TREE_LB[mode] * max(0, count), 1)
 
 
 def billable_weight_lb(box_id: str, count: int, mode: str) -> float:
@@ -371,35 +385,99 @@ def billable_weight_lb(box_id: str, count: int, mode: str) -> float:
     return max(actual_weight_lb(box_id, count, mode), dim_weight_lb(box_id))
 
 
-def representative_billable_lb(box_id: str) -> int:
-    """Billable weight the rate-checker declares for each box, rounded up to the
-    carrier's whole billing pound.
+# ── Packed-weight calibration + basis (GOL-3201) ─────────────────────────────
+# The rate feed prices each box at an ESTIMATED ACTUAL billable weight, not the
+# full-capacity worst case — because packed weight moves the carrier price as
+# much as geography. A
+# box is priced at its calibrated typical billable weight ONLY when it is
+# "verified": at least MIN_CALIBRATION_SAMPLES recorded shipped weights back it
+# AND it is not force-conservative. Every other box stays "unverified" and keeps
+# the conservative full-capacity weight — never undercharge on a box we have not
+# measured.
+#
+# Calibration is DATA, applied by a reviewed refresh PR from the report of
+# ``scripts/rate_check/calibrate_weights.py``; it is NEVER computed live (same
+# contract as the shipping_rates.json refresh). ``typical_billable_lb`` is the
+# empirical median packed weight (the carrier bills ceil() of it); ``samples``
+# is how many recorded ``grove.label.batch.line.weight_lb`` rows back it.
+MIN_CALIBRATION_SAMPLES = 5
 
-    GOL-2923 (Josh 2026-10-06): quote at the MEDIAN packed weight of boxes
-    ACTUALLY shipped for this box type, not the full-capacity worst case. Full
-    capacity systematically over-declared — a full 5-tree small box is rare; the
-    median real small box is 6.5 lb (batch LB-20261005-01). When a measured
-    median is present (``median_packed_lb``) it wins, floored by the box's DIM
-    weight (``billable = max(actual, DIM)``).
+# Boxes pinned to the conservative full-capacity weight regardless of sample
+# count: ``p24x10x6``'s tare was back-solved (DERIVED), never bench-measured at a
+# full fill, so even a full sample set keeps the conservative weight (and the
+# ``unverified`` flag) until Josh weighs a full p24x10x6 and the calibration
+# moves it off this set in a reviewed PR.
+FORCE_CONSERVATIVE_BOXES: frozenset = frozenset({"p24x10x6"})
 
-    When no box of this type has shipped yet (median None/absent), fall back to
-    the model full-capacity estimate across ``QUOTABLE_MODES`` (dormant only — a
-    bareroot parcel only ships dormant, so leafed weight prices a parcel never
-    bought). The fallback is the conservative over-quote side (never undercharge)
-    until a batch of that box is weighed.
+# Seed: EMPTY. The 13 shipped-label calibration that verified the retired 24x6x4
+# ``small`` box does NOT carry over — the bareroot catalog now packs into the
+# p24x10x4 / p24x10x6 cartons (GOL-3285), a different geometry and fill, so those
+# samples no longer describe a box we ship. Both new bareroot boxes start
+# ``unverified`` and quote the conservative full-capacity weight (p24x10x4 12 lb,
+# p24x10x6 22 lb) — which equals the potted representative of the same cartons, so
+# no published rate moves. GOL-3200's golden dataset is the durable source: a
+# refresh PR re-runs calibrate_weights.py against it and seeds
+# ``samples`` / ``typical_billable_lb`` here only once measured labels of the new
+# bareroot fills exist.
+WEIGHT_CALIBRATION: dict[str, dict] = {}
+
+
+def weight_basis(box_id: str) -> str:
+    """``"verified"`` | ``"unverified"`` — whether this box is priced at its
+    calibrated typical weight or the conservative full-capacity weight.
+
+    ``"verified"`` requires ``MIN_CALIBRATION_SAMPLES``+ recorded shipped
+    weights AND that the box is not in ``FORCE_CONSERVATIVE_BOXES``. Everything
+    else is ``"unverified"`` and quotes the conservative worst case (never
+    undercharge on a box we have not measured). Surfaced per box in the rate
+    feed so the storefront can label an unverified quote as conservative.
+    """
+    if box_id in FORCE_CONSERVATIVE_BOXES:
+        return "unverified"
+    cal = WEIGHT_CALIBRATION.get(box_id)
+    if cal and cal.get("samples", 0) >= MIN_CALIBRATION_SAMPLES and "typical_billable_lb" in cal:
+        return "verified"
+    return "unverified"
+
+
+def conservative_billable_lb(box_id: str) -> int:
+    """Full-capacity worst-case billable weight across QUOTABLE modes (ceil lb).
+
+    The no-undercharge fallback for an unverified box: assume the box ships
+    packed to capacity in its heaviest quotable mode. Only ``QUOTABLE_MODES``
+    (dormant) count — a bareroot parcel only ships in its dormant window, so the
+    leafed weight prices a parcel that is never bought (see ``QUOTABLE_MODES``).
+    Falls back to the box's own modes if a future box declares none of the
+    quotable modes, so this never silently returns 0.
     """
     b = BOXES[box_id]
-    median = b.get("median_packed_lb")
-    if median is not None:
-        return math.ceil(max(float(median), dim_weight_lb(box_id)))
     modes = [m for m in QUOTABLE_MODES if m in b["capacity"]] or list(b["capacity"])
     worst = max(billable_weight_lb(box_id, b["capacity"][mode], mode) for mode in modes)
     return math.ceil(worst)
 
 
+def representative_billable_lb(box_id: str) -> int:
+    """Billable weight (whole lb, rounded up to the carrier pound) the rate feed
+    quotes for a box.
+
+    VERIFIED box: the calibrated typical billable weight — the estimated ACTUAL
+    weight its packed boxes ship at (median of recorded shipped weights), not the
+    full-capacity worst case. UNVERIFIED box: the conservative full-capacity
+    worst case (``conservative_billable_lb``) so an unmeasured box is never
+    undercharged. See ``weight_basis`` / ``WEIGHT_CALIBRATION`` (GOL-3201).
+    """
+    if weight_basis(box_id) == "verified":
+        return math.ceil(WEIGHT_CALIBRATION[box_id]["typical_billable_lb"])
+    return conservative_billable_lb(box_id)
+
+
 # No catalog box may exceed the 70 lb USPS Ground Advantage ceiling at its
 # worst-case fill — fails loudly at import if a future box does (GOL-1906).
-assert all(representative_billable_lb(box_id) <= MAX_SHIP_WEIGHT_LB for box_id in BOXES)
+# Guard on the conservative full-capacity weight, not the calibrated typical
+# (``representative_billable_lb``): a verified box can quote a typical weight
+# under the ceiling while its worst-case packed fill still exceeds it, so only
+# ``conservative_billable_lb`` preserves the original mailability invariant.
+assert all(conservative_billable_lb(box_id) <= MAX_SHIP_WEIGHT_LB for box_id in BOXES)
 
 
 def usable_boxes(length_class: int, mode: str) -> list[str]:
@@ -573,11 +651,14 @@ POTTED_UNIT_LB = 2.0  # Josh weigh-in 2026-09-06: firmed damp peat-and-bagged lb
 def known_box_ids() -> set[str]:
     """Every rateable box id across BOTH engines (bareroot BOXES + POTTED_BOXES).
 
-    The zone rate table carries rows for both catalogs (the morning rate-check
-    probes potted boxes too, GOL-2031/GOL-1906) — a rate-table membership check
-    against ``BOXES`` alone false-fails the moment a regen lands, which is
-    exactly how the 2026-09-08 rate-check turned main red after #190 descoped
-    ``BOXES`` to the two bareroot SKUs.
+    Since GOL-3285 both engines pack into the same p24x10x4 / p24x10x6 cartons,
+    so this union is just those two ids — but it stays a union because the two
+    catalogs remain independent dicts (different capacity/weight axes), and a
+    future box could be added to one and not the other. The zone rate table
+    carries one row per id here (the morning rate-check probes both catalogs,
+    GOL-2031/GOL-1906); a membership check against ``BOXES`` alone false-failed
+    the moment a regen landed, which is how the 2026-09-08 rate-check turned main
+    red after #190 first split the catalogs.
     """
     return set(BOXES) | set(POTTED_BOXES)
 
@@ -604,6 +685,16 @@ POTTED_BOXES: dict[str, dict] = {
         "tare_lb": 1.5,
     },
 }
+
+# Bareroot and potted ship in the SAME physical cartons (GOL-3285): wherever a
+# box id appears in both catalogs its geometry and box-only tare MUST be
+# identical, or the shared zone rate rows (keyed by id) would price two
+# different boxes. The capacity and per-unit weight legitimately differ by
+# engine; only the carton itself is pinned. Fail loudly at import on any drift.
+_SHARED_BOX_GEOMETRY_KEYS = ("length", "width", "height", "tare_lb")
+assert all(
+    BOXES[bid][k] == POTTED_BOXES[bid][k] for bid in set(BOXES) & set(POTTED_BOXES) for k in _SHARED_BOX_GEOMETRY_KEYS
+), "bareroot BOXES and POTTED_BOXES share physical cartons; geometry + tare must not drift"
 
 # Potted boxes obey the same USPS Ground Advantage envelope gates as bareroot:
 # 130" length+girth and the 70 lb ceiling at worst-case fill. Fail loudly at
@@ -636,20 +727,9 @@ def potted_billable_weight_lb(box_id: str, count: int) -> float:
 
 
 def potted_representative_billable_lb(box_id: str) -> int:
-    """Billable weight the rate-checker quotes each potted box at, rounded up to
-    the carrier's whole billing pound.
-
-    GOL-2923 (Josh 2026-10-06): prefer the MEASURED median packed weight of
-    potted boxes actually shipped (``median_packed_lb``), floored by DIM. No
-    potted box has shipped yet, so none carries a median today and this falls
-    back to the full-capacity model estimate — the conservative over-quote side
-    (never undercharge) until a potted batch is weighed. Set ``median_packed_lb``
-    on the box once that data exists."""
-    b = POTTED_BOXES[box_id]
-    median = b.get("median_packed_lb")
-    if median is not None:
-        return math.ceil(max(float(median), potted_dim_weight_lb(box_id)))
-    return math.ceil(potted_billable_weight_lb(box_id, b["capacity"]))
+    """Worst-case billable weight at full capacity — the weight the
+    rate-checker quotes each potted box at (never undercharge)."""
+    return math.ceil(potted_billable_weight_lb(box_id, POTTED_BOXES[box_id]["capacity"]))
 
 
 assert all(potted_representative_billable_lb(box_id) <= MAX_SHIP_WEIGHT_LB for box_id in POTTED_BOXES)

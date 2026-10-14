@@ -4,7 +4,8 @@
 Quotes Pirate Ship's public rate calculator (least-cost allowlisted ground:
 UPS Ground / UPS Ground Saver / USPS Ground Advantage, residential) for each
 rate zone x catalog box (shipping_boxes at its representative billable weight —
-the MEDIAN packed weight of that box type, GOL-2923), computes target =
+the calibrated median packed weight for a verified box, else the conservative
+full-capacity weight, GOL-3201), computes target =
 ceil(quote) (raw carrier cost rounded up to the whole dollar; GOL-2923 moved the
 flat S&H fee out of the per-box cell and onto the order, charged once by the app
 — see shipping_zones.compute_order_shipping), and rewrites
@@ -144,10 +145,17 @@ REFERENCE_ZIPS = {
 # vs Saver gap on that lane is a per-shipment service choice the operator makes,
 # not a rate-table undercharge (Josh finding #4), and the flat $5 S&H added once
 # per order more than covers it.
+#
+# Box key (GOL-3285, Josh 2026-10-13): the bareroot-only ``small`` carton these
+# labels shipped in is retired — a 1-10 tree bareroot order now ships in the
+# p24x10x4 carton, quoted at a HEAVIER conservative weight (12 lb) than the
+# 6.5 lb these floors were observed at. A label cost actually paid for that
+# lighter small-order shipment therefore still lower-bounds the p24x10x4 cell,
+# so the floors now guard that cell.
 OBSERVED_FLOORS = {
-    "zone_1": {"small": 9},  # KY 6.5 lb $8.79 (Ground) -> ceil 9
-    "zone_2": {"small": 12},  # PA/MD/NY 6.5 lb $11.15 -> ceil 12
-    "zone_5": {"small": 17},  # Mariaville ME 6.5 lb $16.89 (least-cost Saver) -> ceil 17
+    "zone_1": {"p24x10x4": 9},  # KY 6.5 lb $8.79 (Ground) -> ceil 9
+    "zone_2": {"p24x10x4": 12},  # PA/MD/NY 6.5 lb $11.15 -> ceil 12
+    "zone_5": {"p24x10x4": 17},  # Mariaville ME 6.5 lb $16.89 (least-cost Saver) -> ceil 17
 }
 
 # Box Engine v2: reference parcels come straight from the box catalog — one
@@ -387,8 +395,8 @@ def load_manual_quotes(path: str) -> tuple:
     Shape::
 
         {"_quoted_on": "2026-09-29",
-         "zone_1": {"small": {"quote": 9.84, "carrier": "UPS", "service": "03",
-                              "service_title": "UPS Ground"}, ...}, ...}
+         "zone_1": {"p24x10x4": {"quote": 9.84, "carrier": "UPS", "service": "03",
+                                 "service_title": "UPS Ground"}, ...}, ...}
 
     ``carrier``/``service``/``service_title`` are REQUIRED per cell: schema 3
     exists so "which carrier set this rate" is always answerable, and
@@ -735,9 +743,9 @@ def main(argv=None) -> int:
         "cell — the flat $5 S&H fee is added ONCE PER ORDER by the app "
         "[GOL-2923, shared with settlement]. "
         "Each cell records the winning carrier/service (schema 3); the Odoo loader "
-        "reads `base` only. Carries BOTH shippable catalogs (GOL-2199): bareroot "
-        "small/large and potted/peat-and-bagged p24x10x4/p24x10x6. "
-        "Design: spec 2026-09-09-pirateship-fulfillment-design.md (GOL-2270).",
+        "reads `base` only. Both shippable tiers (bareroot + potted/peat-and-bagged) "
+        "pack into the SAME p24x10x4 / p24x10x6 cartons (GOL-3285) and share these "
+        "rate rows. Design: spec 2026-09-09-pirateship-fulfillment-design.md (GOL-2270).",
         "_schema": 3,
         # Provenance the freshness guard reads (scripts/rate_check/staleness.py,
         # GOL-2641): the date these numbers were actually quoted, and from where.
