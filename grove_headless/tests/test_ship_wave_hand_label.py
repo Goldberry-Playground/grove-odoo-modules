@@ -387,7 +387,11 @@ class TestSeasonalLabelGate(GroveTaxFixtureMixin, TransactionCase):
 
     def _stub_pack(self):
         return (
-            patch.object(sale_order_module, "pack_for_state", return_value=[SimpleNamespace(box_id="BR_S", count=1)]),
+            patch.object(
+                sale_order_module,
+                "pack_for_state",
+                return_value=[SimpleNamespace(box_id="BR_S", count=1, tier="bareroot")],
+            ),
             patch.object(sale_order_module, "unshippable_reason", return_value=None),
         )
 

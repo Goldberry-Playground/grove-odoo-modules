@@ -390,5 +390,66 @@ class TestPacking(unittest.TestCase):
         self.assertEqual(a, b)
 
 
+class TestPackedBoxTier(unittest.TestCase):
+    """GOL-3291: since bareroot and potted share the p24x10x4 / p24x10x6 carton
+    ids (GOL-3285), the box id alone can no longer pick the label weight model.
+    ``PackedBox`` carries the packing ENGINE (``tier``) so the declared label
+    weight is unambiguous regardless of the shared id."""
+
+    def test_pack_order_stamps_bareroot_tier(self):
+        for pb in sb.pack_order([(20, 15)], "dormant", cost_of):
+            self.assertEqual(pb.tier, "bareroot")
+
+    def test_pack_potted_stamps_potted_tier(self):
+        for pb in sb.pack_potted(8, cost_of):
+            self.assertEqual(pb.tier, "potted")
+
+    def test_default_tier_is_bareroot(self):
+        # Back-compat: historical single-engine callers/tests that build a
+        # PackedBox with no tier keep the bareroot weight model.
+        self.assertEqual(sb.PackedBox("p24x10x4", 5).tier, "bareroot")
+
+    def test_potted_box_declares_potted_weight_in_dormant_mode(self):
+        # The bug: a potted box in the shared carton, weighed in "dormant" mode,
+        # must NOT use the lighter bareroot PER_TREE_LB (1.0). A 5-pack potted
+        # p24x10x4 = tare 1.4 + 5*POTTED_UNIT_LB(2.0) = 11.4, never 1.4+5*1.0=6.4.
+        potted = sb.PackedBox("p24x10x4", 5, tier="potted")
+        self.assertEqual(potted.declared_weight_lb("dormant"), 11.4)
+        self.assertEqual(potted.declared_weight_lb("dormant"), sb.potted_actual_weight_lb("p24x10x4", 5))
+        # And mode-independent: a potted box weighs the same in leafed.
+        self.assertEqual(potted.declared_weight_lb("leafed"), potted.declared_weight_lb("dormant"))
+
+    def test_bareroot_box_declares_bareroot_weight_by_mode(self):
+        bareroot = sb.PackedBox("p24x10x4", 5, tier="bareroot")
+        self.assertEqual(bareroot.declared_weight_lb("dormant"), sb.actual_weight_lb("p24x10x4", 5, "dormant"))
+        # Dormant 1.4+5*1.0=6.4; leafed 1.4+5*2.0=11.4 — mode matters for bareroot.
+        self.assertEqual(bareroot.declared_weight_lb("dormant"), 6.4)
+        self.assertEqual(bareroot.declared_weight_lb("leafed"), 11.4)
+
+    def test_shared_id_two_tiers_diverge_in_dormant(self):
+        # Same carton id + count, different engine -> different declared weight in
+        # dormant mode (the under-declare GOL-3291 fixes). They coincide in leafed.
+        bareroot = sb.PackedBox("p24x10x6", 10, tier="bareroot")
+        potted = sb.PackedBox("p24x10x6", 10, tier="potted")
+        self.assertLess(bareroot.declared_weight_lb("dormant"), potted.declared_weight_lb("dormant"))
+        self.assertEqual(bareroot.declared_weight_lb("leafed"), potted.declared_weight_lb("dormant"))
+
+    def test_declared_label_weight_lb_dispatch(self):
+        # The module-level dispatch both label callers share.
+        self.assertEqual(
+            sb.declared_label_weight_lb("p24x10x4", 5, "dormant", "potted"),
+            sb.potted_actual_weight_lb("p24x10x4", 5),
+        )
+        self.assertEqual(
+            sb.declared_label_weight_lb("p24x10x4", 5, "dormant", "bareroot"),
+            sb.actual_weight_lb("p24x10x4", 5, "dormant"),
+        )
+        # Unknown/absent tier falls back to the bareroot model (the safe default).
+        self.assertEqual(
+            sb.declared_label_weight_lb("p24x10x4", 5, "dormant"),
+            sb.actual_weight_lb("p24x10x4", 5, "dormant"),
+        )
+
+
 if __name__ == "__main__":
     unittest.main()

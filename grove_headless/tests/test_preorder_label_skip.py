@@ -135,7 +135,11 @@ class TestPreorderLabelSkip(GroveTaxFixtureMixin, TransactionCase):
             patch.dict(os.environ, {"SHIPPO_API_KEY": "test-key"}),
             # Stub the packer so the test is not coupled to the live rate table /
             # ship-window calendar; the gate under test is line inclusion, not packing.
-            patch.object(sale_order_module, "pack_for_state", return_value=[SimpleNamespace(box_id="BR_S", count=1)]),
+            patch.object(
+                sale_order_module,
+                "pack_for_state",
+                return_value=[SimpleNamespace(box_id="BR_S", count=1, tier="bareroot")],
+            ),
             patch.object(sale_order_module, "unshippable_reason", return_value=None),
             # An OPEN wave implies dormant season by definition — stub the GOL-1906
             # dormancy fail-closed gate (landed after this test, #190) the same way
@@ -209,7 +213,11 @@ class TestPreorderWaveLabelGate(GroveTaxFixtureMixin, TransactionCase):
     def _pack(self, order, today):
         with (
             patch.object(fields.Date, "context_today", return_value=today),
-            patch.object(sale_order_module, "pack_for_state", return_value=[SimpleNamespace(box_id="BR_S", count=1)]),
+            patch.object(
+                sale_order_module,
+                "pack_for_state",
+                return_value=[SimpleNamespace(box_id="BR_S", count=1, tier="bareroot")],
+            ),
             patch.object(sale_order_module, "unshippable_reason", return_value=None),
             patch.object(sale_order_module, "can_ship_bareroot", return_value=True),
         ):
@@ -257,7 +265,11 @@ class TestPreorderWaveLabelGate(GroveTaxFixtureMixin, TransactionCase):
     def _pack_dormancy(self, order, today, dormant):
         with (
             patch.object(fields.Date, "context_today", return_value=today),
-            patch.object(sale_order_module, "pack_for_state", return_value=[SimpleNamespace(box_id="BR_S", count=1)]),
+            patch.object(
+                sale_order_module,
+                "pack_for_state",
+                return_value=[SimpleNamespace(box_id="BR_S", count=1, tier="bareroot")],
+            ),
             patch.object(sale_order_module, "unshippable_reason", return_value=None),
             patch.object(sale_order_module, "can_ship_bareroot", return_value=dormant),
         ):

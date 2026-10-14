@@ -19,12 +19,12 @@ import csv
 import io
 from contextlib import contextmanager
 from datetime import timedelta
-from types import SimpleNamespace
 from unittest.mock import patch
 
 from odoo import fields
 from odoo.addons.grove_headless.models import label_batch as label_batch_module
 from odoo.addons.grove_headless.models import sale_order as sale_order_module
+from odoo.addons.grove_headless.models.shipping_boxes import PackedBox
 from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.exceptions import AccessError
 from odoo.tests import TransactionCase, tagged
@@ -33,7 +33,10 @@ _VALID_TRACK = ["1Z999AA10123456784", "1Z999AA10123456785", "9400111899223817200
 
 
 def _box(n):
-    return SimpleNamespace(box_id="p24x10x4", count=n)
+    # Real PackedBox (not a bare SimpleNamespace) so the batch exercises the
+    # live tier-aware weight model — ``_build_lines`` reads ``declared_weight_lb``
+    # off the box (GOL-3291). Default tier "bareroot" matches these P&B tests.
+    return PackedBox(box_id="p24x10x4", count=n)
 
 
 @tagged("post_install", "-at_install")

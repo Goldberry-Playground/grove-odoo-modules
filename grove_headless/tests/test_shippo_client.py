@@ -39,6 +39,22 @@ class TestShippoClient(unittest.TestCase):
         p = sp.build_shipment_payload(self.ADDR, "p24x10x4", 0, "dormant")
         self.assertGreaterEqual(float(p["parcels"][0]["weight"]), 1.0)
 
+    def test_payload_defaults_to_bareroot_weight_model(self):
+        # Back-compat: no tier -> bareroot PER_TREE_LB. Dormant p24x10x4 with 5
+        # whips = carton 1.4 + 5*1.0 = 6.4 lb.
+        p = sp.build_shipment_payload(self.ADDR, "p24x10x4", 5, "dormant")
+        self.assertEqual(p["parcels"][0]["weight"], "6.4")
+
+    def test_potted_tier_declares_potted_weight_in_dormant(self):
+        # GOL-3291: a potted box in the shared p24x10x4 carton must declare its
+        # potted weight (POTTED_UNIT_LB 2.0), not the lighter bareroot dormant
+        # weight the shared box id alone would pick. 5 units -> 1.4 + 5*2.0 = 11.4.
+        p = sp.build_shipment_payload(self.ADDR, "p24x10x4", 5, "dormant", tier="potted")
+        self.assertEqual(p["parcels"][0]["weight"], "11.4")
+        # Geometry is shared, so dims are unchanged from the bareroot path.
+        self.assertEqual(p["parcels"][0]["length"], "24")
+        self.assertEqual(p["parcels"][0]["height"], "4")
+
     @staticmethod
     def _posts(shipment, transaction):
         return mock.Mock(
