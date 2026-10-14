@@ -1,0 +1,172 @@
+# Pirate Ship persisted-query drift watch — Train #4 / gom#347 rollout step 4
+# (GOL-3303, owner devops-terra).
+#
+# Live ZIP shipping quotes call Pirate Ship's GraphQL endpoint with a persisted
+# query identified by the SHA-256 of its text. If Pirate Ship changes its
+# RatesQuery, our pinned hash is retired and every live quote silently falls
+# back to the ZIP-area table. This job compares our pin against the verbatim
+# copy kept in `taciturnaxolotl/pirateship-api` (`src/rates-query.ts`, MIT)
+# once a week and, on mismatch, opens ONE deduped GitHub issue (label
+# `pirateship-query-drift`) and pings Discord. A later in-sync run closes it.
+#
+# The compare itself lives in scripts/ci/pirateship_query_drift.py (stdlib,
+# unit-tested in scripts/tests/). Exit codes: 0 in sync / 1 drift /
+# 2 no local pin / 3 upstream unreachable or inconsistent.
+#
+# Forced-mismatch QA gate (Train #4 gate 5): dispatch with `expected_hash`
+# set to any other 64-hex value; the run must open the issue + ping Discord,
+# and the next plain run must close the issue again.
+#
+# Discord goes through DISCORD_OPS_WEBHOOK_URL. That secret does NOT exist in
+# this repo yet (GOL-2642); until it does, the alert steps warn loudly on the
+# run summary and the GitHub issue is the only durable signal.
+name: pirateship-query-drift
+
+on:
+  schedule:
+    - cron: "23 12 * * 1"   # Mondays 08:23 ET
+  workflow_dispatch:
+    inputs:
+      expected_hash:
+        description: "Compare against this hash instead of the repo pin (64 hex; forced-mismatch QA gate)"
+        type: string
+        default: ""
+      dry_run:
+        description: "Report only: no issue, no Discord"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: pirateship-query-drift
+  cancel-in-progress: false
+
+env:
+  ISSUE_LABEL: pirateship-query-drift
+  ISSUE_TITLE: "Pirate Ship RatesQuery hash drifted — live ZIP quotes are falling back"
+
+jobs:
+  drift:
+    name: Pirate Ship query drift
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Ops-alerting preflight
+        # Same posture as rate-check.yml (GOL-2642): a missing webhook must be
+        # visible on the run summary, never a silent short-circuit, and must
+        # never fail the check itself. Only emptiness is tested; nothing is echoed.
+        env:
+          HAS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK_URL != '' }}
+        run: |
+          if [ "$HAS_WEBHOOK" != "true" ]; then
+            echo "::warning title=No Discord ops webhook::DISCORD_OPS_WEBHOOK_URL is not set in this repo - a drift alert will only surface as a GitHub issue (GOL-2642)."
+            echo "- :warning: **DISCORD_OPS_WEBHOOK_URL is missing** - drift Discord alerts are no-ops; the GitHub issue is the only signal (GOL-2642)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Discord ops webhook present"
+          fi
+
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: "3.12"
+
+      - name: Compare pinned hash with upstream
+        id: check
+        env:
+          EXPECTED: ${{ inputs.expected_hash }}
+        run: |
+          set +e
+          if [ -n "$EXPECTED" ]; then
+            echo "::notice::forced compare against expected_hash input (QA gate)"
+            python3 scripts/ci/pirateship_query_drift.py --out out/report.md --expected "$EXPECTED"
+          else
+            python3 scripts/ci/pirateship_query_drift.py --out out/report.md
+          fi
+          rc=$?
+          set -e
+          echo "rc=$rc" >> "$GITHUB_OUTPUT"
+          {
+            cat out/report.md
+            echo ""
+            echo "_run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}_"
+          } >> "$GITHUB_STEP_SUMMARY"
+          cat out/report.md
+
+      - name: Open or update the drift issue
+        id: issue
+        if: steps.check.outputs.rc == '1' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          gh label create "$ISSUE_LABEL" --color D93F0B \
+            --description "Pirate Ship persisted RatesQuery hash no longer matches upstream" 2>/dev/null || true
+          {
+            cat out/report.md
+            echo ""
+            echo "Workflow run: $RUN_URL"
+            echo ""
+            echo "<!-- pirateship-query-drift -->"
+          } > out/issue.md
+          existing=$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty')
+          if [ -z "$existing" ]; then
+            url=$(gh issue create --title "$ISSUE_TITLE" --label "$ISSUE_LABEL" --body-file out/issue.md)
+            echo "::warning title=Drift issue opened::$url"
+          else
+            gh issue comment "$existing" --body-file out/issue.md >/dev/null
+            url="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/issues/${existing}"
+            echo "::warning title=Drift issue updated::$url"
+          fi
+          echo "url=$url" >> "$GITHUB_OUTPUT"
+          echo "- Drift issue: $url" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Close the drift issue once back in sync
+        if: steps.check.outputs.rc == '0' && inputs.dry_run != true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          existing=$(gh issue list --label "$ISSUE_LABEL" --state open --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "Pinned hash is back in sync with upstream: $RUN_URL"
+            echo "- Closed drift issue #$existing (back in sync)" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Discord alert
+        if: (steps.check.outputs.rc == '1' || steps.check.outputs.rc == '3') && inputs.dry_run != true
+        env:
+          WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK_URL }}
+          RC: ${{ steps.check.outputs.rc }}
+          ISSUE_URL: ${{ steps.issue.outputs.url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ -z "$WEBHOOK" ]; then
+            echo "::warning title=Drift alert NOT delivered::DISCORD_OPS_WEBHOOK_URL is not configured - no Discord alert was sent (GOL-2642). See the GitHub issue / run summary instead."
+            echo "- :warning: **Discord alert NOT sent** - no DISCORD_OPS_WEBHOOK_URL in this repo (GOL-2642)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$RC" = "1" ]; then
+            header="🏴‍☠️ **Pirate Ship changed its RatesQuery** — live ZIP quotes are falling back to the ZIP-area table until the pinned hash is updated (one-line PR). Issue: ${ISSUE_URL:-see run}"
+          else
+            header="⚠️ **Pirate Ship query-drift watch could not run** (upstream unreachable or inconsistent) — re-run or check manually: $RUN_URL"
+          fi
+          body=$(head -c 1500 out/report.md)
+          payload=$(python3 -c "import json,sys;print(json.dumps({'content':sys.argv[1]+'\n'+sys.argv[2]}))" "$header" "$body")
+          curl -sS -H "Content-Type: application/json" -d "$payload" "$WEBHOOK"
+
+      - name: Enforce verdict
+        if: always()
+        env:
+          RC: ${{ steps.check.outputs.rc }}
+        run: |
+          case "$RC" in
+            0) echo "::notice::pinned Pirate Ship RatesQuery hash is in sync with upstream" ;;
+            1) echo "::error::pinned hash DRIFTED from upstream - update the pin (see the drift issue)"; exit 1 ;;
+            2) echo "::warning::no local pin found - nothing to compare (expected only before gom#347 step 1 lands)" ;;
+            3) echo "::error::upstream check could not run - upstream unreachable or inconsistent"; exit 1 ;;
+            *) echo "::error::drift check did not produce a verdict (rc='$RC')"; exit 1 ;;
+          esac
