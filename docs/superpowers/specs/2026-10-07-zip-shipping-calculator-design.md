@@ -1,5 +1,7 @@
 # ZIP-based shipping calculator (design)
 
+> **Superseded 2026-10-14** by `2026-10-14-live-zip-shipping-design.md` (Josh): live Pirate Ship quotes at checkout + a nightly 3-digit ZIP-area table in the database, flat $2.50 handling. The box catalog, weight calibration and label-tool sections below still hold; the surcharge-table, PR-gated data and $5 handling parts do not.
+
 **Status:** approach ratified by Josh in brainstorm, 2026-10-07; refreshed 2026-10-13 for work merged since (box catalog #335 / GOL-3285, weight calibration #329 / GOL-3201, seed rulings GOL-3257). Targets **Train #4** (up Mon 2026-11-02, promote Wed 11-04, teardown Thu 11-05; freeze Fri 10-30). GOL-2923 stays the interim zone-table fix and ships first; this replaces its state-zone table.
 
 ## Decisions (Josh, 2026-10-07), do not re-open
