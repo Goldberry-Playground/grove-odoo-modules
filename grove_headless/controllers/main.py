@@ -33,7 +33,13 @@ from ..models.preorder_email import (
     seed_confirmation_line,
     seed_preship_balance_line,
 )
-from ..models.seed_season import seed_cart_harvest_year, seed_cart_refusal, seed_season
+from ..models.seed_season import (
+    SEED_MIX_REFUSAL,
+    is_seed_only,
+    seed_cart_harvest_year,
+    seed_cart_refusal,
+    seed_season,
+)
 from ..models.shipment_email import NOTIFY_STATUSES, delivery_status_from_webhook, shipment_notice_copy
 from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from ..models.shipping_calendar import (
@@ -2986,7 +2992,8 @@ def _validate_ship_wave(
 
     Nursery only: for any other tenant (``website`` not the nursery) every rule
     below is skipped and ``(None, None)`` is returned, so a stray ``ship_wave``
-    is ignored and nothing is stored.
+    is ignored and nothing is stored — EXCEPT the seed mixing refusal, which runs
+    for every tenant (fail closed, GOL-3257).
 
     Always enforced (with or without ``ship_wave``): potted-tier lines only sell
     inside ``LEAFED_WINDOW`` (inclusive), and a cart never mixes a potted-tier
@@ -2996,8 +3003,6 @@ def _validate_ship_wave(
     ``require_zone=False`` (the quote preview) skips ONLY the zone/open check for
     a ship cart that carries no ZIP yet.
     """
-    if not _is_nursery_website(website):
-        return None, None
     real_lines = [
         line
         for line in lines
@@ -3006,7 +3011,11 @@ def _validate_ship_wave(
     tiers = {line.product_id.grove_effective_shipping_tier for line in real_lines}
     # Seed reservations check out on their own (GOL-3257 §6): refuse a cart that
     # mixes seeds with non-seed lines, or seeds from two harvest years. Checked
-    # before the potted/bareroot gate so a seed+tree cart shows the seed copy.
+    # before the potted/bareroot gate so a seed+tree cart shows the seed copy,
+    # and BEFORE the nursery short-circuit below so EVERY tenant gets it: the
+    # seed bypass in _create_draft_order (green-list skip, compliance carve-out,
+    # no shipping line, $1 deposit) must never be reachable by a mixed cart on
+    # any storefront (fail closed, GOL-3257 security review).
     if "seed" in tiers:
         years = set()
         for line in real_lines:
@@ -3017,6 +3026,8 @@ def _validate_ship_wave(
         seed_refusal = seed_cart_refusal(tiers, years)
         if seed_refusal:
             return seed_refusal, None
+    if not _is_nursery_website(website):
+        return None, None
     if "potted" in tiers:
         start, end = LEAFED_WINDOW
         if not (start <= (today.month, today.day) <= end):
@@ -3292,6 +3303,14 @@ def _create_draft_order(website, env, payload, discount_out=None):
     # state + DC except Hawaii and Alaska (Josh 2026-10-13). A seed ship-to
     # order to a non-allowed destination is refused here with a plain-English
     # 400, in place of the green-list gate it skips.
+    # Fail closed (GOL-3257 security review): independently of the wave gate
+    # above, refuse ANY cart that carries a seed line alongside a non-seed line
+    # before a seed bypass can apply, and treat an order as seed ONLY when every
+    # real line is seed (_order_is_seed). A mixed cart must never skip the
+    # green-list, compliance or shipping-line gates, nor take the $1 deposit.
+    if _order_has_seed_line(order) and not _order_is_seed(order):
+        order.unlink()
+        return None, _json_response({"error": SEED_MIX_REFUSAL}, status=400)
     is_seed_order = _order_is_seed(order)
     if is_ship_to and is_seed_order:
         dest = canonical_state_code(ship_state)
@@ -3770,11 +3789,26 @@ def _line_tier(product):
     return product.grove_effective_shipping_tier or product.product_tmpl_id.grove_shipping_tier
 
 
+def _real_seed_tiers(pairs):
+    """Tiers of the real (qty > 0) ``(product, qty)`` pairs — the population the
+    seed gate judges (shipping/reward/section lines already excluded by
+    ``_deposit_lines``)."""
+    return [_line_tier(product) for product, qty in pairs if float(qty or 0) > 0]
+
+
+def _order_has_seed_line(order):
+    """True when ``order`` carries at least one real (qty > 0) seed-tier line."""
+    return "seed" in _real_seed_tiers(_deposit_lines(order))
+
+
 def _order_is_seed(order):
-    """True when ``order`` is a seed pre-order — any real product line is tier
-    ``seed`` (GOL-3257). By the mixing rule a seed cart holds only seed lines,
-    so one seed line is enough to route the whole order onto the $1 deposit."""
-    return any(_line_tier(product) == "seed" for product, _qty in _deposit_lines(order))
+    """True when ``order`` is a seed pre-order — EVERY real (qty > 0) product
+    line is tier ``seed`` (GOL-3257). Fail closed: a single non-seed line (or no
+    real line at all) makes it NOT a seed order, so a mixed cart can never ride
+    the seed bypass (green-list skip, compliance carve-out, no shipping line,
+    $1 deposit, $0 handling at settlement) even if the mixing refusal were
+    somehow skipped."""
+    return is_seed_only(_real_seed_tiers(_deposit_lines(order)))
 
 
 def _order_deposit_amount(order):
@@ -3870,9 +3904,11 @@ def _deposit_reason_for_lines(env, lines, fulfillment, today, ship_wave=None):
     on the same ship-time-settlement path as the tree deposit but a different
     amount. The mixing rule guarantees a seed cart carries no trees, so the
     bareroot branches below never fire for it."""
-    for product, qty in lines:
-        if float(qty) > 0 and _line_tier(product) == "seed":
-            return "seed"
+    # All-lines-seed only (fail closed): a mixed seed+tree cart is NOT a $1
+    # seed deposit; it falls through to the tree rules (and is refused upstream
+    # by the mixing rule anyway).
+    if is_seed_only(_real_seed_tiers(lines)):
+        return "seed"
     has_bareroot = False
     for product, qty in lines:
         bareroot, sold_out, _free = _line_sold_out(product, qty)
@@ -4388,18 +4424,20 @@ def _send_dunning_email(env, order, amount_due, pay_url):
         f"{cta}"
         f"<p>Thank you — Goldberry Grove Nursery</p>"
     )
-    try:
-        env["mail.mail"].sudo().create(
-            {
-                "subject": f"Payment needed for your shipped order {order.name}",
-                "email_to": email,
-                **mail_from_vals(env, order.company_id),
-                "body_html": body,
-                "auto_delete": True,
-            }
-        ).send()
-    except Exception:  # noqa: BLE001 — dunning email is best-effort
-        _logger.warning("Dunning email failed for %s", order.name, exc_info=True)
+    subject = f"Payment needed for your shipped order {order.name}"
+    env["grove.email.log"].sudo().log_and_send(
+        order,
+        "dunning",
+        email,
+        subject,
+        mail_vals={
+            "subject": subject,
+            "email_to": email,
+            **mail_from_vals(env, order.company_id),
+            "body_html": body,
+            "auto_delete": True,
+        },
+    )
 
 
 def _settlement_max_retries(env):
@@ -5041,18 +5079,19 @@ def _notify_preorder_deposit(env, order):
             f"<p>Goldberry Grove Nursery</p>"
         )
         subject = f"Your preorder deposit for {order.name}"
-    try:
-        env["mail.mail"].sudo().create(
-            {
-                "subject": subject,
-                "email_to": email,
-                **mail_from_vals(env, order.company_id),
-                "body_html": body,
-                "auto_delete": True,
-            }
-        ).send()
-    except Exception:  # noqa: BLE001 — deposit explainer is best-effort
-        _logger.warning("Preorder deposit email failed for %s", order.name, exc_info=True)
+    env["grove.email.log"].sudo().log_and_send(
+        order,
+        "deposit",
+        email,
+        subject,
+        mail_vals={
+            "subject": subject,
+            "email_to": email,
+            **mail_from_vals(env, order.company_id),
+            "body_html": body,
+            "auto_delete": True,
+        },
+    )
 
 
 def _notify_customer_apology(env, order, product_names, refunded):
@@ -5069,18 +5108,20 @@ def _notify_customer_apology(env, order, product_names, refunded):
         f"Please reach out and we'll help you find an alternative.</p>"
         f"<p>— Goldberry Grove Nursery</p>"
     )
-    try:
-        env["mail.mail"].sudo().create(
-            {
-                "subject": f"About your order {order.name}",
-                "email_to": email,
-                **mail_from_vals(env, order.company_id),
-                "body_html": body,
-                "auto_delete": True,
-            }
-        ).send()
-    except Exception:  # noqa: BLE001 — apology email is best-effort
-        _logger.warning("Oversell apology email failed for %s", order.name, exc_info=True)
+    subject = f"About your order {order.name}"
+    env["grove.email.log"].sudo().log_and_send(
+        order,
+        "oversell_apology",
+        email,
+        subject,
+        mail_vals={
+            "subject": subject,
+            "email_to": email,
+            **mail_from_vals(env, order.company_id),
+            "body_html": body,
+            "auto_delete": True,
+        },
+    )
 
 
 def _notify_discord(message):
@@ -5256,10 +5297,17 @@ def _send_order_confirmation_email(env, order):
     if not template:
         _logger.warning("sale confirmation template missing; skipping receipt for %s", order.name)
         return
-    try:
-        template.sudo().send_mail(order.id, force_send=True)
-    except Exception:  # noqa: BLE001 — receipt is best-effort, never fails the webhook
-        _logger.warning("Order confirmation email failed for %s", order.name, exc_info=True)
+    # Subject here is only the log label — the branded subject is rendered by
+    # the sale template. The helper tags the template-created mail with our
+    # X-Mailgun-Variables header via email_values (GOL-2903).
+    env["grove.email.log"].sudo().log_and_send(
+        order,
+        "receipt",
+        order.partner_id.email,
+        f"Order confirmation {order.name}",
+        template=template,
+        template_res_id=order.id,
+    )
 
 
 # Progress order of the notify-worthy carrier statuses. A carrier event that is
@@ -5435,16 +5483,19 @@ def _notify_shipping_status(env, order, status, tracking):
     # Reply-To to the selling company's formatted address so a customer reply
     # lands with the operator, not the no-reply envelope sender.
     reply_to = getattr(order.company_id, "email_formatted", False) or order.company_id.email or None
-    try:
-        env["mail.mail"].sudo().create(
-            {
-                "subject": subject,
-                "email_to": order.partner_id.email,
-                **mail_from_vals(env, order.company_id),
-                "reply_to": reply_to,
-                "body_html": body,
-                "auto_delete": True,
-            }
-        ).send()
-    except Exception:  # noqa: BLE001 — shipping notice is best-effort
-        _logger.warning("Shipping notification email failed for %s", order.name, exc_info=True)
+    # Carrier status → customer-email kind for the delivery log (GOL-2903).
+    kind = {"transit": "shipped", "out_for_delivery": "out_for_delivery", "delivered": "delivered"}[status]
+    env["grove.email.log"].sudo().log_and_send(
+        order,
+        kind,
+        order.partner_id.email,
+        subject,
+        mail_vals={
+            "subject": subject,
+            "email_to": order.partner_id.email,
+            **mail_from_vals(env, order.company_id),
+            "reply_to": reply_to,
+            "body_html": body,
+            "auto_delete": True,
+        },
+    )

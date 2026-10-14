@@ -17,8 +17,10 @@
 # reads check-runs AND commit statuses on each open non-draft PR's head SHA
 # (some repos post a required context as a commit status, not a check-run), and
 # mints one deduped `ci-failure` issue — mirrored to Paperclip — per PR whose
-# required context is absent past the grace window. Findings are alert-only; the
-# issue body carries the one-step close/reopen remediation for a human to run.
+# required context is absent past the grace window. The issue body carries the
+# one-step close/reopen remediation for a human to run; a control-plane DROP on
+# a bot PR is also self-healed (close+reopen under the agent App token) when the
+# App identity is configured, otherwise the sweep stays alert-only (GOL-3031).
 name: Missing required-check sweep
 
 on:
@@ -33,9 +35,13 @@ on:
 
 permissions:
   contents: read # read required-checks.json + head commit date
-  pull-requests: read # list open PRs
+  pull-requests: read # list open PRs (the self-heal close+reopen runs under the App token below, not GITHUB_TOKEN)
   checks: read # check-runs on the head SHA
   statuses: read # commit statuses on the head SHA
+  actions: read # workflow runs + their JOBS on the head SHA — `runner_name` lives
+    # only on a job, so this is what tells a control-plane drop apart from a real
+    # failure (GOL-3031), and what tells an `action_required` approval gate apart
+    # from a dropped trigger (GOL-2732)
   issues: write # mint/close the deduped ci-failure issue
 
 concurrency:
@@ -48,8 +54,40 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
+      # GOL-3031: identity for the self-heal close+reopen ONLY. When GitHub's
+      # control plane drops a required job without ever assigning it a runner,
+      # close+reopen on the unchanged head SHA is the only re-trigger lever (the
+      # App token has no `actions: write`). GitHub creates no workflow runs for
+      # events triggered by the ambient GITHUB_TOKEN, so a reopen made with it
+      # re-fires nothing, while the close still disarms auto-merge and spends
+      # the re-fire budget. An App-triggered reopen does fire
+      # `pull_request: reopened`. Bounded + bot-PR-only + never --delete-branch
+      # (GOL-1658).
+      #
+      # Same App + switch as auto-approve.yml's enqueue identity (GOL-2524,
+      # docs/merge-queue-enqueue-identity.md): `vars.MERGE_QUEUE_APP_CLIENT_ID`
+      # unset -> this step is skipped. `continue-on-error` covers a missing or
+      # bad private key / an installation lacking the permission. Either way the
+      # token output is empty, the router gets `self-heal: "false"`, and the
+      # sweep stays alert-only (diagnosis + issue + manual remediation command).
+      #
+      # Scoped down to what close/reopen needs; issue minting, PR listing and
+      # every read stay on GITHUB_TOKEN with the permissions above.
+      - name: Mint self-heal identity (agent App)
+        id: refire-identity
+        if: vars.MERGE_QUEUE_APP_CLIENT_ID != ''
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.MERGE_QUEUE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MERGE_QUEUE_APP_PRIVATE_KEY }}
+          permission-contents: read
+          permission-pull-requests: write
+
       - uses: Goldberry-Playground/grove-sites/.github/actions/ci-failure-router@main
         with:
           mode: missing-checks
           github-token: ${{ github.token }}
           grace-minutes: ${{ github.event.inputs.grace-minutes || '20' }}
+          self-heal: ${{ steps.refire-identity.outputs.token != '' && 'true' || 'false' }}
+          refire-token: ${{ steps.refire-identity.outputs.token }}
