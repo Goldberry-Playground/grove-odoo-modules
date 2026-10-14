@@ -210,9 +210,10 @@ class TestWinnerSelection(unittest.TestCase):
 
 
 class TestRateMath(unittest.TestCase):
-    def test_target_formula_ceil(self):
-        # 9.84 + 3.50 (p24x10x4 packaging) + 2.00 = 15.34 -> 16
-        self.assertEqual(rc.target_rate(9.84, "p24x10x4"), 16)
+    def test_target_formula_flat_handling_only(self):
+        # Josh 2026-10-13: label + flat $2.50, no packaging, buffer or round-up.
+        self.assertEqual(rc.target_rate(9.84, "p24x10x4"), 12.34)
+        self.assertEqual(rc.target_rate(11.83, "p24x10x6"), 14.33)
 
     def test_diff_detects_material_drift(self):
         current = {"zone_1": {"bareroot": {"base": 21.0}}}
@@ -389,8 +390,8 @@ class TestSchemaThreeAndWrite(unittest.TestCase):
             self.assertEqual(cell["carrier"], "UPS")
             self.assertEqual(cell["service"], "03")
             self.assertEqual(cell["service_title"], "UPS Ground")
-            # p24x10x4 fixture winner UPS Ground $14.37: ceil(14.37 + 3.50 + 2.00) = 20
-            self.assertEqual(cell["base"], 20.0)
+            # p24x10x4 fixture winner UPS Ground $14.37: 14.37 + 2.50 flat = 16.87
+            self.assertEqual(cell["base"], 16.87)
         finally:
             os.unlink(path)
 
@@ -664,7 +665,7 @@ class TestManualRefreshRun(unittest.TestCase):
         _, _, _, written = self._run(_manual_doc())
         cell = json.loads(written)["zone_1"]["p24x10x4"]
         self.assertEqual(cell["base"], float(rc.target_rate(12.0, "p24x10x4")))
-        self.assertEqual(cell["base"], 18.0)
+        self.assertEqual(cell["base"], 14.5)
         self.assertEqual(set(cell), {"base", "carrier", "service", "service_title"})
 
     def test_incomplete_hand_refresh_is_refused(self):

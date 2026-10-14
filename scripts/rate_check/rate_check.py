@@ -4,7 +4,7 @@
 Quotes Pirate Ship's public rate calculator (least-cost allowlisted ground:
 UPS Ground / UPS Ground Saver / USPS Ground Advantage, residential) for each
 rate zone x catalog box (shipping_boxes at representative billable weight),
-computes target = ceil(quote + per-box packaging + 2.00), and rewrites
+computes target = quote + the flat $2.50 handling (Josh 2026-10-13), and rewrites
 grove_headless/data/shipping_rates.json when any zone drifts >= $1. Pirate Ship
 retires Shippo from quoting (design: spec docs/superpowers/specs/
 2026-09-09-pirateship-fulfillment-design.md section A, ratified Josh 2026-09-09;
@@ -59,7 +59,6 @@ refresh path for that situation is ``--manual-quotes`` (see RUNBOOK.md).
 import argparse
 import importlib.util as _ilu
 import json
-import math
 import os
 import re
 import sys
@@ -82,6 +81,10 @@ REFERENCE_ZIPS = {
     # zone_1 rate exactly — and Memphis is kept as a corner so the published
     # zone_1 rate stays >= TN's worst going forward (never undercharge).
     "zone_1": [
+        # Summersville WV quotes ABOVE the NC/TN corners for the p-boxes on
+        # Pirate Ship (Josh 2026-10-13: 24x10x4 @ 6 lb = $11.83 vs $9.55), so
+        # the home state is a corner too (worst-case-corner rule).
+        ("Summersville", "WV", "26651"),
         ("Wilmington", "NC", "28401"),
         ("Memphis", "TN", "38103"),
     ],
@@ -146,7 +149,10 @@ PARCELS = {
 }
 # Per-box packaging (box + consumables) replaces the old flat $3.50/tree.
 PACKAGING = {box_id: box["packaging_usd"] for catalog, _ in _CATALOGS for box_id, box in catalog.items()}
-BUFFER = 2.00
+BUFFER = 2.00  # retired from the rate formula 2026-10-13; kept for import compatibility
+# The ONLY markup on a box rate (Josh 2026-10-13): the Pirate Ship label cost
+# plus a flat $2.50. No per-box packaging, no buffer, no round-up.
+HANDLING_FLAT = 2.50
 RATES_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "grove_headless", "data", "shipping_rates.json")
 OUT_DIR = os.path.join(os.path.dirname(__file__), "out")
 
@@ -319,8 +325,8 @@ def visibility_report(counts, total):
     return "\n".join(lines)
 
 
-def target_rate(quote: float, box_id: str) -> int:
-    return math.ceil(quote + PACKAGING[box_id] + BUFFER)
+def target_rate(quote: float, box_id: str) -> float:
+    return round(quote + HANDLING_FLAT, 2)
 
 
 def load_manual_quotes(path: str) -> tuple:
@@ -677,9 +683,10 @@ def main(argv=None) -> int:
 
     new_doc = {
         "_comment": "Maintained by scripts/rate_check (morning rate-checker). "
-        "Per-box rates (Box Engine v2): ceil(Pirate Ship least-cost allowlisted "
+        "Per-box rates (Box Engine v2): Pirate Ship least-cost allowlisted "
         "ground [UPS Ground / UPS Ground Saver / USPS Ground Advantage] at the "
-        "box's representative billable weight + per-box packaging + 2.00 buffer). "
+        "box's representative billable weight + flat 2.50 handling "
+        "(Josh 2026-10-13; no packaging, buffer or round-up). "
         "Each cell records the winning carrier/service (schema 3); the Odoo loader "
         "reads `base` only. Both shippable tiers (bareroot + potted/peat-and-bagged) "
         "pack into the SAME p24x10x4 / p24x10x6 cartons (GOL-3285) and share these "
