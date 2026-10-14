@@ -1,7 +1,24 @@
 name: rate-check
 on:
-  schedule:
-    - cron: "0 11 * * *"   # 07:00 ET daily (design: vault Grove Shipping)
+  # GOL-2605 (Josh, 2026-10-14): the daily schedule is REMOVED, not merely
+  # paused in the Actions UI, while Pirate Ship's public GraphQL endpoint is
+  # persisted-queries-only (since 2026-09-29). Every scheduled run since then
+  # was red, carried no new information, and re-fired the CI failure router
+  # each morning. Manual `workflow_dispatch` is kept so the probe (and the
+  # freshness guard below) can still be run by hand.
+  #
+  # RE-ENABLE CONDITION — restore the two commented lines below ONLY when
+  # BOTH hold:
+  #   1. the Train #4 keyless persisted RatesQuery client (gom#347 step 1,
+  #      `RATES_QUERY_HASH` pin + scripts/ci/pirateship-rates-query.sha256)
+  #      is merged to main, and
+  #   2. a `workflow_dispatch` with dry_run=true on main exits 0 (all probe
+  #      cells quoted; freshness guard green).
+  # Until then the rate table is refreshed BY HAND per
+  # scripts/rate_check/RUNBOOK.md ("Refreshing the table without a quote source").
+  #
+  # schedule:
+  #   - cron: "0 11 * * *"   # 07:00 ET daily (design: vault Grove Shipping)
   workflow_dispatch:
     inputs:
       dry_run:

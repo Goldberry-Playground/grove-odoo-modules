@@ -1,7 +1,9 @@
 # rate-check — operations runbook
 
-The `rate-check` workflow (`.github/workflows/rate-check.yml`) runs daily at
-07:00 ET, quotes **Pirate Ship** (public rate calculator, no auth — GOL-2270)
+The `rate-check` workflow (`.github/workflows/rate-check.yml`) is designed to
+run daily at 07:00 ET (**schedule removed 2026-10-14 — see "Quote source
+unavailable" below; `workflow_dispatch` only until it is restored**), quotes
+**Pirate Ship** (public rate calculator, no auth — GOL-2270)
 for the shipping zones, and — when rates have drifted ≥ $1 — force-pushes
 `chore/rate-check` and opens/refreshes a PR against `main`. Each published cell
 records the winning carrier/service (`shipping_rates.json` `_schema` 3); the
@@ -288,12 +290,25 @@ outside CI with a bare `POST` to the same URL. There is nothing to retry:
   ship-to order, which is the exact failure GOL-1312's guard exists to surface.
   Treat weeks-scale staleness as a pricing incident, not a CI annoyance.
 
-**Do not "fix" the red by silencing it.** Exit 1 here *is* the alarm. Likewise do
-not pause the `schedule:` cron: the CI failure router dedupes on
-`<!-- d3-ci-failure:rate-check:main -->`, so a still-broken source only adds a
-"Failed again." comment to the one open issue, and the router auto-closes that
-issue the moment a run goes green. The daily run is the cheapest possible probe
-for "is the source back?".
+**Do not "fix" the red by silencing the probe.** Exit 1 here *is* the alarm.
+
+**The `schedule:` cron is removed while the source is down (GOL-2605, Josh
+2026-10-14).** The original posture was to leave the daily run as the cheapest
+"is the source back?" probe (the CI failure router dedupes on
+`<!-- d3-ci-failure:rate-check:main -->`), but after 15 consecutive identical
+reds the daily re-fire cost more attention than it returned and no "it is back"
+is expected: Pirate Ship's persisted-queries-only mode is deliberate, and the
+sanctioned way forward is the Train #4 keyless persisted `RatesQuery` client
+(gom#347). The cron lines are kept, commented, in the workflow with the
+re-enable condition next to them. **Re-enable only when both hold:**
+
+1. the gom#347 step-1 client (`RATES_QUERY_HASH` pin, watched weekly by
+   `pirateship-query-drift.yml`) is merged to main, and
+2. a manual `workflow_dispatch` with `dry_run=true` on main exits 0.
+
+While the cron is off, the freshness guard (`staleness.py`, warn 14 d / fail
+28 d) only runs on dispatch — refresh the table by hand on the cadence below and
+keep `_rates_verified_on` current.
 
 **Restoring automation requires a replacement quote source** (board decision —
 money path). The three live options, with the trade-off that matters:
