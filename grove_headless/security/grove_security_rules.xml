@@ -27,4 +27,15 @@
         <field name="domain_force">['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]</field>
     </record>
 
+    <!-- Customer-email delivery log (GOL-2903): same multi-company isolation as
+         the potting batch above. The log rows carry customer addresses, so a
+         user only sees rows for companies they are allowed into. company_id is
+         copied from the order at send time. -->
+    <record id="grove_email_log_rule_company" model="ir.rule">
+        <field name="name">Customer Email Log: multi-company</field>
+        <field name="model_id" ref="model_grove_email_log"/>
+        <field name="global" eval="True"/>
+        <field name="domain_force">['|', ('company_id', '=', False), ('company_id', 'in', company_ids)]</field>
+    </record>
+
 </odoo>
