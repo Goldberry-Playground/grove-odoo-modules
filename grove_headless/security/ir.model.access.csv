@@ -25,3 +25,4 @@ access_grove_label_reconcile_line_user,grove_headless.label_reconcile_line.user,
 access_grove_label_reconcile_line_fulfillment,grove_headless.label_reconcile_line.fulfillment,model_grove_label_reconcile_line,sales_team.group_sale_salesman,1,1,1,1
 access_grove_email_log_user,grove_headless.email_log.user,model_grove_email_log,base.group_user,1,0,0,0
 access_grove_email_log_manager,grove_headless.email_log.manager,model_grove_email_log,sales_team.group_sale_manager,1,1,1,1
+access_grove_mailgun_token_manager,grove_headless.mailgun_token.manager,model_grove_mailgun_token,sales_team.group_sale_manager,1,0,0,0

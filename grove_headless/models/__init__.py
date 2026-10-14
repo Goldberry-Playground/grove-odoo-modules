@@ -2,6 +2,7 @@ from . import (
     carrier_tracking,  # noqa: F401  pure UPS/USPS tracking clients (GOL-2272), no ORM models
     grove_email_log,  # noqa: F401  customer-email delivery log + Mailgun event apply (GOL-2903)
     grove_enrich_job,  # noqa: F401  Perenual enrich job queue + budgeted cron (GOL-2391)
+    grove_mailgun_token,  # noqa: F401  single-use Mailgun webhook token ledger (GOL-2903)
     grove_publish,  # noqa: F401  pure HMAC signer/sender (GOL-985), no ORM models
     grove_publish_event,  # noqa: F401
     grove_stripe_event,  # noqa: F401

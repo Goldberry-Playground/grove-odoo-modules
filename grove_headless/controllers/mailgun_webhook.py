@@ -41,10 +41,18 @@ class GroveMailgunWebhook(http.Controller):
     def mailgun_webhook(self, **_kwargs):
         """Receive Mailgun delivery-event webhooks.
 
-        ``type="http"`` (not "json") so Mailgun sees real HTTP status codes: a
-        4xx halts retries (forged / malformed → never reprocessed), a 5xx lets
-        Mailgun retry a transient handler error. Signature-verified against the
-        signature triple in the body before any side effect.
+        ``type="http"`` (not "json") so Mailgun sees real HTTP status codes.
+        Mailgun retries every non-2xx response EXCEPT 406 Not Acceptable, so:
+
+        * 406 — a replayed signature token (already used once): never retry.
+        * 400 — missing key / bad signature / malformed body. Mailgun will
+          retry, which is what we want for a genuine delivery that failed only
+          because the signing key is unset or mid-rotation.
+        * 500 — transient handler error; the transaction (including the token
+          claim) is rolled back so the retry is processed normally.
+
+        Signature-verified and the token claimed single-use before any side
+        effect.
         """
         signing_key = os.environ.get(MAILGUN_SIGNING_KEY_ENV, "")
         if not signing_key:
@@ -70,12 +78,19 @@ class GroveMailgunWebhook(http.Controller):
             _logger.warning("Mailgun webhook rejected: %s", exc)
             return _json_response({"error": "signature verification failed"}, status=400)
 
+        # Single-use token (replay guard). The signature does not cover the body,
+        # so a captured triple could otherwise carry forged event-data for the
+        # whole freshness window. Claimed before any grove.email.log write.
+        env = request.env
+        if not env["grove.mailgun.token"].sudo().claim(signature.get("token"), signature.get("timestamp")):
+            _logger.warning("Mailgun webhook rejected: replayed signature token")
+            return _json_response({"error": "replayed token"}, status=406)
+
         try:
             parsed = mailgun_gateway.parse_event(payload)
         except mailgun_gateway.MailgunError as exc:
             return _json_response({"error": str(exc)}, status=400)
 
-        env = request.env
         row = env["grove.email.log"].sudo().match_event(parsed)
         if not row:
             # No row owns this event (non-customer email, or sent before this

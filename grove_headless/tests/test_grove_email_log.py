@@ -11,13 +11,21 @@ What must hold:
   * events advance the status, never regress it (a late delivered can't clobber
     an opened), and are idempotent;
   * a failed / blocked / complained event fires exactly one ops Discord alert;
-  * the webhook match resolves by log id, then falls back to recipient.
+  * the webhook match resolves by log id, then falls back to recipient;
+  * a signature token is single-use: a replay is answered 406 before any row
+    changes, and ledger rows past the freshness window are pruned;
+  * the ops alert never carries the customer's address.
 """
 
+import hashlib
+import hmac
+import json
+import time
 from unittest import mock
 
 from odoo.addons.grove_headless.models import mailgun_gateway
 from odoo.tests import TransactionCase, tagged
+from odoo.tests.common import HttpCase, get_db_name
 from odoo.tools import mute_logger
 
 from .common import GroveTaxFixtureMixin
@@ -209,3 +217,91 @@ class TestGroveEmailLog(GroveTaxFixtureMixin, TransactionCase):
         log = self._row()
         log.apply_event(self._parsed("delivered", log_id=log.id))
         self.assertEqual(log.mailgun_message_id, "<mg@mg>")
+
+    # ── webhook replay ledger (grove.mailgun.token) ───────────────────────
+
+    def test_token_claimed_once_then_rejected(self):
+        Token = self.env["grove.mailgun.token"]
+        now = 1_800_000_000
+        self.assertTrue(Token.claim("tok-replay", str(now), now=now))
+        # The same signed token a second time (a replay with any body) is refused.
+        self.assertFalse(Token.claim("tok-replay", str(now), now=now + 5))
+        self.assertEqual(Token.search_count([("token", "=", "tok-replay")]), 1)
+
+    def test_token_outside_window_is_pruned(self):
+        Token = self.env["grove.mailgun.token"]
+        now = 1_800_000_000
+        old_ts = now - mailgun_gateway.SIG_TOLERANCE - 60
+        Token.sudo().create({"token": "tok-old", "signed_at": old_ts})
+        Token.sudo().create({"token": "tok-live", "signed_at": now - 60})
+        self.assertTrue(Token.claim("tok-new", str(now), now=now))
+        # The aged-out row is gone (verify_signature already rejects its
+        # timestamp); the in-window row is kept so it still blocks a replay.
+        self.assertFalse(Token.search_count([("token", "=", "tok-old")]))
+        self.assertFalse(Token.claim("tok-live", str(now - 60), now=now))
+
+    def test_alert_omits_recipient_address(self):
+        log = self._row()
+        with mock.patch.dict("os.environ", {"DISCORD_OPS_WEBHOOK_URL": "https://d/ops"}, clear=True):
+            with mock.patch(_POST) as post:
+                log.apply_event(self._parsed("failed", severity="permanent", reason="bounce", log_id=log.id))
+        content = post.call_args[1]["json"]["content"]
+        self.assertNotIn(self.partner.email, content)
+        self.assertIn(f"#{log.id}", content)
+
+
+_TEST_KEY = "test-mailgun-signing-key"
+
+
+@tagged("post_install", "-at_install")
+class TestMailgunWebhookReplay(GroveTaxFixtureMixin, HttpCase):
+    """The route refuses a reused signature token with 406 (Mailgun stops retrying)."""
+
+    def setUp(self):
+        super().setUp()
+        company = self.env.ref("base.main_company")
+        partner = self.env["res.partner"].create({"name": "Replay Customer", "email": "replay@example.com"})
+        product = self.env["product.product"].create({"name": "Pawpaw", "type": "consu", "list_price": 20.0})
+        order = self.env["sale.order"].create(
+            {
+                "partner_id": partner.id,
+                "company_id": company.id,
+                "order_line": [(0, 0, {"product_id": product.id, "product_uom_qty": 1.0})],
+            }
+        )
+        self.log = self.env["grove.email.log"].create(
+            {
+                "order_id": order.id,
+                "company_id": company.id,
+                "kind": "receipt",
+                "recipient": partner.email,
+                "subject": "Receipt",
+                "status": "sent",
+            }
+        )
+
+    def _post(self, event, token):
+        ts = str(int(time.time()))
+        sig = hmac.new(_TEST_KEY.encode(), f"{ts}{token}".encode(), hashlib.sha256).hexdigest()
+        body = {
+            "signature": {"timestamp": ts, "token": token, "signature": sig},
+            "event-data": {
+                "event": event,
+                "recipient": "replay@example.com",
+                "user-variables": {"grove_log_id": str(self.log.id)},
+            },
+        }
+        headers = {"X-Odoo-Database": get_db_name(), "Content-Type": "application/json"}
+        with mock.patch.dict("os.environ", {"mailgun_webhook_signing_key": _TEST_KEY}):
+            return self.url_open("/grove/api/v1/mailgun/webhook", data=json.dumps(body).encode(), headers=headers)
+
+    def test_replayed_token_is_406_and_changes_nothing(self):
+        first = self._post("delivered", "tok-http-1")
+        self.assertEqual(first.status_code, 200)
+        self.log.invalidate_recordset()
+        self.assertEqual(self.log.status, "delivered")
+        # Same token, forged body: refused before any state change.
+        replay = self._post("complained", "tok-http-1")
+        self.assertEqual(replay.status_code, 406)
+        self.log.invalidate_recordset()
+        self.assertEqual(self.log.status, "delivered")

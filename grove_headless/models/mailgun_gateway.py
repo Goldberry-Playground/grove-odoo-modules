@@ -21,9 +21,11 @@ import time
 
 # Mailgun signs each webhook POST with HMAC-SHA256 over the concatenation
 # "{timestamp}{token}" keyed by the account's HTTP webhook signing key. Reject
-# anything older than this window to blunt replay / clock-skew (the caller is
-# *additionally* responsible for rejecting a token it has already seen, which is
-# the real single-use replay guard — see GroveEmailLog._reject_replayed_token).
+# anything older than this window to blunt replay / clock-skew. The signature
+# does NOT cover the body, so the window alone is not a replay guard: the
+# webhook controller also claims each token single-use in the
+# ``grove.mailgun.token`` ledger (GroveMailgunToken.claim) and answers a repeat
+# with 406.
 SIG_TOLERANCE = 15 * 60  # seconds
 
 # The customer-email kinds grove_headless can send. Every send site maps to

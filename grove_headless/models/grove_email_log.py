@@ -227,11 +227,14 @@ class GroveEmailLog(models.Model):
         if not url:
             return False
         label = dict(_STATUS_SELECTION).get(self.status, self.status)
-        reason = f" — {self.failure_reason}" if self.failure_reason else ""
         order_ref = self.order_id.name or f"order {self.order_id.id}"
+        # No recipient address and no free-text failure reason (Mailgun's SMTP
+        # detail usually echoes the address): Discord is outside Odoo's access
+        # control, so the alert carries only the order, kind, status and log id.
+        # The full detail is one click away on the log row.
         message = (
             f":warning: Customer email **{label}** for {order_ref} "
-            f"({dict(_KIND_SELECTION).get(self.kind, self.kind)} → {self.recipient}){reason}"
+            f"({dict(_KIND_SELECTION).get(self.kind, self.kind)}, email log #{self.id})"
         )
         try:
             requests.post(url, json={"content": message[:2000]}, timeout=10)
