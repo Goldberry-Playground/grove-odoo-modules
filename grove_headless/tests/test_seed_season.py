@@ -160,6 +160,26 @@ class TestSeedCartRefusal(unittest.TestCase):
         self.assertEqual(ss.SEED_MIX_REFUSAL, "Seed reservations check out on their own.")
 
 
+class TestIsSeedOnly(unittest.TestCase):
+    """All-lines-seed gate (GOL-3257 fail closed): one seed line in a tree cart
+    must NOT make the order a seed order."""
+
+    def test_all_seed_is_seed(self):
+        self.assertTrue(ss.is_seed_only(["seed"]))
+        self.assertTrue(ss.is_seed_only(["seed", "seed"]))
+
+    def test_mixed_is_not_seed(self):
+        self.assertFalse(ss.is_seed_only(["seed", "bareroot"]))
+        self.assertFalse(ss.is_seed_only(["bareroot", "seed"]))
+        self.assertFalse(ss.is_seed_only(["seed", "potted"]))
+        self.assertFalse(ss.is_seed_only(["seed", None]))
+
+    def test_empty_or_tree_only_is_not_seed(self):
+        self.assertFalse(ss.is_seed_only([]))
+        self.assertFalse(ss.is_seed_only(["bareroot"]))
+        self.assertFalse(ss.is_seed_only(iter(())))
+
+
 class TestSeedCartHarvestYear(unittest.TestCase):
     """The order's single top-level harvest year for the quote (GOL-3257, Josh
     2026-10-13) — the storefront reads it to show/refuse on a rollover."""

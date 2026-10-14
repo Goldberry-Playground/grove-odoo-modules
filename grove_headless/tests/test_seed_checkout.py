@@ -158,6 +158,81 @@ class TestSeedCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(error.status_code, 400)
         self.assertIn("seed reservations check out on their own", error.data.decode().lower())
 
+    # ── fail closed: a mixed seed+tree cart never rides the seed bypass ─────
+    # (GOL-3257 security review). One seed line in a Castanea tree cart must not
+    # skip the green-list/compliance/shipping gates or take the $1 deposit, on
+    # ANY tenant.
+
+    def _castanea(self):
+        tree = self.env["product.product"].create(
+            {
+                "name": "American Chestnut (bareroot)",
+                "type": "consu",
+                "is_storable": True,
+                "list_price": 45.0,
+                "grove_shipping_tier": "bareroot",
+            }
+        )
+        tree.product_tmpl_id.grove_botanical_name = "Castanea dentata"
+        return tree
+
+    def _assert_mixed_refused(self, website):
+        castanea = self._castanea()
+        before = self.env["sale.order"].search_count([])
+        with (
+            mock.patch.object(grove_main, "_today_utc", return_value=TODAY),
+            mock.patch.object(grove_main, "_apply_shipping_line", return_value=16.0) as ship_line,
+        ):
+            order, error = grove_main._create_draft_order(
+                website, self.env, self._payload([self.seed_a, castanea], state="FL")
+            )
+        self.assertIsNone(order, "a seed + Castanea cart must be refused")
+        self.assertEqual(error.status_code, 400)
+        self.assertIn("seed reservations check out on their own", error.data.decode().lower())
+        # Refused before any seed bypass or shipping line: no order survives.
+        ship_line.assert_not_called()
+        self.assertEqual(self.env["sale.order"].search_count([]), before)
+
+    @mute_logger("odoo.addons.grove_headless.controllers.main")
+    def test_seed_plus_castanea_refused_on_nursery(self):
+        self._assert_mixed_refused(self._website())
+
+    @mute_logger("odoo.addons.grove_headless.controllers.main")
+    def test_seed_plus_castanea_refused_on_non_nursery_tenant(self):
+        website = self.env.ref("grove_headless.website_ggg")
+        self.assertFalse(grove_main._is_nursery_website(website))
+        self._assert_mixed_refused(website)
+
+    @mute_logger("odoo.addons.grove_headless.controllers.main")
+    def test_mixed_cart_refused_even_if_wave_gate_is_skipped(self):
+        # Defense in depth: _create_draft_order refuses a mixed cart on its own,
+        # before the seed bypass, even if the wave/mixing gate returned clean.
+        castanea = self._castanea()
+        with mock.patch.object(grove_main, "_validate_ship_wave", return_value=(None, None)):
+            order, error = self._create(self._payload([self.seed_a, castanea], state="FL"))
+        self.assertIsNone(order)
+        self.assertEqual(error.status_code, 400)
+        self.assertIn("seed reservations check out on their own", error.data.decode().lower())
+
+    def test_mixed_order_is_not_a_seed_order(self):
+        # All-lines-seed gate: a mixed order is NOT seed, so it never gets the $1
+        # deposit, the seed deposit reason, or the $0 seed handling fee.
+        castanea = self._castanea()
+        order = self._order_with([self.seed_a, castanea])
+        self.assertFalse(grove_main._order_is_seed(order))
+        self.assertNotEqual(grove_main._order_deposit_amount(order), stripe_gateway.SEED_DEPOSIT)
+        self.assertEqual(grove_main._order_deposit_amount(order), stripe_gateway.PREORDER_DEPOSIT)
+        reason = grove_main._deposit_reason_for_lines(self.env, [(self.seed_a, 1.0), (castanea, 1.0)], "ship", TODAY)
+        self.assertNotEqual(reason, "seed")
+        self.assertEqual(grove_main._order_handling_fee(self.env, order), grove_main._shipping_handling_fee(self.env))
+        # A tree-only order is not seed either.
+        self.assertFalse(grove_main._order_is_seed(self._order_with([castanea])))
+
+    def test_seed_only_order_is_seed_and_pays_no_handling(self):
+        order = self._order_with([self.seed_a, self.seed_c])
+        self.assertTrue(grove_main._order_is_seed(order))
+        self.assertEqual(grove_main._order_handling_fee(self.env, order), 0.0)
+
     @mute_logger("odoo.addons.grove_headless.controllers.main")
     def test_two_harvest_years_refused(self):
         order, error = self._create(self._payload([self.seed_a, self.seed_rolled], state="GA"))

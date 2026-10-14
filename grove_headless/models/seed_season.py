@@ -55,6 +55,21 @@ def seed_cart_refusal(tiers, harvest_years) -> str | None:
     return None
 
 
+def is_seed_only(tiers) -> bool:
+    """True only when EVERY real line in a cart is seed tier (GOL-3257
+    fail-closed gate), pure so it unit-tests without a DB.
+
+    ``tiers`` is an iterable of the effective shipping tiers of the cart's real
+    lines (qty > 0, no shipping/reward/service lines). An empty cart, a cart
+    with any non-seed tier, or a line with no tier at all is NOT a seed order,
+    so nothing can ride the seed bypass (green-list skip, compliance carve-out,
+    no shipping line, $1 deposit, no handling fee) by slipping one seed line
+    into a tree cart.
+    """
+    tiers = list(tiers)
+    return bool(tiers) and all(t == "seed" for t in tiers)
+
+
 def seed_cart_harvest_year(harvest_years) -> int | None:
     """The single harvest year a seed cart resolves to (GOL-3257, Josh
     2026-10-13), pure so it unit-tests without a DB.
