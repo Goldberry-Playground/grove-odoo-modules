@@ -32,6 +32,7 @@ Two modes:
 
 Exit non-zero on any failure.
 """
+
 import glob
 import json
 import os
@@ -53,6 +54,7 @@ def _wf_dir(root):
 
 def _manifest(root):
     return os.path.join(root, ".github", "required-checks.json")
+
 
 # A quoted string literal following a `context:` key — how a commit status is
 # named when posted via the statuses API (github-script
@@ -131,8 +133,9 @@ def merge_group_unsafe_jobs(jobs):
     """Set of job ids that will NOT report on merge_group: their own `if:`
     excludes it, OR they `needs:` a job that is itself skipped on merge_group
     (a skipped dependency skips the dependent). Computed to a fixpoint."""
-    unsafe = {jid for jid, j in jobs.items()
-              if if_excludes_merge_group((j or {}).get("if") if isinstance(j, dict) else None)}
+    unsafe = {
+        jid for jid, j in jobs.items() if if_excludes_merge_group((j or {}).get("if") if isinstance(j, dict) else None)
+    }
     changed = True
     while changed:
         changed = False
@@ -157,8 +160,7 @@ def load_workflows(root=ROOT):
     names and declared `needs:`), used by the needs-closure invariant."""
     out = []
     wf_dir = _wf_dir(root)
-    paths = sorted(glob.glob(os.path.join(wf_dir, "*.yml")) +
-                   glob.glob(os.path.join(wf_dir, "*.yaml")))
+    paths = sorted(glob.glob(os.path.join(wf_dir, "*.yml")) + glob.glob(os.path.join(wf_dir, "*.yaml")))
     for path in paths:
         with open(path) as f:
             raw = f.read()
@@ -179,19 +181,19 @@ def load_workflows(root=ROOT):
         graph = {}
         for job_id, job in jobs.items():
             ctx = job_context_names(job_id, job)
-            meta = contexts.setdefault(ctx, {"templated": ("${{" in ctx),
-                                             "mg_safe": True, "job_ids": []})
+            meta = contexts.setdefault(ctx, {"templated": ("${{" in ctx), "mg_safe": True, "job_ids": []})
             meta["mg_safe"] = meta["mg_safe"] and (job_id not in unsafe)
             meta["job_ids"].append(job_id)
-            graph[job_id] = {"ctx": ctx, "needs": _needs_of(job),
-                             "always": runs_despite_upstream(
-                                 job.get("if") if isinstance(job, dict) else None)}
+            graph[job_id] = {
+                "ctx": ctx,
+                "needs": _needs_of(job),
+                "always": runs_despite_upstream(job.get("if") if isinstance(job, dict) else None),
+            }
         # Commit-status contexts posted via the statuses API (not job names). We
         # cannot tie these to a job, so assume mg_safe (conservative — avoids a
         # false failure on a status that does report) and no `needs:` edges.
         for _q, ctx in STATUS_CTX_RE.findall(raw):
-            contexts.setdefault(ctx, {"templated": ("${{" in ctx),
-                                      "mg_safe": True, "job_ids": []})
+            contexts.setdefault(ctx, {"templated": ("${{" in ctx), "mg_safe": True, "job_ids": []})
         out.append((path, mg, contexts, graph))
     return out
 
@@ -224,7 +226,7 @@ def needs_closure_gaps(required, workflows):
     req = set(required)
     gaps = []
     for ctx in required:
-        for (path, _mg, contexts, graph) in workflows:
+        for path, _mg, contexts, graph in workflows:
             if ctx not in contexts:
                 continue
             for producer in contexts[ctx]["job_ids"]:
@@ -270,26 +272,32 @@ def static_audit(root=ROOT):
     workflows = load_workflows(root)
 
     failures = []
-    print(f"Auditing {len(required)} required context(s) against "
-          f"{len(workflows)} workflow(s):\n")
+    print(f"Auditing {len(required)} required context(s) against {len(workflows)} workflow(s):\n")
     for ctx in required:
         producers = [(path, mg, ctxs[ctx]) for (path, mg, ctxs, _g) in workflows if ctx in ctxs]
         if not producers:
             # Also flag templated names that *might* match, to avoid a false miss.
-            templated = [path for (path, _mg, ctxs, _g) in workflows
-                         for name, meta in ctxs.items() if meta["templated"]]
-            hint = (f" (workflows with templated job/status names that may produce "
-                    f"it: {sorted(set(templated))})") if templated else ""
-            failures.append(f"required check '{ctx}' is produced by NO workflow "
-                            f"job or status — renamed or removed?{hint}")
+            templated = [
+                path for (path, _mg, ctxs, _g) in workflows for name, meta in ctxs.items() if meta["templated"]
+            ]
+            hint = (
+                (f" (workflows with templated job/status names that may produce it: {sorted(set(templated))})")
+                if templated
+                else ""
+            )
+            failures.append(
+                f"required check '{ctx}' is produced by NO workflow job or status — renamed or removed?{hint}"
+            )
             print(f"  ✗ {ctx!r}: no producing workflow found")
             continue
         on_mg = [p for (p, mg, _m) in producers if mg]
         if not on_mg:
             paths = ", ".join(os.path.basename(p) for (p, _mg, _m) in producers)
-            failures.append(f"required check '{ctx}' is PR-only — its workflow(s) "
-                            f"[{paths}] do not trigger on `merge_group`; the merge "
-                            f"queue will wedge. Add `merge_group:` to `on:`.")
+            failures.append(
+                f"required check '{ctx}' is PR-only — its workflow(s) "
+                f"[{paths}] do not trigger on `merge_group`; the merge "
+                f"queue will wedge. Add `merge_group:` to `on:`."
+            )
             print(f"  ✗ {ctx!r}: produced by [{paths}] but none trigger on merge_group")
             continue
         # Workflow triggers on merge_group — but is the producing JOB actually
@@ -297,11 +305,13 @@ def static_audit(root=ROOT):
         safe_mg = [p for (p, mg, meta) in producers if mg and meta["mg_safe"]]
         if not safe_mg:
             paths = ", ".join(os.path.basename(p) for (p, mg, _m) in producers if mg)
-            failures.append(f"required check '{ctx}' is skipped on `merge_group` — "
-                            f"its job in [{paths}] is gated by an `if:` that excludes "
-                            f"merge_group (or `needs:` a job that is), so it never "
-                            f"reports and the merge queue will wedge. Make the job "
-                            f"run unconditionally on merge_group before requiring it.")
+            failures.append(
+                f"required check '{ctx}' is skipped on `merge_group` — "
+                f"its job in [{paths}] is gated by an `if:` that excludes "
+                f"merge_group (or `needs:` a job that is), so it never "
+                f"reports and the merge queue will wedge. Make the job "
+                f"run unconditionally on merge_group before requiring it."
+            )
             print(f"  ✗ {ctx!r}: produced by [{paths}] on merge_group but the job is skipped there")
             continue
         print(f"  ✓ {ctx!r}: {os.path.basename(safe_mg[0])} triggers on merge_group")
@@ -309,40 +319,56 @@ def static_audit(root=ROOT):
     # Needs-closure invariant (GOL-3360): every upstream of a required job must
     # itself be required, else a red upstream skips the dependent and the
     # skipped check satisfies the gate.
-    print(f"\nNeeds-closure: every `needs:` upstream of a required job must itself "
-          f"be required:\n")
+    print("\nNeeds-closure: every `needs:` upstream of a required job must itself be required:\n")
     gaps = needs_closure_gaps(required, workflows)
     gapped = set()
-    for (ctx, path, producer, dep, dep_ctx) in gaps:
+    for ctx, path, producer, dep, dep_ctx in gaps:
         wf = os.path.basename(path)
         gapped.add(ctx)
         if dep_ctx is None:
-            failures.append(f"required check '{ctx}' ({wf} job `{producer}`) has "
-                            f"`needs: {dep}` but no job with id `{dep}` exists in "
-                            f"{wf} — the edge cannot be audited; fix the job id.")
+            failures.append(
+                f"required check '{ctx}' ({wf} job `{producer}`) has "
+                f"`needs: {dep}` but no job with id `{dep}` exists in "
+                f"{wf} — the edge cannot be audited; fix the job id."
+            )
             print(f"  ✗ {ctx!r}: needs unknown job id `{dep}` in {wf}")
             continue
-        failures.append(f"required check '{ctx}' ({wf} job `{producer}`) transitively "
-                        f"needs job `{dep}` = '{dep_ctx}', which is NOT a required "
-                        f"check. A red '{dep_ctx}' SKIPS '{ctx}', and a skipped job "
-                        f"satisfies branch protection, so the merge gate would observe "
-                        f"neither failure (needs-closure invariant, GOL-3360). Either "
-                        f"add '{dep_ctx}' to required_contexts (and live protection, "
-                        f"in lockstep) or remove it from `needs:`.")
+        failures.append(
+            f"required check '{ctx}' ({wf} job `{producer}`) transitively "
+            f"needs job `{dep}` = '{dep_ctx}', which is NOT a required "
+            f"check. A red '{dep_ctx}' SKIPS '{ctx}', and a skipped job "
+            f"satisfies branch protection, so the merge gate would observe "
+            f"neither failure (needs-closure invariant, GOL-3360). Either "
+            f"add '{dep_ctx}' to required_contexts (and live protection, "
+            f"in lockstep) or remove it from `needs:`."
+        )
         print(f"  ✗ {ctx!r}: needs `{dep}` = {dep_ctx!r}, which is not required")
     for ctx in required:
         if ctx in gapped:
             continue
-        always_gate = [j for (_p, _mg, ctxs, graph) in workflows if ctx in ctxs
-                       for j in ctxs[ctx]["job_ids"] if graph[j]["always"] and graph[j]["needs"]]
-        deps = sorted({graph[d]["ctx"]
-                       for (_p, _mg, ctxs, graph) in workflows if ctx in ctxs
-                       for j in ctxs[ctx]["job_ids"] if not graph[j]["always"]
-                       for d in _transitive_needs(graph, j)
-                       if d in graph})
+        always_gate = [
+            j
+            for (_p, _mg, ctxs, graph) in workflows
+            if ctx in ctxs
+            for j in ctxs[ctx]["job_ids"]
+            if graph[j]["always"] and graph[j]["needs"]
+        ]
+        deps = sorted(
+            {
+                graph[d]["ctx"]
+                for (_p, _mg, ctxs, graph) in workflows
+                if ctx in ctxs
+                for j in ctxs[ctx]["job_ids"]
+                if not graph[j]["always"]
+                for d in _transitive_needs(graph, j)
+                if d in graph
+            }
+        )
         if always_gate:
-            print(f"  ✓ {ctx!r}: gate job `{always_gate[0]}` runs with always()/!cancelled() "
-                  f"and judges its upstreams itself")
+            print(
+                f"  ✓ {ctx!r}: gate job `{always_gate[0]}` runs with always()/!cancelled() "
+                f"and judges its upstreams itself"
+            )
         elif deps:
             print(f"  ✓ {ctx!r}: needs {deps}, all required")
         else:
@@ -352,12 +378,16 @@ def static_audit(root=ROOT):
     if failures:
         for msg in failures:
             print(f"::error::{msg}")
-        print(f"\nFAIL: {len(failures)} required-check problem(s): a required check "
-              f"would not report on the merge queue, or a required job depends on "
-              f"a non-required one.")
+        print(
+            f"\nFAIL: {len(failures)} required-check problem(s): a required check "
+            f"would not report on the merge queue, or a required job depends on "
+            f"a non-required one."
+        )
         return 1
-    print("PASS: every required check reports on `merge_group`, and every "
-          "`needs:` upstream of a required job is itself required.")
+    print(
+        "PASS: every required check reports on `merge_group`, and every "
+        "`needs:` upstream of a required job is itself required."
+    )
     return 0
 
 
@@ -365,11 +395,15 @@ def _api_get(url, token):
     """GET a GitHub API URL. Returns (data, None) or (None, http_status)."""
     import urllib.error
     import urllib.request
-    req = urllib.request.Request(url, headers={
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/vnd.github+json",
-        "X-GitHub-Api-Version": "2022-11-28",
-    })
+
+    req = urllib.request.Request(
+        url,
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.load(resp), None
@@ -394,8 +428,8 @@ def reconcile(root=ROOT):
 
     # 1) Classic branch protection required status checks.
     prot, err = _api_get(
-        f"https://api.github.com/repos/{repo}/branches/{branch}"
-        f"/protection/required_status_checks", token)
+        f"https://api.github.com/repos/{repo}/branches/{branch}/protection/required_status_checks", token
+    )
     if prot is not None:
         sources += 1
         for c in prot.get("checks", []):
@@ -406,8 +440,7 @@ def reconcile(root=ROOT):
     # that is a legitimate empty source, not an auth failure.
 
     # 2) Ruleset-based required status checks effective on the branch.
-    rules, err = _api_get(
-        f"https://api.github.com/repos/{repo}/rules/branches/{branch}", token)
+    rules, err = _api_get(f"https://api.github.com/repos/{repo}/rules/branches/{branch}", token)
     if rules is not None:
         sources += 1
         if isinstance(rules, list):
@@ -438,19 +471,23 @@ def reconcile(root=ROOT):
         # opt-out: the default GITHUB_TOKEN provably cannot read classic branch
         # protection, so soft-skip with a notice.
         if os.environ.get("REQUIRED_CHECKS_ADMIN_TOKEN_SET") == "true":
-            print(f"::error::--reconcile FAILED: REQUIRED_CHECKS_ADMIN_TOKEN is set "
-                  f"but was rejected (401/403) reading branch-protection / rulesets "
-                  f"on {repo}@{branch}. The credential is present but under-scoped or "
-                  f"expired — grant it fine-grained Administration: read (or a classic "
-                  f"token with `repo` scope + admin) so the live drift check can run. "
-                  f"Refusing to soft-skip a present-but-insufficient token.")
+            print(
+                f"::error::--reconcile FAILED: REQUIRED_CHECKS_ADMIN_TOKEN is set "
+                f"but was rejected (401/403) reading branch-protection / rulesets "
+                f"on {repo}@{branch}. The credential is present but under-scoped or "
+                f"expired — grant it fine-grained Administration: read (or a classic "
+                f"token with `repo` scope + admin) so the live drift check can run. "
+                f"Refusing to soft-skip a present-but-insufficient token."
+            )
             return 1
-        print(f"::warning::--reconcile skipped: no REQUIRED_CHECKS_ADMIN_TOKEN "
-              f"provisioned; the default GITHUB_TOKEN cannot read branch-protection "
-              f"on {repo}@{branch}. Provision an admin-scoped "
-              f"REQUIRED_CHECKS_ADMIN_TOKEN secret (fine-grained: Administration "
-              f"read) to enable the live drift check; the static audit above still "
-              f"gates.")
+        print(
+            f"::warning::--reconcile skipped: no REQUIRED_CHECKS_ADMIN_TOKEN "
+            f"provisioned; the default GITHUB_TOKEN cannot read branch-protection "
+            f"on {repo}@{branch}. Provision an admin-scoped "
+            f"REQUIRED_CHECKS_ADMIN_TOKEN secret (fine-grained: Administration "
+            f"read) to enable the live drift check; the static audit above still "
+            f"gates."
+        )
         return 0
 
     live = sorted(live)
@@ -458,8 +495,10 @@ def reconcile(root=ROOT):
         print(f"PASS: required-checks.json matches live required checks: {live}")
         return 0
     print(f"::error::required-checks.json drift — declared={declared} live={live}")
-    print("Update .github/required-checks.json to match, then re-run the static "
-          "audit so the new checks are verified against merge_group.")
+    print(
+        "Update .github/required-checks.json to match, then re-run the static "
+        "audit so the new checks are verified against merge_group."
+    )
     return 1
 
 

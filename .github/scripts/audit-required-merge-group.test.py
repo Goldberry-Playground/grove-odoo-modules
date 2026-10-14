@@ -11,18 +11,19 @@ from a required job to a NON-required job must fail the audit with the exact
 upstream job named, and the real odoocker shape (smoke test gated behind five
 cheap jobs that are all required) must pass.
 """
+
 import contextlib
 import importlib.util
 import io
 import json
 import os
-import sys
 import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 _spec = importlib.util.spec_from_file_location(
-    "audit_required_merge_group", os.path.join(HERE, "audit-required-merge-group.py"))
+    "audit_required_merge_group", os.path.join(HERE, "audit-required-merge-group.py")
+)
 audit = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(audit)
 
@@ -99,9 +100,12 @@ class NeedsClosure(unittest.TestCase):
     def test_odoocker_shape_passes_when_every_upstream_is_required(self):
         rc, out = run_audit({"ci.yml": ODOOCKER_CI}, ODOOCKER_REQUIRED)
         self.assertEqual(rc, 0, out)
-        self.assertIn("'Backend stack smoke test': needs ['Lint Python (Odoo Modules)', "
-                      "'Reject tracked .env files', 'Validate Docker Compose (Grove)', "
-                      "'actionlint (all workflows)', 'shellcheck (scripts/)'], all required", out)
+        self.assertIn(
+            "'Backend stack smoke test': needs ['Lint Python (Odoo Modules)', "
+            "'Reject tracked .env files', 'Validate Docker Compose (Grove)', "
+            "'actionlint (all workflows)', 'shellcheck (scripts/)'], all required",
+            out,
+        )
         self.assertIn("PASS", out)
 
     def test_synthetic_needs_on_non_required_job_fails_naming_it(self):
@@ -109,13 +113,17 @@ class NeedsClosure(unittest.TestCase):
         # audit must fail and name the exact upstream job (id AND context).
         ci = ODOOCKER_CI.replace(
             "needs: [actionlint, shellcheck, no-tracked-env-files, lint-python, validate-compose]",
-            "needs: [actionlint, shellcheck, no-tracked-env-files, lint-python, validate-compose, ssh-payload-escaping]")
+            "needs: [actionlint, shellcheck, no-tracked-env-files, lint-python, validate-compose, ssh-payload-escaping]",
+        )
         rc, out = run_audit({"ci.yml": ci}, ODOOCKER_REQUIRED)
         self.assertEqual(rc, 1, out)
         self.assertIn("needs `ssh-payload-escaping` = 'ssh payload render guard', which is not required", out)
-        self.assertIn("::error::required check 'Backend stack smoke test' (ci.yml job `stack-smoke-test`) "
-                      "transitively needs job `ssh-payload-escaping` = 'ssh payload render guard', "
-                      "which is NOT a required check", out)
+        self.assertIn(
+            "::error::required check 'Backend stack smoke test' (ci.yml job `stack-smoke-test`) "
+            "transitively needs job `ssh-payload-escaping` = 'ssh payload render guard', "
+            "which is NOT a required check",
+            out,
+        )
         # Promoting the upstream closes the gap — the fix the message prescribes.
         rc2, out2 = run_audit({"ci.yml": ci}, ODOOCKER_REQUIRED + ["ssh payload render guard"])
         self.assertEqual(rc2, 0, out2)
@@ -167,7 +175,7 @@ jobs:
     steps: [{run: "true"}]
 """
         rc, out = run_audit({"ci.yml": ci}, ["Lint", "Build"])
-        self.assertEqual(rc, 0, out)                      # string-form needs, closed
+        self.assertEqual(rc, 0, out)  # string-form needs, closed
         rc, out = run_audit({"ci.yml": ci}, ["Lint", "Build", "Deploy check"])
         self.assertEqual(rc, 1, out)
         self.assertIn("has `needs: does-not-exist` but no job with id `does-not-exist` exists in ci.yml", out)
@@ -206,7 +214,9 @@ jobs:
         rc, out = run_audit({"g.yml": gate.replace("GATE_IF", "github.event_name != 'push'")}, ["prod-plan-guard"])
         self.assertEqual(rc, 1, out)
         self.assertIn("needs `detect` = 'detect prod TF changes', which is not required", out)
-        self.assertIn("needs `prod-plan` = 'Prod plan must not destroy or replace a live resource', which is not required", out)
+        self.assertIn(
+            "needs `prod-plan` = 'Prod plan must not destroy or replace a live resource', which is not required", out
+        )
 
     def test_walk_stops_at_required_always_job(self):
         # A (required, plain) -> B (required, always()) -> C (non-required).
