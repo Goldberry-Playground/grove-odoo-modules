@@ -6,8 +6,9 @@
 #   ruff format --check . --line-length 120         (write here)
 # Non-mechanical failures leave no diff and stay red for the CI failure router
 # to escalate. See grove-sites ci-autofix.yml for the full rationale, the
-# `pull_request` (not `workflow_run`) security reasoning, and the GITHUB_TOKEN
-# re-trigger limitation (identical here).
+# `pull_request` (not `workflow_run`) security reasoning, and the App-token
+# push that re-triggers the required contexts on the autofix head (GOL-3337,
+# identical here).
 #
 # Guardrails: same-repo agent-authored PRs only; one autofix commit per push
 # (skips if the head commit is already a "[ci-autofix]" commit); no-op on a
@@ -38,6 +39,9 @@ jobs:
         with:
           ref: ${{ github.head_ref }}
           fetch-depth: 2
+          # The push step supplies its own credential (GOL-3337); do not leave the
+          # GITHUB_TOKEN in .git/config while the PR's own tooling runs.
+          persist-credentials: false
 
       - name: Gate (agent author + loop guard)
         id: gate
@@ -75,10 +79,33 @@ jobs:
           ruff check . --select E,F,I --line-length 120 --fix || true
           ruff format . --line-length 120 || true
 
+      # GOL-3337: GitHub dispatches NO workflows for pushes made with the automatic
+      # GITHUB_TOKEN, so an autofix pushed that way left the PR with zero check-runs
+      # on the new head until a human pushed an empty commit. Pushing as the agent
+      # App (same org pair auto-approve.yml uses for the merge-queue enqueue,
+      # GOL-2524) is a normal collaborator push: pull_request `synchronize` fires
+      # and the required contexts start on the autofix head. Unset pair -> step
+      # skipped -> GITHUB_TOKEN fallback (today's behaviour), never red.
+      - name: Mint push identity (agent App)
+        id: push-identity
+        if: steps.gate.outputs.proceed == 'true' && vars.MERGE_QUEUE_APP_CLIENT_ID != ''
+        # Fail-safe: a broken pair must not turn this context red. On failure the
+        # token output is empty and the push step falls back to GITHUB_TOKEN with
+        # a ::warning:: annotation.
+        continue-on-error: true
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.MERGE_QUEUE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.MERGE_QUEUE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
       - name: Commit & push one fix commit (or skip if clean)
         if: steps.gate.outputs.proceed == 'true'
         env:
           HEAD_REF: ${{ github.head_ref }}
+          # App token when minted above, else the default token (GOL-3337).
+          PUSH_TOKEN: ${{ steps.push-identity.outputs.token || secrets.GITHUB_TOKEN }}
+          APP_PUSH: ${{ steps.push-identity.outputs.token != '' }}
         run: |
           set -euo pipefail
           git config user.name "github-actions[bot]"
@@ -92,5 +119,14 @@ jobs:
             -m "chore(ci): apply mechanical ruff lint/format fixes [ci-autofix]" \
             -m "Automated bounded self-heal for an agent PR. One commit per push (GOL-308)." \
             -m "Co-authored-by: Paperclip <noreply@paperclip.ing>"
-          git push origin "HEAD:$HEAD_REF"
-          echo "::notice::Pushed one [ci-autofix] commit to $HEAD_REF. NOTE: GITHUB_TOKEN pushes do not re-trigger pull_request checks — the next agent push or a maintainer 'Re-run' will re-validate."
+          # Push with an explicit credential (checkout persisted none). An App-token
+          # push re-triggers pull_request checks; a GITHUB_TOKEN push does not.
+          AUTH_B64=$(printf '%s' "x-access-token:${PUSH_TOKEN}" | base64 -w0)
+          echo "::add-mask::${AUTH_B64}"
+          git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic ${AUTH_B64}" \
+            push origin "HEAD:$HEAD_REF"
+          if [ "$APP_PUSH" = "true" ]; then
+            echo "::notice::Pushed one [ci-autofix] commit to $HEAD_REF as the agent App; pull_request checks re-run on the new head (GOL-3337)."
+          else
+            echo "::warning::Pushed one [ci-autofix] commit to $HEAD_REF with GITHUB_TOKEN; GitHub will NOT re-run pull_request checks on it. Set org vars.MERGE_QUEUE_APP_CLIENT_ID + secrets.MERGE_QUEUE_APP_PRIVATE_KEY (GOL-2524 / GOL-3337) or push an empty commit to re-trigger."
+          fi
