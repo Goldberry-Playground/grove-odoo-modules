@@ -179,6 +179,19 @@ class TestShippingZoneEngineContract(unittest.TestCase):
     def test_bareroot_has_no_unshippable_reason(self):
         self.assertIsNone(sz.unshippable_reason([("bareroot", 20, 3)]))
 
+    def test_seed_line_is_skipped_not_blocked(self):
+        # Seed pre-orders (GOL-3257) are not quoted at checkout — a seed line is
+        # SKIPPED by packing, not routed through the non-shippable block seam.
+        self.assertIn("seed", sz.TIERS)
+        self.assertNotIn("seed", sz.SHIPPABLE_TIERS)
+        self.assertIsNone(sz.unshippable_reason([("seed", 0, 2)]))
+
+    def test_seed_line_contributes_no_shipping(self):
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+            bareroot_only = sz.compute_order_shipping("WV", [("bareroot", 20, 1)], "leafed")
+            with_seed = sz.compute_order_shipping("WV", [("bareroot", 20, 1), ("seed", 0, 5)], "leafed")
+            self.assertEqual(with_seed, bareroot_only)
+
     def test_zero_qty_potted_line_is_ignored(self):
         self.assertIsNone(sz.unshippable_reason([("potted", 20, 0), ("bareroot", 20, 1)]))
 
@@ -445,6 +458,87 @@ class TestFullNameShippingRouting(unittest.TestCase):
         # so it correctly returns None (no guessed charge) — the fail-safe holds.
         with _temp_table({"WV": "zone_1"}, self.TABLE):
             self.assertIsNone(sz.compute_order_shipping("Ohio", [("bareroot", 20, 1)], "leafed"))
+
+
+class TestSeedShipStates(unittest.TestCase):
+    """Seeds ship to every US state + DC except HI/AK (GOL-3257, Josh 2026-10-13).
+    Deliberately independent of sz.SEED_SHIP_STATES so an accidental edit to the
+    module constant is caught."""
+
+    # 48 contiguous states + DC = 49 (50 states - HI - AK + DC).
+    EXPECTED = frozenset(
+        {
+            "AL",
+            "AZ",
+            "AR",
+            "CA",
+            "CO",
+            "CT",
+            "DE",
+            "DC",
+            "FL",
+            "GA",
+            "ID",
+            "IL",
+            "IN",
+            "IA",
+            "KS",
+            "KY",
+            "LA",
+            "ME",
+            "MD",
+            "MA",
+            "MI",
+            "MN",
+            "MS",
+            "MO",
+            "MT",
+            "NE",
+            "NV",
+            "NH",
+            "NJ",
+            "NM",
+            "NY",
+            "NC",
+            "ND",
+            "OH",
+            "OK",
+            "OR",
+            "PA",
+            "RI",
+            "SC",
+            "SD",
+            "TN",
+            "TX",
+            "UT",
+            "VT",
+            "VA",
+            "WA",
+            "WV",
+            "WI",
+            "WY",
+        }
+    )
+
+    def test_exact_membership(self):
+        self.assertEqual(sz.SEED_SHIP_STATES, self.EXPECTED)
+
+    def test_count_is_49(self):
+        self.assertEqual(len(sz.SEED_SHIP_STATES), 49)
+
+    def test_excludes_hawaii_and_alaska(self):
+        self.assertNotIn("HI", sz.SEED_SHIP_STATES)
+        self.assertNotIn("AK", sz.SEED_SHIP_STATES)
+        self.assertEqual(sz.SEED_SHIP_EXCLUDED_STATES, frozenset({"HI", "AK"}))
+
+    def test_excludes_territories(self):
+        for terr in ("PR", "VI", "GU", "AS", "MP"):
+            self.assertNotIn(terr, sz.SEED_SHIP_STATES)
+
+    def test_wider_than_the_green_list(self):
+        # Seeds reach far more of the country than live trees.
+        self.assertTrue(sz.GREEN_STATES <= sz.SEED_SHIP_STATES)
+        self.assertGreater(len(sz.SEED_SHIP_STATES), len(sz.GREEN_STATES))
 
 
 if __name__ == "__main__":

@@ -13,10 +13,16 @@ class ProductProduct(models.Model):
     # resolved per-variant — the template field alone quotes bareroot pears
     # at potted rates (bug found in the 2026-07-13 design review).
     grove_effective_shipping_tier = fields.Selection(
-        [("bareroot", "Bareroot"), ("potted", "Potted")],
+        [("bareroot", "Bareroot"), ("potted", "Potted"), ("seed", "Seed")],
         compute="_compute_grove_effective_shipping_tier",
         string="Effective Shipping Tier",
     )
+
+    # Pack weight (lb) for a seed pre-order variant's "Pack size" axis value.
+    # Counts against the template's season cap (grove_seed_cap_lb) by pack
+    # weight × qty, and is the per-line weight re-checked at checkout. 0 for
+    # non-seed variants (GOL-3257).
+    grove_seed_pack_lb = fields.Float(string="Seed Pack Weight (lb)")
 
     @api.depends("product_template_variant_value_ids", "product_tmpl_id.grove_shipping_tier")
     def _compute_grove_effective_shipping_tier(self):

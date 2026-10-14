@@ -44,6 +44,16 @@ TAX_CODE_GIFT_CARD = "txcd_10401000"  # Gift card (non-taxable at sale)
 # per-line / per-unit deposit split (GOL-642 / GOL-1036 / GOL-1666).
 PREORDER_DEPOSIT = 10.00  # USD, flat, per ORDER (not per line / per unit)
 
+# Seed pre-order deposit (GOL-3257, Train #3). A seed order — seed nuts sold as
+# a pre-order — takes a $1 flat deposit for the WHOLE order, beside the $10
+# bareroot deposit above. The balance (rest of the pack price + actual label
+# cost + the shipping_handling_fee + tax) settles off-session at ship time on
+# the SAME path the tree pre-orders use (GOL-2053/2895) — no new charge code.
+# Seeds never share a cart with trees (the mixing rule), so an order takes one
+# deposit or the other, never both. The caller picks which via line_charge's
+# `deposit=` argument / the controller's per-order deposit resolver.
+SEED_DEPOSIT = 1.00  # USD, flat, per ORDER
+
 # Reject webhook events whose signed timestamp is more than this many seconds
 # from now — Stripe's recommended default, blunts replay of a captured payload.
 SIG_TOLERANCE = 300

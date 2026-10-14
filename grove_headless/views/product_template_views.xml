@@ -236,6 +236,30 @@
                             </list>
                         </field>
                     </group>
+                    <group
+                        string="Seed pre-orders"
+                        name="grove_seed_preorders"
+                        invisible="grove_shipping_tier != 'seed'"
+                    >
+                        <div class="alert alert-info" role="alert" colspan="2">
+                            Seed nuts sell as a <b>$1 pre-order</b>: the shopper pays $1 at
+                            checkout and the rest of the pack price, the actual label cost, the
+                            handling fee and tax are charged when the order ships. Each seed
+                            product has its own ship window, order-by date and season cap. After
+                            the order-by date <b>or</b> once the cap is reached, the storefront
+                            rolls over to next fall's harvest automatically and tells the shopper.
+                        </div>
+                        <field name="grove_seed_open" />
+                        <field name="grove_seed_ship_start" />
+                        <field name="grove_seed_ship_end" />
+                        <field name="grove_seed_order_by" />
+                        <field name="grove_seed_cap_lb" />
+                        <field name="grove_seed_reserved_lb" />
+                        <div class="text-muted" colspan="2">
+                            Set the per-variant pack weight (lb) on each Pack size variant below;
+                            reserved weight counts pack weight × quantity against the season cap.
+                        </div>
+                    </group>
                     <group string="Storefront Guide" name="grove_guide">
                         <div class="text-muted" colspan="2">
                             The species guide shown on the storefront is the

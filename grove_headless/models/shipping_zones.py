@@ -110,6 +110,20 @@ US_STATES: tuple[str, ...] = (
     "MP",
 )
 
+# The five US territories within US_STATES (everything that is not one of the
+# 50 states or DC). Named so the "50 states + DC" universe can be derived
+# without re-typing it.
+US_TERRITORIES: frozenset[str] = frozenset({"PR", "VI", "GU", "AS", "MP"})
+
+# Seed pre-orders ship to every US state + DC EXCEPT Hawaii and Alaska
+# (GOL-3257, Josh 2026-10-13). Seeds are exempt from the live-plant green-list
+# (the "Castanea seed into FL/WA/OR allowed" ruling), so they reach far more of
+# the country than trees — but not HI/AK, and not the territories (not a
+# "state + DC"). This is the authoritative seed destination universe; the
+# checkout gate refuses anything outside it with a 400.
+SEED_SHIP_EXCLUDED_STATES: frozenset[str] = frozenset({"HI", "AK"})
+SEED_SHIP_STATES: frozenset[str] = frozenset(US_STATES) - US_TERRITORIES - SEED_SHIP_EXCLUDED_STATES
+
 RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 6))
 
 # Product tiers survive v2 as the shippability gate. GOL-2199 potted go-live
@@ -128,8 +142,15 @@ RATE_ZONE_IDS: tuple[str, ...] = tuple(f"zone_{i}" for i in range(1, 6))
 # order with the friendly retry message — potted ship-to carts cannot be
 # under-billed in the window between this flip and the rate-checker's first
 # potted-inclusive table.
-TIERS: tuple[str, ...] = ("bareroot", "potted")
+TIERS: tuple[str, ...] = ("bareroot", "potted", "seed")
 SHIPPABLE_TIERS: frozenset[str] = frozenset({"bareroot", "potted"})
+# Seed pre-orders (GOL-3257) are not quoted at checkout — they pay a $1 deposit
+# and settle the actual label cost at ship time — so seed lines are SKIPPED by
+# box packing and the rate feed entirely, not routed through the fail-closed
+# non-shippable seam the way an unknown future tier is. Seeds also never share a
+# cart with trees (the mixing rule), so a seed line never reaches packing beside
+# a priced line in practice; skipping it is belt-and-braces.
+SKIPPED_TIERS: frozenset[str] = frozenset({"seed"})
 DEFAULT_TIER = "potted"
 
 # Box-geometry authority lives in shipping_boxes; re-exported for callers
@@ -589,6 +610,8 @@ def unshippable_reason(items: list[tuple[str, int, float]]) -> str | None:
         if float(qty) <= 0:
             continue
         tier_key = tier if tier in TIERS else DEFAULT_TIER
+        if tier_key in SKIPPED_TIERS:
+            continue
         if tier_key not in SHIPPABLE_TIERS:
             return (
                 f"{tier_key.capitalize()} trees are available for farm pickup only — "
@@ -624,6 +647,8 @@ def pack_for_state(state: str, items: list[tuple[str, int, float]], mode: str):
         if float(qty) <= 0:
             continue
         tier_key = tier if tier in TIERS else DEFAULT_TIER
+        if tier_key in SKIPPED_TIERS:
+            continue
         if tier_key == "potted":
             potted_units += qty
         else:
