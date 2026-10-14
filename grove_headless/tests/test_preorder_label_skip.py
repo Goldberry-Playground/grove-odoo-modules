@@ -19,9 +19,11 @@ live default tax in the minimal chartless CI database (see tests/common.py).
 """
 
 import os
+from datetime import date
 from types import SimpleNamespace
 from unittest.mock import patch
 
+from odoo import fields
 from odoo.addons.grove_headless.models import sale_order as sale_order_module
 from odoo.addons.grove_headless.models import shippo_client
 from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
@@ -154,3 +156,144 @@ class TestPreorderLabelSkip(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_delivery_status, "label_purchased")
         # Watermark advanced onto the ship path (legal from wave_assigned).
         self.assertEqual(order.grove_fulfillment_stage, "label_purchased")
+
+
+@tagged("post_install", "-at_install")
+class TestPreorderWaveLabelGate(GroveTaxFixtureMixin, TransactionCase):
+    """The stored wave (not the Oct 15 cutover) decides when a pre-order label
+    may be bought: held until today is inside THAT wave's ship window for the
+    order's zone. Zone 6 default windows: fall Nov 1-Dec 15, spring Mar 1-Apr 15
+    style; dates pinned via context_today."""
+
+    def setUp(self):
+        super().setUp()
+        self.company = self.env.ref("base.main_company")
+        self.partner = self.env["res.partner"].create(
+            {
+                "name": "Wave Gate",
+                "street": "1 Grove Way",
+                "city": "Summersville",
+                "zip": "26651",
+                "email": "w@example.com",
+            }
+        )
+        self.product = self.env["product.product"].create(
+            {
+                "name": "Wave Gate Tree",
+                "type": "consu",
+                "list_price": 40.0,
+                "grove_shipping_tier": "bareroot",
+                "grove_tree_length": "20",
+            }
+        )
+
+    def _order(self, wave):
+        order = (
+            self.env["sale.order"]
+            .with_company(self.company)
+            .create(
+                {
+                    "partner_id": self.partner.id,
+                    "company_id": self.company.id,
+                    "date_order": "2026-10-07 12:00:00",
+                    "grove_fulfillment": "ship",
+                    "order_line": [(0, 0, {"product_id": self.product.id, "product_uom_qty": 1.0, "price_unit": 40.0})],
+                }
+            )
+        )
+        order.grove_preorder_variant_ids = str(self.product.id)
+        if wave:
+            order.grove_ship_wave = wave
+        return order
+
+    def _pack(self, order, today):
+        with (
+            patch.object(fields.Date, "context_today", return_value=today),
+            patch.object(sale_order_module, "pack_for_state", return_value=[SimpleNamespace(box_id="BR_S", count=1)]),
+            patch.object(sale_order_module, "unshippable_reason", return_value=None),
+            patch.object(sale_order_module, "can_ship_bareroot", return_value=True),
+        ):
+            return order._grove_pack_for_label()
+
+    def test_zone_is_six(self):
+        self.assertEqual(self._order("spring").grove_usda_zone, "6")
+
+    def test_spring_wave_order_held_inside_fall_window(self):
+        order = self._order("spring")
+        with self.assertRaisesRegex(UserError, "spring wave"):
+            self._pack(order, date(2026, 11, 15))
+
+    def test_spring_wave_order_held_in_october(self):
+        order = self._order("spring")
+        with self.assertRaisesRegex(UserError, "spring wave"):
+            self._pack(order, date(2026, 10, 10))
+
+    def test_wave_assigned_stage_rule_still_packs(self):
+        order = self._order("fall")
+        order.grove_fulfillment_state = "deposit_paid"
+        order.action_grove_assign_wave("2026-fall")
+        _a, plan, _m = self._pack(order, date(2026, 11, 15))
+        self.assertTrue(plan)
+
+    def test_order_without_wave_keeps_legacy_behaviour(self):
+        order = self._order(False)
+        # Legacy: preorder lines are excluded (not wave_assigned) -> no shippable lines,
+        # NOT the new wave hold.
+        with self.assertRaisesRegex(UserError, "no shippable lines"):
+            self._pack(order, date(2026, 11, 15))
+
+    def test_email_season_prefers_stored_wave(self):
+        """Placed Oct 7 in zone 6 the date recompute says fall; the chosen
+        spring wave must win so the email says "this spring"."""
+        from odoo.addons.grove_headless.controllers import main as grove_main
+        from odoo.addons.grove_headless.models.preorder_email import preship_balance_line
+
+        order = self._order("spring")
+        self.assertEqual(grove_main._preorder_ship_season(self.env, order), "spring")
+        self.assertIn("this spring", preship_balance_line(grove_main._preorder_ship_season(self.env, order)))
+        # No stored wave: unchanged date-based recompute (still a season string).
+        self.assertIn(grove_main._preorder_ship_season(self.env, self._order(False)), ("spring", "fall", None))
+
+    def _pack_dormancy(self, order, today, dormant):
+        with (
+            patch.object(fields.Date, "context_today", return_value=today),
+            patch.object(sale_order_module, "pack_for_state", return_value=[SimpleNamespace(box_id="BR_S", count=1)]),
+            patch.object(sale_order_module, "unshippable_reason", return_value=None),
+            patch.object(sale_order_module, "can_ship_bareroot", return_value=dormant),
+        ):
+            return order._grove_pack_for_label()
+
+    def _assigned(self, wave="fall"):
+        order = self._order(wave)
+        order.grove_fulfillment_state = "deposit_paid"
+        order.action_grove_assign_wave(f"2026-{wave}")
+        return order
+
+    def test_wave_assigned_outside_dormancy_still_refused(self):
+        with self.assertRaisesRegex(UserError, "dormant"):
+            self._pack_dormancy(self._assigned(), date(2026, 10, 20), dormant=False)
+
+    def test_wave_in_window_and_dormant_packs(self):
+        _a, plan, _m = self._pack_dormancy(self._assigned(), date(2026, 11, 15), dormant=True)
+        self.assertTrue(plan)
+
+    def _unassigned_wave_order(self):
+        """Wave set, NOT wave_assigned, non-preorder line: reaches _wave_hold_reason
+        and then the dormancy gate inside _grove_pack_for_label."""
+        order = self._order("fall")
+        order.grove_preorder_variant_ids = False
+        return order
+
+    def test_zoneless_wave_order_outside_dormancy_refused(self):
+        order = self._unassigned_wave_order()
+        order.grove_usda_zone = False
+        self.assertIsNone(order._wave_hold_reason(date(2026, 10, 20)))
+        with self.assertRaisesRegex(UserError, "dormant"):
+            self._pack_dormancy(order, date(2026, 10, 20), dormant=False)
+
+    def test_zone_missing_from_calendar_no_keyerror_dormancy_applies(self):
+        order = self._unassigned_wave_order()
+        with patch.object(sale_order_module, "preorder_waves", side_effect=KeyError(6)):
+            self.assertIsNone(order._wave_hold_reason(date(2026, 10, 20)))
+            with self.assertRaisesRegex(UserError, "dormant"):
+                self._pack_dormancy(order, date(2026, 10, 20), dormant=False)

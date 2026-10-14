@@ -24,6 +24,10 @@ from odoo.tests.common import HttpCase, get_db_name
 from odoo.tools import mute_logger
 from psycopg2 import IntegrityError
 
+# Potted lines only sell May 1 to Oct 15 (checkout season gate), so tests that
+# post default-potted carts pin "today" in season rather than use the real clock.
+_in_season = mock.patch.object(grove_main, "_today_utc", new=lambda: date(2026, 10, 7))
+
 
 @tagged("post_install", "-at_install")
 class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
@@ -539,6 +543,60 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents((order.amount_total or 0.0) - 20.0))
         self.assertFalse(order.grove_stripe_tax_amount)
 
+    def test_settlement_tax_calc_failure_falls_back_and_alerts(self):
+        """GOL-2910: flag ON but the ship-time Stripe Tax calc raises. Settlement
+        still runs on Odoo's own tax (safe — the customer is taxed), but the
+        degraded tax source is made VISIBLE: one Discord alert naming the order
+        and the fallback, plus a chatter note. grove_stripe_tax_amount stays
+        unset so nobody reads the balance as Stripe-computed."""
+        order = self._settleable_order()  # deposit_paid, WV-taxed, $20 deposit
+        captured = {}
+        pings = []
+
+        def fake_pi(secret_key, **kwargs):
+            captured.update(kwargs)
+            return {"id": "pi_fallback", "status": "succeeded"}
+
+        with (
+            mock.patch.object(grove_main, "_stripe_tax_enabled", return_value=True),
+            mock.patch.object(
+                stripe_gateway, "create_tax_calculation", side_effect=stripe_gateway.StripeError("tax calc 500")
+            ),
+            mock.patch.object(stripe_gateway, "create_tax_transaction") as txn,
+            mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
+            mock.patch.object(grove_main, "_notify_discord", side_effect=pings.append),
+            mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
+        ):
+            self.assertEqual(grove_main.settle_order_at_ship(self.env, order), "settled")
+
+        # Fallback balance: Odoo's amount_total less the deposit, no Stripe Tax record.
+        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents((order.amount_total or 0.0) - 20.0))
+        self.assertFalse(order.grove_stripe_tax_amount)
+        txn.assert_not_called()
+        fallback = [m for m in pings if "Stripe Tax FALLBACK" in m]
+        self.assertEqual(len(fallback), 1, pings)
+        self.assertIn(order.name, fallback[0])
+        self.assertIn("tax calc 500", fallback[0])
+        self.assertTrue(
+            any("Stripe Tax calculation failed" in (m.body or "") for m in order.message_ids),
+            "fallback must leave a chatter note on the order",
+        )
+
+    def test_settlement_flag_off_never_raises_fallback_alert(self):
+        """Flag OFF is the designed Odoo-tax path, not a degradation — no alert."""
+        order = self._settleable_order()
+        pings = []
+        with (
+            mock.patch.object(grove_main, "_stripe_tax_enabled", return_value=False),
+            mock.patch.object(
+                stripe_gateway, "create_payment_intent", return_value={"id": "pi_off", "status": "succeeded"}
+            ),
+            mock.patch.object(grove_main, "_notify_discord", side_effect=pings.append),
+            mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
+        ):
+            self.assertEqual(grove_main.settle_order_at_ship(self.env, order), "settled")
+        self.assertFalse([m for m in pings if "FALLBACK" in m], pings)
+
     def test_pickup_deposit_has_no_shipping_line_to_defer(self):
         """A farm-pickup deposit order never had a shipping line; the flat $10
         deposit stands alone."""
@@ -855,6 +913,37 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(discounts[0]["amount_cents"], -stripe_gateway.to_cents(10.0))
         self.assertEqual(discounts[0]["name"], "Discount (FLATWOODS)")
 
+    def test_wave_order_in_stock_pickup_takes_flat_deposit_and_blocks_promo(self):
+        """2026-10-07: an in-stock bareroot order carrying a chosen wave is a
+        pre-order deposit even for pickup before the cutover. The line builder
+        records every variant as a preorder (so grove_preorder_variant_ids and
+        setup_future_usage=off_session follow, as for the other deposit reasons)
+        and the promo gate rejects a code on it."""
+        self._make_bareroot()
+        self._set_stock(self.product, 5)
+        order = self._make_order(qty=2)
+        order.grove_fulfillment = "pickup"
+        self.assertFalse(grove_main._order_takes_deposit(order, self.BEFORE_CUTOVER))
+        order.grove_ship_wave = "fall"
+        line_items, preorder_ids, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER)
+        self.assertEqual([li["kind"] for li in line_items], ["deposit"])
+        self.assertEqual(preorder_ids, [self.product.id])
+        self.assertEqual(charged, stripe_gateway.to_cents(stripe_gateway.PREORDER_DEPOSIT))
+        self.assertTrue(grove_main._cart_has_preorder(self.env, order, None, today=self.BEFORE_CUTOVER))
+
+        self._make_promo_program("TESTPROMO", min_qty=2, amount=10.0)
+        payload = self._cart_payload("WV", fulfillment="pickup", promo_code="TESTPROMO", ship_wave="fall")
+        payload["items"] = [{"variant_id": self.product.id, "quantity": 2}]
+        with (
+            mock.patch.object(grove_main, "_today_utc", return_value=date(2026, 10, 7)),
+            # Wave rules are nursery-only (M1); this class runs on the main company.
+            mock.patch.object(grove_main, "_is_nursery_website", return_value=True),
+        ):
+            rejected, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        self.assertIsNone(rejected)
+        self.assertEqual(error.status_code, 400)
+        self.assertIn("preorder", error.data.decode().lower())
+
     def test_cart_has_preorder_agrees_with_line_builder(self):
         """The promo-gate predicate (_cart_has_preorder) must classify a cart the
         same way the charging path (_build_stripe_line_items) does — a deposit
@@ -1029,9 +1118,15 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         action_buy_shipping_labels fails closed with a loud error before any
         Shippo call, so a mistimed label attempt can never buy a leafed
         (underpriced, ~2x heavier) parcel against the dormant-priced table. Such
-        an order is a preorder that ships in the next dormant wave."""
+        an order is a preorder that ships in the next dormant wave.
+
+        GOL-2895 (Josh ruling 2026-10-02) relaxed this for orders placed ON OR
+        BEFORE the season cutover (they ship now as peat-and-bagged); the label
+        gate now only fails closed for an order placed AFTER the cutover, so pin
+        the order date past it to keep exercising the still-valid block."""
         self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
         order = self._make_order(qty=2)
+        order.date_order = "2026-11-20 12:00:00"  # after the Oct 15 cutover → held for the dormant wave
         with (
             mock.patch.dict("os.environ", {"SHIPPO_API_KEY": "shippo_test"}, clear=False),
             mock.patch.object(grove_sale_order, "can_ship_bareroot", return_value=False),
@@ -1055,6 +1150,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         payload.update(extra)
         return payload
 
+    @_in_season
     def test_state_gate_rejects_non_green_destination(self):
         """Defect 1: an unsupported ship-to state is rejected server-side at
         session creation, before any payment. Fixture state = CA (permanently
@@ -1076,6 +1172,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(error.status_code, 409)
         self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
 
+    @_in_season
     def test_potted_ship_order_clears_gate_and_fails_safe_without_rates(self):
         """GOL-2199 potted go-live: a potted SHIP order is no longer 400-blocked
         at the unshippable gate. When no potted shipping charge can be resolved
@@ -1093,6 +1190,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertIn("couldn't calculate shipping", error.data.decode().lower())
         self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
 
+    @_in_season
     def test_potted_ship_order_proceeds_once_shipping_prices(self):
         """GOL-2199: with a potted shipping charge resolvable (rate table carries
         the potted boxes), a potted ship-to order passes the whole ship gate —
@@ -1106,6 +1204,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
 
     # ── explicit fulfillment: pickup vs ship (GOL-1057) ───────────────────
 
+    @_in_season
     def test_pickup_skips_ship_gate_and_adds_no_shipping(self):
         """Farm pickup is the ONE legitimate $0-shipping path. An explicit
         fulfillment='pickup' order clears the ship-to gate even for potted trees
@@ -1131,6 +1230,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertIn("pickup", error.data.decode().lower())
         self.assertFalse(self.env["sale.order"].search([("partner_id.email", "=", "ship@example.com")]))
 
+    @_in_season
     def test_pickup_keeps_wv_tax_despite_out_of_state_address(self):
         """GOL-1303: a pickup order carrying a leftover out-of-state address (buyer
         filled the address, then toggled to pickup) must KEEP the WV default tax —
@@ -1377,7 +1477,10 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         """Acceptance 2/3: the deferred balance = actual goods + actual shipping +
         Stripe Tax − deposit already paid, captured off-session against the saved
         card with an order-scoped Idempotency-Key (GOL-2568: tax is Stripe's)."""
-        order = self._settleable_order()  # 2×$25 goods + $15 actual shipping = $65 base
+        # 2×$25 goods + $15 actual shipping + $5.00 flat S&H fee (GOL-2895, Josh
+        # 2026-10-02 PM) = $70.00 base. The fee rides on the GROVE-SHIP line at
+        # settlement; grove_actual_shipping_cost stays the raw $15 carrier spend.
+        order = self._settleable_order()
         captured = {}
 
         def fake_pi(secret_key, **kwargs):
@@ -1385,7 +1488,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             captured["secret_key"] = secret_key
             return {"id": "pi_settled", "status": "succeeded"}
 
-        flag_p, tax_calc_p, tax_txn_p = self._fake_tax_calc(390)  # $3.90 Stripe tax on $65
+        flag_p, tax_calc_p, tax_txn_p = self._fake_tax_calc(390)  # $3.90 Stripe tax (mocked)
         with (
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
             flag_p,
@@ -1399,10 +1502,12 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_checkout_status, "settled")
         self.assertEqual(order.grove_settlement_payment_intent, "pi_settled")
         self.assertEqual(order.grove_settlement_attempts, 1)
-        # The quoted shipping line was rewritten to the ACTUAL bought cost.
-        self.assertEqual(grove_main._settlement_shipping_line(order).price_unit, 15.0)
-        # Charged = $65 base + $3.90 Stripe tax − $20 deposit = $48.90.
-        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents(48.90))
+        # The quoted shipping line was rewritten to the ACTUAL bought cost + the
+        # flat $5.00 S&H fee (GOL-2895): $15.00 + $5.00 = $20.00.
+        self.assertEqual(grove_main._settlement_shipping_line(order).price_unit, 20.00)
+        # Charged = $70.00 base ($50 goods + $20.00 shipping+fee) + $3.90 Stripe tax
+        # − $20 deposit = $53.90.
+        self.assertEqual(captured["amount_cents"], stripe_gateway.to_cents(53.90))
         self.assertEqual(order.grove_stripe_tax_amount, 3.90)
         self.assertEqual(captured["customer"], "cus_test")
         self.assertEqual(captured["payment_method"], "pm_test")
