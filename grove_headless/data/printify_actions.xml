@@ -17,7 +17,7 @@
              for printing and shipping, so it must not be a self-service button
              (GOL-3314 review 2026-10-14). The method itself also refuses any
              order that is not a push_failed Printify order. -->
-        <field name="groups_id" eval="[(4, ref('sales_team.group_sale_manager'))]"/>
+        <field name="group_ids" eval="[(4, ref('sales_team.group_sale_manager'))]"/>
         <field name="state">code</field>
         <field name="code">records.action_grove_retry_printify_push()</field>
     </record>
