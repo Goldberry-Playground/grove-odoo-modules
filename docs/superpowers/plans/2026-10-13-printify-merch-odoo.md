@@ -98,7 +98,9 @@ class TestPrintifyClient(unittest.TestCase):
 
     def test_calculate_shipping_returns_standard_in_dollars(self):
         post = mock.Mock(return_value=_resp(200, {"standard": 475, "express": 1200}))
-        amount = pc.calculate_shipping("tok", "42", [{"product_id": "p", "variant_id": 1, "quantity": 1}], {"zip": "25526"}, post=post)
+        amount = pc.calculate_shipping(
+            "tok", "42", [{"product_id": "p", "variant_id": 1, "quantity": 1}], {"zip": "25526"}, post=post
+        )
         self.assertEqual(amount, 4.75)
         self.assertEqual(post.call_args.kwargs["timeout"], 5)
         self.assertEqual(post.call_args.args[0], "https://api.printify.com/v1/shops/42/orders/shipping.json")
@@ -139,7 +141,9 @@ class TestPrintifyClient(unittest.TestCase):
     def test_send_to_production_posts(self):
         post = mock.Mock(return_value=_resp(200, {"id": "po_1"}))
         pc.send_to_production("tok", "42", "po_1", post=post)
-        self.assertEqual(post.call_args.args[0], "https://api.printify.com/v1/shops/42/orders/po_1/send_to_production.json")
+        self.assertEqual(
+            post.call_args.args[0], "https://api.printify.com/v1/shops/42/orders/po_1/send_to_production.json"
+        )
 
     def test_verify_signature(self):
         body = b'{"type":"order:updated"}'
@@ -213,8 +217,9 @@ def _call(fn, url, token, timeout, **kwargs):
 def list_products(token, shop_id, get=requests.get):
     products, page = [], 1
     while True:
-        body = _call(get, f"{BASE_URL}/shops/{shop_id}/products.json", token, DEFAULT_TIMEOUT,
-                     params={"page": page, "limit": 50})
+        body = _call(
+            get, f"{BASE_URL}/shops/{shop_id}/products.json", token, DEFAULT_TIMEOUT, params={"page": page, "limit": 50}
+        )
         products.extend(body.get("data") or [])
         if page >= int(body.get("last_page") or 1):
             return products
@@ -222,8 +227,13 @@ def list_products(token, shop_id, get=requests.get):
 
 
 def calculate_shipping(token, shop_id, line_items, address, post=requests.post):
-    body = _call(post, f"{BASE_URL}/shops/{shop_id}/orders/shipping.json", token, QUOTE_TIMEOUT,
-                 json={"line_items": line_items, "address_to": address})
+    body = _call(
+        post,
+        f"{BASE_URL}/shops/{shop_id}/orders/shipping.json",
+        token,
+        QUOTE_TIMEOUT,
+        json={"line_items": line_items, "address_to": address},
+    )
     cents = body.get("standard")
     if cents is None:
         raise PrintifyError("Printify shipping quote had no standard rate")
@@ -242,8 +252,9 @@ def find_order_by_external_id(token, shop_id, external_id, get=requests.get, pag
     """Printify's order list has no external_id filter; scan the newest pages.
     A retry happens within hours of the first push, so 3 pages of 10 is plenty."""
     for page in range(1, pages + 1):
-        body = _call(get, f"{BASE_URL}/shops/{shop_id}/orders.json", token, DEFAULT_TIMEOUT,
-                     params={"page": page, "limit": 10})
+        body = _call(
+            get, f"{BASE_URL}/shops/{shop_id}/orders.json", token, DEFAULT_TIMEOUT, params={"page": page, "limit": 10}
+        )
         for order in body.get("data") or []:
             if order.get("external_id") == external_id:
                 return order
@@ -257,8 +268,13 @@ def send_to_production(token, shop_id, order_id, post=requests.post):
 
 
 def create_webhook(token, shop_id, topic, url, secret, post=requests.post):
-    return _call(post, f"{BASE_URL}/shops/{shop_id}/webhooks.json", token, DEFAULT_TIMEOUT,
-                 json={"topic": topic, "url": url, "secret": secret})
+    return _call(
+        post,
+        f"{BASE_URL}/shops/{shop_id}/webhooks.json",
+        token,
+        DEFAULT_TIMEOUT,
+        json={"topic": topic, "url": url, "secret": secret},
+    )
 
 
 def verify_signature(secret, body, header):
@@ -332,8 +348,17 @@ class TestMapProduct(unittest.TestCase):
         self.assertEqual(m["name"], "Grove Tee")
         self.assertEqual(m["image_url"], "https://img/2.png")
         first = m["variants"][0]
-        self.assertEqual(first, {"printify_variant_id": 11001, "color": "Natural", "size": "M",
-                                 "price": 28.0, "cost": 12.5, "enabled": True})
+        self.assertEqual(
+            first,
+            {
+                "printify_variant_id": 11001,
+                "color": "Natural",
+                "size": "M",
+                "price": 28.0,
+                "cost": 12.5,
+                "enabled": True,
+            },
+        )
         self.assertFalse(m["variants"][2]["enabled"])
 
     def test_first_image_when_no_default(self):
@@ -370,14 +395,16 @@ def map_product(raw):
     variants = []
     for variant in raw.get("variants") or []:
         axes = dict(value_axis[i] for i in variant.get("options") or [] if i in value_axis)
-        variants.append({
-            "printify_variant_id": int(variant["id"]),
-            "color": axes.get("Color", ""),
-            "size": axes.get("Size", ""),
-            "price": round((variant.get("price") or 0) / 100.0, 2),
-            "cost": round((variant.get("cost") or 0) / 100.0, 2),
-            "enabled": bool(variant.get("is_enabled")),
-        })
+        variants.append(
+            {
+                "printify_variant_id": int(variant["id"]),
+                "color": axes.get("Color", ""),
+                "size": axes.get("Size", ""),
+                "price": round((variant.get("price") or 0) / 100.0, 2),
+                "cost": round((variant.get("cost") or 0) / 100.0, 2),
+                "enabled": bool(variant.get("is_enabled")),
+            }
+        )
 
     images = raw.get("images") or []
     default = next((img["src"] for img in images if img.get("is_default")), None)
@@ -464,13 +491,18 @@ PNG = base64.b64decode(
 class TestPrintifySync(GroveTaxFixtureMixin, TransactionCase):
     def _sync(self, raws=None):
         fetch = mock.Mock(return_value=mock.Mock(status_code=200, content=PNG))
-        with mock.patch.dict(os.environ, ENV, clear=False), mock.patch.object(
-            printify_client, "list_products", return_value=raws if raws is not None else [RAW]
+        with (
+            mock.patch.dict(os.environ, ENV, clear=False),
+            mock.patch.object(printify_client, "list_products", return_value=raws if raws is not None else [RAW]),
         ):
             return self.env["product.template"]._grove_printify_sync(fetch=fetch)
 
     def _tmpl(self):
-        return self.env["product.template"].with_context(active_test=False).search([("printify_product_id", "=", "6650abc")])
+        return (
+            self.env["product.template"]
+            .with_context(active_test=False)
+            .search([("printify_product_id", "=", "6650abc")])
+        )
 
     def test_first_sync_creates_unpublished_farm_template(self):
         result = self._sync()
@@ -510,7 +542,9 @@ class TestPrintifySync(GroveTaxFixtureMixin, TransactionCase):
         self._sync()
         raw = dict(RAW, variants=[dict(v, is_enabled=(v["id"] != 11003)) for v in RAW["variants"]])
         result = self._sync([raw])
-        variant = self.env["product.product"].with_context(active_test=False).search([("printify_variant_id", "=", 11003)])
+        variant = (
+            self.env["product.product"].with_context(active_test=False).search([("printify_variant_id", "=", 11003)])
+        )
         self.assertEqual(len(variant), 1)
         self.assertFalse(variant.active)
         self.assertEqual(result["archived"], 1)
@@ -525,10 +559,12 @@ class TestPrintifySync(GroveTaxFixtureMixin, TransactionCase):
     def test_order_is_printify_compute(self):
         self._sync()
         variant = self.env["product.product"].search([("printify_variant_id", "=", 11001)])
-        order = self.env["sale.order"].create({
-            "partner_id": self.env.ref("base.partner_admin").id,
-            "order_line": [(0, 0, {"product_id": variant.id, "product_uom_qty": 1})],
-        })
+        order = self.env["sale.order"].create(
+            {
+                "partner_id": self.env.ref("base.partner_admin").id,
+                "order_line": [(0, 0, {"product_id": variant.id, "product_uom_qty": 1})],
+            }
+        )
         self.assertTrue(order.grove_is_printify)
 ```
 
@@ -570,35 +606,36 @@ In `product_product.py` (inside the class):
 In `sale_order.py` (after the existing grove fields, ~line 180):
 
 ```python
-    # Printify merch (spec 2026-10-13-printify-merch-design.md §6-8).
-    grove_is_printify = fields.Boolean(compute="_compute_grove_is_printify", store=True, index=True)
-    printify_order_id = fields.Char(readonly=True, copy=False, index=True)
-    printify_state = fields.Selection(
-        [
-            ("queued", "Queued"),
-            ("created", "Created"),
-            ("in_production", "In production"),
-            ("shipped", "Shipped"),
-            ("delivered", "Delivered"),
-            ("canceled", "Canceled"),
-            ("on_hold", "On hold"),
-            ("push_failed", "Push failed"),
-        ],
-        readonly=True,
-        copy=False,
-        index=True,
-    )
-    printify_push_attempts = fields.Integer(readonly=True, copy=False, default=0)
-    printify_push_last_attempt = fields.Datetime(readonly=True, copy=False)
+# Printify merch (spec 2026-10-13-printify-merch-design.md §6-8).
+grove_is_printify = fields.Boolean(compute="_compute_grove_is_printify", store=True, index=True)
+printify_order_id = fields.Char(readonly=True, copy=False, index=True)
+printify_state = fields.Selection(
+    [
+        ("queued", "Queued"),
+        ("created", "Created"),
+        ("in_production", "In production"),
+        ("shipped", "Shipped"),
+        ("delivered", "Delivered"),
+        ("canceled", "Canceled"),
+        ("on_hold", "On hold"),
+        ("push_failed", "Push failed"),
+    ],
+    readonly=True,
+    copy=False,
+    index=True,
+)
+printify_push_attempts = fields.Integer(readonly=True, copy=False, default=0)
+printify_push_last_attempt = fields.Datetime(readonly=True, copy=False)
 
-    @api.depends("order_line.product_id")
-    def _compute_grove_is_printify(self):
-        for order in self:
-            order.grove_is_printify = any(
-                line.product_id.product_tmpl_id.grove_fulfillment_route == "printify"
-                for line in order.order_line
-                if not line.display_type and line.product_id
-            )
+
+@api.depends("order_line.product_id")
+def _compute_grove_is_printify(self):
+    for order in self:
+        order.grove_is_printify = any(
+            line.product_id.product_tmpl_id.grove_fulfillment_route == "printify"
+            for line in order.order_line
+            if not line.display_type and line.product_id
+        )
 ```
 
 (Add `api` to the `from odoo import ...` line if it is not imported.)
@@ -608,50 +645,52 @@ In `sale_order.py` (after the existing grove fields, ~line 180):
 In `product_template.py` (imports at top: `import base64`, `import os`, `import requests`, `from odoo.exceptions import UserError`, `from . import printify_client, printify_sync`):
 
 ```python
-    @api.model
-    def _grove_printify_attribute_value(self, attr_name, value_name):
-        Attribute = self.env["product.attribute"].sudo()
-        attribute = Attribute.search([("name", "=", attr_name)], limit=1) or Attribute.create(
-            {"name": attr_name, "create_variant": "always"}
-        )
-        Value = self.env["product.attribute.value"].sudo()
-        value = Value.search([("attribute_id", "=", attribute.id), ("name", "=", value_name)], limit=1)
-        return attribute, value or Value.create({"attribute_id": attribute.id, "name": value_name})
+@api.model
+def _grove_printify_attribute_value(self, attr_name, value_name):
+    Attribute = self.env["product.attribute"].sudo()
+    attribute = Attribute.search([("name", "=", attr_name)], limit=1) or Attribute.create(
+        {"name": attr_name, "create_variant": "always"}
+    )
+    Value = self.env["product.attribute.value"].sudo()
+    value = Value.search([("attribute_id", "=", attribute.id), ("name", "=", value_name)], limit=1)
+    return attribute, value or Value.create({"attribute_id": attribute.id, "name": value_name})
 
-    @api.model
-    def _grove_printify_sync(self, fetch=None):
-        """Upsert every Printify shop product (spec §3). New templates land unpublished
-        on the farm company; Odoo's sale price wins after the first create."""
-        token = os.environ.get("PRINTIFY_API_TOKEN", "")
-        shop_id = os.environ.get("PRINTIFY_SHOP_ID", "")
-        if not token or not shop_id:
-            raise UserError("PRINTIFY_API_TOKEN and PRINTIFY_SHOP_ID must be configured on this server.")
-        fetch = fetch or requests.get
-        company = self.env.ref("base.main_company")
-        Template = self.sudo().with_context(active_test=False)
-        result = {"created": 0, "updated": 0, "archived": 0}
-        try:
-            raws = printify_client.list_products(token, shop_id)
-        except printify_client.PrintifyError as exc:
-            raise UserError(f"Printify sync failed: {exc}") from exc
 
-        for raw in raws:
-            mapped = printify_sync.map_product(raw)
-            enabled = [v for v in mapped["variants"] if v["enabled"]]
-            if not enabled:
-                continue
-            values = {}
-            for v in enabled:
-                for axis in ("Color", "Size"):
-                    name = v[axis.lower()]
-                    if name:
-                        attribute, value = self._grove_printify_attribute_value(axis, name)
-                        values.setdefault(attribute, self.env["product.attribute.value"])
-                        values[attribute] |= value
+@api.model
+def _grove_printify_sync(self, fetch=None):
+    """Upsert every Printify shop product (spec §3). New templates land unpublished
+    on the farm company; Odoo's sale price wins after the first create."""
+    token = os.environ.get("PRINTIFY_API_TOKEN", "")
+    shop_id = os.environ.get("PRINTIFY_SHOP_ID", "")
+    if not token or not shop_id:
+        raise UserError("PRINTIFY_API_TOKEN and PRINTIFY_SHOP_ID must be configured on this server.")
+    fetch = fetch or requests.get
+    company = self.env.ref("base.main_company")
+    Template = self.sudo().with_context(active_test=False)
+    result = {"created": 0, "updated": 0, "archived": 0}
+    try:
+        raws = printify_client.list_products(token, shop_id)
+    except printify_client.PrintifyError as exc:
+        raise UserError(f"Printify sync failed: {exc}") from exc
 
-            tmpl = Template.search([("printify_product_id", "=", mapped["printify_product_id"])], limit=1)
-            if not tmpl:
-                tmpl = Template.create({
+    for raw in raws:
+        mapped = printify_sync.map_product(raw)
+        enabled = [v for v in mapped["variants"] if v["enabled"]]
+        if not enabled:
+            continue
+        values = {}
+        for v in enabled:
+            for axis in ("Color", "Size"):
+                name = v[axis.lower()]
+                if name:
+                    attribute, value = self._grove_printify_attribute_value(axis, name)
+                    values.setdefault(attribute, self.env["product.attribute.value"])
+                    values[attribute] |= value
+
+        tmpl = Template.search([("printify_product_id", "=", mapped["printify_product_id"])], limit=1)
+        if not tmpl:
+            tmpl = Template.create(
+                {
                     "name": mapped["name"],
                     "description_sale": mapped["description"],
                     "type": "consu",
@@ -666,61 +705,63 @@ In `product_template.py` (imports at top: `import base64`, `import os`, `import 
                         (0, 0, {"attribute_id": attribute.id, "value_ids": [(6, 0, vals.ids)]})
                         for attribute, vals in values.items()
                     ],
-                })
-                result["created"] += 1
-                if mapped["image_url"]:
-                    resp = fetch(mapped["image_url"], timeout=15)
-                    if resp.status_code == 200:
-                        tmpl.image_1920 = base64.b64encode(resp.content)
-                first_create = True
-            else:
-                for attribute, vals in values.items():
-                    line = tmpl.attribute_line_ids.filtered(lambda ln, a=attribute: ln.attribute_id == a)
-                    missing = vals - line.value_ids
-                    if line and missing:
-                        line.value_ids = [(4, val.id) for val in missing]
-                result["updated"] += 1
-                first_create = False
+                }
+            )
+            result["created"] += 1
+            if mapped["image_url"]:
+                resp = fetch(mapped["image_url"], timeout=15)
+                if resp.status_code == 200:
+                    tmpl.image_1920 = base64.b64encode(resp.content)
+            first_create = True
+        else:
+            for attribute, vals in values.items():
+                line = tmpl.attribute_line_ids.filtered(lambda ln, a=attribute: ln.attribute_id == a)
+                missing = vals - line.value_ids
+                if line and missing:
+                    line.value_ids = [(4, val.id) for val in missing]
+            result["updated"] += 1
+            first_create = False
 
-            by_combo = {(v["color"], v["size"]): v for v in mapped["variants"]}
-            base_price = tmpl.list_price
-            for variant in tmpl.with_context(active_test=False).product_variant_ids:
-                axis = {ptav.attribute_id.name: ptav.name for ptav in variant.product_template_attribute_value_ids}
-                pv = by_combo.get((axis.get("Color", ""), axis.get("Size", "")))
-                if not pv or not pv["enabled"]:
-                    if variant.active:
-                        variant.active = False
-                        if variant.printify_variant_id:
-                            result["archived"] += 1
-                    continue
-                vals = {}
-                if variant.printify_variant_id != pv["printify_variant_id"]:
-                    vals["printify_variant_id"] = pv["printify_variant_id"]
-                if variant.standard_price != pv["cost"]:
-                    vals["standard_price"] = pv["cost"]
-                if not variant.active:
-                    vals["active"] = True
-                if vals:
-                    variant.write(vals)
-                if first_create and pv["price"] > base_price:
-                    size_ptav = variant.product_template_attribute_value_ids.filtered(
-                        lambda p: p.attribute_id.name == "Size"
-                    )
-                    if size_ptav and size_ptav.price_extra != pv["price"] - base_price:
-                        size_ptav.price_extra = pv["price"] - base_price
-        return result
+        by_combo = {(v["color"], v["size"]): v for v in mapped["variants"]}
+        base_price = tmpl.list_price
+        for variant in tmpl.with_context(active_test=False).product_variant_ids:
+            axis = {ptav.attribute_id.name: ptav.name for ptav in variant.product_template_attribute_value_ids}
+            pv = by_combo.get((axis.get("Color", ""), axis.get("Size", "")))
+            if not pv or not pv["enabled"]:
+                if variant.active:
+                    variant.active = False
+                    if variant.printify_variant_id:
+                        result["archived"] += 1
+                continue
+            vals = {}
+            if variant.printify_variant_id != pv["printify_variant_id"]:
+                vals["printify_variant_id"] = pv["printify_variant_id"]
+            if variant.standard_price != pv["cost"]:
+                vals["standard_price"] = pv["cost"]
+            if not variant.active:
+                vals["active"] = True
+            if vals:
+                variant.write(vals)
+            if first_create and pv["price"] > base_price:
+                size_ptav = variant.product_template_attribute_value_ids.filtered(
+                    lambda p: p.attribute_id.name == "Size"
+                )
+                if size_ptav and size_ptav.price_extra != pv["price"] - base_price:
+                    size_ptav.price_extra = pv["price"] - base_price
+    return result
 
-    def action_grove_printify_sync(self):
-        result = self._grove_printify_sync()
-        return {
-            "type": "ir.actions.client",
-            "tag": "display_notification",
-            "params": {
-                "title": "Printify sync",
-                "message": f"Created {result['created']}, updated {result['updated']}, archived {result['archived']}.",
-                "sticky": False,
-            },
-        }
+
+def action_grove_printify_sync(self):
+    result = self._grove_printify_sync()
+    return {
+        "type": "ir.actions.client",
+        "tag": "display_notification",
+        "params": {
+            "title": "Printify sync",
+            "message": f"Created {result['created']}, updated {result['updated']}, archived {result['archived']}.",
+            "sticky": False,
+        },
+    }
 ```
 
 Note on price: a Size `price_extra` applies to every color in that size, which matches Printify's pricing (size drives cost). It is set only on first create.
@@ -856,29 +897,48 @@ class TestPrintifyCatalog(GroveTaxFixtureMixin, HttpCase):
         size = self.env["product.attribute"].create({"name": "Size", "create_variant": "always"})
         natural = self.env["product.attribute.value"].create({"attribute_id": color.id, "name": "Natural"})
         medium = self.env["product.attribute.value"].create({"attribute_id": size.id, "name": "M"})
-        self.shirt = self.env["product.template"].create({
-            "name": "Grove Tee", "type": "consu", "is_storable": False, "list_price": 28.0,
-            "company_id": False, "website_published": True, "grove_fulfillment_route": "printify",
-            "grove_gate_exempt": True, "printify_lead_time": "3 to 7 business days",
-            "attribute_line_ids": [
-                (0, 0, {"attribute_id": color.id, "value_ids": [(6, 0, natural.ids)]}),
-                (0, 0, {"attribute_id": size.id, "value_ids": [(6, 0, medium.ids)]}),
-            ],
-        })
-        self.shared_tree = self.env["product.template"].create({
-            "name": "Shared Tree", "type": "consu", "list_price": 12.0,
-            "company_id": False, "website_published": True,
-        })
+        self.shirt = self.env["product.template"].create(
+            {
+                "name": "Grove Tee",
+                "type": "consu",
+                "is_storable": False,
+                "list_price": 28.0,
+                "company_id": False,
+                "website_published": True,
+                "grove_fulfillment_route": "printify",
+                "grove_gate_exempt": True,
+                "printify_lead_time": "3 to 7 business days",
+                "attribute_line_ids": [
+                    (0, 0, {"attribute_id": color.id, "value_ids": [(6, 0, natural.ids)]}),
+                    (0, 0, {"attribute_id": size.id, "value_ids": [(6, 0, medium.ids)]}),
+                ],
+            }
+        )
+        self.shared_tree = self.env["product.template"].create(
+            {
+                "name": "Shared Tree",
+                "type": "consu",
+                "list_price": 12.0,
+                "company_id": False,
+                "website_published": True,
+            }
+        )
         admin = self.env.ref("base.user_admin")
         try:
-            self.api_key = self.env["res.users.apikeys"].with_user(admin)._generate(
-                "rpc", "grove-printify-catalog", datetime.now() + timedelta(days=1)
+            self.api_key = (
+                self.env["res.users.apikeys"]
+                .with_user(admin)
+                ._generate("rpc", "grove-printify-catalog", datetime.now() + timedelta(days=1))
             )
         except Exception as exc:  # noqa: BLE001
             self.skipTest(f"API keys unavailable: {exc}")
 
     def _get(self, path, tenant):
-        headers = {"X-Odoo-Database": get_db_name(), "X-Grove-Tenant": tenant, "Authorization": f"Bearer {self.api_key}"}
+        headers = {
+            "X-Odoo-Database": get_db_name(),
+            "X-Grove-Tenant": tenant,
+            "Authorization": f"Bearer {self.api_key}",
+        }
         return json.loads(self.url_open(path, headers=headers).content)
 
     def _names(self, body):
@@ -895,7 +955,11 @@ class TestPrintifyCatalog(GroveTaxFixtureMixin, HttpCase):
     def test_farm_detail_refuses_shared_tree(self):
         resp = self.url_open(
             f"/grove/api/v1/products/{self.shared_tree.id}",
-            headers={"X-Odoo-Database": get_db_name(), "X-Grove-Tenant": "goldberry", "Authorization": f"Bearer {self.api_key}"},
+            headers={
+                "X-Odoo-Database": get_db_name(),
+                "X-Grove-Tenant": "goldberry",
+                "Authorization": f"Bearer {self.api_key}",
+            },
         )
         self.assertEqual(resp.status_code, 404)
 
@@ -931,8 +995,8 @@ Expected: FAIL (shared tree listed on farm; flags missing `fulfillment_route`; v
 `product_detail` (952-956): replace `("company_id", "in", [current_company.id, False]),` so the list reads:
 
 ```python
-                [("id", "=", product_id), ("website_published", "=", True)]
-                + company_domain(current_company.id, request.website.grove_tenant_slug()),
+[("id", "=", product_id), ("website_published", "=", True)]
+(+company_domain(current_company.id, request.website.grove_tenant_slug()),)
 ```
 
 and import `company_domain` beside `build_product_domain` at the top of `main.py`.
@@ -1000,21 +1064,40 @@ class _PrintifyFixture:
         self.company = self.env.ref("base.main_company")
         size = self.env["product.attribute"].create({"name": "Size", "create_variant": "always"})
         medium = self.env["product.attribute.value"].create({"attribute_id": size.id, "name": "M"})
-        self.shirt_tmpl = self.env["product.template"].create({
-            "name": "Grove Tee", "type": "consu", "is_storable": False, "list_price": 28.0,
-            "company_id": self.company.id, "website_published": True, "grove_fulfillment_route": "printify",
-            "printify_product_id": "6650abc",
-            "attribute_line_ids": [(0, 0, {"attribute_id": size.id, "value_ids": [(6, 0, medium.ids)]})],
-        })
+        self.shirt_tmpl = self.env["product.template"].create(
+            {
+                "name": "Grove Tee",
+                "type": "consu",
+                "is_storable": False,
+                "list_price": 28.0,
+                "company_id": self.company.id,
+                "website_published": True,
+                "grove_fulfillment_route": "printify",
+                "printify_product_id": "6650abc",
+                "attribute_line_ids": [(0, 0, {"attribute_id": size.id, "value_ids": [(6, 0, medium.ids)]})],
+            }
+        )
         self.shirt = self.shirt_tmpl.product_variant_ids[0]
         self.shirt.write({"printify_variant_id": 11001})
-        self.tree = self.env["product.template"].create({
-            "name": "Pawpaw", "type": "consu", "is_storable": True, "list_price": 12.0,
-            "company_id": self.company.id, "grove_shipping_tier": "potted",
-        }).product_variant_ids[0]
+        self.tree = (
+            self.env["product.template"]
+            .create(
+                {
+                    "name": "Pawpaw",
+                    "type": "consu",
+                    "is_storable": True,
+                    "list_price": 12.0,
+                    "company_id": self.company.id,
+                    "grove_shipping_tier": "potted",
+                }
+            )
+            .product_variant_ids[0]
+        )
 
     def _website(self):
-        return self.env["website"].search([("company_id", "=", self.company.id)], limit=1) or self.env["website"].search([], limit=1)
+        return self.env["website"].search([("company_id", "=", self.company.id)], limit=1) or self.env[
+            "website"
+        ].search([], limit=1)
 
     def _payload(self, state="CA", items=None, **extra):
         payload = {
@@ -1202,34 +1285,35 @@ def _printify_quote(line_items, address):
 Right after `is_ship_to` is computed and the `_validate_ship_wave` block (~line 3200), insert:
 
 ```python
-    # Printify merch (spec §5): one fulfillment route per order; shirts skip every
-    # plant rule and take a live Printify shipping quote instead of Box Engine.
-    goods_lines = [
-        line for line in order.order_line
-        if not line.display_type and line.product_id and line.product_id.product_tmpl_id.type != "service"
-    ]
-    printify_goods = [ln for ln in goods_lines if ln.product_id.product_tmpl_id.grove_fulfillment_route == "printify"]
-    is_printify = bool(printify_goods)
-    if is_printify and len(printify_goods) != len(goods_lines):
+# Printify merch (spec §5): one fulfillment route per order; shirts skip every
+# plant rule and take a live Printify shipping quote instead of Box Engine.
+goods_lines = [
+    line
+    for line in order.order_line
+    if not line.display_type and line.product_id and line.product_id.product_tmpl_id.type != "service"
+]
+printify_goods = [ln for ln in goods_lines if ln.product_id.product_tmpl_id.grove_fulfillment_route == "printify"]
+is_printify = bool(printify_goods)
+if is_printify and len(printify_goods) != len(goods_lines):
+    order.unlink()
+    return None, _json_response({"error": PRINTIFY_MIXED_CART_MESSAGE}, status=409)
+printify_charge = None
+if is_printify:
+    if is_pickup or not is_ship_to:
         order.unlink()
-        return None, _json_response({"error": PRINTIFY_MIXED_CART_MESSAGE}, status=409)
-    printify_charge = None
-    if is_printify:
-        if is_pickup or not is_ship_to:
-            order.unlink()
-            return None, _json_response({"error": PRINTIFY_PICKUP_MESSAGE}, status=400)
-        dest = canonical_state_code(ship_state)
-        if dest not in printify_client.US_50_AND_DC:
-            order.unlink()
-            return None, _json_response({"error": PRINTIFY_DESTINATION_MESSAGE}, status=400)
-        try:
-            printify_charge = _printify_quote(
-                _printify_line_items(order), _printify_address(payload.get("contact") or {}, shipping, dest)
-            )
-        except printify_client.PrintifyError:
-            _logger.warning("grove_headless: Printify shipping quote failed for draft %s", order.name, exc_info=True)
-            order.unlink()
-            return None, _json_response({"error": PRINTIFY_SHIPPING_UNAVAILABLE}, status=503)
+        return None, _json_response({"error": PRINTIFY_PICKUP_MESSAGE}, status=400)
+    dest = canonical_state_code(ship_state)
+    if dest not in printify_client.US_50_AND_DC:
+        order.unlink()
+        return None, _json_response({"error": PRINTIFY_DESTINATION_MESSAGE}, status=400)
+    try:
+        printify_charge = _printify_quote(
+            _printify_line_items(order), _printify_address(payload.get("contact") or {}, shipping, dest)
+        )
+    except printify_client.PrintifyError:
+        _logger.warning("grove_headless: Printify shipping quote failed for draft %s", order.name, exc_info=True)
+        order.unlink()
+        return None, _json_response({"error": PRINTIFY_SHIPPING_UNAVAILABLE}, status=503)
 ```
 
 Then guard the plant gates so Printify orders skip them:
@@ -1309,7 +1393,8 @@ class TestPrintifyPush(_PrintifyFixture, GroveTaxFixtureMixin, TransactionCase):
             mock.patch.dict(os.environ, env or ENV, clear=False),
             mock.patch.object(printify_client, "find_order_by_external_id", return_value=existing),
             mock.patch.object(printify_client, "create_order", return_value=create)
-            if not isinstance(create, Exception) else mock.patch.object(printify_client, "create_order", side_effect=create),
+            if not isinstance(create, Exception)
+            else mock.patch.object(printify_client, "create_order", side_effect=create),
             mock.patch.object(printify_client, "send_to_production", side_effect=send),
             mock.patch.object(grove_main, "_notify_discord"),
         )
@@ -1375,9 +1460,12 @@ class TestPrintifyPush(_PrintifyFixture, GroveTaxFixtureMixin, TransactionCase):
 
     def test_session_completed_queues_push(self):
         self.order.write({"printify_state": False, "grove_stripe_session_id": "cs_shirt"})
-        with mock.patch.object(grove_main, "_notify_discord"), mock.patch.object(grove_main, "_notify_new_order"), \
-                mock.patch.object(grove_main, "_notify_merchant_email"), \
-                mock.patch.object(grove_main, "_send_order_confirmation_email"):
+        with (
+            mock.patch.object(grove_main, "_notify_discord"),
+            mock.patch.object(grove_main, "_notify_new_order"),
+            mock.patch.object(grove_main, "_notify_merchant_email"),
+            mock.patch.object(grove_main, "_send_order_confirmation_email"),
+        ):
             grove_main._handle_session_completed(self.env, {"id": "cs_shirt", "payment_intent": "pi_shirt"})
         self.assertEqual(self.order.printify_state, "queued")
 ```
@@ -1410,85 +1498,92 @@ Expected: FAIL (`_grove_printify_push` missing; oversold returns the shirt line)
 - [ ] **Step 5: Push, cron and retry** (`sale_order.py`; imports `import os`, `from datetime import timedelta`, `from odoo.tools import config`, `from . import printify_client`)
 
 ```python
-    _PRINTIFY_BACKOFF_MINUTES = (0, 5, 30, 120)
-    _PRINTIFY_MAX_ATTEMPTS = 3
-    _PRINTIFY_SENDABLE = ("pending", "on-hold")
+_PRINTIFY_BACKOFF_MINUTES = (0, 5, 30, 120)
+_PRINTIFY_MAX_ATTEMPTS = 3
+_PRINTIFY_SENDABLE = ("pending", "on-hold")
 
-    def _printify_push_due(self, now=None):
-        last = self.printify_push_last_attempt
-        if not last:
-            return True
-        idx = min(self.printify_push_attempts or 0, len(self._PRINTIFY_BACKOFF_MINUTES) - 1)
-        return (now or fields.Datetime.now()) - last >= timedelta(minutes=self._PRINTIFY_BACKOFF_MINUTES[idx])
 
-    def _printify_order_payload(self):
-        from ..controllers.main import _printify_address, _printify_line_items
+def _printify_push_due(self, now=None):
+    last = self.printify_push_last_attempt
+    if not last:
+        return True
+    idx = min(self.printify_push_attempts or 0, len(self._PRINTIFY_BACKOFF_MINUTES) - 1)
+    return (now or fields.Datetime.now()) - last >= timedelta(minutes=self._PRINTIFY_BACKOFF_MINUTES[idx])
 
-        partner = self.partner_shipping_id or self.partner_id
-        shipping = {"street": partner.street, "street2": partner.street2, "city": partner.city, "zip": partner.zip}
-        contact = {"name": partner.name, "email": partner.email or self.partner_id.email, "phone": partner.phone}
-        return {
-            "external_id": self.name,
-            "label": self.name,
-            "line_items": _printify_line_items(self),
-            "shipping_method": 1,
-            "send_shipping_notification": False,
-            "address_to": _printify_address(contact, shipping, partner.state_id.code or ""),
-        }
 
-    def _grove_printify_push(self):
-        """Create (or find) the Printify order and send it to production (spec §6).
-        Bounded retries: the cron calls this per due order; never loops."""
-        from ..controllers.main import _notify_discord
+def _printify_order_payload(self):
+    from ..controllers.main import _printify_address, _printify_line_items
 
-        self.ensure_one()
-        token = os.environ.get("PRINTIFY_API_TOKEN", "")
-        shop_id = os.environ.get("PRINTIFY_SHOP_ID", "")
-        dry_run = (os.environ.get("PRINTIFY_DRY_RUN") or "").strip().lower() in ("1", "true", "yes", "on")
+    partner = self.partner_shipping_id or self.partner_id
+    shipping = {"street": partner.street, "street2": partner.street2, "city": partner.city, "zip": partner.zip}
+    contact = {"name": partner.name, "email": partner.email or self.partner_id.email, "phone": partner.phone}
+    return {
+        "external_id": self.name,
+        "label": self.name,
+        "line_items": _printify_line_items(self),
+        "shipping_method": 1,
+        "send_shipping_notification": False,
+        "address_to": _printify_address(contact, shipping, partner.state_id.code or ""),
+    }
+
+
+def _grove_printify_push(self):
+    """Create (or find) the Printify order and send it to production (spec §6).
+    Bounded retries: the cron calls this per due order; never loops."""
+    from ..controllers.main import _notify_discord
+
+    self.ensure_one()
+    token = os.environ.get("PRINTIFY_API_TOKEN", "")
+    shop_id = os.environ.get("PRINTIFY_SHOP_ID", "")
+    dry_run = (os.environ.get("PRINTIFY_DRY_RUN") or "").strip().lower() in ("1", "true", "yes", "on")
+    try:
+        if not token or not shop_id:
+            raise printify_client.PrintifyError("Printify is not configured on this server")
+        existing = printify_client.find_order_by_external_id(token, shop_id, self.name)
+        if existing:
+            po_id, status = str(existing["id"]), existing.get("status") or "pending"
+        else:
+            po_id, status = printify_client.create_order(token, shop_id, self._printify_order_payload()), "pending"
+        self.sudo().write({"printify_order_id": po_id, "printify_state": "created"})
+        if status not in self._PRINTIFY_SENDABLE:
+            self.sudo().write({"printify_state": "in_production"})
+        elif not dry_run:
+            printify_client.send_to_production(token, shop_id, po_id)
+            self.sudo().write({"printify_state": "in_production"})
+        self.message_post(body=f"Printify order {po_id} {'created (dry run)' if dry_run else 'sent to production'}.")
+        return True
+    except printify_client.PrintifyError as exc:
+        attempts = (self.printify_push_attempts or 0) + 1
+        vals = {"printify_push_attempts": attempts, "printify_push_last_attempt": fields.Datetime.now()}
+        if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
+            vals["printify_state"] = "push_failed"
+        self.sudo().write(vals)
+        self.message_post(body=f"Printify push attempt {attempts} failed: {exc}")
+        if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
+            _notify_discord(f":rotating_light: Printify push FAILED on {self.name} after {attempts} tries: {exc}")
+        return False
+
+
+@api.model
+def _cron_printify_push(self):
+    now = fields.Datetime.now()
+    for order in self.sudo().search([("printify_state", "=", "queued")]):
+        if not order._printify_push_due(now=now):
+            continue
         try:
-            if not token or not shop_id:
-                raise printify_client.PrintifyError("Printify is not configured on this server")
-            existing = printify_client.find_order_by_external_id(token, shop_id, self.name)
-            if existing:
-                po_id, status = str(existing["id"]), existing.get("status") or "pending"
-            else:
-                po_id, status = printify_client.create_order(token, shop_id, self._printify_order_payload()), "pending"
-            self.sudo().write({"printify_order_id": po_id, "printify_state": "created"})
-            if status not in self._PRINTIFY_SENDABLE:
-                self.sudo().write({"printify_state": "in_production"})
-            elif not dry_run:
-                printify_client.send_to_production(token, shop_id, po_id)
-                self.sudo().write({"printify_state": "in_production"})
-            self.message_post(body=f"Printify order {po_id} {'created (dry run)' if dry_run else 'sent to production'}.")
-            return True
-        except printify_client.PrintifyError as exc:
-            attempts = (self.printify_push_attempts or 0) + 1
-            vals = {"printify_push_attempts": attempts, "printify_push_last_attempt": fields.Datetime.now()}
-            if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
-                vals["printify_state"] = "push_failed"
-            self.sudo().write(vals)
-            self.message_post(body=f"Printify push attempt {attempts} failed: {exc}")
-            if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
-                _notify_discord(f":rotating_light: Printify push FAILED on {self.name} after {attempts} tries: {exc}")
-            return False
+            order._grove_printify_push()
+        except Exception:  # noqa: BLE001 — the cron must never raise
+            _logger.exception("Printify push crashed for %s", order.name)
+        if not config["test_enable"]:
+            self.env.cr.commit()
 
-    @api.model
-    def _cron_printify_push(self):
-        now = fields.Datetime.now()
-        for order in self.sudo().search([("printify_state", "=", "queued")]):
-            if not order._printify_push_due(now=now):
-                continue
-            try:
-                order._grove_printify_push()
-            except Exception:  # noqa: BLE001 — the cron must never raise
-                _logger.exception("Printify push crashed for %s", order.name)
-            if not config["test_enable"]:
-                self.env.cr.commit()
 
-    def action_grove_retry_printify_push(self):
-        for order in self:
-            order.sudo().write({"printify_state": "queued", "printify_push_attempts": 0, "printify_push_last_attempt": False})
-            order.message_post(body="Printify push re-queued.")
+def action_grove_retry_printify_push(self):
+    for order in self:
+        order.sudo().write(
+            {"printify_state": "queued", "printify_push_attempts": 0, "printify_push_last_attempt": False}
+        )
+        order.message_post(body="Printify push re-queued.")
 ```
 
 - [ ] **Step 6: Cron and retry action XML**
@@ -1535,20 +1630,29 @@ class TestPrintifyQuoteEndpoint(_PrintifyFixture, GroveTaxFixtureMixin, HttpCase
         self._build()
         admin = self.env.ref("base.user_admin")
         try:
-            self.api_key = self.env["res.users.apikeys"].with_user(admin)._generate(
-                "rpc", "grove-printify-quote", datetime.now() + timedelta(days=1)
+            self.api_key = (
+                self.env["res.users.apikeys"]
+                .with_user(admin)
+                ._generate("rpc", "grove-printify-quote", datetime.now() + timedelta(days=1))
             )
         except Exception as exc:  # noqa: BLE001
             self.skipTest(f"API keys unavailable: {exc}")
 
     def _post(self, body):
-        headers = {"X-Odoo-Database": get_db_name(), "X-Grove-Tenant": "goldberry",
-                   "Content-Type": "application/json", "Authorization": f"Bearer {self.api_key}"}
+        headers = {
+            "X-Odoo-Database": get_db_name(),
+            "X-Grove-Tenant": "goldberry",
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.api_key}",
+        }
         return self.url_open("/grove/api/v1/checkout/quote", data=json.dumps(body).encode(), headers=headers)
 
     def _body(self, **extra):
-        body = {"items": [{"variant_id": self.shirt.id, "quantity": 1}], "fulfillment": "ship",
-                "shipping": {"state": "CA", "zip": "90001"}}
+        body = {
+            "items": [{"variant_id": self.shirt.id, "quantity": 1}],
+            "fulfillment": "ship",
+            "shipping": {"state": "CA", "zip": "90001"},
+        }
         body.update(extra)
         return body
 
@@ -1571,12 +1675,17 @@ class TestPrintifyQuoteEndpoint(_PrintifyFixture, GroveTaxFixtureMixin, HttpCase
         self.assertEqual(resp.status_code, 503)
 
     def test_quote_409_mixed(self):
-        resp = self._post(self._body(items=[{"variant_id": self.shirt.id, "quantity": 1},
-                                            {"variant_id": self.tree.id, "quantity": 1}]))
+        resp = self._post(
+            self._body(
+                items=[{"variant_id": self.shirt.id, "quantity": 1}, {"variant_id": self.tree.id, "quantity": 1}]
+            )
+        )
         self.assertEqual(resp.status_code, 409)
 
     def test_tree_quote_unchanged(self):
-        data = json.loads(self._post(self._body(items=[{"variant_id": self.tree.id, "quantity": 1}], shipping=None)).content)
+        data = json.loads(
+            self._post(self._body(items=[{"variant_id": self.tree.id, "quantity": 1}], shipping=None)).content
+        )
         self.assertEqual(data["fulfillment_route"], "in_house")
         self.assertIsNone(data["shipping_amount"])
 ```
@@ -1588,27 +1697,30 @@ class TestPrintifyQuoteEndpoint(_PrintifyFixture, GroveTaxFixtureMixin, HttpCase
 After the variants are looked up (before `_validate_ship_wave`), insert:
 
 ```python
-        route_lines = [v for v in variants if v.product_tmpl_id.type != "service"]
-        printify = [v for v in route_lines if v.product_tmpl_id.grove_fulfillment_route == "printify"]
-        if printify and len(printify) != len(route_lines):
-            return _json_response({"error": PRINTIFY_MIXED_CART_MESSAGE}, status=409)
-        shipping_amount = None
-        if printify:
-            ship_to = payload.get("shipping") or {}
-            dest = canonical_state_code(ship_to.get("state") or "")
-            if ship_to.get("state") and dest not in printify_client.US_50_AND_DC:
-                return _json_response({"error": PRINTIFY_DESTINATION_MESSAGE}, status=400)
-            if dest and ship_to.get("zip"):
-                qty = {int(i["variant_id"]): int(i.get("quantity") or 1) for i in items}
-                line_items = [
-                    {"product_id": v.product_tmpl_id.printify_product_id, "variant_id": v.printify_variant_id,
-                     "quantity": qty.get(v.id, 1)}
-                    for v in printify
-                ]
-                try:
-                    shipping_amount = _printify_quote(line_items, _printify_address({}, ship_to, dest))
-                except printify_client.PrintifyError:
-                    return _json_response({"error": PRINTIFY_SHIPPING_UNAVAILABLE}, status=503)
+route_lines = [v for v in variants if v.product_tmpl_id.type != "service"]
+printify = [v for v in route_lines if v.product_tmpl_id.grove_fulfillment_route == "printify"]
+if printify and len(printify) != len(route_lines):
+    return _json_response({"error": PRINTIFY_MIXED_CART_MESSAGE}, status=409)
+shipping_amount = None
+if printify:
+    ship_to = payload.get("shipping") or {}
+    dest = canonical_state_code(ship_to.get("state") or "")
+    if ship_to.get("state") and dest not in printify_client.US_50_AND_DC:
+        return _json_response({"error": PRINTIFY_DESTINATION_MESSAGE}, status=400)
+    if dest and ship_to.get("zip"):
+        qty = {int(i["variant_id"]): int(i.get("quantity") or 1) for i in items}
+        line_items = [
+            {
+                "product_id": v.product_tmpl_id.printify_product_id,
+                "variant_id": v.printify_variant_id,
+                "quantity": qty.get(v.id, 1),
+            }
+            for v in printify
+        ]
+        try:
+            shipping_amount = _printify_quote(line_items, _printify_address({}, ship_to, dest))
+        except printify_client.PrintifyError:
+            return _json_response({"error": PRINTIFY_SHIPPING_UNAVAILABLE}, status=503)
 ```
 
 Use the names `checkout_quote` already binds (`payload`, `items`, the variants recordset); read lines 1787-1860 and adapt. Then add two keys to the response dict: `"fulfillment_route": "printify" if printify else "in_house"` and `"shipping_amount": shipping_amount`.
@@ -1673,31 +1785,50 @@ class TestPrintifyWebhook(_PrintifyFixture, GroveTaxFixtureMixin, HttpCase):
         return {"id": "evt", "type": kind, "resource": {"id": "po_1", "type": "order", "data": {}}}
 
     def _shipped_order(self, delivered=False):
-        return {"id": "po_1", "status": "fulfilled", "shipments": [
-            {"carrier": "usps", "number": "9400111", "url": "https://t", "delivered_at": "2026-10-20" if delivered else None}
-        ]}
+        return {
+            "id": "po_1",
+            "status": "fulfilled",
+            "shipments": [
+                {
+                    "carrier": "usps",
+                    "number": "9400111",
+                    "url": "https://t",
+                    "delivered_at": "2026-10-20" if delivered else None,
+                }
+            ],
+        }
 
     def test_bad_signature_401(self):
         body = json.dumps(self._event("order:updated")).encode()
         with mock.patch.dict(os.environ, ENV, clear=False):
-            resp = self.url_open("/grove/api/v1/printify/webhook", data=body,
-                                 headers={"X-Pfy-Signature": "sha256=bad", "Content-Type": "application/json",
-                                          "X-Odoo-Database": get_db_name()})
+            resp = self.url_open(
+                "/grove/api/v1/printify/webhook",
+                data=body,
+                headers={
+                    "X-Pfy-Signature": "sha256=bad",
+                    "Content-Type": "application/json",
+                    "X-Odoo-Database": get_db_name(),
+                },
+            )
         self.assertEqual(resp.status_code, 401)
 
     def test_good_signature_200(self):
         body = json.dumps(self._event("order:sent-to-production")).encode()
         sig = "sha256=" + hmac.new(SECRET.encode(), body, hashlib.sha256).hexdigest()
         with mock.patch.dict(os.environ, ENV, clear=False):
-            resp = self.url_open("/grove/api/v1/printify/webhook", data=body,
-                                 headers={"X-Pfy-Signature": sig, "Content-Type": "application/json",
-                                          "X-Odoo-Database": get_db_name()})
+            resp = self.url_open(
+                "/grove/api/v1/printify/webhook",
+                data=body,
+                headers={"X-Pfy-Signature": sig, "Content-Type": "application/json", "X-Odoo-Database": get_db_name()},
+            )
         self.assertEqual(resp.status_code, 200)
 
     def test_shipment_created_writes_tracking_then_transit(self):
-        with mock.patch.dict(os.environ, ENV, clear=False), \
-                mock.patch.object(printify_client, "get_order", return_value=self._shipped_order()), \
-                mock.patch.object(grove_main, "_apply_delivery_status", return_value=True) as apply:
+        with (
+            mock.patch.dict(os.environ, ENV, clear=False),
+            mock.patch.object(printify_client, "get_order", return_value=self._shipped_order()),
+            mock.patch.object(grove_main, "_apply_delivery_status", return_value=True) as apply,
+        ):
             grove_main._handle_printify_event(self.env, self._event("order:shipment:created"))
         self.assertEqual(self.order.grove_tracking_numbers, "9400111")
         self.assertEqual(self.order.grove_shipping_carriers, "USPS")
@@ -1706,18 +1837,22 @@ class TestPrintifyWebhook(_PrintifyFixture, GroveTaxFixtureMixin, HttpCase):
         self.assertEqual(self.order.printify_state, "shipped")
 
     def test_delivered_then_late_shipment_never_regresses(self):
-        with mock.patch.dict(os.environ, ENV, clear=False), \
-                mock.patch.object(printify_client, "get_order", return_value=self._shipped_order(delivered=True)), \
-                mock.patch.object(grove_main, "_notify_shipping_status"):
+        with (
+            mock.patch.dict(os.environ, ENV, clear=False),
+            mock.patch.object(printify_client, "get_order", return_value=self._shipped_order(delivered=True)),
+            mock.patch.object(grove_main, "_notify_shipping_status"),
+        ):
             grove_main._handle_printify_event(self.env, self._event("order:shipment:delivered"))
             grove_main._handle_printify_event(self.env, self._event("order:shipment:created"))
         self.assertEqual(self.order.grove_delivery_status, "delivered")
         self.assertEqual(self.order.printify_state, "delivered")
 
     def test_duplicate_shipment_event_emails_once(self):
-        with mock.patch.dict(os.environ, ENV, clear=False), \
-                mock.patch.object(printify_client, "get_order", return_value=self._shipped_order()), \
-                mock.patch.object(grove_main, "_notify_shipping_status") as notify:
+        with (
+            mock.patch.dict(os.environ, ENV, clear=False),
+            mock.patch.object(printify_client, "get_order", return_value=self._shipped_order()),
+            mock.patch.object(grove_main, "_notify_shipping_status") as notify,
+        ):
             grove_main._handle_printify_event(self.env, self._event("order:shipment:created"))
             grove_main._handle_printify_event(self.env, self._event("order:shipment:created"))
         self.assertEqual(notify.call_count, 1)
@@ -1773,7 +1908,9 @@ def _handle_printify_event(env, event):
         numbers = [s.get("number") for s in shipments if s.get("number")]
         carriers = [(s.get("carrier") or "").upper() for s in shipments if s.get("number")]
         if numbers and order.grove_tracking_numbers != "\n".join(numbers):
-            order.sudo().write({"grove_tracking_numbers": "\n".join(numbers), "grove_shipping_carriers": "\n".join(carriers)})
+            order.sudo().write(
+                {"grove_tracking_numbers": "\n".join(numbers), "grove_shipping_carriers": "\n".join(carriers)}
+            )
         status = "delivered" if kind == "order:shipment:delivered" else "transit"
         _apply_delivery_status(env, order, status, "\n".join(numbers), source="printify")
         _printify_set_state(order, "delivered" if status == "delivered" else "shipped")
@@ -1943,7 +2080,12 @@ def test_registers_every_topic():
     create = mock.Mock(side_effect=lambda token, shop, topic, url, secret: {"topic": topic})
     out = reg.register("tok", "42", "https://odoo.example/grove/api/v1/printify/webhook", "s", create=create)
     assert [o["topic"] for o in out] == list(reg.TOPICS)
-    assert set(reg.TOPICS) == {"order:sent-to-production", "order:shipment:created", "order:shipment:delivered", "order:updated"}
+    assert set(reg.TOPICS) == {
+        "order:sent-to-production",
+        "order:shipment:created",
+        "order:shipment:delivered",
+        "order:updated",
+    }
 ```
 
 `scripts/printify_register_webhooks.py`:
@@ -1978,7 +2120,9 @@ def main(argv):
     if len(argv) != 2:
         print(__doc__)
         return 2
-    token, shop_id, secret = (os.environ.get(k, "") for k in ("PRINTIFY_API_TOKEN", "PRINTIFY_SHOP_ID", "PRINTIFY_WEBHOOK_SECRET"))
+    token, shop_id, secret = (
+        os.environ.get(k, "") for k in ("PRINTIFY_API_TOKEN", "PRINTIFY_SHOP_ID", "PRINTIFY_WEBHOOK_SECRET")
+    )
     if not (token and shop_id and secret):
         print("Set PRINTIFY_API_TOKEN, PRINTIFY_SHOP_ID and PRINTIFY_WEBHOOK_SECRET.")
         return 2
