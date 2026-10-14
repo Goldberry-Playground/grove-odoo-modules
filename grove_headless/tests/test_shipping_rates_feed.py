@@ -100,6 +100,24 @@ class RateFeedTests(unittest.TestCase):
         # dormant_window was replaced by the top-level per-zone calendar (GOL-1172).
         self.assertNotIn("dormant_window", packing)
 
+    def test_packing_potted_boxes_mirror_catalog(self):
+        # GOL-3346: the PDP estimator reads peat & bagged trees-per-box from the
+        # feed's packing.potted_boxes (never hard-codes 5 / 10), so the block
+        # must mirror POTTED_BOXES exactly — dims + a single-number capacity (no
+        # season mode, unlike bareroot boxes' {dormant, leafed} dict).
+        potted = self.feed["packing"]["potted_boxes"]
+        self.assertEqual(set(potted), set(sz.shipping_boxes.POTTED_BOXES))
+        for box_id, box in potted.items():
+            src = sz.shipping_boxes.POTTED_BOXES[box_id]
+            self.assertEqual(box["length"], src["length"])
+            self.assertEqual(box["width"], src["width"])
+            self.assertEqual(box["height"], src["height"])
+            self.assertEqual(box["capacity"], src["capacity"])
+            self.assertIsInstance(box["capacity"], int)
+        # The expected peat & bagged counts the storefront renders: 5 / 10.
+        self.assertEqual(potted["p24x10x4"]["capacity"], 5)
+        self.assertEqual(potted["p24x10x6"]["capacity"], 10)
+
     def test_calendar_block_is_per_usda_zone(self):
         # GOL-1172/1177: the feed carries the annual, per-USDA-zone shipping
         # calendar (real Arbor Day windows) the frontend resolves

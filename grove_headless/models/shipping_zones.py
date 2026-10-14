@@ -309,6 +309,8 @@ def rate_feed(calendar_override=None, today=None, consult_deferral_enabled=None)
           "packing": {
             "boxes": {"p24x10x4": {"length": 24, "width": 10, "height": 4,
                                    "capacity": {"dormant": 10, "leafed": 10}}, ...},
+            "potted_boxes": {"p24x10x4": {"length": 24, "width": 10, "height": 4,
+                                          "capacity": 5}, ...},  # GOL-3346 peat & bagged
             "length_classes": [16, 20],
             "modes": ["dormant", "leafed"],
           },
@@ -398,6 +400,22 @@ def rate_feed(calendar_override=None, today=None, consult_deferral_enabled=None)
                     "weight_basis": shipping_boxes.weight_basis(box_id),
                 }
                 for box_id, b in shipping_boxes.BOXES.items()
+            },
+            # Peat & bagged carton capacities (GOL-3346): the PDP estimator
+            # reads trees-per-box from here rather than hard-coding 5 / 10, so
+            # the Peat & bagged rows stay in lockstep with POTTED_BOXES. Capacity
+            # is a single count (no season mode), mirroring POTTED_BOXES; the
+            # shared cartons' geometry/tare is pinned to BOXES at import. The
+            # storefront's boxOptions("…", "potted", feed) lights up the rows the
+            # moment this key appears; a feed without it stays price-only.
+            "potted_boxes": {
+                box_id: {
+                    "length": b["length"],
+                    "width": b["width"],
+                    "height": b["height"],
+                    "capacity": b["capacity"],
+                }
+                for box_id, b in shipping_boxes.POTTED_BOXES.items()
             },
             "length_classes": list(shipping_boxes.LENGTH_CLASSES),
             "modes": list(shipping_boxes.MODES),
