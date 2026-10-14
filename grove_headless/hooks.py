@@ -33,7 +33,9 @@ company cannot be bound. The same entry point runs from the post-migration
 script so an ``-u grove_headless`` upgrade converges an already installed DB.
 """
 
+import html
 import logging
+import re
 
 _logger = logging.getLogger(__name__)
 
@@ -786,6 +788,258 @@ def add_native_bundle_to_guilds(env):
         return
     bundle.write({"public_categ_ids": [(4, guilds.id)]})
     _logger.info("grove_headless: added %r to the Guilds collection (GOL-2882)", bundle.name)
+
+
+# ── Approved department copy (GOL-3292 / GOL-2746) ──────────────────────────
+#
+# The GOL-2744 restructure built the department tree but left every
+# grove_teaser = "" and every grove_coming_list empty. This loads Sora's
+# approved teasers + "What's coming" lists (GOL-2746 comment 8df5c928) and the
+# Guilds lede, matched by grove_slug.
+#
+# Each field is written ONLY when it is currently empty, so any edit later made
+# in Odoo survives a re-run (the Train #3 ``-u grove_headless`` upgrade and
+# every upgrade after it). Both fields are ``translate=True``; the copy is
+# written in the default ``en_US`` context so it lands on the source term.
+#
+# The text is Sora's §1/§2 verbatim except punctuation: em dashes became
+# colons, semicolons or commas (storefront no-em-dash rule, GOL-589; the
+# storefront prints these fields as-is). grove_coming_list is one
+# ``Name | detail`` item per line (parsed by grove_coming_items).
+_DEPARTMENT_COPY = {
+    "orchard-food-forest": {
+        "teaser": (
+            "Fruit, nut and native trees for the orchard or food forest you're "
+            "putting in: the same hardy Appalachian stock we plant on our own hill."
+        ),
+    },
+    "mycoforestry": {
+        "teaser": (
+            "Host trees that come with their fungal partner already on the roots: "
+            "pecan truffle and porcini, on white oak, hybrid chestnut and American "
+            "hazelnut. The tree is the crop you can count on; the mushrooms are the "
+            "long game, and whether they show up depends on your soil, your pH and "
+            "your patience. We're growing the first batch out now."
+        ),
+        "coming_list": "\n".join(
+            (
+                "White oak, pecan truffle | inoculated seedling: a shade tree now, truffle ground later",
+                "White oak, porcini | the same oak with porcini instead; you pick which fungus rides on the roots",
+                "Hybrid chestnut, porcini | nuts off the tree, porcini out of the ground under it",
+                (
+                    "American hazelnut, pecan truffle | bears young and stays shrub-sized, "
+                    "the quickest way into a truffle planting"
+                ),
+                "Block plantings, ten trees and up | bulk rates for putting in a stand instead of one specimen tree",
+            )
+        ),
+    },
+    "forest-farming": {
+        "teaser": (
+            "The woodland crops that grow in the shade you already have: goldenseal, "
+            "American ginseng, ramps, black cohosh. These are slow, three to five "
+            "years for goldenseal and closer to a decade for wild-simulated ginseng, "
+            "so what we'll sell is planting stock, not dug root. If you've got "
+            "north-facing hardwood with trillium and bloodroot coming up under it, "
+            "you've got the site for it."
+        ),
+        "coming_list": "\n".join(
+            (
+                "Goldenseal | root divisions: three to five years to a harvestable root",
+                (
+                    "American ginseng | shade-grown planting stock; seven to eleven years "
+                    "wild-simulated, and harvest is state-regulated"
+                ),
+                "Ramps | two to three years to your first harvest from bulblets, five to seven from seed",
+                "Black cohosh | root divisions: three to five years, the quickest of the four",
+            )
+        ),
+    },
+    "seed-and-scion": {
+        "teaser": (
+            "For the people who'd rather graft it themselves: dormant scion wood cut "
+            "while the trees are still asleep, seed cleaned and stratified over "
+            "winter, and rootstock to put it all on. Scion only travels well "
+            "dormant, so this one opens for a short season rather than year-round; "
+            "the notify list is how you'll hear it's open. Same stock as the rest of "
+            "the nursery, sold a step earlier."
+        ),
+        "coming_list": "\n".join(
+            (
+                "Apple scion wood | dormant cuttings for grafting onto your own rootstock",
+                "Pear scion wood | same idea, cut from the pears we grow here",
+                "Fig cuttings | figs root straight from dormant wood, no grafting needed",
+                "Chestnut and pawpaw seed | cold-stratified over winter, sold ready to plant",
+                "Rootstock | bare-root stock to graft your own trees onto",
+            )
+        ),
+    },
+    "guilds": {
+        "teaser": (
+            "Sets we'd actually plant together: something to bloom early, something "
+            "to feed you later, something to hold the soil. One box, and a plan for "
+            "where each tree goes."
+        ),
+    },
+}
+
+
+def _load_copy_field(record, field, value):
+    """Write ``value`` to ``field`` on ``record`` only when it is empty today.
+
+    Returns True when it wrote, False when it left an existing value alone. The
+    guard reads the stored value so a re-run never clobbers an Odoo-side edit.
+    """
+    if (record[field] or "").strip():
+        return False
+    record.write({field: value})
+    return True
+
+
+def load_department_copy(env):
+    """Load the approved department teasers + coming lists (GOL-3292).
+
+    Matches departments / the Guilds collection by grove_slug and fills
+    grove_teaser / grove_coming_list from ``_DEPARTMENT_COPY``, writing each
+    field only when it is currently empty. Idempotent: a second run is a no-op,
+    and a teaser later edited in Odoo is never overwritten. No-ops cleanly for
+    any slug missing from the DB (fresh install / QA before the tree is seeded).
+
+    ``translate=True`` fields are written in the ``en_US`` context so the copy
+    lands on the source language regardless of the upgrade user's language.
+    """
+    Category = env["product.public.category"].with_context(lang="en_US").sudo()
+    for slug, copy in _DEPARTMENT_COPY.items():
+        record = Category.search([("grove_slug", "=", slug)], limit=1)
+        if not record:
+            _logger.info("grove_headless: no category for slug %r; skipping copy (GOL-3292)", slug)
+            continue
+        wrote = False
+        if copy.get("teaser"):
+            wrote |= _load_copy_field(record, "grove_teaser", copy["teaser"])
+        if copy.get("coming_list"):
+            wrote |= _load_copy_field(record, "grove_coming_list", copy["coming_list"])
+        if wrote:
+            _logger.info("grove_headless: loaded approved copy for %r (GOL-3292)", slug)
+
+
+# ── Guild card purpose lines (GOL-3304) ─────────────────────────────────────
+#
+# Sora's approved one-line guild descriptions (GOL-2746 comment 8df5c928,
+# approved 2026-09-30; em dashes already swapped per GOL-589). Each line is
+# prepended to the matched guild template's description_ecommerce as a NEW first
+# <p>. The storefront Guilds-page card purpose line is
+# ``guildPurpose(description_html)`` = the first sentence of the PDP description
+# (grove-sites), and description_html is description_ecommerce
+# (controllers/main.py), so this is what fixes the Guilds-page card copy —
+# e.g. tmpl 140's factual error ("...redbud for pollination": redbud brings
+# pollinators in, it does not pollinate the pears).
+#
+# Matched by product NAME, case-insensitive prefix (prod names carry a
+# "(... Trees)" style suffix), NOT by raw product.template id: GOL-3292 Part B
+# keyed the six lines on ids 22/132/133/140/135/134, which are not stable across
+# QA and prod, so it was dropped and re-scoped here.
+#
+# The "Chestnut Grove" bundle (prod tmpl 22, the GOL-2750 native bundle) is the
+# template Sora wrote the "Remembrance Grove" line for; confirmed against prod
+# 2026-10-13 that tmpl 22 is this bundle before keying the row on its real
+# catalog name rather than Sora's working title.
+_GUILD_CARD_LINES = (
+    (
+        "Chestnut Grove",
+        "Five natives to put in the ground in someone's memory: chestnut, "
+        "persimmon, plum, serviceberry and mulberry, each one still feeding "
+        "something long after the planting day.",
+    ),
+    (
+        "Mountain Mama Package",
+        "The Appalachian starter: two chestnuts, two pawpaws and a mountain "
+        "laurel. The hillside's own plant list, in one box.",
+    ),
+    (
+        "Pollinator Bundle",
+        "Eastern redbud anchors it and blooms before almost anything else, with "
+        "four supporting natives to keep the bees fed the rest of the season.",
+    ),
+    (
+        "Heirloom Fruit Package",
+        "Two pears, two persimmons, and a redbud that flowers ahead of them to "
+        "bring the pollinators in before the fruit trees open.",
+    ),
+    (
+        "At the Grove Food Forest",
+        "Fifty seedlings at our bulk seedling rate, plus a half-hour consult on "
+        "what to plant where; the honest starting point for a food forest.",
+    ),
+    (
+        "Centennial Food Forest",
+        "A hundred trees for the people planting something their grandkids will be the ones to harvest.",
+    ),
+)
+
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+
+def _visible_text(fragment):
+    """Collapse an HTML fragment to its visible text for comparison.
+
+    Strips tags, unescapes entities, turns ``&nbsp;`` into a space and collapses
+    whitespace runs. Used to tell whether the first paragraph already reads the
+    approved line, so a re-run is a no-op.
+    """
+    without_tags = _TAG_RE.sub(" ", fragment or "")
+    unescaped = html.unescape(without_tags).replace("\xa0", " ")
+    return _WS_RE.sub(" ", unescaped).strip()
+
+
+def _first_paragraph_html(description):
+    """Return the first ``<p>...</p>`` fragment of ``description``, or "" if none."""
+    match = re.search(r"<p\b[^>]*>.*?</p>", description or "", re.IGNORECASE | re.DOTALL)
+    return match.group(0) if match else ""
+
+
+def _prepend_guild_card_line(record, line):
+    """Prepend ``line`` as a new first ``<p>`` of description_ecommerce.
+
+    Writes nothing (returns False) when the current first paragraph already reads
+    the approved line, so the upgrade is idempotent. Returns True when it wrote.
+    """
+    current = record.description_ecommerce or ""
+    if _visible_text(_first_paragraph_html(current)) == line:
+        return False
+    record.description_ecommerce = f"<p>{line}</p>{current}"
+    return True
+
+
+def load_guild_card_lines(env):
+    """Load Sora's approved guild card purpose lines (GOL-3304).
+
+    Prepends each approved line (``_GUILD_CARD_LINES``) to the matching guild
+    template's description_ecommerce as a new first ``<p>``, matched by product
+    name (case-insensitive prefix). Asserts exactly one template per name; a name
+    that is absent is logged and skipped (QA may not carry every bundle, and a
+    fresh install carries none) rather than failing the upgrade. Idempotent: a
+    re-run whose first paragraph already reads the approved line writes nothing.
+
+    description_ecommerce carries no ``translate=True`` here, and the write stamps
+    no grove_facts_provenance, so the model's write override treats it as a human
+    edit: it marks the field provenance ``human`` (protecting the editorial line)
+    and never clears the Facts-reviewed sign-off or re-gates publishing.
+    """
+    Product = env["product.template"].sudo()
+    for prefix, line in _GUILD_CARD_LINES:
+        matches = Product.search([("name", "=ilike", prefix + "%")])
+        if not matches:
+            _logger.info("grove_headless: no guild template for %r; skipping card line (GOL-3304)", prefix)
+            continue
+        if len(matches) != 1:
+            raise ValueError(
+                f"grove_headless (GOL-3304): guild name prefix {prefix!r} matched "
+                f"{len(matches)} templates ({matches.mapped('name')!r}); expected exactly one"
+            )
+        if _prepend_guild_card_line(matches, line):
+            _logger.info("grove_headless: prepended approved card line to %r (GOL-3304)", matches.name)
 
 
 def post_init_hook(env):

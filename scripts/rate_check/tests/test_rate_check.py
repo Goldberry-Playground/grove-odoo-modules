@@ -66,7 +66,7 @@ class TestRequestShape(unittest.TestCase):
             return _R()
 
         with mock.patch.object(rc.requests, "post", fake_post):
-            rc.quote_zone_box("zone_2", "small", PROBE_DATE)
+            rc.quote_zone_box("zone_2", "p24x10x4", PROBE_DATE)
 
         self.assertEqual(captured["url"], rc.PIRATESHIP_URL)
         body = captured["body"]
@@ -79,9 +79,9 @@ class TestRequestShape(unittest.TestCase):
         self.assertEqual(v["destinationCountryCode"], "US")
         self.assertEqual(v["mailClassKeys"], ["03", "93", "GroundAdvantage"])
         self.assertEqual(v["packageTypeKeys"], ["Parcel"])
-        # small box: 24x6x4 at 7 lb representative -> weight in OUNCES.
-        self.assertEqual(v["weight"], 112.0)
-        self.assertEqual((v["dimensionX"], v["dimensionY"], v["dimensionZ"]), (24, 6, 4))
+        # p24x10x4 box: 24x10x4 at 12 lb representative -> weight in OUNCES.
+        self.assertEqual(v["weight"], 192.0)
+        self.assertEqual((v["dimensionX"], v["dimensionY"], v["dimensionZ"]), (24, 10, 4))
 
     def test_parcels_come_from_box_catalog(self):
         # GOL-2199: BOTH catalogs publish (bareroot BOXES + potted POTTED_BOXES),
@@ -211,8 +211,8 @@ class TestWinnerSelection(unittest.TestCase):
 
 class TestRateMath(unittest.TestCase):
     def test_target_formula_ceil(self):
-        # 9.84 + 3.50 (small packaging) + 2.00 = 15.34 -> 16
-        self.assertEqual(rc.target_rate(9.84, "small"), 16)
+        # 9.84 + 3.50 (p24x10x4 packaging) + 2.00 = 15.34 -> 16
+        self.assertEqual(rc.target_rate(9.84, "p24x10x4"), 16)
 
     def test_diff_detects_material_drift(self):
         current = {"zone_1": {"bareroot": {"base": 21.0}}}
@@ -269,7 +269,7 @@ class TestCarrierVisibility(unittest.TestCase):
             return _R()
 
         with mock.patch.object(rc.requests, "post", fake_post):
-            winner, present = rc.quote_zone_box("zone_4", "small", PROBE_DATE)
+            winner, present = rc.quote_zone_box("zone_4", "p24x10x4", PROBE_DATE)
         self.assertEqual(winner["price"], 12.74)
         self.assertEqual((winner["carrier"], winner["service"]), ("USPS", "GroundAdvantage"))
         self.assertEqual(present, {("USPS", "GroundAdvantage")})
@@ -306,7 +306,7 @@ class TestCarrierVisibility(unittest.TestCase):
             return _R()
 
         with mock.patch.object(rc.requests, "post", fake_post):
-            winner, _present = rc.quote_zone_box("zone_5", "small", PROBE_DATE)
+            winner, _present = rc.quote_zone_box("zone_5", "p24x10x4", PROBE_DATE)
         # MAX across corners -> $18.00 sets the published (upper-bound) rate.
         self.assertEqual(winner["price"], 18.00)
 
@@ -359,7 +359,7 @@ class TestCarrierVisibility(unittest.TestCase):
         with mock.patch.object(rc.requests, "post", fake_post):
             err = io.StringIO()
             with redirect_stderr(err):
-                winner, _present = rc.quote_zone_box("zone_5", "small", PROBE_DATE)
+                winner, _present = rc.quote_zone_box("zone_5", "p24x10x4", PROBE_DATE)
         self.assertEqual(winner["price"], 13.00)
         self.assertIn("pirateship error", err.getvalue())
 
@@ -383,14 +383,14 @@ class TestSchemaThreeAndWrite(unittest.TestCase):
             with open(path, encoding="utf-8") as fh:
                 doc = json.load(fh)
             self.assertEqual(doc["_schema"], 3)
-            cell = doc["zone_1"]["small"]
+            cell = doc["zone_1"]["p24x10x4"]
             self.assertEqual(set(cell), {"base", "carrier", "service", "service_title"})
             self.assertIsInstance(cell["base"], float)
             self.assertEqual(cell["carrier"], "UPS")
             self.assertEqual(cell["service"], "03")
             self.assertEqual(cell["service_title"], "UPS Ground")
-            # small: ceil(9.84 + 3.50 + 2.00) = 16
-            self.assertEqual(cell["base"], 16.0)
+            # p24x10x4 fixture winner UPS Ground $14.37: ceil(14.37 + 3.50 + 2.00) = 20
+            self.assertEqual(cell["base"], 20.0)
         finally:
             os.unlink(path)
 
@@ -427,7 +427,7 @@ class TestNoGroundHandling(unittest.TestCase):
             os.unlink(path)
 
     def test_all_missing_with_real_published_rates_fails(self):
-        real = {"_comment": "x", "_schema": 3, "zone_1": {"small": {"base": 18.0}}}
+        real = {"_comment": "x", "_schema": 3, "zone_1": {"p24x10x4": {"base": 18.0}}}
         before = json.dumps(real)
         code, err, after = self._run_no_ground_against(real)
         self.assertEqual(code, 1)
@@ -491,7 +491,7 @@ class TestQuoteSourceRefused(unittest.TestCase):
         with mock.patch.object(rc.requests, "post", fake_post):
             err = io.StringIO()
             with redirect_stderr(err):
-                winner, present = rc.quote_zone_box("zone_2", "small", PROBE_DATE, diagnostics=diagnostics)
+                winner, present = rc.quote_zone_box("zone_2", "p24x10x4", PROBE_DATE, diagnostics=diagnostics)
         self.assertIsNone(winner)
         self.assertEqual(present, set())
         self.assertTrue(diagnostics, "the refusal text must reach the caller")
@@ -512,7 +512,7 @@ class TestQuoteSourceRefused(unittest.TestCase):
             os.unlink(path)
 
     def test_refusal_against_real_rates_names_the_closed_source(self):
-        real = {"_comment": "x", "_schema": 3, "zone_1": {"small": {"base": 18.0}}}
+        real = {"_comment": "x", "_schema": 3, "zone_1": {"p24x10x4": {"base": 18.0}}}
         before = json.dumps(real)
         code, out, err, after = self._run_persisted_only_against(real)
         self.assertEqual(code, 1)
@@ -532,7 +532,7 @@ class TestQuoteSourceRefused(unittest.TestCase):
         # No real published rates to protect => the pre-launch "not ready" state
         # wins over the refusal alarm (GOL-1312 clean-skip preserved).
         code, _out, _err, _after = self._run_persisted_only_against(
-            {"_comment": "x", "_schema": 3, "_provisional": True, "zone_1": {"small": {"base": 1.0}}}
+            {"_comment": "x", "_schema": 3, "_provisional": True, "zone_1": {"p24x10x4": {"base": 1.0}}}
         )
         self.assertEqual(code, 0)
 
@@ -540,7 +540,7 @@ class TestQuoteSourceRefused(unittest.TestCase):
 def _manual_doc(quoted_on="2026-09-29", **overrides):
     """A COMPLETE hand-quote file: every zone x box cell, ascending by box size
     so the monotonicity guard passes."""
-    order = {"small": 9.0, "large": 15.0, "p24x10x4": 12.0, "p24x10x6": 20.0}
+    order = {"p24x10x4": 12.0, "p24x10x6": 20.0}
     doc = {"_quoted_on": quoted_on}
     for i, zone in enumerate(rc.REFERENCE_ZIPS):
         doc[zone] = {
@@ -576,8 +576,8 @@ class TestManualQuoteLoader(unittest.TestCase):
     def test_loads_raw_quotes_and_the_quote_date(self):
         quotes, quoted_on = self._load(_manual_doc())
         self.assertEqual(quoted_on, date(2026, 9, 29))
-        cell = quotes["zone_1"]["small"]
-        self.assertEqual(cell["price"], 9.0)
+        cell = quotes["zone_1"]["p24x10x4"]
+        self.assertEqual(cell["price"], 12.0)
         self.assertEqual(cell["carrier"], "UPS")
         self.assertEqual(cell["service_title"], "UPS Ground")
 
@@ -594,7 +594,7 @@ class TestManualQuoteLoader(unittest.TestCase):
 
     def test_unknown_zone_raises(self):
         with self.assertRaises(ValueError) as cm:
-            self._load(_manual_doc(zone_99={"small": {"quote": 1.0}}))
+            self._load(_manual_doc(zone_99={"p24x10x4": {"quote": 1.0}}))
         self.assertIn("zone_99", str(cm.exception))
 
     def test_unknown_box_id_raises(self):
@@ -609,21 +609,21 @@ class TestManualQuoteLoader(unittest.TestCase):
         # and rate_feed shows service_title in storefront copy.
         for key in ("carrier", "service", "service_title"):
             doc = _manual_doc()
-            del doc["zone_1"]["small"][key]
+            del doc["zone_1"]["p24x10x4"][key]
             with self.assertRaises(ValueError) as cm:
                 self._load(doc)
             self.assertIn(key, str(cm.exception))
 
     def test_bare_number_cell_is_rejected(self):
         doc = _manual_doc()
-        doc["zone_1"]["small"] = 12.0
+        doc["zone_1"]["p24x10x4"] = 12.0
         with self.assertRaises(ValueError):
             self._load(doc)
 
     def test_non_positive_quote_is_rejected(self):
         for bad in (0, -3.0):
             doc = _manual_doc()
-            doc["zone_1"]["small"]["quote"] = bad
+            doc["zone_1"]["p24x10x4"]["quote"] = bad
             with self.assertRaises(ValueError) as cm:
                 self._load(doc)
             self.assertIn("positive", str(cm.exception))
@@ -659,24 +659,24 @@ class TestManualRefreshRun(unittest.TestCase):
         self.assertNotIn("Service visibility", err)
 
     def test_hand_quotes_go_through_the_same_target_formula(self):
-        # small: ceil(9.00 + 3.50 packaging + 2.00 buffer) = 15 — NOT the raw
+        # p24x10x4: ceil(12.00 + 3.50 packaging + 2.00 buffer) = 18 — NOT the raw
         # quote. Hand-editing shipping_rates.json is what skips this.
         _, _, _, written = self._run(_manual_doc())
-        cell = json.loads(written)["zone_1"]["small"]
-        self.assertEqual(cell["base"], float(rc.target_rate(9.0, "small")))
-        self.assertEqual(cell["base"], 15.0)
+        cell = json.loads(written)["zone_1"]["p24x10x4"]
+        self.assertEqual(cell["base"], float(rc.target_rate(12.0, "p24x10x4")))
+        self.assertEqual(cell["base"], 18.0)
         self.assertEqual(set(cell), {"base", "carrier", "service", "service_title"})
 
     def test_incomplete_hand_refresh_is_refused(self):
         # A dropped cell falls back in the Odoo loader -> under-charge. Exit 2,
         # and the table must be untouched.
         doc = _manual_doc()
-        del doc["zone_1"]["small"]
-        real = {"_comment": "x", "_schema": 3, "zone_1": {"small": {"base": 18.0}}}
+        del doc["zone_1"]["p24x10x4"]
+        real = {"_comment": "x", "_schema": 3, "zone_1": {"p24x10x4": {"base": 18.0}}}
         before = json.dumps(real)
         code, _, err, written = self._run(doc, current=real)
         self.assertEqual(code, 2)
-        self.assertIn("zone_1/small", err)
+        self.assertIn("zone_1/p24x10x4", err)
         self.assertIn("incomplete", err)
         self.assertEqual(json.loads(written), json.loads(before))
 
@@ -684,13 +684,13 @@ class TestManualRefreshRun(unittest.TestCase):
         # A bigger box cheaper than a smaller one inside a zone is cart-gaming;
         # the hand path must not be a way around the guard (exit 4).
         doc = _manual_doc()
-        doc["zone_1"]["large"]["quote"] = 1.0
+        doc["zone_1"]["p24x10x6"]["quote"] = 1.0
         code, _, err, _ = self._run(doc)
         self.assertEqual(code, 4)
         self.assertIn("monotonicity", err)
 
     def test_manual_dry_run_does_not_write(self):
-        real = {"_comment": "x", "_schema": 3, "zone_1": {"small": {"base": 18.0}}}
+        real = {"_comment": "x", "_schema": 3, "zone_1": {"p24x10x4": {"base": 18.0}}}
         before = json.dumps(real)
         code, _, _, written = self._run(_manual_doc(), extra_argv=["--dry-run"], current=real)
         self.assertEqual(code, 0)

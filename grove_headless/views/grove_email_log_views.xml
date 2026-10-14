@@ -83,11 +83,12 @@
                 <separator />
                 <filter name="delivered" string="Delivered"
                         domain="[('status', 'in', ('delivered', 'opened'))]" />
-                <group expand="0" string="Group By">
-                    <filter name="group_status" string="Status" context="{'group_by': 'status'}" />
-                    <filter name="group_kind" string="Email type" context="{'group_by': 'kind'}" />
-                    <filter name="group_order" string="Order" context="{'group_by': 'order_id'}" />
-                </group>
+                <!-- Odoo 19 search views reject <group expand>; group_by filters
+                     land under the Group By dropdown on their own. -->
+                <separator />
+                <filter name="group_status" string="Status" context="{'group_by': 'status'}" />
+                <filter name="group_kind" string="Email type" context="{'group_by': 'kind'}" />
+                <filter name="group_order" string="Order" context="{'group_by': 'order_id'}" />
             </search>
         </field>
     </record>

@@ -71,6 +71,14 @@
                            statusbar_visible="open,exported,purchased" />
                 </header>
                 <sheet>
+                    <div class="alert alert-warning" role="alert"
+                         invisible="unacked_flagged_count == 0">
+                        <field name="unacked_flagged_count" class="oe_inline" />
+                        row(s) look like they may already have shipped by hand (older
+                        than the acknowledgement threshold) and are held OUT of the
+                        exported CSV. Review them below and tick <b>Confirmed not already
+                        shipped</b> on any that genuinely still need a label (GOL-3083).
+                    </div>
                     <div class="oe_title">
                         <h1><field name="name" readonly="1" /></h1>
                     </div>
@@ -92,18 +100,23 @@
                     </group>
                     <notebook>
                         <page string="Rows">
-                            <field name="line_ids" readonly="1">
-                                <list>
-                                    <field name="grove_ref" />
-                                    <field name="order_id" />
-                                    <field name="box_id" />
-                                    <field name="weight_lb" />
-                                    <field name="service" />
-                                    <field name="committed_rate" />
-                                    <field name="tracking_number" />
-                                    <field name="carrier_token" />
-                                    <field name="service_token" optional="hide" />
-                                    <field name="actual_cost" />
+                            <field name="line_ids">
+                                <list decoration-warning="age_flagged and not age_ack"
+                                      editable="bottom">
+                                    <field name="grove_ref" readonly="1" />
+                                    <field name="order_id" readonly="1" />
+                                    <field name="box_id" readonly="1" />
+                                    <field name="order_age_days" readonly="1" />
+                                    <field name="age_flagged" column_invisible="1" />
+                                    <field name="age_ack" readonly="not age_flagged"
+                                           string="Confirmed not already shipped" />
+                                    <field name="weight_lb" readonly="1" />
+                                    <field name="service" readonly="1" />
+                                    <field name="committed_rate" readonly="1" />
+                                    <field name="tracking_number" readonly="1" />
+                                    <field name="carrier_token" readonly="1" />
+                                    <field name="service_token" optional="hide" readonly="1" />
+                                    <field name="actual_cost" readonly="1" />
                                 </list>
                             </field>
                         </page>

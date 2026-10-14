@@ -64,21 +64,20 @@ GREEN = frozenset(
     }
 )
 
-# A complete single-zone box rate table for contract tests (two-SKU catalog:
-# small 1-5 trees, large 6-10; large < 2*small so 6-10 picks one large box).
+# A complete single-zone box rate table for contract tests. Both shippable
+# tiers pack into the same p24x10x4 / p24x10x6 cartons (GOL-3285), so ONE table
+# serves both engines. p24x10x6 < 2*p24x10x4 so 11-20 trees pick one larger
+# carton over two smaller ones. (Bareroot holds 1-10 / 11-20 whips per carton;
+# potted holds 1-5 / 6-10 units of the same cartons — same rate rows either way.)
 BOX_RATES_Z1 = {
-    "small": {"base": 12.0},
-    "large": {"base": 18.0},
+    "p24x10x4": {"base": 12.0},
+    "p24x10x6": {"base": 18.0},
 }
 
-# GOL-2199 potted go-live: a zone row carrying BOTH catalogs — bareroot
-# small/large plus the potted/peat-and-bagged boxes (GOL-2031).
-BOX_RATES_Z1_BOTH = {
-    "small": {"base": 12.0},
-    "large": {"base": 18.0},
-    "p24x10x4": {"base": 16.0},
-    "p24x10x6": {"base": 24.0},
-}
+# Back-compat alias: pre-GOL-3285 tests used a separate "both catalogs" table
+# when bareroot had its own small/large SKUs. The catalogs now share the p-boxes,
+# so the single table above serves both tiers.
+BOX_RATES_Z1_BOTH = BOX_RATES_Z1
 
 
 class _temp_table:
@@ -111,12 +110,12 @@ class TestShippingZoneEngineContract(unittest.TestCase):
 
     def test_unmapped_state_returns_none(self):
         # None (not 0.0) => "no shipping configured, add no line".
-        self.assertIsNone(sz.box_rate("ZZ", "small"))
+        self.assertIsNone(sz.box_rate("ZZ", "p24x10x4"))
         self.assertIsNone(sz.compute_order_shipping("ZZ", [("bareroot", 20, 1)], "leafed"))
 
     def test_empty_or_missing_state_returns_none(self):
-        self.assertIsNone(sz.box_rate("", "small"))
-        self.assertIsNone(sz.box_rate(None, "small"))
+        self.assertIsNone(sz.box_rate("", "p24x10x4"))
+        self.assertIsNone(sz.box_rate(None, "p24x10x4"))
 
     def test_there_are_exactly_five_rate_zones(self):
         # zone_1..5. GOL-2238's 2026-09-08 zone_6/zone_7 split was retired
@@ -125,12 +124,12 @@ class TestShippingZoneEngineContract(unittest.TestCase):
 
     def test_rate_is_box_scoped(self):
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
-            self.assertEqual(sz.box_rate("WV", "small"), 12.0)
-            self.assertEqual(sz.box_rate("WV", "large"), 18.0)
+            self.assertEqual(sz.box_rate("WV", "p24x10x4"), 12.0)
+            self.assertEqual(sz.box_rate("WV", "p24x10x6"), 18.0)
 
     def test_missing_box_rule_returns_none(self):
-        with _temp_table({"WV": "zone_1"}, {"zone_1": {"small": {"base": 12.0}}}):
-            self.assertIsNone(sz.box_rate("WV", "large"))
+        with _temp_table({"WV": "zone_1"}, {"zone_1": {"p24x10x4": {"base": 12.0}}}):
+            self.assertIsNone(sz.box_rate("WV", "p24x10x6"))
 
     def test_rates_load_from_json_file(self):
         # The shipped data file parses and, if non-empty, only contains known
@@ -155,30 +154,43 @@ class TestShippingZoneEngineContract(unittest.TestCase):
 
     def test_potted_is_shippable_at_potted_rates(self):
         # GOL-2199 potted go-live: potted / peat-and-bagged ships on its own
-        # engine — no block message, priced from the potted boxes (never the
-        # bareroot ones).
-        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
-            self.assertIsNone(sz.unshippable_reason([("potted", 20, 1)]))
-            self.assertEqual(sz.compute_order_shipping("WV", [("potted", 20, 1)], "leafed"), 16.0)
-
-    def test_potted_without_potted_rates_fails_safe(self):
-        # The flip landed before the rate-checker's first potted-inclusive
-        # table: a zone row with only bareroot rates must price a potted cart
-        # as None (no shipping line -> checkout $0-shipping breaker blocks),
-        # never fall back to a bareroot box price.
+        # engine — no block message, priced from the p-boxes. One unit -> the
+        # cheapest rated potted carton (p24x10x4 @ 12).
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
+            self.assertIsNone(sz.unshippable_reason([("potted", 20, 1)]))
+            self.assertEqual(sz.compute_order_shipping("WV", [("potted", 20, 1)], "leafed"), 12.0)
+
+    def test_potted_without_pbox_rates_fails_safe(self):
+        # Before the rate-checker's first p-box table (or any zone row missing
+        # the p-boxes): both shippable tiers pack into the p-boxes now, so a zone
+        # row with NO rated p-box must price a potted cart as None (no shipping
+        # line -> checkout $0-shipping breaker blocks), never guess a rate.
+        with _temp_table({"WV": "zone_1"}, {"zone_1": {}}):
             self.assertIsNone(sz.unshippable_reason([("potted", 20, 1)]))
             self.assertIsNone(sz.compute_order_shipping("WV", [("potted", 20, 1)], "leafed"))
 
     def test_unknown_tier_treated_as_potted(self):
-        # A mistagged product prices as potted — the pricier catalog at every
-        # weight point — so it can never ship undercharged (GOL-2199).
-        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+        # A mistagged product prices as potted (DEFAULT_TIER) — so it can never
+        # ship with no charge (GOL-2199). One unit -> p24x10x4 @ 12.
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
             self.assertIsNone(sz.unshippable_reason([("mystery", 20, 1)]))
-            self.assertEqual(sz.compute_order_shipping("WV", [("mystery", 20, 1)], "leafed"), 16.0)
+            self.assertEqual(sz.compute_order_shipping("WV", [("mystery", 20, 1)], "leafed"), 12.0)
 
     def test_bareroot_has_no_unshippable_reason(self):
         self.assertIsNone(sz.unshippable_reason([("bareroot", 20, 3)]))
+
+    def test_seed_line_is_skipped_not_blocked(self):
+        # Seed pre-orders (GOL-3257) are not quoted at checkout — a seed line is
+        # SKIPPED by packing, not routed through the non-shippable block seam.
+        self.assertIn("seed", sz.TIERS)
+        self.assertNotIn("seed", sz.SHIPPABLE_TIERS)
+        self.assertIsNone(sz.unshippable_reason([("seed", 0, 2)]))
+
+    def test_seed_line_contributes_no_shipping(self):
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+            bareroot_only = sz.compute_order_shipping("WV", [("bareroot", 20, 1)], "leafed")
+            with_seed = sz.compute_order_shipping("WV", [("bareroot", 20, 1), ("seed", 0, 5)], "leafed")
+            self.assertEqual(with_seed, bareroot_only)
 
     def test_zero_qty_potted_line_is_ignored(self):
         self.assertIsNone(sz.unshippable_reason([("potted", 20, 0), ("bareroot", 20, 1)]))
@@ -291,51 +303,53 @@ class TestOrderShipping(unittest.TestCase):
 
     TABLE = {"zone_1": BOX_RATES_Z1}
 
-    def test_single_tree_prices_one_small_box(self):
+    def test_single_tree_prices_one_small_carton(self):
         with _temp_table({"WV": "zone_1"}, self.TABLE):
             self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 1)], "leafed"), 12.0)
 
-    def test_five_trees_fit_one_small_box(self):
-        # Small holds 1-5 -> one box ($12), not five.
+    def test_ten_trees_fit_one_small_carton(self):
+        # Bareroot p24x10x4 holds 1-10 whips -> one carton ($12), not ten.
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 5)], "leafed"), 12.0)
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 10)], "leafed"), 12.0)
 
-    def test_six_trees_use_one_large_box(self):
-        # 6-10 -> one large box ($18), NOT two smalls ($24).
+    def test_eleven_trees_use_one_large_carton(self):
+        # 11-20 -> one p24x10x6 ($18), NOT two p24x10x4 ($24).
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 6)], "dormant"), 18.0)
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 11)], "dormant"), 18.0)
 
-    def test_eleven_trees_split_large_plus_small(self):
-        # 11 -> large (10) + small (1) = 18 + 12 = 30.
+    def test_twentyone_trees_split_large_plus_small(self):
+        # 21 -> p24x10x6 (20) + p24x10x4 (1) = 18 + 12 = 30.
         with _temp_table({"WV": "zone_1"}, self.TABLE):
-            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 11)], "dormant"), 30.0)
+            self.assertEqual(sz.compute_order_shipping("WV", [("bareroot", 20, 21)], "dormant"), 30.0)
 
     def test_mixed_length_classes_pool_by_count(self):
-        # 3 whip-class + 3 standard-class = 6 trees -> one large box ($18).
+        # 3 whip-class + 3 standard-class = 6 trees -> one p24x10x4 ($12).
         with _temp_table({"WV": "zone_1"}, self.TABLE):
             items = [("bareroot", 16, 3), ("bareroot", 20, 3)]
-            self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 18.0)
+            self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 12.0)
 
     def test_mixed_cart_prices_both_engines(self):
-        # GOL-2199: 2 bareroot -> one small bareroot box ($12); 3 potted -> one
-        # p24x10x4 ($16). Split plans, summed: $28.
-        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+        # Bareroot and potted share the p-boxes but pack on their own engines and
+        # never consolidate across tiers: 2 bareroot whips -> one p24x10x4 ($12);
+        # 3 potted units -> one p24x10x4 ($12). Two separate cartons, summed: $24.
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
             items = [("bareroot", 20, 2), ("potted", 20, 3)]
-            self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 28.0)
+            self.assertEqual(sz.compute_order_shipping("WV", items, "dormant"), 24.0)
 
     def test_potted_units_pool_across_lines_into_boxes(self):
-        # 4 + 3 = 7 potted units -> one p24x10x6 10-pack ($24), not two 5-packs
-        # ($32) — pack_potted picks the cheapest combo, pooled across lines.
-        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+        # 4 + 3 = 7 potted units -> one p24x10x6 10-pack ($18), not two 5-packs
+        # ($24) — pack_potted picks the cheapest combo, pooled across lines.
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
             items = [("potted", 20, 4), ("potted", 16, 3)]
-            self.assertEqual(sz.compute_order_shipping("WV", items, "leafed"), 24.0)
+            self.assertEqual(sz.compute_order_shipping("WV", items, "leafed"), 18.0)
 
-    def test_mixed_cart_with_unpriceable_potted_side_fails_whole_order(self):
+    def test_mixed_cart_one_engine_unpackable_fails_whole_order(self):
         # Either engine failing to pack-and-price fails the WHOLE plan — a
-        # half-priced order must never add a shipping line (fail-safe kept
-        # from the pre-split contract).
-        with _temp_table({"WV": "zone_1"}, self.TABLE):  # bareroot rates only
-            items = [("bareroot", 20, 2), ("potted", 20, 1)]
+        # half-priced order must never add a shipping line (fail-safe kept from
+        # the pre-split contract). Here the bareroot side has a 30" tree no box
+        # can hold while the potted side prices fine; the whole plan is None.
+        with _temp_table({"WV": "zone_1"}, self.TABLE):
+            items = [("bareroot", 30, 1), ("potted", 20, 1)]
             self.assertIsNone(sz.compute_order_shipping("WV", items, "leafed"))
 
     def test_tree_taller_than_any_box_fails_whole_order(self):
@@ -380,17 +394,17 @@ class TestSinglePottedRate(unittest.TestCase):
     """single_potted_rate: the potted PDP "shipping from $X" estimate (GOL-2199)."""
 
     def test_single_potted_unit_is_the_small_potted_box(self):
-        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
-            self.assertEqual(sz.single_potted_rate("WV"), 16.0)
-
-    def test_no_potted_rates_returns_none(self):
-        # Pre-first-potted-table window: bareroot-only rows quote nothing for
-        # potted — never a bareroot-box fallback.
         with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
+            self.assertEqual(sz.single_potted_rate("WV"), 12.0)
+
+    def test_no_pbox_rates_returns_none(self):
+        # A zone row with no rated p-box quotes nothing for potted (both tiers
+        # pack into the p-boxes now) — never a guessed fallback.
+        with _temp_table({"WV": "zone_1"}, {"zone_1": {}}):
             self.assertIsNone(sz.single_potted_rate("WV"))
 
     def test_unmapped_state_returns_none(self):
-        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1_BOTH}):
+        with _temp_table({"WV": "zone_1"}, {"zone_1": BOX_RATES_Z1}):
             self.assertIsNone(sz.single_potted_rate("GA"))
 
 
@@ -444,6 +458,87 @@ class TestFullNameShippingRouting(unittest.TestCase):
         # so it correctly returns None (no guessed charge) — the fail-safe holds.
         with _temp_table({"WV": "zone_1"}, self.TABLE):
             self.assertIsNone(sz.compute_order_shipping("Ohio", [("bareroot", 20, 1)], "leafed"))
+
+
+class TestSeedShipStates(unittest.TestCase):
+    """Seeds ship to every US state + DC except HI/AK (GOL-3257, Josh 2026-10-13).
+    Deliberately independent of sz.SEED_SHIP_STATES so an accidental edit to the
+    module constant is caught."""
+
+    # 48 contiguous states + DC = 49 (50 states - HI - AK + DC).
+    EXPECTED = frozenset(
+        {
+            "AL",
+            "AZ",
+            "AR",
+            "CA",
+            "CO",
+            "CT",
+            "DE",
+            "DC",
+            "FL",
+            "GA",
+            "ID",
+            "IL",
+            "IN",
+            "IA",
+            "KS",
+            "KY",
+            "LA",
+            "ME",
+            "MD",
+            "MA",
+            "MI",
+            "MN",
+            "MS",
+            "MO",
+            "MT",
+            "NE",
+            "NV",
+            "NH",
+            "NJ",
+            "NM",
+            "NY",
+            "NC",
+            "ND",
+            "OH",
+            "OK",
+            "OR",
+            "PA",
+            "RI",
+            "SC",
+            "SD",
+            "TN",
+            "TX",
+            "UT",
+            "VT",
+            "VA",
+            "WA",
+            "WV",
+            "WI",
+            "WY",
+        }
+    )
+
+    def test_exact_membership(self):
+        self.assertEqual(sz.SEED_SHIP_STATES, self.EXPECTED)
+
+    def test_count_is_49(self):
+        self.assertEqual(len(sz.SEED_SHIP_STATES), 49)
+
+    def test_excludes_hawaii_and_alaska(self):
+        self.assertNotIn("HI", sz.SEED_SHIP_STATES)
+        self.assertNotIn("AK", sz.SEED_SHIP_STATES)
+        self.assertEqual(sz.SEED_SHIP_EXCLUDED_STATES, frozenset({"HI", "AK"}))
+
+    def test_excludes_territories(self):
+        for terr in ("PR", "VI", "GU", "AS", "MP"):
+            self.assertNotIn(terr, sz.SEED_SHIP_STATES)
+
+    def test_wider_than_the_green_list(self):
+        # Seeds reach far more of the country than live trees.
+        self.assertTrue(sz.GREEN_STATES <= sz.SEED_SHIP_STATES)
+        self.assertGreater(len(sz.SEED_SHIP_STATES), len(sz.GREEN_STATES))
 
 
 if __name__ == "__main__":

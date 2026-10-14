@@ -1,10 +1,14 @@
-"""Tests for the box catalog + packing engine (Box Engine v2, two-SKU catalog).
+"""Tests for the box catalog + packing engine (Box Engine v2, shared p-boxes).
 
 ``models/shipping_boxes.py`` is pure Python (no Odoo, no DB) — plain unittest
 cases loaded by file path, same pattern as ``test_shipping_zones.py``.
 
-Catalog descoped to two SKUs by CEO directive 2026-09-07: ``small`` (24x6x4,
-1-5 trees) and ``large`` (24x9x6, 6-10 trees), selected by tree count.
+Bareroot now packs into the SAME cartons as peat-and-bagged (Josh ruling
+2026-10-13, GOL-3285): ``p24x10x4`` (24x10x4, 1-10 whips) and ``p24x10x6``
+(24x10x6, 11-20 whips), selected by tree count. A bareroot whip holds twice as
+many per carton as a peat-and-bagged unit and weighs about half (PER_TREE_LB
+dormant 1.0 vs POTTED_UNIT_LB 2.0), so both engines land on the same 12 / 22 lb
+representative points and share the p24x10x4 / p24x10x6 zone rate rows.
 """
 
 import importlib.util
@@ -17,9 +21,10 @@ _spec = importlib.util.spec_from_file_location("grove_shipping_boxes", _MODULE_P
 sb = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(sb)
 
-# Cost table used by packing tests. large < 2*small so 6-10 trees pick the large
-# box over two smalls (the intended count threshold under a monotone table).
-COSTS = {"small": 12.0, "large": 18.0}
+# Cost table used by packing tests. p24x10x6 < 2*p24x10x4 so 11-20 whips pick the
+# larger carton over two smaller ones (the intended count threshold under a
+# monotone table).
+COSTS = {"p24x10x4": 12.0, "p24x10x6": 18.0}
 
 
 def cost_of(box_id):
@@ -32,8 +37,17 @@ def plan_summary(plan):
 
 
 class TestCatalog(unittest.TestCase):
-    def test_catalog_is_the_two_descoped_skus(self):
-        self.assertEqual(set(sb.BOXES), {"small", "large"})
+    def test_catalog_is_the_two_shared_pboxes(self):
+        self.assertEqual(set(sb.BOXES), {"p24x10x4", "p24x10x6"})
+
+    def test_bareroot_shares_potted_geometry(self):
+        # GOL-3285: the two engines pack into the same physical cartons, so where
+        # an id is in both dicts its geometry + box-only tare must be identical
+        # (only capacity / per-unit weight legitimately differ). This mirrors the
+        # import-time drift assert in the module.
+        for bid in set(sb.BOXES) & set(sb.POTTED_BOXES):
+            for key in ("length", "width", "height", "tare_lb"):
+                self.assertEqual(sb.BOXES[bid][key], sb.POTTED_BOXES[bid][key], (bid, key))
 
     def test_every_box_is_usps_mailable(self):
         # USPS Ground Advantage hard limits: length + girth <= 130", weight <= 70 lb.
@@ -41,10 +55,10 @@ class TestCatalog(unittest.TestCase):
             self.assertLessEqual(sb.length_plus_girth_in(box), sb.MAX_LENGTH_PLUS_GIRTH_IN, box_id)
             self.assertLessEqual(sb.representative_billable_lb(box_id), sb.MAX_SHIP_WEIGHT_LB, box_id)
 
-    def test_length_plus_girth_matches_directive(self):
-        # CEO directive spelled these out: small 44", large 54".
-        self.assertEqual(sb.length_plus_girth_in(sb.BOXES["small"]), 44)
-        self.assertEqual(sb.length_plus_girth_in(sb.BOXES["large"]), 54)
+    def test_length_plus_girth_matches_dimensions(self):
+        # Both cartons are 24" long: p24x10x4 -> 24+2*(10+4)=52, p24x10x6 -> 56.
+        self.assertEqual(sb.length_plus_girth_in(sb.BOXES["p24x10x4"]), 52)
+        self.assertEqual(sb.length_plus_girth_in(sb.BOXES["p24x10x6"]), 56)
 
     def test_capacities_are_positive_and_mode_scoped(self):
         for box_id, box in sb.BOXES.items():
@@ -54,10 +68,17 @@ class TestCatalog(unittest.TestCase):
                 self.assertGreater(cap, 0)
 
     def test_capacity_ranges_are_contiguous_and_non_overlapping(self):
-        # 1-5 -> small, 6-10 -> large (both modes carry the same count).
+        # 1-10 -> p24x10x4, 11-20 -> p24x10x6 (both modes carry the same count),
+        # and each holds twice the peat-and-bagged count of the same carton.
         for mode in sb.MODES:
-            self.assertEqual(sb.BOXES["small"]["capacity"][mode], 5)
-            self.assertEqual(sb.BOXES["large"]["capacity"][mode], 10)
+            self.assertEqual(sb.BOXES["p24x10x4"]["capacity"][mode], 10)
+            self.assertEqual(sb.BOXES["p24x10x6"]["capacity"][mode], 20)
+        self.assertEqual(sb.BOXES["p24x10x4"]["capacity"]["dormant"], 2 * sb.POTTED_BOXES["p24x10x4"]["capacity"])
+        self.assertEqual(sb.BOXES["p24x10x6"]["capacity"]["dormant"], 2 * sb.POTTED_BOXES["p24x10x6"]["capacity"])
+
+    def test_bareroot_weighs_about_half_a_potted_unit(self):
+        # Josh ruling: a bareroot whip weighs about half a peat-and-bagged unit.
+        self.assertEqual(sb.PER_TREE_LB["dormant"], sb.POTTED_UNIT_LB / 2)
 
     def test_every_length_class_has_a_box_in_both_modes(self):
         # Both boxes are 24" long, so every supported class fits both, each mode.
@@ -68,38 +89,111 @@ class TestCatalog(unittest.TestCase):
 
 class TestWeights(unittest.TestCase):
     def test_no_dim_weight_below_one_cubic_foot(self):
-        # Both descoped boxes are under 1 cu ft (small 576, large 1296) -> no DIM.
-        self.assertEqual(sb.dim_weight_lb("small"), 0.0)
-        self.assertEqual(sb.dim_weight_lb("large"), 0.0)
+        # Both cartons are under 1 cu ft (p24x10x4 960, p24x10x6 1440) -> no DIM.
+        self.assertEqual(sb.dim_weight_lb("p24x10x4"), 0.0)
+        self.assertEqual(sb.dim_weight_lb("p24x10x6"), 0.0)
 
     def test_actual_weight_scales_with_count(self):
-        lighter = sb.actual_weight_lb("large", 1, "dormant")
-        heavier = sb.actual_weight_lb("large", 10, "dormant")
+        lighter = sb.actual_weight_lb("p24x10x6", 1, "dormant")
+        heavier = sb.actual_weight_lb("p24x10x6", 20, "dormant")
         self.assertGreater(heavier, lighter)
 
+    def test_actual_weight_has_no_paper_term(self):
+        # The shared p-boxes carry no separate void-fill term: weight is tare +
+        # per-tree only. One dormant whip in p24x10x4: 1.4 + 1*1.0 = 2.4.
+        self.assertEqual(sb.actual_weight_lb("p24x10x4", 1, "dormant"), 2.4)
+
     def test_billable_is_actual_when_no_dim(self):
-        # One dormant tree in the small box: carton 2.0 + paper 2.5 + 1*0.5 = 5.0; no DIM.
-        self.assertEqual(sb.billable_weight_lb("small", 1, "dormant"), 5.0)
-        # Full dormant large: carton 3.1 + paper 5.0 + 10*0.5 = 13.1 lb; no DIM.
-        self.assertEqual(sb.billable_weight_lb("large", 10, "dormant"), 13.1)
+        # One dormant whip in p24x10x4: tare 1.4 + 1*1.0 = 2.4; no DIM.
+        self.assertEqual(sb.billable_weight_lb("p24x10x4", 1, "dormant"), 2.4)
+        # Full dormant p24x10x6: tare 1.5 + 20*1.0 = 21.5 lb; no DIM.
+        self.assertEqual(sb.billable_weight_lb("p24x10x6", 20, "dormant"), 21.5)
 
     def test_representative_billable_quotes_dormant_not_leafed(self):
         # The published table prices the DORMANT parcel only: a bareroot tree
-        # only ships in its dormant window; the heavier leafed weight prices a
-        # parcel that is never bought (GOL-1906, Josh 2026-09-07). Rep must cover
-        # every QUOTABLE mode's worst fill, but need NOT cover leafed.
+        # only ships (as bareroot) in its dormant window; the heavier leafed
+        # weight prices a peat-and-bagged parcel sold under the potted tier. Rep
+        # must cover every QUOTABLE mode's worst fill, but need NOT cover leafed.
         for box_id, box in sb.BOXES.items():
             rep = sb.representative_billable_lb(box_id)
             for mode in sb.QUOTABLE_MODES:
                 cap = box["capacity"][mode]
                 self.assertGreaterEqual(rep, sb.billable_weight_lb(box_id, cap, mode), box_id)
-        # Dormant full fills: small ceil(2.0+2.5+5*0.5)=ceil(7.0)=7,
-        # large ceil(3.1+5.0+10*0.5)=ceil(13.1)=14.
-        self.assertEqual(sb.representative_billable_lb("small"), 7)
-        self.assertEqual(sb.representative_billable_lb("large"), 14)
-        # And it must NOT be inflated by the un-shippable leafed weight.
-        self.assertLess(sb.representative_billable_lb("small"), 11)
-        self.assertLess(sb.representative_billable_lb("large"), 22)
+        # Dormant full fills: p24x10x4 ceil(1.4+10*1.0)=ceil(11.4)=12,
+        # p24x10x6 ceil(1.5+20*1.0)=ceil(21.5)=22.
+        self.assertEqual(sb.representative_billable_lb("p24x10x4"), 12)
+        self.assertEqual(sb.representative_billable_lb("p24x10x6"), 22)
+        # And it must NOT be inflated by the un-shippable leafed weight
+        # (leafed full p24x10x4 -> 22, p24x10x6 -> 42).
+        self.assertLess(sb.representative_billable_lb("p24x10x4"), 22)
+        self.assertLess(sb.representative_billable_lb("p24x10x6"), 42)
+
+    def test_bareroot_reps_match_potted_reps(self):
+        # The whole point of GOL-3285: both engines land on the same 12 / 22 lb
+        # representative points for the same cartons, so bareroot reuses the
+        # existing p-box zone rate rows with no re-derive.
+        for box_id in set(sb.BOXES) & set(sb.POTTED_BOXES):
+            self.assertEqual(
+                sb.representative_billable_lb(box_id),
+                sb.potted_representative_billable_lb(box_id),
+                box_id,
+            )
+
+
+class TestWeightBasisAndCalibration(unittest.TestCase):
+    """Packed-weight calibration + weight_basis (GOL-3201). The retired small/
+    large calibration seed does not carry to the new cartons (GOL-3285), so both
+    bareroot boxes start unverified and quote the conservative full-capacity
+    weight (which equals the potted representative, so no rate moves)."""
+
+    def setUp(self):
+        # Snapshot the module calibration seed so patches never leak between tests.
+        self._saved = dict(sb.WEIGHT_CALIBRATION)
+        self.addCleanup(lambda: sb.WEIGHT_CALIBRATION.clear() or sb.WEIGHT_CALIBRATION.update(self._saved))
+
+    def test_seed_is_empty_and_both_boxes_unverified(self):
+        self.assertEqual(sb.WEIGHT_CALIBRATION, {})
+        self.assertEqual(sb.weight_basis("p24x10x4"), "unverified")
+        self.assertEqual(sb.weight_basis("p24x10x6"), "unverified")
+
+    def test_unverified_quotes_the_conservative_full_capacity_weight(self):
+        # p24x10x4 12, p24x10x6 22 — the conservative worst case, unchanged.
+        self.assertEqual(sb.representative_billable_lb("p24x10x4"), 12)
+        self.assertEqual(sb.representative_billable_lb("p24x10x6"), 22)
+        for box_id in sb.BOXES:
+            self.assertEqual(sb.representative_billable_lb(box_id), sb.conservative_billable_lb(box_id))
+
+    def test_verified_prices_the_calibrated_median_not_full_capacity(self):
+        # Verify the mechanism really diverges from the conservative path once a
+        # measured median lands: p24x10x4 calibrated to 9.5 lb quotes 10, below
+        # its 12 lb worst case. (p24x10x4 is not force-conservative.)
+        sb.WEIGHT_CALIBRATION["p24x10x4"] = {"samples": 13, "typical_billable_lb": 9.5}
+        self.assertEqual(sb.weight_basis("p24x10x4"), "verified")
+        self.assertEqual(sb.representative_billable_lb("p24x10x4"), 10)
+        self.assertLess(sb.representative_billable_lb("p24x10x4"), sb.conservative_billable_lb("p24x10x4"))
+
+    def test_fewer_than_min_samples_stays_unverified(self):
+        sb.WEIGHT_CALIBRATION["p24x10x4"] = {
+            "samples": sb.MIN_CALIBRATION_SAMPLES - 1,
+            "typical_billable_lb": 9.5,
+        }
+        self.assertEqual(sb.weight_basis("p24x10x4"), "unverified")
+        self.assertEqual(sb.representative_billable_lb("p24x10x4"), sb.conservative_billable_lb("p24x10x4"))
+
+    def test_p24x10x6_is_force_conservative_even_with_samples(self):
+        sb.WEIGHT_CALIBRATION["p24x10x6"] = {"samples": 99, "typical_billable_lb": 14.0}
+        self.assertEqual(sb.weight_basis("p24x10x6"), "unverified")
+        self.assertEqual(sb.representative_billable_lb("p24x10x6"), 22)
+        self.assertIn("p24x10x6", sb.FORCE_CONSERVATIVE_BOXES)
+
+    def test_missing_calibration_entry_is_unverified(self):
+        sb.WEIGHT_CALIBRATION.pop("p24x10x4", None)
+        self.assertEqual(sb.weight_basis("p24x10x4"), "unverified")
+        self.assertEqual(sb.representative_billable_lb("p24x10x4"), sb.conservative_billable_lb("p24x10x4"))
+
+    def test_every_box_has_a_known_basis(self):
+        for box_id in sb.BOXES:
+            self.assertIn(sb.weight_basis(box_id), ("verified", "unverified"))
 
 
 class TestPackingMode(unittest.TestCase):
@@ -223,35 +317,35 @@ class TestPacking(unittest.TestCase):
     def test_empty_cart_packs_empty(self):
         self.assertEqual(sb.pack_order([], "leafed", cost_of), [])
 
-    def test_one_to_five_trees_use_one_small_box(self):
-        for n in (1, 2, 5):
+    def test_one_to_ten_trees_use_one_small_carton(self):
+        for n in (1, 2, 5, 10):
             plan = sb.pack_order([(20, n)], "dormant", cost_of)
-            self.assertEqual(plan_summary(plan), [("small", n)], n)
+            self.assertEqual(plan_summary(plan), [("p24x10x4", n)], n)
 
-    def test_six_to_ten_trees_use_one_large_box(self):
-        for n in (6, 8, 10):
+    def test_eleven_to_twenty_trees_use_one_large_carton(self):
+        for n in (11, 15, 20):
             plan = sb.pack_order([(20, n)], "dormant", cost_of)
-            self.assertEqual(plan_summary(plan), [("large", n)], n)
+            self.assertEqual(plan_summary(plan), [("p24x10x6", n)], n)
 
-    def test_eleven_trees_split_large_plus_small(self):
-        plan = sb.pack_order([(20, 11)], "dormant", cost_of)
-        self.assertEqual(plan_summary(plan), [("large", 10), ("small", 1)])
+    def test_twentyone_trees_split_large_plus_small(self):
+        plan = sb.pack_order([(20, 21)], "dormant", cost_of)
+        self.assertEqual(plan_summary(plan), [("p24x10x4", 1), ("p24x10x6", 20)])
 
-    def test_sixteen_trees_use_two_large(self):
-        # 16: two large ($36) beat large+two small ($42).
-        plan = sb.pack_order([(20, 16)], "dormant", cost_of)
-        self.assertEqual(plan_summary(plan), [("large", 6), ("large", 10)])
+    def test_forty_trees_use_two_large(self):
+        # 40: two large ($36) beat large+two small ($42).
+        plan = sb.pack_order([(20, 40)], "dormant", cost_of)
+        self.assertEqual(plan_summary(plan), [("p24x10x6", 20), ("p24x10x6", 20)])
 
     def test_mixed_length_classes_pool_by_total_count(self):
-        # 3 whip-class + 3 standard-class = 6 trees -> one large box (pooled),
-        # not two small boxes split by class.
+        # 3 whip-class + 3 standard-class = 6 trees -> one small carton (pooled),
+        # not two cartons split by class.
         plan = sb.pack_order([(16, 3), (20, 3)], "dormant", cost_of)
-        self.assertEqual(plan_summary(plan), [("large", 6)])
+        self.assertEqual(plan_summary(plan), [("p24x10x4", 6)])
 
     def test_leafed_and_dormant_pack_the_same_counts(self):
         for mode in sb.MODES:
-            self.assertEqual(plan_summary(sb.pack_order([(20, 5)], mode, cost_of)), [("small", 5)])
-            self.assertEqual(plan_summary(sb.pack_order([(20, 6)], mode, cost_of)), [("large", 6)])
+            self.assertEqual(plan_summary(sb.pack_order([(20, 10)], mode, cost_of)), [("p24x10x4", 10)])
+            self.assertEqual(plan_summary(sb.pack_order([(20, 11)], mode, cost_of)), [("p24x10x6", 11)])
 
     def test_tree_taller_than_any_box_fails_safe(self):
         # No box is longer than 24" -> a 30" tree cannot be packed.
@@ -260,7 +354,7 @@ class TestPacking(unittest.TestCase):
     def test_class_at_box_length_still_fits(self):
         # A tree needing exactly 24" fits (box length 24 >= 24).
         plan = sb.pack_order([(24, 1)], "dormant", cost_of)
-        self.assertEqual(plan_summary(plan), [("small", 1)])
+        self.assertEqual(plan_summary(plan), [("p24x10x4", 1)])
 
     def test_unknown_mode_fails_safe(self):
         self.assertIsNone(sb.pack_order([(20, 1)], "potted", cost_of))
@@ -275,10 +369,10 @@ class TestPacking(unittest.TestCase):
         self.assertIsNone(sb.pack_order([(20, 1)], "leafed", lambda b: None))
 
     def test_partially_rated_catalog_still_packs(self):
-        # Only small rated: 6 trees -> two small boxes (5 + 1).
-        only_small = lambda b: 12.0 if b == "small" else None  # noqa: E731
-        plan = sb.pack_order([(20, 6)], "dormant", only_small)
-        self.assertEqual(plan_summary(plan), [("small", 1), ("small", 5)])
+        # Only p24x10x4 rated: 11 trees -> two p24x10x4 boxes (10 + 1).
+        only_small = lambda b: 12.0 if b == "p24x10x4" else None  # noqa: E731
+        plan = sb.pack_order([(20, 11)], "dormant", only_small)
+        self.assertEqual(plan_summary(plan), [("p24x10x4", 1), ("p24x10x4", 10)])
 
     def test_no_box_ever_exceeds_capacity(self):
         for mode in sb.MODES:

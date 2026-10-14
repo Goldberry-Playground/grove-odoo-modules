@@ -41,6 +41,36 @@ Verify: `workflow_dispatch` the workflow and confirm the preflight step no longe
 warns. On a failing run the `Discord failure alert` step should post to the ops
 channel instead of logging that no webhook is configured.
 
+## Calibrating the packed-weight model (GOL-3201)
+
+The rate feed prices each box at an **estimated actual billable weight**, not the
+full-capacity worst case — packed weight moves the carrier price as much as
+geography (the shipped small boxes ran 6.5–14.5 lb, most at 6.5). That weight
+lives in `grove_headless/models/shipping_boxes.py` as `WEIGHT_CALIBRATION`
+(per box: `samples` + `typical_billable_lb`) and the `weight_basis`
+(`verified` / `unverified`) it drives. A box is priced at its calibrated typical
+weight only when it is **verified** (≥ `MIN_CALIBRATION_SAMPLES` recorded shipped
+weights and not in `FORCE_CONSERVATIVE_BOXES`); every other box keeps the
+conservative full-capacity weight so an unmeasured box is never undercharged.
+
+`calibrate_weights.py` reports predicted vs. recorded weight per box so a human
+can decide whether to move `WEIGHT_CALIBRATION` in a reviewed PR. **It never
+writes anything live** — same contract as the table refresh. Run it before each
+refresh PR against a JSON of recorded `grove.label.batch.line.weight_lb`
+(grouped by box, or GOL-3200's `golden_labels_*.json` directly):
+
+```bash
+python3 scripts/rate_check/calibrate_weights.py --samples <weights.json> [--json]
+# exit 0 = no change needed; 3 = refresh PR recommended (prints a pasteable
+# WEIGHT_CALIBRATION fragment); 2 = bad input.
+```
+
+When samples carry a per-box tree `count`, the report adds a least-squares fit
+of `tare_total` + `per_tree_lb` (what `PER_TREE_LB` / tare should move to);
+without counts it reports the empirical median (the carrier bills `ceil()` of
+it). Apply the printed fragment by hand in a PR — the script is the evidence,
+the PR is the change.
+
 ## Is the table still trustworthy? (freshness guard, GOL-2641)
 
 `rate-check` answers *"can we reach a rate source right now"*. That is **not**

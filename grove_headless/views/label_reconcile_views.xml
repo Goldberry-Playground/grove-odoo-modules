@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+  <!-- Legacy label reconcile wizard (GOL-3091). Upload the Pirate Ship Shipments
+       export, Scan to match rows to open orders by recipient email + name, then
+       Record each unambiguous match with one click. Recording is a records-only
+       backfill (action_grove_record_historical_label): no customer email, no
+       re-settlement. Reached from the Sales menu — it is not bound to one order. -->
+  <record id="view_grove_label_reconcile_form" model="ir.ui.view">
+    <field name="name">grove.label.reconcile.form</field>
+    <field name="model">grove.label.reconcile</field>
+    <field name="arch" type="xml">
+      <form string="Reconcile Pirate Ship shipments">
+        <group>
+          <field name="company_id" groups="base.group_multi_company"/>
+          <field name="data" filename="filename"/>
+          <field name="filename" invisible="1"/>
+        </group>
+        <field name="summary" invisible="not scanned" readonly="1"/>
+        <field name="scanned" invisible="1"/>
+        <field name="line_ids" invisible="not scanned" readonly="1">
+          <list decoration-success="status == 'matched'"
+                decoration-warning="status == 'ambiguous'"
+                decoration-muted="status in ('unmatched', 'duplicate')">
+            <field name="status"/>
+            <field name="recipient"/>
+            <field name="email"/>
+            <field name="tracking"/>
+            <field name="carrier"/>
+            <field name="cost"/>
+            <field name="label_date"/>
+            <field name="export_status"/>
+            <field name="order_id"/>
+            <field name="evidence"/>
+            <field name="recorded" column_invisible="1"/>
+            <button string="Record" name="action_record_one" type="object"
+                    icon="fa-check" class="btn-primary"
+                    invisible="status != 'matched' or recorded"/>
+          </list>
+        </field>
+        <footer>
+          <button string="Scan export" name="action_scan" type="object" class="btn-primary"/>
+          <button string="Close" class="btn-secondary" special="cancel"/>
+        </footer>
+      </form>
+    </field>
+  </record>
+
+  <record id="action_grove_label_reconcile" model="ir.actions.act_window">
+    <field name="name">Reconcile legacy hand labels</field>
+    <field name="res_model">grove.label.reconcile</field>
+    <field name="view_mode">form</field>
+    <field name="target">new</field>
+  </record>
+
+  <menuitem
+    id="menu_grove_label_reconcile"
+    name="Reconcile legacy hand labels"
+    parent="sale.sale_menu_root"
+    action="action_grove_label_reconcile"
+    sequence="92"
+  />
+</odoo>

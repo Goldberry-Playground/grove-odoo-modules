@@ -56,4 +56,19 @@
         <field name="value"></field>
     </record>
 
+    <!-- Already-labelled guard threshold in days (GOL-3083). A batch row whose
+         order has been awaiting a label longer than this is "likely already
+         shipped by hand" (the LB-20261005-01 duplicate-label failure: four orders
+         shipped + delivered in September on hand-bought Pirate Ship labels that
+         were never recorded in Odoo, so the builder re-bought a second label).
+         Such a row is held OUT of the exported CSV until an operator explicitly
+         acknowledges it. Seed = 14. noupdate="1" so an operator can tune it in
+         Settings / Technical / System Parameters without a deploy — that
+         adjustability is the requirement, so 14 is never a code constant (the
+         DEFAULT_AGE_ACK_DAYS in label_batch.py is only the missing-row fallback). -->
+    <record id="label_batch_age_ack_days_param" model="ir.config_parameter">
+        <field name="key">grove_headless.label_batch_age_ack_days</field>
+        <field name="value">14</field>
+    </record>
+
 </odoo>
