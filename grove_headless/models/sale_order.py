@@ -921,7 +921,10 @@ class SaleOrder(models.Model):
             purchase_plan: list[tuple[dict, str]] = []  # (payload, box_id) per box
             for pb in plan:
                 purchase_plan.append(
-                    (shippo_client.build_shipment_payload(address, pb.box_id, pb.count, mode), pb.box_id)
+                    (
+                        shippo_client.build_shipment_payload(address, pb.box_id, pb.count, mode, tier=pb.tier),
+                        pb.box_id,
+                    )
                 )
 
             # ── Pass 2: buy labels, persisting after each success ──────────

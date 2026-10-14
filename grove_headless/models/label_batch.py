@@ -29,7 +29,7 @@ from datetime import timedelta
 from odoo import api, fields, models
 from odoo.exceptions import UserError
 
-from .shipping_boxes import BOXES, actual_weight_lb
+from .shipping_boxes import BOXES
 from .shipping_zones import box_rate, box_service_title
 
 _logger = logging.getLogger(__name__)
@@ -286,7 +286,10 @@ class GroveLabelBatch(models.Model):
                         "state": address["state"] or "",
                         "zip": address["zip"] or "",
                         "country": address["country"] or "US",
-                        "weight_lb": max(1.0, actual_weight_lb(pb.box_id, pb.count, mode)),
+                        # Tier-aware (GOL-3291): a potted box in the shared p-box
+                        # carton declares its potted weight, not the lighter
+                        # bareroot dormant weight the box id alone would pick.
+                        "weight_lb": max(1.0, pb.declared_weight_lb(mode)),
                         "length_in": box["length"],
                         "width_in": box["width"],
                         "height_in": box["height"],

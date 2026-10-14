@@ -470,19 +470,36 @@ def usable_boxes(length_class: int, mode: str) -> list[str]:
 
 
 class PackedBox:
-    """One physical box in a shipment plan."""
+    """One physical box in a shipment plan.
 
-    __slots__ = ("box_id", "count")
+    ``tier`` records which packing ENGINE produced the box — ``"bareroot"``
+    (``pack_order``) or ``"potted"`` (``pack_potted``). Since GOL-3285 both
+    engines pack into the SAME p24x10x4 / p24x10x6 cartons, so the box id alone
+    no longer tells the label path which weight model to declare (bareroot
+    ``PER_TREE_LB`` vs potted ``POTTED_UNIT_LB``); the tier set here does
+    (GOL-3291). Defaults to ``"bareroot"`` so the historical single-engine
+    callers and their tests keep their meaning — the potted packer sets it
+    explicitly.
+    """
 
-    def __init__(self, box_id: str, count: int = 0):
+    __slots__ = ("box_id", "count", "tier")
+
+    def __init__(self, box_id: str, count: int = 0, tier: str = "bareroot"):
         self.box_id = box_id
         self.count = count
+        self.tier = tier
 
     def spare(self, mode: str) -> int:
         return BOXES[self.box_id]["capacity"].get(mode, 0) - self.count
 
+    def declared_weight_lb(self, mode: str) -> float:
+        """Estimated scale weight this box's label declares, chosen by its
+        packing engine rather than its (now shared) box id — see
+        ``declared_label_weight_lb`` (GOL-3291)."""
+        return declared_label_weight_lb(self.box_id, self.count, mode, self.tier)
+
     def __repr__(self):  # pragma: no cover — debugging aid
-        return f"PackedBox({self.box_id}, count={self.count})"
+        return f"PackedBox({self.box_id}, count={self.count}, tier={self.tier!r})"
 
 
 def _min_cost_combo(
@@ -585,7 +602,7 @@ def pack_order(items: list[tuple[int, float]], mode: str, cost_of) -> list[Packe
     n = total
     for box_id in combo:
         take = min(n, BOXES[box_id]["capacity"][mode])
-        packed.append(PackedBox(box_id, take))
+        packed.append(PackedBox(box_id, take, tier="bareroot"))
         n -= take
     assert n <= 0
     return packed
@@ -707,6 +724,25 @@ def potted_billable_weight_lb(box_id: str, count: int) -> float:
     return max(potted_actual_weight_lb(box_id, count), potted_dim_weight_lb(box_id))
 
 
+def declared_label_weight_lb(box_id: str, count: int, mode: str, tier: str = "bareroot") -> float:
+    """Estimated scale weight one packed box's shipping label declares, chosen
+    by the packing ENGINE/``tier`` — NOT by the box id (GOL-3291).
+
+    Since GOL-3285 bareroot and potted pack into the same p24x10x4 / p24x10x6
+    cartons, so ``box_id`` alone can no longer pick the weight model. A
+    ``"potted"`` box weighs ``potted_actual_weight_lb`` (``POTTED_UNIT_LB`` per
+    unit, mode-independent — the damp root mass does not change with the
+    bareroot dormancy season). Everything else (``"bareroot"``, the back-compat
+    default) weighs ``actual_weight_lb`` (``PER_TREE_LB[mode]``). The label path
+    (``label_batch`` / ``shippo_client.build_shipment_payload``) reads the tier
+    off the ``PackedBox`` the packer stamped, so a potted box is never declared
+    at the lighter bareroot dormant weight — the under-declare this fixes.
+    """
+    if tier == "potted":
+        return potted_actual_weight_lb(box_id, count)
+    return actual_weight_lb(box_id, count, mode)
+
+
 def potted_representative_billable_lb(box_id: str) -> int:
     """Worst-case billable weight at full capacity — the weight the
     rate-checker quotes each potted box at (never undercharge)."""
@@ -747,7 +783,7 @@ def pack_potted(count, cost_of) -> list[PackedBox] | None:
     packed: list[PackedBox] = []
     for box_id in combo:
         take = min(n, POTTED_BOXES[box_id]["capacity"])
-        packed.append(PackedBox(box_id, take))
+        packed.append(PackedBox(box_id, take, tier="potted"))
         n -= take
     assert n <= 0
     return packed

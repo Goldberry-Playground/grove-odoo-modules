@@ -62,13 +62,20 @@ class ShippoError(RuntimeError):
     pass
 
 
-def build_shipment_payload(address: dict, box_id: str, count: int, mode: str) -> dict:
+def build_shipment_payload(address: dict, box_id: str, count: int, mode: str, tier: str = "bareroot") -> dict:
     """Shippo shipment payload for ONE packed box (Box Engine v2).
 
     Declares the estimated actual scale weight; the carrier applies DIM billing
     on its side from the dimensions, so we never under- or over-declare. Both
     ground services we quote (UPS Ground, USPS Ground Advantage) bill the greater
     of actual vs dimensional weight, so one declared parcel serves the race.
+
+    ``tier`` is the packing engine that produced the box (``PackedBox.tier`` —
+    ``"bareroot"`` / ``"potted"``). Since GOL-3285 both engines share the
+    p24x10x4 / p24x10x6 carton ids, so the id alone can't pick the weight model;
+    the tier does (GOL-3291). Box GEOMETRY is identical across engines (an
+    import-time assert in shipping_boxes pins it), so dimensions read from
+    ``BOXES`` are correct for either tier.
     """
     box = shipping_boxes.BOXES[box_id]
     parcel = {
@@ -76,7 +83,7 @@ def build_shipment_payload(address: dict, box_id: str, count: int, mode: str) ->
         "width": str(box["width"]),
         "height": str(box["height"]),
         "distance_unit": "in",
-        "weight": str(max(1.0, shipping_boxes.actual_weight_lb(box_id, count, mode))),
+        "weight": str(max(1.0, shipping_boxes.declared_label_weight_lb(box_id, count, mode, tier))),
         "mass_unit": "lb",
     }
     addr_to = dict(address)
