@@ -4230,15 +4230,16 @@ def _settlement_shipping_line(order):
 
 
 SHIPPING_HANDLING_FEE_PARAM = "grove_headless.shipping_handling_fee"
-DEFAULT_SHIPPING_HANDLING_FEE = 5.00  # Josh 2026-10-02 PM (GOL-2895): flat per-ORDER S&H
+DEFAULT_SHIPPING_HANDLING_FEE = 2.50  # Josh 2026-10-13 (GOL-2923): flat per-ORDER S&H, was $5
 
 
 def _shipping_handling_fee(env):
     """The shipping & handling fee (USD) added to the ACTUAL carrier cost at
     settlement, on top of the raw Pirate Ship label cost (GOL-2895, Josh
     2026-10-02). Odoo-editable via ir.config_parameter
-    ``grove_headless.shipping_handling_fee`` (default $5.00); a blank or malformed
-    value falls back to the default rather than silently dropping the fee.
+    ``grove_headless.shipping_handling_fee`` (default $2.50, Josh 2026-10-13
+    GOL-2923; was $5.00 GOL-2895); a blank or malformed value falls back to the
+    default rather than silently dropping the fee.
 
     Applied PER ORDER — one fee on the single GROVE-SHIP line, NOT per box. Josh
     ruled "assume per order unless I say per box" (2026-10-02); flip to per-box
@@ -4262,7 +4263,7 @@ def _shipping_handling_fee(env):
 def _order_handling_fee(env, order):
     """The flat shipping-handling fee this order bills at settlement: $0 for a
     seed pre-order (GOL-3257, Josh 2026-10-13 — seeds carry the actual label
-    cost only, no $5 handling), the standard ``_shipping_handling_fee`` for a
+    cost only, no handling), the standard ``_shipping_handling_fee`` for a
     tree order."""
     return 0.0 if _order_is_seed(order) else _shipping_handling_fee(env)
 
@@ -4273,9 +4274,10 @@ def _recompute_ship_total(env, order):
     estimate.
 
     The customer-facing GROVE-SHIP line becomes ``grove_actual_shipping_cost +
-    _order_handling_fee`` (GOL-2895, Josh 2026-10-02) — the handling fee is $5
-    for a tree order and $0 for a seed pre-order (GOL-3257, Josh 2026-10-13: a
-    seed balance is goods + actual label + tax, no handling). The raw carrier
+    _order_handling_fee`` (GOL-2895, Josh 2026-10-02) — the handling fee is the
+    flat $2.50 (GOL-2923, Josh 2026-10-13) for a tree order and $0 for a seed
+    pre-order (GOL-3257, Josh 2026-10-13: a seed balance is goods + actual label
+    + tax, no handling). The raw carrier
     spend stays on ``grove_actual_shipping_cost`` for reporting; because the fee rides
     on the line price_unit, both ``amount_total`` and the Stripe Tax line items
     (which read ``price_subtotal``) include it, so the balance and tax are
