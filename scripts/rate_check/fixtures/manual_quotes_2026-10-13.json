@@ -1,0 +1,74 @@
+{
+  "_comment": "Hand quotes read 2026-10-13 from pirateship.com/rates (public calculator, no login), origin 26651, residential, 24x10x4 @ 6 lb and 24x10x6 @ 13 lb (Josh ruling: typical-order weight). Per corner the cheapest allowlisted ground; per zone the priciest corner. zone_1 adds Summersville WV 26651.",
+  "_quoted_on": "2026-10-13",
+  "zone_1": {
+    "p24x10x4": {
+      "quote": 11.83,
+      "carrier": "UPS",
+      "service": "03",
+      "service_title": "UPS Ground"
+    },
+    "p24x10x6": {
+      "quote": 13.56,
+      "carrier": "UPS",
+      "service": "03",
+      "service_title": "UPS Ground"
+    }
+  },
+  "zone_2": {
+    "p24x10x4": {
+      "quote": 10.54,
+      "carrier": "UPS",
+      "service": "93",
+      "service_title": "UPS Ground Saver"
+    },
+    "p24x10x6": {
+      "quote": 12.31,
+      "carrier": "UPS",
+      "service": "03",
+      "service_title": "UPS Ground"
+    }
+  },
+  "zone_3": {
+    "p24x10x4": {
+      "quote": 10.54,
+      "carrier": "UPS",
+      "service": "93",
+      "service_title": "UPS Ground Saver"
+    },
+    "p24x10x6": {
+      "quote": 12.31,
+      "carrier": "UPS",
+      "service": "03",
+      "service_title": "UPS Ground"
+    }
+  },
+  "zone_4": {
+    "p24x10x4": {
+      "quote": 10.54,
+      "carrier": "UPS",
+      "service": "93",
+      "service_title": "UPS Ground Saver"
+    },
+    "p24x10x6": {
+      "quote": 12.31,
+      "carrier": "UPS",
+      "service": "03",
+      "service_title": "UPS Ground"
+    }
+  },
+  "zone_5": {
+    "p24x10x4": {
+      "quote": 13.32,
+      "carrier": "UPS",
+      "service": "93",
+      "service_title": "UPS Ground Saver"
+    },
+    "p24x10x6": {
+      "quote": 16.24,
+      "carrier": "UPS",
+      "service": "03",
+      "service_title": "UPS Ground"
+    }
+  }
+}
