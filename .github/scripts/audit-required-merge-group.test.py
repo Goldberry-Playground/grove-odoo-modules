@@ -111,10 +111,8 @@ class NeedsClosure(unittest.TestCase):
     def test_synthetic_needs_on_non_required_job_fails_naming_it(self):
         # The next job someone appends to `needs:` without promoting it. The
         # audit must fail and name the exact upstream job (id AND context).
-        ci = ODOOCKER_CI.replace(
-            "needs: [actionlint, shellcheck, no-tracked-env-files, lint-python, validate-compose]",
-            "needs: [actionlint, shellcheck, no-tracked-env-files, lint-python, validate-compose, ssh-payload-escaping]",
-        )
+        base = "needs: [actionlint, shellcheck, no-tracked-env-files, lint-python, validate-compose"
+        ci = ODOOCKER_CI.replace(f"{base}]", f"{base}, ssh-payload-escaping]")
         rc, out = run_audit({"ci.yml": ci}, ODOOCKER_REQUIRED)
         self.assertEqual(rc, 1, out)
         self.assertIn("needs `ssh-payload-escaping` = 'ssh payload render guard', which is not required", out)
