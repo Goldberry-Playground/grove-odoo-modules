@@ -2,13 +2,15 @@
 
 **Epic:** GOL-3199 (Train #4). **Spec:** `docs/superpowers/specs/2026-10-07-zip-shipping-calculator-design.md` (PR #327). **Status:** decision + probe recipe delivered; 13-label golden fixture is a scaffold pending an Odoo read path for the exact ship-to ZIP + per-label service. This note sizes the surcharge table for Slice 2.
 
+**Update 2026-10-13:** Slice 3 (weight calibration) has since merged as **#329 (GOL-3201)** and no longer waits on the Odoo read path below; it already reads this fixture's shape via `scripts/rate_check/calibrate_weights.py --samples`. Separately, **#335 (GOL-3285) retired the `small` (24x6x4) box**: bareroot now packs into `p24x10x4` / `p24x10x6`. The 13 rows below stay valid as *historical* price evidence for `price(zip, billable_lb)` (the golden test keys on ZIP + billable weight, not box id), but they are no longer calibration samples for any box we ship (`calibrate_weights.py` reports `small` as an unknown box id). **Still open:** 12 of the 13 rows need the exact 5-digit ZIP and the bought service from Josh (see Blocker).
+
 ## TL;DR
 
 - **Surcharge source: UPS's published Delivery-Area-Surcharge (DAS) ZIP list — specifically the *Extended* and *Remote* tiers — as the seed, validated against the 13-label golden set and spot public-calculator probes.** It is free, authoritative, refreshed by UPS a few times a year (fits the "static data, PR refresh" rule), and it is the only candidate that *explains* the one outlier in the real data (Mariaville ME 04605) without blind nationwide probing.
 - **Odoo back-fill is a validation/drift check, not the source.** Only 1 of the 13 shipped labels hit a surcharge ZIP, and the data has no zone_3, no large/potted, and no coverage of most of the map — it cannot size or populate a surcharge table.
 - **Sampling every 3-digit prefix is rejected as the surcharge source** (it only rediscovers what UPS already publishes, at ~900+ live lookups) but is retained as the method for the base **rate card** (one representative ZIP per UPS zone × weight tier), which the spec already calls for.
 - **Expected surcharge-table size: sparse.** Bounded above by the UPS Extended + Remote DAS ZIP set (order 10³–10⁴ five-digit ZIPs nationwide); the spec's ">$0.25 over card" threshold plus the empirical rarity (1/13 labels, and 9 of 10 "far" corners in the CEO probe priced at the plain zone rate) will narrow the committed table well below that. Final count is pinned in Slice 2 by diffing the DAS list against card-reproduced probes.
-- **Golden fixture:** `scripts/rate_check/fixtures/golden_labels_2026-10-07.json` (13 rows, `small` box, batch LB-20261005-01). Complete on state/weight/cost; `zip`/`service` gaps flagged per row (see Blocker).
+- **Golden fixture:** `scripts/rate_check/fixtures/golden_labels_2026-10-07.json` (13 rows, historical `small` box id retired by #335, batch LB-20261005-01). Complete on state/weight/cost; `zip`/`service` gaps flagged per row (see Blocker).
 
 ## Evidence base (no new reads were possible this spike)
 
@@ -67,7 +69,7 @@ The fixture is complete on `(zone, state, packed_weight, billable_weight, actual
 
 **Unblock owner: Josh.** Either (durable, preferred):
 
-- **(A)** grant the rate-check / content-drafter prod Odoo service account **read-only Sales** access to `grove.label.batch` + `grove.label.batch.line`. This also unblocks **Slice 3** weight-calibration, which must read `grove.label.batch.line.weight_lb` across shipped boxes.
+- **(A)** grant the rate-check / content-drafter prod Odoo service account **read-only Sales** access to `grove.label.batch` + `grove.label.batch.line`. (Slice 3 calibration already shipped as #329; this access would also let its future refresh PRs read new `weight_lb` samples for the p24x10x4 / p24x10x6 boxes directly.)
 
 or (fast path):
 

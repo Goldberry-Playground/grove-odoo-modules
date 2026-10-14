@@ -4,7 +4,8 @@
   "origin_zip": "26651",
   "batch": "LB-20261005-01",
   "captured_on": "2026-10-06",
-  "box_catalog_note": "All 13 are the `small` box (24x6x4). billable_weight_lb = ceil(packed_weight_lb) to the carrier pound.",
+  "box_catalog_note": "All 13 are the `small` box (24x6x4), a HISTORICAL box id: #335 (GOL-3285, 2026-10-13) retired small/large and bareroot now packs into p24x10x4 / p24x10x6. The rows remain valid price evidence for price(zip, billable_lb); they are not calibration samples for any current box. billable_weight_lb = ceil(packed_weight_lb) to the carrier pound.",
+  "open_items": "Still needed from Josh: exact 5-digit ZIP for 12 of 13 rows and the bought service for 6 rows (each row's `needs` list). Slice 3 calibration no longer waits on this (merged as #329, GOL-3201).",
   "schema": ["label", "zone", "state", "zip", "box_id", "packed_weight_lb", "billable_weight_lb", "service", "actual_label_cost", "needs"],
   "labels": [
     {"label": "L01", "zone": "zone_1", "state": "KY", "zip": null, "box_id": "small", "packed_weight_lb": 6.5, "billable_weight_lb": 7, "service": "UPS Ground", "actual_label_cost": 8.79, "needs": ["zip5"]},
