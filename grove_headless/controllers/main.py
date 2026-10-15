@@ -1963,9 +1963,7 @@ class GroveHeadlessAPI(http.Controller):
         # and shows the "Add a free 15-minute planting consult" checkbox when true.
         # Computed the SAME way _create_draft_order's gate will decide, so the
         # cart checkbox and the checkout can never disagree.
-        consult_eligible = _consult_eligible_for_quote(
-            request.website, request.env, lines, payload.get("promo_code")
-        )
+        consult_eligible = _consult_eligible_for_quote(request.website, request.env, lines, payload.get("promo_code"))
         response = {
             "deposit_now": deposit_now,
             "deposit_reason": reason,
@@ -5184,11 +5182,7 @@ def _notify_consult_booking(env, order):
             order.name,
         )
         return
-    body = (
-        f"<p>Hi {html.escape(order.partner_id.name or 'there')},</p>"
-        f"{block}"
-        "<p>Goldberry Grove Nursery</p>"
-    )
+    body = f"<p>Hi {html.escape(order.partner_id.name or 'there')},</p>{block}<p>Goldberry Grove Nursery</p>"
     subject = f"Book your planting consult for {order.name}"
     env["grove.email.log"].sudo().log_and_send(
         order,

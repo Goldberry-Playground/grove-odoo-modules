@@ -21,8 +21,6 @@ tests/__init__.py AND the root conftest's collect_ignore_glob so it is not
 double-skipped (GOL-1936).
 """
 
-from unittest import mock
-
 from odoo.addons.grove_headless.controllers import main as grove_main
 from odoo.addons.grove_headless.models import order_digest, promotions
 from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
@@ -222,7 +220,9 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
     def test_booking_email_sent_only_when_requested(self):
         self.icp.set_param("grove_headless.consult_booking_url", "https://cal.example/appt")
         requested = self._order([(self.consult_variant, 1)])
-        with mute_logger("odoo.addons.grove_headless.controllers.main", "odoo.addons.grove_headless.models.grove_email_log"):
+        with mute_logger(
+            "odoo.addons.grove_headless.controllers.main", "odoo.addons.grove_headless.models.grove_email_log"
+        ):
             grove_main._notify_consult_booking(self.env, requested)
         logs = self.env["grove.email.log"].search([("order_id", "=", requested.id), ("kind", "=", "consult")])
         self.assertEqual(len(logs), 1)

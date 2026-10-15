@@ -399,8 +399,7 @@ def render_digest_html(digest: dict) -> str:
         parts.append("<ul>")
         for c in consults:
             parts.append(
-                f"<li><strong>{html.escape(str(c['order_name']))}</strong> | "
-                f"{html.escape(str(c['partner_name']))}</li>"
+                f"<li><strong>{html.escape(str(c['order_name']))}</strong> | {html.escape(str(c['partner_name']))}</li>"
             )
         parts.append("</ul>")
 
