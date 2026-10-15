@@ -1222,6 +1222,14 @@ class GroveHeadlessAPI(http.Controller):
             sale_order = request.website._create_cart()
         sale_order._cart_add(product_id=variant.id, quantity=quantity)
 
+        # Carry the storefront planner's mix onto the cart (GOL-3381 spec C.4):
+        # a `plan` object is accepted only on a line whose template is
+        # consult-built (134/135), and stored on the sale order as
+        # grove_planner_plan so the order form shows Wesley the customer's plan.
+        plan = payload.get("plan")
+        if isinstance(plan, dict) and variant.product_tmpl_id.grove_consult_built:
+            sale_order.grove_planner_plan = plan
+
         return self.cart_get()
 
     # ── Shipping ─────────────────────────────────────────────────────────
@@ -1950,6 +1958,14 @@ class GroveHeadlessAPI(http.Controller):
         # on a rollover. The per-line value stays. The mixing rule above (via
         # _validate_ship_wave) has already rejected any cart with two harvest
         # years, so a seed cart that reaches here carries exactly one.
+        # Whether the free $0 planting consult may be offered (GOL-3381 spec D.2).
+        # The storefront never computes the threshold itself — it reads this flag
+        # and shows the "Add a free 15-minute planting consult" checkbox when true.
+        # Computed the SAME way _create_draft_order's gate will decide, so the
+        # cart checkbox and the checkout can never disagree.
+        consult_eligible = _consult_eligible_for_quote(
+            request.website, request.env, lines, payload.get("promo_code")
+        )
         response = {
             "deposit_now": deposit_now,
             "deposit_reason": reason,
@@ -1957,6 +1973,7 @@ class GroveHeadlessAPI(http.Controller):
             "amount_due_today": deposit_amount if deposit_now else None,
             "after_cutover": _after_deposit_cutover(request.env, today),
             "ship_wave": ship_wave,
+            "consult_eligible": consult_eligible,
             "lines": line_quotes,
         }
         seed_year = seed_cart_harvest_year(q.get("seed_harvest_year") for q in line_quotes)
@@ -3073,6 +3090,60 @@ def _validate_ship_wave(
     return None, wave
 
 
+def _consult_eligible_for_quote(website, env, lines, promo_code):
+    """``consult_eligible`` for the checkout quote (GOL-3381 spec D.2), decided
+    the same way ``_create_draft_order``'s gate will so the cart checkbox and the
+    checkout never disagree.
+
+    A ``grove_consult_built`` line is always eligible (that is how every
+    agroforestry plan arrives). Otherwise the goods subtotal AFTER promotions
+    must clear ``grove_headless.consult_threshold`` (0 disables the subtotal
+    offer). The after-promo subtotal is measured by building the cart in a
+    rolled-back savepoint through ``_create_draft_order`` — the same mechanism
+    ``checkout_promo_preview`` uses — but only when a cheap pre-discount sum
+    could possibly clear the threshold (a promo only lowers it), and a build
+    error (e.g. a promo code on a deposit cart) degrades to not-eligible rather
+    than failing the quote.
+    """
+    SaleOrder = env["sale.order"].sudo()
+    if any(variant.product_tmpl_id.grove_consult_built for variant, _ in lines):
+        return True
+    threshold = SaleOrder._grove_consult_threshold()
+    if threshold <= 0:
+        return False
+    # Pre-discount upper bound: a promo can only reduce the subtotal, so a cart
+    # that cannot reach the threshold even at full price is never eligible and
+    # needs no order build.
+    gross = sum((variant.lst_price or 0.0) * qty for variant, qty in lines)
+    if round(gross, 2) < threshold:
+        return False
+
+    class _Rollback(Exception):
+        pass
+
+    preview_payload = {
+        "contact": {
+            "name": "Consult eligibility",
+            "email": "consult-eligibility@grove.invalid",
+            "phone": "0000000000",
+        },
+        "items": [{"variant_id": variant.id, "quantity": qty} for variant, qty in lines],
+        "fulfillment": "pickup",
+    }
+    if promo_code:
+        preview_payload["promo_code"] = promo_code
+    eligible = False
+    try:
+        with env.cr.savepoint():
+            order, error = _create_draft_order(website, env, preview_payload)
+            if error is None:
+                eligible = order._grove_consult_eligible()
+            raise _Rollback()
+    except _Rollback:
+        pass
+    return eligible
+
+
 def _create_draft_order(website, env, payload, discount_out=None):
     """Build a draft sale.order from a posted cart payload.
 
@@ -3612,6 +3683,30 @@ def _create_draft_order(website, env, payload, discount_out=None):
     # rolled since the shopper added to cart. No-op for a non-seed order.
     if is_seed_order:
         _stamp_seed_harvest_years(order, _today_utc())
+
+    # $0 planting-consult gate (GOL-3381 spec D.2). An eligible cart is the ONLY
+    # way to get the consult line onto an order — reject it here (after promos, so
+    # eligibility is measured on the after-promo goods subtotal) with the same 400
+    # pattern as the blank-phone check. This runs for every caller of
+    # _create_draft_order, so a hand-rolled bearer-API POST can't slip it in.
+    consult_tmpl = env.ref("grove_headless.product_planting_consult", raise_if_not_found=False)
+    if consult_tmpl and any(line.product_template_id == consult_tmpl for line in order.order_line):
+        if not order._grove_consult_eligible():
+            order.unlink()
+            return None, _json_response(
+                {"error": "The free planting consult isn't available on this order."},
+                status=400,
+            )
+
+    # Carry the storefront planner's mix onto a consult-built order (spec C.4) so
+    # Wesley starts the SOP from the customer's own plan. Only stored when the
+    # cart actually carries a grove_consult_built line (the planner only sends a
+    # plan with such a line) and the payload is a well-formed object.
+    plan = payload.get("plan")
+    if isinstance(plan, dict) and any(
+        line.product_template_id.grove_consult_built for line in order.order_line if line.product_template_id
+    ):
+        order.grove_planner_plan = plan
 
     return order, None
 
@@ -4989,6 +5084,10 @@ def _handle_session_completed(env, session):
     except Exception:  # noqa: BLE001 — payment is already recorded; don't fail the webhook
         _logger.exception("action_confirm failed for %s (payment recorded, confirm deferred)", order.name)
     _send_order_confirmation_email(env, order)
+    # Booking link alongside the receipt for an order that added the free $0
+    # planting consult (GOL-3381 spec D.3). Best-effort, like the deposit
+    # explainer; never fails the webhook.
+    _notify_consult_booking(env, order)
     # Post-purchase ops chain (GOL-1933): alert staff on EVERY new paid order —
     # both fulfilment types, deposit or full. Pickup orders get no label but must
     # still notify (Josh). Both are best-effort and must never fail the webhook.
@@ -5043,6 +5142,67 @@ def _preorder_ship_season(env, order):
         return None
     calendar = merge_calendar_override(_parse_calendar_override(env))
     return resolve_fulfillment(zone, _date.today(), calendar).get("season")
+
+
+def consult_booking_block(order_name, booking_url):
+    """HTML "Book your planting consult" block for the confirmation email
+    (GOL-3381 spec D.3). The booking link carries ``?order=<name>`` so the
+    calendar description shows which order the call is for (an existing query on
+    the URL is preserved with ``&``). Returns "" when no booking URL is
+    configured, so the email simply omits the block rather than linking nowhere.
+    Pure — unit-tested without a DB."""
+    if not booking_url:
+        return ""
+    sep = "&" if "?" in booking_url else "?"
+    link = f"{html.escape(booking_url)}{sep}order={html.escape(order_name or '')}"
+    return (
+        "<p><strong>Book your planting consult</strong><br/>"
+        "You added a free 15-minute planting consult. "
+        f'<a href="{link}">Pick a time that works for you</a> and we will review your '
+        "plan before it ships.</p>"
+    )
+
+
+def _notify_consult_booking(env, order):
+    """Best-effort "book your planting consult" email sent alongside the
+    confirmation receipt when the order requested the $0 consult (GOL-3381 spec
+    D.3). The standard Odoo sale receipt template can't be block-extended
+    cleanly, so the booking link rides its own branded email, logged in
+    grove.email.log like the preorder-deposit explainer. Never fatal: the
+    payment is recorded and the receipt stands on its own. Skipped (and logged)
+    when the booking URL system parameter is unset."""
+    if not order.grove_consult_requested:
+        return
+    email = order.partner_id.email
+    if not email:
+        return
+    booking_url = env["ir.config_parameter"].sudo().get_param("grove_headless.consult_booking_url", "")
+    block = consult_booking_block(order.name, booking_url)
+    if not block:
+        _logger.warning(
+            "Consult requested on %s but grove_headless.consult_booking_url is unset; no booking email",
+            order.name,
+        )
+        return
+    body = (
+        f"<p>Hi {html.escape(order.partner_id.name or 'there')},</p>"
+        f"{block}"
+        "<p>Goldberry Grove Nursery</p>"
+    )
+    subject = f"Book your planting consult for {order.name}"
+    env["grove.email.log"].sudo().log_and_send(
+        order,
+        "consult",
+        email,
+        subject,
+        mail_vals={
+            "subject": subject,
+            "email_to": email,
+            **mail_from_vals(env, order.company_id),
+            "body_html": body,
+            "auto_delete": True,
+        },
+    )
 
 
 def _notify_preorder_deposit(env, order):

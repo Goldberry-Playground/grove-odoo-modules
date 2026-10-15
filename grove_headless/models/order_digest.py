@@ -144,6 +144,15 @@ def build_digest(
         if (o.get("grove_checkout_status") or "") in ("settlement_failed", "settlement_error")
     ]
 
+    # --- Consult requests (GOL-3381 spec D.3) ---
+    # Orders placed in the window that added the free $0 planting consult. Wesley
+    # books the calls off this list; one entry per order with name + customer.
+    consult_requests = [
+        {"order_name": o.get("name") or "", "partner_name": o.get("partner_name") or ""}
+        for o in period_orders
+        if o.get("grove_consult_requested")
+    ]
+
     return {
         "period_start": period_start,
         "period_end": today,
@@ -162,6 +171,8 @@ def build_digest(
         "pickup_count": len(pickup_awaiting),
         "settlement_failures": settlement_failures,
         "settlement_failed_count": len(settlement_failures),
+        "consult_requests": consult_requests,
+        "consult_request_count": len(consult_requests),
     }
 
 
@@ -310,6 +321,12 @@ def render_digest_text(digest: dict) -> str:
     else:
         lines += ["", "No pickups awaiting collection."]
 
+    consults = digest.get("consult_requests") or []
+    if consults:
+        lines += ["", f"Consult requested ({len(consults)}):"]
+        for c in consults:
+            lines.append(f"  {c['order_name']} | {c['partner_name']}")
+
     return "\n".join(lines)
 
 
@@ -375,6 +392,17 @@ def render_digest_html(digest: dict) -> str:
         parts.append("</ul>")
     else:
         parts.append("<p>No pickups awaiting collection.</p>")
+
+    consults = digest.get("consult_requests") or []
+    if consults:
+        parts.append(f"<h3>Consult requested ({len(consults)})</h3>")
+        parts.append("<ul>")
+        for c in consults:
+            parts.append(
+                f"<li><strong>{html.escape(str(c['order_name']))}</strong> | "
+                f"{html.escape(str(c['partner_name']))}</li>"
+            )
+        parts.append("</ul>")
 
     return "\n".join(parts)
 

@@ -29,6 +29,7 @@ _KIND_SELECTION = [
     ("delivered", "Delivered notice"),
     ("dunning", "Balance-due (dunning)"),
     ("oversell_apology", "Oversell apology"),
+    ("consult", "Planting-consult booking link"),
 ]
 
 _STATUS_SELECTION = [
