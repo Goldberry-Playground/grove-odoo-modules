@@ -1,7 +1,8 @@
 {
   "//": "Declared required status checks for this repo (GOL-1735 / GOL-1406-D; ported by GOL-1824).",
-  "//audit": "audit-required-merge-group.py asserts every context below is produced by a workflow that triggers on `merge_group` (job name OR a commit status posted via the statuses API), so no required check is PR-only and the merge queue cannot wedge ('Expected \u2014 waiting for status'). The weekly reconcile job compares this list against the live required contexts (classic branch protection AND rulesets) and fails on drift, so keep this file in sync when a required check is added or removed.",
-  "//gol1953-pause": "PARTIAL PROMOTION 2026-09-08 (CEO directive after the 09-08 main-red incident: #190/#194/#204 all merged with red test jobs because tests were not required). The two test-suite jobs are promoted now; the remaining guard/hardening layer in '//gol1953-parked-promotion-target' stays parked pending the GOL-1953 canary. Applied IN LOCKSTEP with the main-branch-protection ruleset (id 15851628) PUT \u2014 declared == live.",
+  "//audit": "audit-required-merge-group.py asserts every context below is produced by a workflow that triggers on `merge_group` (job name OR a commit status posted via the statuses API), so no required check is PR-only and the merge queue cannot wedge ('Expected — waiting for status'). The weekly reconcile job compares this list against the live required contexts (classic branch protection AND rulesets) and fails on drift, so keep this file in sync when a required check is added or removed.",
+  "//gol1953-pause": "PARTIAL PROMOTION 2026-09-08 (CEO directive after the 09-08 main-red incident: #190/#194/#204 all merged with red test jobs because tests were not required). The two test-suite jobs are promoted now; the remaining guard/hardening layer in '//gol1953-parked-promotion-target' stays parked pending the GOL-1953 canary. Applied IN LOCKSTEP with the main-branch-protection ruleset (id 15851628) PUT — declared == live.",
+  "//gol3360-promotion": "2026-10-14: 'Validate XML data files' promoted out of the parked target (needs-closure invariant, GOL-3360 / PR #352): 'Install + test module against Odoo 19' needs it, and a required job must not depend on a non-required one. Verified reporting success on real merge_group heads first. Applied IN LOCKSTEP with ruleset 15851628 PUT by Josh (admin) — declared == live.",
   "//gol1953-parked-promotion-target": [
     "Protected paths guard",
     "Config freeze",
@@ -12,7 +13,6 @@
     "pip-audit (CVE scan)",
     "trufflehog (verified)",
     "Reject tracked .env files",
-    "Validate XML data files",
     "Pure-Python unit tests"
   ],
   "branch": "main",
@@ -21,6 +21,7 @@
     "Validate Module Manifests",
     "Validate Tenant Slug Map",
     "Pure-Python unit tests",
-    "Install + test module against Odoo 19"
+    "Install + test module against Odoo 19",
+    "Validate XML data files"
   ]
 }

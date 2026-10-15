@@ -46,8 +46,15 @@ except ImportError:
     sys.exit(2)
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-WF_DIR = os.path.join(ROOT, ".github", "workflows")
-MANIFEST = os.path.join(ROOT, ".github", "required-checks.json")
+
+
+def _wf_dir(root):
+    return os.path.join(root, ".github", "workflows")
+
+
+def _manifest(root):
+    return os.path.join(root, ".github", "required-checks.json")
+
 
 # A quoted string literal following a `context:` key — how a commit status is
 # named when posted via the statuses API (github-script
@@ -77,10 +84,83 @@ def job_context_names(job_id, job):
     return name if name else job_id
 
 
-def load_workflows():
-    """[(path, has_merge_group, {context_name: templated_bool})]"""
+# A workflow may list `merge_group` in `on:` yet still fail to report a given
+# check there, because the *job* is conditionally skipped on merge_group. GitHub
+# treats a skipped required check as never-reporting, so the merge queue wedges
+# exactly as if the workflow were PR-only (GOL-1735 / GOL-1953). The audit must
+# therefore look past `on:` to per-job `if:` and `needs:`.
+_EVENT_NAME_RE = re.compile(r"github\.event_name")
+
+
+def if_excludes_merge_group(cond):
+    """Heuristic: does this job `if:` deterministically skip on `merge_group`?
+
+    Conservative — only True when the condition keys on `github.event_name` and
+    never mentions `merge_group` (e.g. `if: github.event_name == 'pull_request'`,
+    the exact gate on dependency-review / codeql preflights that makes them skip
+    on the queue). We deliberately do NOT try to evaluate arbitrary expressions;
+    a false negative just falls back to the old on:-only behaviour, while a false
+    positive would wrongly fail a healthy required check.
+    """
+    if not cond or not isinstance(cond, str):
+        return False
+    if "merge_group" in cond:
+        return False
+    return bool(_EVENT_NAME_RE.search(cond))
+
+
+def _needs_of(job):
+    n = (job or {}).get("needs") if isinstance(job, dict) else None
+    if n is None:
+        return []
+    return [n] if isinstance(n, str) else list(n)
+
+
+# A job whose `if:` uses always() or !cancelled() is NOT skipped when an
+# upstream fails — it runs and must judge `needs.*.result` itself. That is the
+# standard "required aggregator / gate job" pattern (e.g. odoocker's
+# `prod-plan-guard`, `if: ${{ always() }}` over detect + prod-plan), and it is
+# exactly what makes an edge safe: the gate observes the upstream outcome
+# through the dependent instead of through the upstream being required.
+_RUNS_DESPITE_UPSTREAM_RE = re.compile(r"always\(\)|!\s*cancelled\(\)")
+
+
+def runs_despite_upstream(cond):
+    return bool(cond) and isinstance(cond, str) and bool(_RUNS_DESPITE_UPSTREAM_RE.search(cond))
+
+
+def merge_group_unsafe_jobs(jobs):
+    """Set of job ids that will NOT report on merge_group: their own `if:`
+    excludes it, OR they `needs:` a job that is itself skipped on merge_group
+    (a skipped dependency skips the dependent). Computed to a fixpoint."""
+    unsafe = {
+        jid for jid, j in jobs.items() if if_excludes_merge_group((j or {}).get("if") if isinstance(j, dict) else None)
+    }
+    changed = True
+    while changed:
+        changed = False
+        for jid, j in jobs.items():
+            if jid in unsafe:
+                continue
+            if any(dep in unsafe for dep in _needs_of(j)):
+                unsafe.add(jid)
+                changed = True
+    return unsafe
+
+
+def load_workflows(root=ROOT):
+    """[(path, has_merge_group,
+         {context_name: {"templated": bool, "mg_safe": bool, "job_ids": [id]}},
+         {job_id: {"ctx": context_name, "needs": [job_id]}})]
+
+    mg_safe is False when the producing job is skipped on merge_group (its `if:`
+    excludes it, or it `needs:` a job that is). A context is only a valid
+    merge_group producer when the workflow triggers on merge_group AND the job is
+    mg_safe. The 4th element is the workflow's job graph (ids, their context
+    names and declared `needs:`), used by the needs-closure invariant."""
     out = []
-    paths = sorted(glob.glob(os.path.join(WF_DIR, "*.yml")) + glob.glob(os.path.join(WF_DIR, "*.yaml")))
+    wf_dir = _wf_dir(root)
+    paths = sorted(glob.glob(os.path.join(wf_dir, "*.yml")) + glob.glob(os.path.join(wf_dir, "*.yaml")))
     for path in paths:
         with open(path) as f:
             raw = f.read()
@@ -88,37 +168,118 @@ def load_workflows():
             doc = yaml.safe_load(raw)
         except yaml.YAMLError as e:
             print(f"::error file={path}::unparseable workflow YAML: {e}")
-            out.append((path, False, {}))
+            out.append((path, False, {}, {}))
             continue
         if not isinstance(doc, dict):
             continue
         # PyYAML parses the bare key `on:` as the boolean True.
         on = doc.get("on", doc.get(True))
         mg = on_has_merge_group(on)
+        jobs = doc.get("jobs") or {}
+        unsafe = merge_group_unsafe_jobs(jobs)
         contexts = {}
-        for job_id, job in (doc.get("jobs") or {}).items():
+        graph = {}
+        for job_id, job in jobs.items():
             ctx = job_context_names(job_id, job)
-            contexts[ctx] = "${{" in ctx
-        # Commit-status contexts posted via the statuses API (not job names).
+            meta = contexts.setdefault(ctx, {"templated": ("${{" in ctx), "mg_safe": True, "job_ids": []})
+            meta["mg_safe"] = meta["mg_safe"] and (job_id not in unsafe)
+            meta["job_ids"].append(job_id)
+            graph[job_id] = {
+                "ctx": ctx,
+                "needs": _needs_of(job),
+                "always": runs_despite_upstream(job.get("if") if isinstance(job, dict) else None),
+            }
+        # Commit-status contexts posted via the statuses API (not job names). We
+        # cannot tie these to a job, so assume mg_safe (conservative — avoids a
+        # false failure on a status that does report) and no `needs:` edges.
         for _q, ctx in STATUS_CTX_RE.findall(raw):
-            contexts.setdefault(ctx, ("${{" in ctx))
-        out.append((path, mg, contexts))
+            contexts.setdefault(ctx, {"templated": ("${{" in ctx), "mg_safe": True, "job_ids": []})
+        out.append((path, mg, contexts, graph))
     return out
 
 
-def static_audit():
-    with open(MANIFEST) as f:
+def needs_closure_gaps(required, workflows):
+    """Needs-closure invariant (GOL-3360).
+
+    For every required context, walk the transitive `needs:` of each job that
+    produces it and return one gap per upstream job whose own context is NOT
+    required. Why this is a gate hole and not a style nit: when an upstream job
+    fails, GitHub SKIPS every dependent job, and a skipped check-run SATISFIES a
+    required status check. So a red in a non-required upstream makes the
+    required dependent vanish silently — the merge gate sees neither the lint
+    failure nor the missing integration test (GOL-1953 2026-10-06 finding on
+    odoocker's `Backend stack smoke test`). Every producer across every
+    workflow is checked, so a context name reused in a PR-only workflow cannot
+    smuggle an unrequired edge past the audit.
+
+    Exemption: a job gated by `if: always()` / `!cancelled()` is not skipped
+    when its upstream fails — it runs and must evaluate `needs.*.result`
+    itself (the required aggregator pattern). Such a producer carries no
+    closure obligation, and the walk does not descend past a required
+    always()-job either: anything above it is that job's responsibility and
+    its own failure IS observed by the gate.
+
+    Returns [(ctx, path, producer_job_id, upstream_job_id, upstream_ctx|None)]
+    in deterministic order. upstream_ctx is None when the `needs:` names a job
+    id that does not exist in the workflow (GitHub rejects such a workflow, but
+    the audit must not silently treat the edge as satisfied)."""
+    req = set(required)
+    gaps = []
+    for ctx in required:
+        for path, _mg, contexts, graph in workflows:
+            if ctx not in contexts:
+                continue
+            for producer in contexts[ctx]["job_ids"]:
+                if graph[producer]["always"]:
+                    continue
+                seen = set()
+                stack = sorted(graph[producer]["needs"], reverse=True)
+                while stack:
+                    dep = stack.pop()
+                    if dep in seen:
+                        continue
+                    seen.add(dep)
+                    if dep not in graph:
+                        gaps.append((ctx, path, producer, dep, None))
+                        continue
+                    dep_ctx = graph[dep]["ctx"]
+                    if dep_ctx not in req:
+                        gaps.append((ctx, path, producer, dep, dep_ctx))
+                    elif graph[dep]["always"]:
+                        continue  # required gate job: its upstreams are its own verdict
+                    stack.extend(sorted(graph[dep]["needs"], reverse=True))
+    return gaps
+
+
+def _transitive_needs(graph, job_id):
+    """All job ids reachable from job_id via `needs:` (ids only; may include
+    ids absent from graph when a workflow names a non-existent job)."""
+    seen = set()
+    stack = list(graph.get(job_id, {}).get("needs", []))
+    while stack:
+        d = stack.pop()
+        if d in seen:
+            continue
+        seen.add(d)
+        stack.extend(graph.get(d, {}).get("needs", []))
+    return seen
+
+
+def static_audit(root=ROOT):
+    with open(_manifest(root)) as f:
         manifest = json.load(f)
     required = manifest.get("required_contexts", [])
-    workflows = load_workflows()
+    workflows = load_workflows(root)
 
     failures = []
     print(f"Auditing {len(required)} required context(s) against {len(workflows)} workflow(s):\n")
     for ctx in required:
-        producers = [(path, mg) for (path, mg, ctxs) in workflows if ctx in ctxs]
+        producers = [(path, mg, ctxs[ctx]) for (path, mg, ctxs, _g) in workflows if ctx in ctxs]
         if not producers:
             # Also flag templated names that *might* match, to avoid a false miss.
-            templated = [path for (path, _mg, ctxs) in workflows for name, t in ctxs.items() if t]
+            templated = [
+                path for (path, _mg, ctxs, _g) in workflows for name, meta in ctxs.items() if meta["templated"]
+            ]
             hint = (
                 (f" (workflows with templated job/status names that may produce it: {sorted(set(templated))})")
                 if templated
@@ -129,9 +290,9 @@ def static_audit():
             )
             print(f"  ✗ {ctx!r}: no producing workflow found")
             continue
-        on_mg = [p for (p, mg) in producers if mg]
+        on_mg = [p for (p, mg, _m) in producers if mg]
         if not on_mg:
-            paths = ", ".join(os.path.basename(p) for (p, _mg) in producers)
+            paths = ", ".join(os.path.basename(p) for (p, _mg, _m) in producers)
             failures.append(
                 f"required check '{ctx}' is PR-only — its workflow(s) "
                 f"[{paths}] do not trigger on `merge_group`; the merge "
@@ -139,15 +300,94 @@ def static_audit():
             )
             print(f"  ✗ {ctx!r}: produced by [{paths}] but none trigger on merge_group")
             continue
-        print(f"  ✓ {ctx!r}: {os.path.basename(on_mg[0])} triggers on merge_group")
+        # Workflow triggers on merge_group — but is the producing JOB actually
+        # reached there, or is it skipped by an `if:`/`needs:` gate (GOL-1953)?
+        safe_mg = [p for (p, mg, meta) in producers if mg and meta["mg_safe"]]
+        if not safe_mg:
+            paths = ", ".join(os.path.basename(p) for (p, mg, _m) in producers if mg)
+            failures.append(
+                f"required check '{ctx}' is skipped on `merge_group` — "
+                f"its job in [{paths}] is gated by an `if:` that excludes "
+                f"merge_group (or `needs:` a job that is), so it never "
+                f"reports and the merge queue will wedge. Make the job "
+                f"run unconditionally on merge_group before requiring it."
+            )
+            print(f"  ✗ {ctx!r}: produced by [{paths}] on merge_group but the job is skipped there")
+            continue
+        print(f"  ✓ {ctx!r}: {os.path.basename(safe_mg[0])} triggers on merge_group")
+
+    # Needs-closure invariant (GOL-3360): every upstream of a required job must
+    # itself be required, else a red upstream skips the dependent and the
+    # skipped check satisfies the gate.
+    print("\nNeeds-closure: every `needs:` upstream of a required job must itself be required:\n")
+    gaps = needs_closure_gaps(required, workflows)
+    gapped = set()
+    for ctx, path, producer, dep, dep_ctx in gaps:
+        wf = os.path.basename(path)
+        gapped.add(ctx)
+        if dep_ctx is None:
+            failures.append(
+                f"required check '{ctx}' ({wf} job `{producer}`) has "
+                f"`needs: {dep}` but no job with id `{dep}` exists in "
+                f"{wf} — the edge cannot be audited; fix the job id."
+            )
+            print(f"  ✗ {ctx!r}: needs unknown job id `{dep}` in {wf}")
+            continue
+        failures.append(
+            f"required check '{ctx}' ({wf} job `{producer}`) transitively "
+            f"needs job `{dep}` = '{dep_ctx}', which is NOT a required "
+            f"check. A red '{dep_ctx}' SKIPS '{ctx}', and a skipped job "
+            f"satisfies branch protection, so the merge gate would observe "
+            f"neither failure (needs-closure invariant, GOL-3360). Either "
+            f"add '{dep_ctx}' to required_contexts (and live protection, "
+            f"in lockstep) or remove it from `needs:`."
+        )
+        print(f"  ✗ {ctx!r}: needs `{dep}` = {dep_ctx!r}, which is not required")
+    for ctx in required:
+        if ctx in gapped:
+            continue
+        always_gate = [
+            j
+            for (_p, _mg, ctxs, graph) in workflows
+            if ctx in ctxs
+            for j in ctxs[ctx]["job_ids"]
+            if graph[j]["always"] and graph[j]["needs"]
+        ]
+        deps = sorted(
+            {
+                graph[d]["ctx"]
+                for (_p, _mg, ctxs, graph) in workflows
+                if ctx in ctxs
+                for j in ctxs[ctx]["job_ids"]
+                if not graph[j]["always"]
+                for d in _transitive_needs(graph, j)
+                if d in graph
+            }
+        )
+        if always_gate:
+            print(
+                f"  ✓ {ctx!r}: gate job `{always_gate[0]}` runs with always()/!cancelled() "
+                f"and judges its upstreams itself"
+            )
+        elif deps:
+            print(f"  ✓ {ctx!r}: needs {deps}, all required")
+        else:
+            print(f"  ✓ {ctx!r}: no `needs:`")
 
     print()
     if failures:
         for msg in failures:
             print(f"::error::{msg}")
-        print(f"\nFAIL: {len(failures)} required check(s) would not report on the merge queue.")
+        print(
+            f"\nFAIL: {len(failures)} required-check problem(s): a required check "
+            f"would not report on the merge queue, or a required job depends on "
+            f"a non-required one."
+        )
         return 1
-    print("PASS: every required check reports on `merge_group`.")
+    print(
+        "PASS: every required check reports on `merge_group`, and every "
+        "`needs:` upstream of a required job is itself required."
+    )
     return 0
 
 
@@ -171,13 +411,13 @@ def _api_get(url, token):
         return None, e.code
 
 
-def reconcile():
+def reconcile(root=ROOT):
     token = os.environ.get("GH_TOKEN")
     repo = os.environ.get("GH_REPO")
     if not token or not repo:
         print("::error::--reconcile needs GH_TOKEN and GH_REPO=owner/repo.")
         return 2
-    with open(MANIFEST) as f:
+    with open(_manifest(root)) as f:
         manifest = json.load(f)
     branch = manifest.get("branch", "main")
     declared = sorted(manifest.get("required_contexts", []))
