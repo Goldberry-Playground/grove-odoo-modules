@@ -33,33 +33,52 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.company = self.env.ref("base.main_company")
-        self.partner = self.env["res.partner"].create(
-            {"name": "Consult Customer", "email": "consult-line@example.com", "company_id": self.company.id}
-        )
+        # The consult product is scoped to the nursery company (spec D.1,
+        # company_id 3) and the live storefront that offers it runs under the
+        # nursery website — so the consult-bearing orders here must too. An order
+        # on another company can't legally carry a line whose product belongs to
+        # the nursery (res.company._check_company crossover), which is exactly
+        # what checkout does in production.
+        self.nursery = self.env.ref("grove_headless.company_nursery")
+        # Company-shared customer (company_id False) so the same partner can sit
+        # on a main-company order (the eligibility carts) and a nursery order
+        # (the consult-bearing ones) without a company crossover.
+        self.partner = self.env["res.partner"].create({"name": "Consult Customer", "email": "consult-line@example.com"})
         self.consult = self.env.ref("grove_headless.product_planting_consult")
         self.consult_variant = self.consult.product_variant_id
         # A plain storable tree — the regression control for the tree-count /
-        # deposit / box-plan assertions.
+        # deposit / box-plan assertions. Tax-free on purpose: the chartless CI DB
+        # binds the WV sale tax to a single company (GroveTaxFixtureMixin), so a
+        # taxed product landing on a nursery-company order line would cross
+        # companies on the tax; the tree's tax is irrelevant to these assertions.
         self.tree = self.env["product.product"].create(
-            {"name": "American Plum (bareroot)", "type": "consu", "is_storable": True, "list_price": 22.0}
+            {
+                "name": "American Plum (bareroot)",
+                "type": "consu",
+                "is_storable": True,
+                "list_price": 22.0,
+                "taxes_id": [(6, 0, [])],
+            }
         )
         self.icp = self.env["ir.config_parameter"].sudo()
 
     # ── helpers ──────────────────────────────────────────────────────────
 
     def _website(self):
-        return self.env["website"].search([("company_id", "=", self.company.id)], limit=1) or self.env[
-            "website"
-        ].search([], limit=1)
+        # The nursery website (company 3) — the tenant that actually offers the
+        # consult, and the only company whose [company, False] domain resolves
+        # the nursery-scoped consult product inside _create_draft_order.
+        return self.env.ref("grove_headless.website_nursery")
 
-    def _order(self, lines):
+    def _order(self, lines, company=None):
+        company = company or self.company
         return (
             self.env["sale.order"]
-            .with_company(self.company)
+            .with_company(company)
             .create(
                 {
                     "partner_id": self.partner.id,
-                    "company_id": self.company.id,
+                    "company_id": company.id,
                     "order_line": [(0, 0, {"product_id": p.id, "product_uom_qty": q}) for p, q in lines],
                 }
             )
@@ -67,7 +86,13 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
 
     def _consult_built_product(self):
         prod = self.env["product.product"].create(
-            {"name": "Food Forest 50", "type": "consu", "is_storable": True, "list_price": 200.0}
+            {
+                "name": "Food Forest 50",
+                "type": "consu",
+                "is_storable": True,
+                "list_price": 200.0,
+                "taxes_id": [(6, 0, [])],
+            }
         )
         prod.product_tmpl_id.grove_consult_built = True
         return prod
@@ -132,7 +157,7 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
         # Tree count: 0 for the service, and adding it to a cart does not change
         # the qualifying tree count.
         self.assertEqual(promotions.variant_tree_count(self.consult_variant), 0)
-        order = self._order([(self.tree, 1), (self.consult_variant, 1)])
+        order = self._order([(self.tree, 1), (self.consult_variant, 1)], company=self.nursery)
         self.assertEqual(promotions.qualifying_tree_count(order), 1)
         # Deposit rule: a $0 service never triggers the deposit, and adding it to
         # a deposit-triggering line leaves the reason untouched.
@@ -187,7 +212,13 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
 
     def test_create_draft_order_accepts_the_consult_line_when_eligible(self):
         big_tree = self.env["product.product"].create(
-            {"name": "Specimen tree", "type": "consu", "is_storable": True, "list_price": 500.0}
+            {
+                "name": "Specimen tree",
+                "type": "consu",
+                "is_storable": True,
+                "list_price": 500.0,
+                "taxes_id": [(6, 0, [])],
+            }
         )
         payload = self._cart_payload(
             [
@@ -203,7 +234,7 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
     # ── D.3 order flag, digest, email ───────────────────────────────────────
 
     def test_grove_consult_requested_computed(self):
-        with_consult = self._order([(self.tree, 1), (self.consult_variant, 1)])
+        with_consult = self._order([(self.tree, 1), (self.consult_variant, 1)], company=self.nursery)
         without = self._order([(self.tree, 1)])
         self.assertTrue(with_consult.grove_consult_requested)
         self.assertFalse(without.grove_consult_requested)
@@ -219,7 +250,7 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
 
     def test_booking_email_sent_only_when_requested(self):
         self.icp.set_param("grove_headless.consult_booking_url", "https://cal.example/appt")
-        requested = self._order([(self.consult_variant, 1)])
+        requested = self._order([(self.consult_variant, 1)], company=self.nursery)
         with mute_logger(
             "odoo.addons.grove_headless.controllers.main", "odoo.addons.grove_headless.models.grove_email_log"
         ):
