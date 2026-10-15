@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Back-in-stock email (website_sale_stock): link to the headless
+         storefront PDP, not Odoo's own /shop page (2026-10-15 capture hotfix).
+         `storefront_url` is passed by product.product._grove_send_restock_email;
+         the fallback keeps stock Odoo behaviour if it is ever rendered without it. -->
+    <template id="availability_email_body_storefront" inherit_id="website_sale_stock.availability_email_body">
+        <xpath expr="(//a)[1]" position="attributes">
+            <attribute name="t-attf-href">#{storefront_url or product.website_url}</attribute>
+        </xpath>
+        <xpath expr="(//a)[2]" position="attributes">
+            <attribute name="t-attf-href">#{storefront_url or product.website_url}</attribute>
+        </xpath>
+    </template>
+</odoo>

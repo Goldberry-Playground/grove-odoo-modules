@@ -35,6 +35,7 @@ sys.modules.setdefault("grove_headless.tests", _stub_pkg("grove_headless.tests",
 # half-imported death. Pure-Python tests (loaded via importlib by file path)
 # stay collected.
 collect_ignore_glob = [
+    "grove_headless/tests/test_capture_endpoints.py",
     "grove_headless/tests/test_growing_facts.py",
     "grove_headless/tests/test_html_field_tracking.py",
     "grove_headless/tests/test_effective_shipping_tier.py",
