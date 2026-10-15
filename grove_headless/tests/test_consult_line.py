@@ -47,10 +47,15 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
         self.consult = self.env.ref("grove_headless.product_planting_consult")
         self.consult_variant = self.consult.product_variant_id
         # A plain storable tree — the regression control for the tree-count /
-        # deposit / box-plan assertions. Tax-free on purpose: the chartless CI DB
-        # binds the WV sale tax to a single company (GroveTaxFixtureMixin), so a
-        # taxed product landing on a nursery-company order line would cross
-        # companies on the tax; the tree's tax is irrelevant to these assertions.
+        # deposit / box-plan assertions. Categorised under the Plants root so it
+        # is a *qualifying* plant (promotions.is_qualifying_plant filters on the
+        # category, not merely on being storable): a real nursery tree carries
+        # this category, and the point of the tree-count assertion is that the
+        # consult service leaves a genuine tree's count untouched. Tax-free on
+        # purpose: the chartless CI DB binds the WV sale tax to a single company
+        # (GroveTaxFixtureMixin), so a taxed product landing on a nursery-company
+        # order line would cross companies on the tax; the tree's tax is
+        # irrelevant to these assertions.
         self.tree = self.env["product.product"].create(
             {
                 "name": "American Plum (bareroot)",
@@ -58,6 +63,7 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
                 "is_storable": True,
                 "list_price": 22.0,
                 "taxes_id": [(6, 0, [])],
+                "categ_id": self.env.ref("grove_headless.categ_plants").id,
             }
         )
         self.icp = self.env["ir.config_parameter"].sudo()
