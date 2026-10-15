@@ -440,6 +440,18 @@ def _serialize_facts(product):
         "chill_hours": product.grove_chill_hours or "",
         "pollination": product.grove_pollination or "",
         "years_to_fruit": product.grove_years_to_fruit or "",
+        # Planner facts (GOL-3378, order-builder §A): the scoreable subset plus
+        # the computed ready flag. Same blank conventions — integers to None when
+        # 0, chars to "", booleans as booleans, selection to None.
+        "years_to_fruit_min": product.grove_years_to_fruit_min or None,
+        "pollination_min": product.grove_pollination_min or None,
+        "harvest_months": product.grove_harvest_months or "",
+        "tolerates_wet": bool(product.grove_tolerates_wet),
+        "tolerates_poor_soil": bool(product.grove_tolerates_poor_soil),
+        "tolerates_shade": bool(product.grove_tolerates_shade),
+        "wildlife_value": product.grove_wildlife_value or None,
+        "planner_priority": product.grove_planner_priority or None,
+        "planner_ready": bool(product.grove_planner_ready),
     }
 
 
