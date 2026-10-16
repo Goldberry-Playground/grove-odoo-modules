@@ -8,6 +8,10 @@ POTTED_VALUE = "Potted"
 class ProductProduct(models.Model):
     _inherit = "product.product"
 
+    # Printify variant id (one per size/color), set by the Printify sync
+    # (spec 2026-10-13-printify-merch-design.md §3). Empty for every in-house product.
+    printify_variant_id = fields.Integer(string="Printify variant ID", index=True, copy=False, readonly=True)
+
     # The zone-rate engine bills bareroot as a 4 lb slim box and potted as a
     # ~25 lb box. Format is a VARIANT axis on live data, so the tier must be
     # resolved per-variant — the template field alone quotes bareroot pears

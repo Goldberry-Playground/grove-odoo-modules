@@ -1,3 +1,4 @@
+import base64
 import logging
 import os
 import re
@@ -14,6 +15,7 @@ from odoo.exceptions import UserError, ValidationError
 # the budgeted cron (models/grove_enrich_job.py).
 from ..services.plant_data import mapping as plant_mapping
 from ..services.plant_data.usda import USDAProvider
+from . import printify_client, printify_sync
 
 _logger = logging.getLogger(__name__)
 
@@ -799,6 +801,24 @@ class ProductTemplate(models.Model):
         help="Tracks the Paperclip content-drafter workflow (GOL-2384/C).",
     )
 
+    # Printify print-on-demand merch (spec 2026-10-13-printify-merch-design.md).
+    # ``printify`` products skip every plant rule at checkout and are fulfilled by
+    # Printify; ``in_house`` (default) is every existing product, unchanged.
+    grove_fulfillment_route = fields.Selection(
+        [("in_house", "In-house"), ("printify", "Printify")],
+        string="Fulfillment route",
+        default="in_house",
+        required=True,
+        tracking=True,
+        help="Printify products are printed and shipped by Printify and skip plant shipping rules.",
+    )
+    printify_product_id = fields.Char(string="Printify product ID", index=True, copy=False, readonly=True)
+    printify_lead_time = fields.Char(
+        string="Printify production time",
+        default="3 to 7 business days",
+        help="Shown on the product page and confirmation: 'Printed to order, ships in ...'.",
+    )
+
     # ── Enrichment / draft status UX (GOL-2541) ─────────────────────────
     # Josh could not tell from the form whether Fetch-facts / Request-draft were
     # running, how long they would take, or whether they succeeded. These fields
@@ -1576,3 +1596,138 @@ class ProductTemplate(models.Model):
         lowered = (value or "").lower()
         collapsed = re.sub(r"[^a-z0-9]+", "-", lowered)
         return collapsed.strip("-")
+
+    # ── Printify print-on-demand sync (spec 2026-10-13-printify-merch-design.md §3) ──
+
+    @api.model
+    def _grove_printify_attribute_value(self, attr_name, value_name):
+        Attribute = self.env["product.attribute"].sudo()
+        # Bind only to an attribute that actually spins up variants. A pre-existing
+        # "Color"/"Size" attribute configured with create_variant != "always" (a
+        # no-variant or dynamic attribute) would leave the shirt with NO variants
+        # to price or push (GOL-3314 review 2026-10-14), so we scope the match to
+        # create_variant="always" and create our own if none qualifies.
+        attribute = Attribute.search(
+            [("name", "=", attr_name), ("create_variant", "=", "always")], limit=1
+        ) or Attribute.create({"name": attr_name, "create_variant": "always"})
+        Value = self.env["product.attribute.value"].sudo()
+        value = Value.search([("attribute_id", "=", attribute.id), ("name", "=", value_name)], limit=1)
+        return attribute, value or Value.create({"attribute_id": attribute.id, "name": value_name})
+
+    @api.model
+    def _grove_printify_sync(self, fetch=None):
+        """Upsert every Printify shop product (spec §3). New templates land unpublished
+        on the farm company; Odoo's sale price wins after the first create."""
+        token = os.environ.get("PRINTIFY_API_TOKEN", "")
+        shop_id = os.environ.get("PRINTIFY_SHOP_ID", "")
+        if not token or not shop_id:
+            raise UserError("PRINTIFY_API_TOKEN and PRINTIFY_SHOP_ID must be configured on this server.")
+        fetch = fetch or requests.get
+        company = self.env.ref("base.main_company")
+        Template = self.sudo().with_context(active_test=False)
+        result = {"created": 0, "updated": 0, "archived": 0}
+        try:
+            raws = printify_client.list_products(token, shop_id)
+        except printify_client.PrintifyError as exc:
+            raise UserError(f"Printify sync failed: {exc}") from exc
+
+        for raw in raws:
+            mapped = printify_sync.map_product(raw)
+            enabled = [v for v in mapped["variants"] if v["enabled"]]
+            if not enabled:
+                continue
+            values = {}
+            for v in enabled:
+                for axis in ("Color", "Size"):
+                    name = v[axis.lower()]
+                    if name:
+                        attribute, value = self._grove_printify_attribute_value(axis, name)
+                        values.setdefault(attribute, self.env["product.attribute.value"])
+                        values[attribute] |= value
+
+            tmpl = Template.search([("printify_product_id", "=", mapped["printify_product_id"])], limit=1)
+            if not tmpl:
+                tmpl = Template.create(
+                    {
+                        "name": mapped["name"],
+                        "description_sale": mapped["description"],
+                        "type": "consu",
+                        "is_storable": False,
+                        "company_id": company.id,
+                        "website_published": False,
+                        "grove_fulfillment_route": "printify",
+                        "grove_gate_exempt": True,
+                        "printify_product_id": mapped["printify_product_id"],
+                        "list_price": min(v["price"] for v in enabled),
+                        "attribute_line_ids": [
+                            (0, 0, {"attribute_id": attribute.id, "value_ids": [(6, 0, vals.ids)]})
+                            for attribute, vals in values.items()
+                        ],
+                    }
+                )
+                result["created"] += 1
+                if mapped["image_url"]:
+                    resp = fetch(mapped["image_url"], timeout=15)
+                    if resp.status_code == 200:
+                        tmpl.image_1920 = base64.b64encode(resp.content)
+            else:
+                for attribute, vals in values.items():
+                    line = tmpl.attribute_line_ids.filtered(lambda ln, a=attribute: ln.attribute_id == a)
+                    missing = vals - line.value_ids
+                    if line and missing:
+                        line.value_ids = [(4, val.id) for val in missing]
+                result["updated"] += 1
+
+            by_combo = {(v["color"], v["size"]): v for v in mapped["variants"]}
+            # Anchor per-variant upcharges to PRINTIFY's own base (its cheapest
+            # enabled variant), not tmpl.list_price: that keeps the extra an
+            # upcharge ABOVE whatever base the operator has set (spec §3, "Odoo
+            # price wins after first sync") while still pricing 2XL/3XL correctly.
+            printify_base = min(v["price"] for v in enabled)
+            for variant in tmpl.with_context(active_test=False).product_variant_ids:
+                axis = {ptav.attribute_id.name: ptav.name for ptav in variant.product_template_attribute_value_ids}
+                pv = by_combo.get((axis.get("Color", ""), axis.get("Size", "")))
+                if not pv or not pv["enabled"]:
+                    if variant.active:
+                        variant.active = False
+                        if variant.printify_variant_id:
+                            result["archived"] += 1
+                    continue
+                vals = {}
+                if variant.printify_variant_id != pv["printify_variant_id"]:
+                    vals["printify_variant_id"] = pv["printify_variant_id"]
+                if variant.standard_price != pv["cost"]:
+                    vals["standard_price"] = pv["cost"]
+                if not variant.active:
+                    vals["active"] = True
+                if vals:
+                    variant.write(vals)
+                # Keep every enabled variant's upcharge in lockstep with Printify's
+                # variant price on EVERY sync, not just first create: a size or
+                # colour added in Printify after the first sync (2XL, 3XL) would
+                # otherwise sell at the base price, possibly below cost (GOL-3314
+                # review 2026-10-14). The base list_price stays Odoo's (spec §3,
+                # "Odoo price wins after first sync") — only the per-variant extra
+                # tracks Printify. The extra sits on the Size axis when present
+                # (shirt pricing is size-driven), else Colour, so colour-driven
+                # price differences are captured too rather than only Size.
+                extra = round(pv["price"] - printify_base, 2)
+                target_ptav = (
+                    variant.product_template_attribute_value_ids.filtered(lambda p: p.attribute_id.name == "Size")
+                    or variant.product_template_attribute_value_ids.filtered(lambda p: p.attribute_id.name == "Color")
+                )[:1]
+                if target_ptav and target_ptav.price_extra != extra:
+                    target_ptav.price_extra = extra
+        return result
+
+    def action_grove_printify_sync(self):
+        result = self._grove_printify_sync()
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": "Printify sync",
+                "message": f"Created {result['created']}, updated {result['updated']}, archived {result['archived']}.",
+                "sticky": False,
+            },
+        }

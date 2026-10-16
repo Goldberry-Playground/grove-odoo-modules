@@ -6,7 +6,7 @@ from odoo import api, fields, models
 from odoo.exceptions import UserError
 from odoo.tools import config
 
-from . import carrier_tracking, shippo_client
+from . import carrier_tracking, printify_client, shippo_client
 from .shipment_email import normalize_carrier
 from .shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from .shipping_calendar import merge_calendar_override, preorder_waves, usda_zone_for_zip
@@ -203,6 +203,179 @@ class SaleOrder(models.Model):
             order.grove_seed_harvest_year = next(
                 (y for y in order.order_line.mapped("grove_seed_harvest_year") if y), 0
             )
+
+    # ── Printify merch (spec 2026-10-13-printify-merch-design.md §6-8) ──────
+    # grove_is_printify gates every Printify branch: it keeps these orders out of
+    # in-house fulfillment (label batch, carrier poll) and routes checkout/push.
+    grove_is_printify = fields.Boolean(compute="_compute_grove_is_printify", store=True, index=True)
+    printify_order_id = fields.Char(readonly=True, copy=False, index=True)
+    printify_state = fields.Selection(
+        [
+            ("queued", "Queued"),
+            ("created", "Created"),
+            ("in_production", "In production"),
+            ("shipped", "Shipped"),
+            ("delivered", "Delivered"),
+            ("canceled", "Canceled"),
+            ("on_hold", "On hold"),
+            ("push_failed", "Push failed"),
+        ],
+        readonly=True,
+        copy=False,
+        index=True,
+    )
+    printify_push_attempts = fields.Integer(readonly=True, copy=False, default=0)
+    printify_push_last_attempt = fields.Datetime(readonly=True, copy=False)
+    # Stripe refund id for a Printify-side cancellation (Josh 2026-10-14). Set
+    # the moment an auto-refund succeeds so a redelivered cancel webhook is a
+    # no-op and the customer is never refunded twice.
+    printify_refund_id = fields.Char(readonly=True, copy=False)
+
+    @api.depends("order_line.product_id")
+    def _compute_grove_is_printify(self):
+        for order in self:
+            order.grove_is_printify = any(
+                line.product_id.product_tmpl_id.grove_fulfillment_route == "printify"
+                for line in order.order_line
+                if not line.display_type and line.product_id
+            )
+
+    # Push cadence (spec §6): a paid Printify order is pushed by the 5-minute
+    # cron with a widening backoff (0, 5, 30, 120 minutes) and capped at three
+    # attempts, after which it parks as push_failed with a Discord alert. The
+    # cron never loops: it calls _grove_printify_push once per due order.
+    _PRINTIFY_BACKOFF_MINUTES = (0, 5, 30, 120)
+    _PRINTIFY_MAX_ATTEMPTS = 3
+    # Printify order statuses that still need send_to_production; anything else
+    # (already in-production, fulfilled, canceled) is treated as already sent.
+    _PRINTIFY_SENDABLE = ("pending", "on-hold")
+
+    def _printify_push_due(self, now=None):
+        """True when this queued order's backoff window has elapsed."""
+        last = self.printify_push_last_attempt
+        if not last:
+            return True
+        idx = min(self.printify_push_attempts or 0, len(self._PRINTIFY_BACKOFF_MINUTES) - 1)
+        return (now or fields.Datetime.now()) - last >= timedelta(minutes=self._PRINTIFY_BACKOFF_MINUTES[idx])
+
+    def _printify_order_payload(self):
+        """The Printify create-order body for this sale order (spec §6)."""
+        from ..controllers.main import _printify_address, _printify_line_items
+
+        partner = self.partner_shipping_id or self.partner_id
+        shipping = {"street": partner.street, "street2": partner.street2, "city": partner.city, "zip": partner.zip}
+        contact = {"name": partner.name, "email": partner.email or self.partner_id.email, "phone": partner.phone}
+        return {
+            "external_id": self.name,
+            "label": self.name,
+            "line_items": _printify_line_items(self),
+            "shipping_method": 1,
+            "send_shipping_notification": False,
+            "address_to": _printify_address(contact, shipping, partner.state_id.code or ""),
+        }
+
+    def _grove_printify_push(self):
+        """Create (or find) the Printify order and send it to production (spec §6).
+
+        Idempotent: external_id is the sale-order name, so a Stripe webhook retry
+        that re-queues an already-pushed order finds the existing Printify order
+        rather than creating a duplicate. Bounded retries: the cron calls this per
+        due order; this method never loops."""
+        from ..controllers.main import _notify_discord
+
+        self.ensure_one()
+        token = os.environ.get("PRINTIFY_API_TOKEN", "")
+        shop_id = os.environ.get("PRINTIFY_SHOP_ID", "")
+        dry_run = (os.environ.get("PRINTIFY_DRY_RUN") or "").strip().lower() in ("1", "true", "yes", "on")
+        try:
+            if not token or not shop_id:
+                raise printify_client.PrintifyError("Printify is not configured on this server")
+            existing = printify_client.find_order_by_external_id(token, shop_id, self.name)
+            if existing:
+                po_id, status = str(existing["id"]), existing.get("status") or "pending"
+            else:
+                po_id, status = printify_client.create_order(token, shop_id, self._printify_order_payload()), "pending"
+            self.sudo().write({"printify_order_id": po_id, "printify_state": "created"})
+            if status not in self._PRINTIFY_SENDABLE:
+                self.sudo().write({"printify_state": "in_production"})
+            elif not dry_run:
+                printify_client.send_to_production(token, shop_id, po_id)
+                self.sudo().write({"printify_state": "in_production"})
+            self.message_post(
+                body=f"Printify order {po_id} {'created (dry run)' if dry_run else 'sent to production'}."
+            )
+            return True
+        except printify_client.PrintifyError as exc:
+            attempts = (self.printify_push_attempts or 0) + 1
+            vals = {"printify_push_attempts": attempts, "printify_push_last_attempt": fields.Datetime.now()}
+            # Reset to "queued" (not left at whatever partial state the try wrote)
+            # so the cron picks the order up again: a create that SUCCEEDED but
+            # whose send_to_production then raised has already written
+            # printify_state="created" above, and the cron only retries "queued".
+            # Without this reset such an order would never print, never reach
+            # push_failed and never alert (GOL-3314 review 2026-10-14).
+            vals["printify_state"] = "push_failed" if attempts >= self._PRINTIFY_MAX_ATTEMPTS else "queued"
+            self.sudo().write(vals)
+            self.message_post(body=f"Printify push attempt {attempts} failed: {exc}")
+            if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
+                _notify_discord(f":rotating_light: Printify push FAILED on {self.name} after {attempts} tries: {exc}")
+            return False
+
+    def _printify_record_push_crash(self, exc):
+        """Count an UNEXPECTED (non-PrintifyError) push crash against the retry
+        budget and park/alert at the cap. Without this an order that trips a bug
+        in the push path would sit at "queued" and the cron would retry it every
+        5 minutes forever, silently (GOL-3314 review 2026-10-14)."""
+        from ..controllers.main import _notify_discord
+
+        self.ensure_one()
+        attempts = (self.printify_push_attempts or 0) + 1
+        vals = {
+            "printify_push_attempts": attempts,
+            "printify_push_last_attempt": fields.Datetime.now(),
+            "printify_state": "push_failed" if attempts >= self._PRINTIFY_MAX_ATTEMPTS else "queued",
+        }
+        self.sudo().write(vals)
+        if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
+            _notify_discord(f":rotating_light: Printify push CRASHED on {self.name} after {attempts} tries: {exc}")
+
+    @api.model
+    def _cron_printify_push(self):
+        """Push every queued Printify order whose backoff window has elapsed."""
+        now = fields.Datetime.now()
+        for order in self.sudo().search([("printify_state", "=", "queued")]):
+            if not order._printify_push_due(now=now):
+                continue
+            try:
+                order._grove_printify_push()
+            except Exception as exc:  # noqa: BLE001 — the cron must never raise
+                _logger.exception("Printify push crashed for %s", order.name)
+                # Roll back the half-written row from the crashed push, then count
+                # the crash so a persistently broken order parks instead of
+                # retrying forever (see _printify_record_push_crash).
+                if not config["test_enable"]:
+                    self.env.cr.rollback()
+                order._printify_record_push_crash(exc)
+            if not config["test_enable"]:
+                self.env.cr.commit()
+
+    def action_grove_retry_printify_push(self):
+        """Re-queue a push_failed Printify order from the back office. Only a
+        push_failed Printify order is eligible — never a non-Printify order and
+        never one that already printed, shipped or delivered (GOL-3314 review
+        2026-10-14). The server action is additionally sales-manager gated."""
+        eligible = self.filtered(lambda o: o.grove_is_printify and o.printify_state == "push_failed")
+        skipped = self - eligible
+        if skipped:
+            raise UserError(
+                "Retry Printify push only applies to Printify orders whose push has failed. "
+                "These are not eligible: %s" % ", ".join(skipped.mapped("name"))
+            )
+        for order in eligible:
+            order.sudo().write(
+                {"printify_state": "queued", "printify_push_attempts": 0, "printify_push_last_attempt": False}
+            )
+            order.message_post(body="Printify push re-queued.")
 
     # ── Destination USDA zone, as a groupable order field (GOL-3056) ────────
     # Ship windows and labels are batched by the DESTINATION USDA hardiness zone
@@ -1273,6 +1446,9 @@ class SaleOrder(models.Model):
                 ("grove_tracking_numbers", "!=", False),
                 ("grove_delivery_status", "!=", "delivered"),
                 ("grove_carrier_poll_stopped", "=", False),
+                # Printify tracking comes from Printify's own webhook, not the
+                # UPS/USPS poll (spec Review Focus 2, GOL-3314).
+                ("grove_is_printify", "=", False),
             ]
         )
         now = fields.Datetime.now()
