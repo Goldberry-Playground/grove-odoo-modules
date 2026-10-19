@@ -1,4 +1,5 @@
 from . import (
+    capture_leads,  # noqa: F401  pure storefront capture routing (2026-10-15), no ORM models
     carrier_tracking,  # noqa: F401  pure UPS/USPS tracking clients (GOL-2272), no ORM models
     grove_email_log,  # noqa: F401  customer-email delivery log + Mailgun event apply (GOL-2903)
     grove_enrich_job,  # noqa: F401  Perenual enrich job queue + budgeted cron (GOL-2391)

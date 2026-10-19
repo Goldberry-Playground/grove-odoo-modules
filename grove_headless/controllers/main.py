@@ -12,11 +12,12 @@ from types import SimpleNamespace
 
 import psycopg2
 import requests
+from markupsafe import Markup
 from odoo import fields, http
 from odoo.http import Response, request
 
 from ..hooks import _get_company_wv_state_tax
-from ..models import bundle_substitution, printify_client, promotions, stripe_gateway
+from ..models import bundle_substitution, capture_leads, printify_client, promotions, stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
 from ..models.mail_from import mail_from_vals
@@ -2501,6 +2502,104 @@ class GroveHeadlessAPI(http.Controller):
                 "created": created,
             }
         )
+
+    # ── Capture: CRM leads + back-in-stock (2026-10-15 hotfix) ───────────
+
+    @http.route(
+        "/grove/api/v1/leads",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def capture_lead(self, **_kwargs):
+        """Record a storefront consult / wholesale / farm-visit / state-waitlist
+        request as a CRM lead (Josh 2026-10-15: customer relationships live in
+        Odoo CRM; Ghost is only the newsletter).
+
+        Body: {email, kind, name?, phone?, message?, label?, state?, product_id?, source?}
+        kind: food_forest_consult | wholesale | farm_visit | state_waitlist
+        -> 200 {lead_id, partner_id, created}
+
+        Same email + kind within 24 h appends a note to the open lead instead of
+        creating a second one, so a double-submit never splits a relationship.
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        clean, err = capture_leads.validate_lead(payload)
+        if err:
+            return _json_response({"error": err}, status=400)
+        source = payload.get("source") if isinstance(payload.get("source"), str) else ""
+        company = request.website.company_id
+        lead, partner, created = _upsert_capture_lead(request.env, company, clean, source[:MAX_SOURCE])
+        if created:
+            _notify_discord(
+                f":seedling: New {capture_leads.LEAD_KINDS[clean['kind']]} lead ({company.name}): "
+                f"{lead.name} <{clean['email']}>"
+            )
+        return _json_response({"lead_id": lead.id, "partner_id": partner.id, "created": created})
+
+    @http.route(
+        "/grove/api/v1/products/<int:product_id>/notify-restock",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def notify_restock(self, product_id, **_kwargs):
+        """Subscribe an email to Odoo's back-in-stock alert for a product
+        template (``product_id`` = template id, as on /products/<id>).
+
+        Body: {email, name?, variant_id?} -> 200 {partner_id, variant_ids}
+        Without ``variant_id`` every variant is watched; the hourly cron
+        (product.product._send_availability_email) sends one email per template
+        when any of them has stock again, then clears the subscription.
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        if not isinstance(payload, dict):
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        email = payload.get("email")
+        if not isinstance(email, str) or len(email) > MAX_EMAIL or not EMAIL_RE.fullmatch(email.strip()):
+            return _json_response({"error": "email is not a valid email address"}, status=400)
+        email = email.strip()
+        name = payload.get("name") if isinstance(payload.get("name"), str) else ""
+
+        company = request.website.company_id
+        tmpl = (
+            request.env["product.template"]
+            .sudo()
+            .with_company(company)
+            .search(
+                [
+                    ("id", "=", product_id),
+                    ("website_published", "=", True),
+                    ("company_id", "in", [company.id, False]),
+                ],
+                limit=1,
+            )
+        )
+        if not tmpl:
+            return _json_response({"error": "Product not found"}, status=404)
+        variants = tmpl.product_variant_ids
+        variant_id = payload.get("variant_id")
+        if variant_id not in (None, ""):
+            try:
+                variants = variants.filtered(lambda v: v.id == int(variant_id))
+            except (TypeError, ValueError):
+                return _json_response({"error": "variant_id must be an integer"}, status=400)
+            if not variants:
+                return _json_response({"error": "Variant not found"}, status=404)
+
+        partner = _upsert_capture_partner(request.env, company, email, name[:MAX_NAME])
+        variants.write({"stock_notification_partner_ids": [(4, partner.id)]})
+        return _json_response({"partner_id": partner.id, "variant_ids": variants.ids})
 
     # ── Shipping webhook ─────────────────────────────────────────────────
 
@@ -5929,3 +6028,75 @@ def _notify_shipping_status(env, order, status, tracking):
             "auto_delete": True,
         },
     )
+
+
+# ── Capture helpers (2026-10-15 hotfix) ─────────────────────────────────────
+
+
+def _upsert_capture_partner(env, company, email, name="", phone=""):
+    """Find the contact by email within the storefront's company (or shared),
+    else create it. Never overwrites an existing name/email from a bearer POST
+    (same stance as newsletter_subscribe / order_create)."""
+    Partner = env["res.partner"].sudo().with_company(company)
+    partner = Partner.search([("email", "=", email), ("company_id", "in", [company.id, False])], limit=1)
+    if not partner:
+        vals = {"name": name or email, "email": email, "company_id": company.id}
+        if phone:
+            vals["phone"] = phone
+        partner = Partner.create(vals)
+    return partner
+
+
+def _crm_tags(env, names):
+    Tag = env["crm.tag"].sudo()
+    tags = Tag.browse()
+    for name in names:
+        tags |= Tag.search([("name", "=", name)], limit=1) or Tag.create({"name": name})
+    return tags
+
+
+def _upsert_capture_lead(env, company, clean, source=""):
+    """Create (or, within 24 h for the same email + kind, append to) a CRM lead.
+    Returns (lead, partner, created)."""
+    partner = _upsert_capture_partner(env, company, clean["email"], clean["name"], clean["phone"])
+    product_name = None
+    if clean.get("product_id"):
+        product = env["product.template"].sudo().browse(clean["product_id"]).exists()
+        product_name = product.name if product else None
+    tags = _crm_tags(env, capture_leads.lead_tag_names(clean["kind"], clean["label"]))
+    kind_tag = tags[:1]
+    description = capture_leads.lead_description(clean, source=source)
+
+    Lead = env["crm.lead"].sudo().with_company(company)
+    since = fields.Datetime.subtract(fields.Datetime.now(), hours=24)
+    existing = Lead.search(
+        [
+            ("partner_id", "=", partner.id),
+            ("tag_ids", "in", kind_tag.ids),
+            ("create_date", ">=", since),
+            ("active", "=", True),
+        ],
+        limit=1,
+    )
+    if existing:
+        existing.write({"tag_ids": [(4, t.id) for t in tags]})
+        note = html.escape(description or "Submitted the form again.").replace("\n", "<br/>")
+        existing.message_post(body=Markup(note))
+        return existing, partner, False
+
+    lead = Lead.create(
+        {
+            "name": capture_leads.lead_title(
+                clean["kind"], clean["name"], clean["email"], product_name=product_name, state=clean["state"] or None
+            ),
+            "type": "opportunity",
+            "partner_id": partner.id,
+            "contact_name": clean["name"] or False,
+            "email_from": clean["email"],
+            "phone": clean["phone"] or False,
+            "description": description,
+            "tag_ids": [(6, 0, tags.ids)],
+            "company_id": company.id,
+        }
+    )
+    return lead, partner, True

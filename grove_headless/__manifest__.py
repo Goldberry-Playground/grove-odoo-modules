@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.79.0",
+    "version": "19.0.1.80.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -28,6 +28,13 @@
         # _apply_promo_code (GOL-2088). Already present on prod via
         # website_sale_loyalty; listed explicitly because we call it directly.
         "sale_loyalty",
+        # crm: storefront consult / wholesale / farm-visit / state-waitlist
+        # requests become crm.lead records (2026-10-15 capture hotfix).
+        "crm",
+        # website_sale_stock: back-in-stock alerts ride its
+        # product.product.stock_notification_partner_ids + hourly cron, which
+        # grove_headless overrides for the headless multi-company storefronts.
+        "website_sale_stock",
         # mrp provides mrp.bom (Bills of Materials), required for Kit-type
         # BOMs that bundle multiple variants behind one storefront line item,
         # and for the variant→variant transformation in potting-up batches.
@@ -80,6 +87,7 @@
         "data/enrich_job_cron.xml",
         "data/grove_dormancy_params.xml",
         "data/grove_zone_filters.xml",
+        "data/restock_email_templates.xml",
         "data/grove_seed_filters.xml",
         "data/printify_actions.xml",
         "data/printify_cron.xml",

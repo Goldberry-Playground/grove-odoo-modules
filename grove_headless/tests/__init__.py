@@ -9,6 +9,8 @@ from . import (
     test_availability_events,  # noqa: F401
     test_bundle_packing_slip,  # noqa: F401
     test_bundle_substitution,  # noqa: F401
+    test_capture_endpoints,  # noqa: F401
+    test_capture_leads,  # noqa: F401
     test_carrier_tracking,  # noqa: F401
     test_carrier_tracking_cron,  # noqa: F401
     test_checkout_compliance_gate,  # noqa: F401
