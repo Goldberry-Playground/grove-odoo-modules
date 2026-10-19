@@ -35,17 +35,32 @@ LAYER_VALUES = {"canopy", "understory", "shrub", "ground", "vine"}
 SUN_VALUES = {"full", "partial", "shade"}
 
 
-def build_product_domain(kwargs: dict, company_id: int, cat_category_ids=None, dept_category_ids=None) -> list:
+def company_domain(company_id, tenant):
+    """Company visibility for a storefront. Shared (company_id=False) products show on
+    every tenant, except the farm, where only Printify-routed shared products show
+    (spec 2026-10-13-printify-merch-design.md §4: shared trees must not leak onto
+    goldberrygrove.farm)."""
+    if tenant == "goldberry":
+        return [
+            "|",
+            ("company_id", "=", company_id),
+            "&",
+            ("company_id", "=", False),
+            ("grove_fulfillment_route", "=", "printify"),
+        ]
+    return [("company_id", "in", [company_id, False])]
+
+
+def build_product_domain(
+    kwargs: dict, company_id: int, cat_category_ids=None, dept_category_ids=None, tenant=None
+) -> list:
     # Visibility is gated by `website_published` alone — NOT `sale_ok`. A
     # published-but-not-for-sale "coming soon" placeholder (sale_ok=False,
     # GOL-757/760) must appear in the /shop grid and ?cat= facets so shoppers
     # can browse to it; the storefront reads the serialized `sale_ok` to render
     # the card + detail buy box as not-purchasable. (Odoo semantics:
     # website_published = "show it", sale_ok = "can it be sold".)
-    domain = [
-        ("website_published", "=", True),
-        ("company_id", "in", [company_id, False]),
-    ]
+    domain = [("website_published", "=", True)] + company_domain(company_id, tenant)
     if kwargs.get("featured"):
         domain.append(("grove_featured", "=", True))
     category_id = _to_int(kwargs.get("category_id"))

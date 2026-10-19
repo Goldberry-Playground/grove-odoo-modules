@@ -12,6 +12,8 @@ from . import (
     newsletter,  # noqa: F401  pure tag-name helper (GOL-221), no ORM models
     order_rollup,  # noqa: F401  weekly order/preorder digest cron (GOL-1978)
     potting_batch,  # noqa: F401
+    printify_client,  # noqa: F401  pure HTTP client, no ORM models
+    printify_sync,  # noqa: F401  pure mapping, no ORM models
     product_product,  # noqa: F401
     product_public_category,  # noqa: F401  department tree metadata (GOL-2744)
     product_template,  # noqa: F401

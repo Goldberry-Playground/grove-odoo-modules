@@ -237,6 +237,9 @@ class GroveLabelBatch(models.Model):
                 [
                     ("company_id", "=", company.id),
                     ("grove_fulfillment", "!=", "pickup"),
+                    # Printify prints and ships its own orders; they never need a
+                    # Pirate Ship label (spec Review Focus 2, GOL-3314).
+                    ("grove_is_printify", "=", False),
                     ("grove_fulfillment_stage", "in", ("awaiting_label", "wave_assigned")),
                     ("grove_tracking_numbers", "in", (False, "")),
                     ("grove_label_batch_id", "in", [False] + (self.ids or [])),

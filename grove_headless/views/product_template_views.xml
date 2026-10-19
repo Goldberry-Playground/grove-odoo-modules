@@ -64,6 +64,16 @@
                             clears <b>Facts reviewed</b>.
                         </div>
                     </group>
+                    <!-- Printify print-on-demand routing (GOL-3314). A product on
+                         the "printify" route is printed and shipped by Printify;
+                         the product + lead time are set by "Sync from Printify". -->
+                    <group string="Printify" name="grove_printify">
+                        <field name="grove_fulfillment_route" />
+                        <field name="printify_product_id"
+                               invisible="grove_fulfillment_route != 'printify'" />
+                        <field name="printify_lead_time"
+                               invisible="grove_fulfillment_route != 'printify'" />
+                    </group>
                     <group>
                         <group string="Storefront">
                             <field name="grove_featured" />
