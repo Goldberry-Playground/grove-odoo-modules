@@ -263,17 +263,17 @@ class GroveSupportCase(TransactionCase):
         """The explicit channel company wins over the operator's company, so a
         nursery chat handled by a farm-company operator still files under the
         nursery."""
-        self.livechat_channel.company_id = self.other_company
+        self.livechat_channel.grove_support_company_id = self.other_company
         channel = self._make_channel()  # operator is the current user (company 1)
         self.assertEqual(channel._grove_support_company(), self.other_company)
 
     def test_company_falls_back_to_operator_when_channel_unset(self):
         channel = self._make_channel()
-        self.assertFalse(self.livechat_channel.company_id)
+        self.assertFalse(self.livechat_channel.grove_support_company_id)
         self.assertEqual(channel._grove_support_company(), self.env.user.company_id)
 
     def test_lead_and_partner_land_in_channel_company(self):
-        self.livechat_channel.company_id = self.other_company
+        self.livechat_channel.grove_support_company_id = self.other_company
         channel = self._make_channel()
         with patch.object(
             type(channel),
@@ -285,6 +285,43 @@ class GroveSupportCase(TransactionCase):
         lead = channel.grove_support_lead_id
         self.assertEqual(lead.company_id, self.other_company)
         self.assertEqual(lead.partner_id.company_id, self.other_company)
+
+    # ── GOL-3482: the channel company pointer must NOT flip the loader url ──
+
+    def test_channel_company_field_is_not_named_company_id(self):
+        """Regression guard for GOL-3482. The website module's get_base_url()
+        override resolves a record's base URL to its company's website domain
+        whenever a field literally named ``company_id`` exists on the model;
+        im_livechat.channel.get_livechat_info() emits get_base_url() as the
+        embed's serverUrl. grove_support's company pointer must therefore NOT be
+        named ``company_id`` (it was in GOL-3459, which flipped serverUrl to
+        https://atthegrovenursery.com and broke the widget). im_livechat.channel
+        has no native company_id in Odoo 19, so the only way this field exists is
+        if grove_support (re)introduces it — which is exactly the regression."""
+        fields = self.env["im_livechat.channel"]._fields
+        self.assertNotIn(
+            "company_id",
+            fields,
+            "im_livechat.channel must not carry a field named company_id — it "
+            "flips the livechat loader's serverUrl to the company website domain "
+            "(GOL-3482). Use grove_support_company_id instead.",
+        )
+        self.assertIn("grove_support_company_id", fields)
+
+    def test_serverurl_stays_web_base_url_with_company_set(self):
+        """Behavioural contract for GOL-3482: with the channel company set,
+        get_livechat_info()['server_url'] (the loader's serverUrl) must still be
+        the Odoo web.base.url, never the company's website domain.
+
+        Note: the website domain resolution lives in the ``website`` module,
+        which the grove_support test harness does not install, so this asserts
+        the baseline the renamed field preserves. The true end-to-end flip was
+        reproduced on nursery.qa (loader/2) and is re-verified there after
+        deploy; test_channel_company_field_is_not_named_company_id is the
+        deterministic, website-independent guard."""
+        self.livechat_channel.grove_support_company_id = self.other_company
+        base_url = self.env["ir.config_parameter"].sudo().get_param("web.base.url")
+        self.assertEqual(self.livechat_channel.get_livechat_info()["server_url"], base_url)
 
     def test_process_chat_no_email_is_noop(self):
         channel = self._make_channel()

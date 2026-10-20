@@ -181,16 +181,17 @@ class DiscussChannel(models.Model):
 
         Livechat is not natively company-scoped in Odoo community, so resolve
         defensively (never trusting an edge-supplied tenant header): the explicit
-        ``company_id`` grove_support adds to ``im_livechat.channel`` (GOL-3459)
-        when set, else the human operator's company, else the environment
-        company. Set the channel's company so nursery leads land in the nursery
-        rather than the operator's company. The partner search is
-        ``company_id in [company, False]`` regardless, so a shared (company-less)
-        partner still matches."""
+        ``grove_support_company_id`` grove_support adds to ``im_livechat.channel``
+        (GOL-3459; deliberately not named ``company_id`` — see
+        im_livechat_channel.py / GOL-3482) when set, else the human operator's
+        company, else the environment company. Set the channel's company so
+        nursery leads land in the nursery rather than the operator's company. The
+        partner search is ``company_id in [company, False]`` regardless, so a
+        shared (company-less) partner still matches."""
         self.ensure_one()
         lc = self.livechat_channel_id
-        if lc and "company_id" in lc._fields and lc.company_id:
-            return lc.company_id
+        if lc and lc.grove_support_company_id:
+            return lc.grove_support_company_id
         operator = self.livechat_operator_id
         if operator:
             op_user = operator.user_ids[:1]
