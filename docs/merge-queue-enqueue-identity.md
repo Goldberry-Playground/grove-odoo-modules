@@ -207,6 +207,42 @@ and a nulled field, so `curl -f` does not catch it and a partial response reads
 like real data. Fail-closed holds, but silently, so the sweep logs GraphQL
 `errors` and treats a missing `repository` as fatal.
 
+### Stacked PRs: the workflow approves, the owner merges (GOL-3489)
+
+Since GOL-3489 `auto-approve.yml` no longer merges an agent PR whose base is
+any branch other than the repo default branch. On a topic branch there is no
+merge queue, so the step's `gh pr merge` call was a DIRECT merge pushed by
+`GITHUB_TOKEN` (with or without `--auto`: gh merges an already-clean PR
+immediately). That push moved the head of the PARENT PR under a self-triggered
+identity, GitHub parked every `pull_request` workflow on the parent at
+`action_required`, and the head move dismissed the parent's approving review:
+no CI and REVIEW_REQUIRED on the parent, silently (fleet-wide 4th occurrence;
+in this repo see the merges of #877 and #799 by `github-actions[bot]`). The
+step now **approves only**, logs a `::notice::` naming the base branch, and
+exits.
+
+Merging the stacked child is the owning agent's step, under the agent App
+identity (the same broker-minted installation token that authored the PR —
+see the header of `scripts/ci/merge-queue-arm-automerge.sh`). An App merge
+push is an ordinary collaborator push: the parent's `pull_request` workflows
+run as `queued`/`in_progress`, never `action_required`, and its approval
+survives.
+
+```bash
+REPO=Goldberry-Playground/grove-odoo-modules
+# App installation token for this repo (never GITHUB_TOKEN, never a PAT).
+GH_TOKEN="$(curl -fsS -H "Authorization: Bearer $(cat "${GH_BROKER_API_KEY_FILE:-/paperclip/gh-broker.key}")" \
+  "${GH_TOKEN_BROKER_URL:-http://gh-token-broker:9099}/token?owner=${REPO%/*}&repo=${REPO#*/}" | jq -r .token)" \
+  gh pr merge <CHILD_PR> --repo "$REPO" --squash
+# Then confirm the parent re-ran ungated:
+gh api "repos/$REPO/actions/runs?head_sha=$(gh pr view <PARENT_PR> --repo "$REPO" --json headRefOid -q .headRefOid)" \
+  --jq '.workflow_runs[] | "\(.name)\t\(.status)\t\(.conclusion)"'
+```
+
+Do this only once the child's `auto-approve.yml` run has posted the
+`github-actions[bot]` approval (the notice in that run's log is the cue); the
+approval records that the agent-review gate was satisfied on the head.
+
 ## Provisioning the App identity in Actions (optional — not recommended)
 
 > **Not required.** The section above fixes this with no credential at all.
