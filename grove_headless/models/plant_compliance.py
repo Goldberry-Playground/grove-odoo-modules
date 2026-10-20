@@ -127,6 +127,55 @@ def excluded_taxa_for_state(state_code: str) -> list[str]:
     )
 
 
+def genus_for(botanical_name: str | None) -> str | None:
+    """Public: the lowercased genus parsed from ``botanical_name``, or ``None``.
+
+    ``None`` when the name is empty or its first token is not alphabetic
+    (unparseable) — same rule as ``parse_taxon``. Exposed for the planner catalog
+    feed (GOL-3379), which stamps the genus on every plant and keys the
+    bundle-substitution lookup on it; the order gate already uses ``parse_taxon``
+    internally, this is just the public genus-only view of it.
+    """
+    parsed = parse_taxon(botanical_name)
+    return parsed[0] if parsed else None
+
+
+def blocked_states_for(botanical_name: str | None) -> list[str]:
+    """Public: sorted states this botanical may NOT ship to, per ``CARVE_OUTS``.
+
+    The planner catalog feed (GOL-3379) stamps this on every plant so the
+    storefront drops or substitutes a blocked plant by state without re-deriving
+    the carve-out map. Mirrors ``evaluate_line``'s decision surface exactly:
+
+      * empty or unparseable botanical name -> the full regulated-state set, the
+        same fail-safe ``evaluate_line`` applies (refuse to guess a taxon into a
+        regulated state);
+      * a taxon with no carve-out rule -> ``[]`` (ships everywhere on the green
+        list);
+      * a ``block`` rule -> that rule's states (e.g. ``morus alba`` -> IN/OH/WI
+        while bare ``morus``/``morus rubra`` match nothing, the red-vs-white
+        split);
+      * an ``allow`` rule -> the regulated states outside the allow set. No allow
+        rules exist today; scoped to ``REGULATED_STATES`` to match the fail-safe
+        frontier and keep this module DB-free (``GREEN_STATES`` lives in
+        ``shipping_zones``).
+
+    The ``grove_compliance_exempt`` empty-list case is applied by the caller (the
+    feed controller), not here, so this helper stays a pure function of the name.
+    """
+    parsed = parse_taxon(botanical_name)
+    if parsed is None:
+        return sorted(REGULATED_STATES)
+    genus, species = parsed
+    rule = _rule_for(genus, species)
+    if rule is None:
+        return []
+    kind, states = rule
+    if kind == "block":
+        return sorted(states)
+    return sorted(REGULATED_STATES - states)
+
+
 def _block_message(botanical_name: str, state_label: str) -> str:
     plant = (botanical_name or "").strip() or "this plant"
     return (

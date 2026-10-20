@@ -292,6 +292,52 @@ ZONE_BY_STATE: dict[str, str] = {
 
 assert set(ZONE_BY_STATE) == GREEN_STATES
 
+# USDA plant-hardiness band per green state, for the planner's ZIP-unknown
+# fallback (GOL-3379 §B, order builder). This is NOT the shipping-zone map above
+# (ZONE_BY_STATE / zone_5 etc. are rate bands); it is one coarse [cold, warm]
+# USDA hardiness pair spanning the state, used only when a shopper's ZIP does not
+# resolve to a zone so the planner can still judge a plant "safe" (its
+# zone_min..zone_max covers the whole band) or "marginal" (overlaps it). The feed
+# ships this so the storefront never carries its own copy. Hand-maintained and
+# deliberately broad (a state's real span can be two zones wide); refine as the
+# catalog's zone edges sharpen. A test asserts every green state has an entry.
+STATE_ZONE_BANDS: dict[str, list[int]] = {
+    "AL": [7, 9],
+    "AR": [6, 8],
+    "CT": [5, 7],
+    "DC": [7, 8],
+    "DE": [7, 8],
+    "FL": [8, 11],
+    "GA": [7, 9],
+    "IA": [4, 6],
+    "IL": [5, 7],
+    "IN": [5, 7],
+    "KY": [6, 7],
+    "LA": [8, 9],
+    "MA": [5, 7],
+    "MD": [6, 8],
+    "ME": [3, 6],
+    "MI": [4, 6],
+    "MN": [3, 5],
+    "MO": [5, 7],
+    "MS": [7, 9],
+    "NC": [5, 8],
+    "NH": [3, 6],
+    "NJ": [6, 7],
+    "NY": [3, 7],
+    "OH": [5, 6],
+    "PA": [5, 7],
+    "RI": [6, 7],
+    "SC": [7, 9],
+    "TN": [6, 8],
+    "VA": [5, 8],
+    "VT": [3, 5],
+    "WI": [3, 5],
+    "WV": [5, 7],
+}
+
+assert set(STATE_ZONE_BANDS) == GREEN_STATES, "STATE_ZONE_BANDS must cover every green state exactly once"
+
 
 def rate_feed(calendar_override=None, today=None, consult_deferral_enabled=None) -> dict:
     """Read-only snapshot of the live rate table + compliance zone map (GOL-952).

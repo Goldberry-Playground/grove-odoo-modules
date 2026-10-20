@@ -88,6 +88,18 @@ def _substitute_for(genus: str, species: str | None) -> Substitute | None:
     return SUBSTITUTES.get(genus)
 
 
+def substitute_for(genus: str) -> Substitute | None:
+    """Public: what we ship in place of a blocked ``genus``, or ``None``.
+
+    Genus-granularity view of the substitute map for the planner catalog feed
+    (GOL-3379): the feed resolves each plant's genus to the substitute the engine
+    would swap in (Castanea -> Shagbark Hickory, Prunus -> Jujube) so the planner
+    can say "in Florida we send shagbark hickory instead", the same copy the PDP
+    notice renders. A genus with no defined substitute returns ``None``.
+    """
+    return _substitute_for(genus, None)
+
+
 def swaps_for_state(components, state_code: str) -> list[ComponentSwap]:
     """Ordered substitutions needed to ship a bundle into ``state_code``.
 

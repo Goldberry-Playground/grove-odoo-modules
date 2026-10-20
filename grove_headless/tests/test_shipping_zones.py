@@ -541,5 +541,24 @@ class TestSeedShipStates(unittest.TestCase):
         self.assertGreater(len(sz.SEED_SHIP_STATES), len(sz.GREEN_STATES))
 
 
+class TestStateZoneBands(unittest.TestCase):
+    """STATE_ZONE_BANDS: the planner's ZIP-unknown USDA fallback (GOL-3379 §B)."""
+
+    def test_every_green_state_has_a_band(self):
+        # The acceptance invariant: one entry per green state, no gaps, no extras.
+        self.assertEqual(set(sz.STATE_ZONE_BANDS), GREEN)
+
+    def test_bands_are_ordered_cold_to_warm_pairs(self):
+        for state, band in sz.STATE_ZONE_BANDS.items():
+            self.assertEqual(len(band), 2, f"{state}: {band}")
+            cold, warm = band
+            self.assertTrue(1 <= cold <= warm <= 13, f"{state}: {band} out of USDA range")
+
+    def test_spec_examples_hold(self):
+        # The two worked examples from the spec shape.
+        self.assertEqual(sz.STATE_ZONE_BANDS["WV"], [5, 7])
+        self.assertEqual(sz.STATE_ZONE_BANDS["GA"], [7, 9])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -27,8 +27,10 @@ from ..models.order_alerts import (
     format_merchant_email,
     format_new_order_discord,
 )
+from ..models.plant_compliance import blocked_states_for as compliance_blocked_states_for
 from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
 from ..models.plant_compliance import excluded_taxa_for_state
+from ..models.plant_compliance import genus_for as compliance_genus_for
 from ..models.preorder_email import (
     confirmation_deposit_line,
     preship_balance_line,
@@ -60,6 +62,7 @@ from ..models.shipping_zones import (
     GREEN_STATES,
     SEED_SHIP_EXCLUDED_STATES,
     SEED_SHIP_STATES,
+    STATE_ZONE_BANDS,
     canonical_state_code,
     compute_order_shipping,
     rate_feed,
@@ -207,13 +210,18 @@ def _list_in_stock(product):
     return any(v.grove_shared_pool_qty("qty_available") > 0 for v in product.product_variant_ids)
 
 
-def _json_response(data, status=200):
-    """Return a plain JSON HTTP response (not Odoo JSON-RPC)."""
+def _json_response(data, status=200, headers=None):
+    """Return a plain JSON HTTP response (not Odoo JSON-RPC).
+
+    ``headers`` (a dict) is merged onto the response — used by the planner
+    catalog feed to set ``Cache-Control: public, max-age=300`` (GOL-3379).
+    """
     body = json.dumps(data, default=str)
     return Response(
         body,
         status=status,
         content_type="application/json",
+        headers=headers,
     )
 
 
@@ -452,6 +460,140 @@ def _serialize_facts(product):
         "wildlife_value": product.grove_wildlife_value or None,
         "planner_priority": product.grove_planner_priority or None,
         "planner_ready": bool(product.grove_planner_ready),
+    }
+
+
+# Public category that holds the storefront bundle packages. The spec calls it
+# "public category 6"; 6 is its prod id, which we must not hardcode (QA/test ids
+# differ), so the feed resolves it by this stable name (GOL-3379 §B).
+FOOD_FOREST_PACKAGES_CATEGORY = "Food Forest Packages"
+
+# Cache the planner catalog at the edge/BFF for 5 minutes (GOL-3379 §B). The
+# storefront fetches it once per quiz run through a server-side BFF route, so a
+# short public TTL is safe and keeps the quiz snappy without hammering Odoo.
+PLANNER_CATALOG_CACHE_CONTROL = "public, max-age=300"
+
+
+def _harvest_months_list(value):
+    """Parse ``grove_harvest_months`` ("9,10,11") into ``[9, 10, 11]``.
+
+    Returns ``[]`` for a blank or unparseable value — the planner reads an empty
+    list as "no harvest-month data", never a ``False``. Non-numeric tokens are
+    dropped so a hand-typed stray can't 500 the feed.
+    """
+    if not value:
+        return []
+    months = []
+    for token in str(value).split(","):
+        token = token.strip()
+        if token.isdigit():
+            months.append(int(token))
+    return months
+
+
+def _planner_substitute_tmpl_id(genus, substitute_by_genus):
+    """Template id the substitution engine would swap in for ``genus``, or None.
+
+    Resolves the genus -> substitute (Castanea -> Carya ovata / Shagbark Hickory)
+    via ``bundle_substitution``, then maps the substitute's genus to a concrete
+    template in this storefront via ``substitute_by_genus`` (built from the
+    published, sale_ok catalog). ``None`` when the genus has no substitute or the
+    substitute isn't carried here.
+    """
+    if not genus:
+        return None
+    sub = bundle_substitution.substitute_for(genus)
+    if sub is None:
+        return None
+    return substitute_by_genus.get(compliance_genus_for(sub.botanical))
+
+
+def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
+    """One plant row for the planner catalog feed (GOL-3379 §B).
+
+    Blank conventions mirror ``_serialize_facts``: integers to ``None`` at 0,
+    selections to ``None`` when unset, booleans as booleans, ``harvest_months`` a
+    list (never a ``False``). ``blocked_states`` is the carve-out lookup on the
+    parsed genus, emptied by ``grove_compliance_exempt`` (the admin escape hatch),
+    and the regulated-state set for an empty/unparseable botanical name — the same
+    fail-safe the checkout gate applies.
+    """
+    botanical = product.grove_botanical_name or ""
+    genus = compliance_genus_for(botanical)
+    blocked_states = [] if product.grove_compliance_exempt else compliance_blocked_states_for(botanical)
+    return {
+        "id": product.id,
+        "slug": product.grove_slug or "",
+        "name": product.name or "",
+        "botanical_name": botanical,
+        "genus": genus,
+        "price": product.list_price,
+        "tier": product.grove_shipping_tier or None,
+        "pickup_only": bool(product.grove_pickup_only),
+        "in_stock": _list_in_stock(product) if has_stock_field else True,
+        "preorder_cap_reached": bool(product.grove_preorder_cap_reached),
+        "layer": product.grove_layer or None,
+        "zone_min": product.grove_zone_min or None,
+        "zone_max": product.grove_zone_max or None,
+        "years_to_fruit_min": product.grove_years_to_fruit_min or None,
+        "pollination_min": product.grove_pollination_min or None,
+        "harvest_months": _harvest_months_list(product.grove_harvest_months),
+        "tolerates": {
+            "wet": bool(product.grove_tolerates_wet),
+            "poor_soil": bool(product.grove_tolerates_poor_soil),
+            "shade": bool(product.grove_tolerates_shade),
+        },
+        "wildlife_value": product.grove_wildlife_value or None,
+        "priority": product.grove_planner_priority or None,
+        "blocked_states": blocked_states,
+        "substitute_id": _planner_substitute_tmpl_id(genus, substitute_by_genus),
+        "image": _image_url("product.template", product, "image_512"),
+    }
+
+
+def _bundle_component_ids(env, variant):
+    """Component template ids of a phantom-BoM bundle, repeated per unit qty.
+
+    e.g. a Mountain Mama kit of 2× template 93, 2× 91, 1× 133 -> ``[93, 93, 91,
+    91, 133]`` (the shape the storefront's bundle-match reads as a multiset).
+    Empty when there is no BoM (a consult-built package, GOL-2589 seeds the real
+    ones) or ``mrp`` is absent. Best-effort: a BoM explode hiccup logs and yields
+    ``[]`` rather than breaking the read-only feed.
+    """
+    if "mrp.bom" not in env.registry:
+        return []
+    bom = env["mrp.bom"].sudo()._bom_find(variant, bom_type="phantom").get(variant)
+    if not bom:
+        return []
+    try:
+        _boms, exploded = bom.explode(variant, 1)
+    except Exception:  # noqa: BLE001 — a bundle BoM gap must not break the feed
+        _logger.warning("GOL-3379: could not explode bundle BoM for variant %s", variant.id, exc_info=True)
+        return []
+    component_ids = []
+    for bom_line, line_data in exploded:
+        qty = int(line_data.get("qty") or bom_line.product_qty or 0)
+        if qty > 0:
+            component_ids.extend([bom_line.product_id.product_tmpl_id.id] * qty)
+    return component_ids
+
+
+def _serialize_planner_bundle(env, template):
+    """One bundle row for the planner catalog feed (GOL-3379 §B).
+
+    ``tree_count`` is the existing promo-engine count (``variant_tree_count``),
+    emitted on every bundle so the shape is uniform; for a consult-built package
+    with no BoM the engine's count is the only size signal the planner gets.
+    """
+    variant = template.product_variant_id
+    return {
+        "id": template.id,
+        "slug": template.grove_slug or "",
+        "name": template.name or "",
+        "price": template.list_price,
+        "component_ids": _bundle_component_ids(env, variant),
+        "consult_built": bool(template.grove_consult_built),
+        "tree_count": promotions.variant_tree_count(variant),
     }
 
 
@@ -1070,6 +1212,101 @@ class GroveHeadlessAPI(http.Controller):
             data["seed_season"] = season
 
         return _json_response(data)
+
+    # ── Planner catalog feed ─────────────────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/planner/catalog",
+        type="http",
+        auth="public",
+        website=True,
+        methods=["GET"],
+        csrf=False,
+    )
+    def planner_catalog(self, **_kwargs):
+        """One cached JSON document the order-builder quiz runs over (GOL-3379 §B).
+
+        Public, no auth, same CORS and company scoping as ``/products``. The
+        storefront fetches it once per quiz run through a server-side BFF route,
+        never from the browser; a 5-minute public cache keeps it snappy. The
+        response is read-only and idempotent, so the nightly listing audit can
+        call and diff it.
+
+        ``plants`` are the planner-ready, published, for-sale, non-seed templates
+        for this storefront's company (``grove_planner_ready`` already excludes
+        bundles and consult-built mixes). Out-of-stock plants stay in the feed so
+        the planner can offer "notify me". ``bundles`` are the published Food
+        Forest Packages. ``states``/``state_zones`` ship the green list and the
+        ZIP-unknown USDA bands so the storefront carries no copy of either.
+        """
+        website = request.website
+        current_company = website.company_id
+        tenant = website.grove_tenant_slug()
+        Template = request.env["product.template"].sudo().with_company(current_company)
+        scope = company_domain(current_company.id, tenant)
+
+        # Published, for-sale, planner-ready plants — seeds are not plants and
+        # never appear in a tree-planting quiz (spec §C.2). grove_planner_ready
+        # already excludes BoM bundles and consult-built mixes (§A).
+        plant_domain = [
+            ("sale_ok", "=", True),
+            ("website_published", "=", True),
+            ("grove_planner_ready", "=", True),
+            ("grove_shipping_tier", "!=", "seed"),
+        ] + scope
+        plants = Template.search(plant_domain, order="grove_planner_priority asc, id asc")
+
+        # Warm the batched preorder-cap + stock computes once for the whole page
+        # so the per-plant reads below are cache hits, not N+1 (mirrors /products).
+        plants.mapped("grove_preorder_cap_reached")
+        has_stock_field = "qty_available" in request.env["product.product"]._fields
+        if has_stock_field:
+            plants.product_variant_ids.mapped("qty_available")
+
+        # genus -> template id for substitute resolution. Built from the whole
+        # published, sale_ok catalog (not just planner-ready plants) so a
+        # substitute such as Shagbark Hickory resolves even if it isn't itself
+        # recommendable. Smallest id wins for determinism.
+        substitute_by_genus = {}
+        sub_candidates = Template.search(
+            [
+                ("sale_ok", "=", True),
+                ("website_published", "=", True),
+                ("grove_botanical_name", "!=", False),
+            ]
+            + scope,
+            order="id asc",
+        )
+        for candidate in sub_candidates:
+            genus = compliance_genus_for(candidate.grove_botanical_name)
+            if genus and genus not in substitute_by_genus:
+                substitute_by_genus[genus] = candidate.id
+
+        plant_rows = [_serialize_planner_plant(p, substitute_by_genus, has_stock_field) for p in plants]
+
+        # Bundles: published templates in the Food Forest Packages public
+        # category, resolved by name (its prod id is 6; see the constant).
+        bundle_rows = []
+        ff_category = (
+            request.env["product.public.category"]
+            .sudo()
+            .search([("name", "=", FOOD_FOREST_PACKAGES_CATEGORY)], limit=1)
+        )
+        if ff_category:
+            bundles = Template.search(
+                [("website_published", "=", True), ("public_categ_ids", "in", ff_category.ids)] + scope,
+                order="id asc",
+            )
+            bundle_rows = [_serialize_planner_bundle(request.env, b) for b in bundles]
+
+        body = {
+            "generated_at": _datetime.now(_timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "states": sorted(GREEN_STATES),
+            "state_zones": {state: STATE_ZONE_BANDS[state] for state in sorted(STATE_ZONE_BANDS)},
+            "plants": plant_rows,
+            "bundles": bundle_rows,
+        }
+        return _json_response(body, headers={"Cache-Control": PLANNER_CATALOG_CACHE_CONTROL})
 
     # ── Catalog nav (department tree) ────────────────────────────────────
 
