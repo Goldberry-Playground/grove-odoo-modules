@@ -1,6 +1,6 @@
 {
     "name": "Grove Support Chat",
-    "version": "19.0.1.1.0",
+    "version": "19.0.1.1.1",
     "category": "Website/Live Chat",
     "summary": "Livechat glue: partner match, crm.lead, recent-orders note, Discord ping",
     "description": """
@@ -38,8 +38,9 @@
     # We only add fields to / extend behaviour on existing models
     # (discuss.channel, im_livechat.channel), so no new model and no ACLs. The
     # one data file is a form-view inherit exposing the livechat channel's
-    # company_id (GOL-3459) so operators can file a channel's chats under the
-    # right legal entity.
+    # grove_support_company_id (GOL-3459; renamed off company_id in GOL-3482 so
+    # it does not flip the loader's serverUrl) so operators can file a channel's
+    # chats under the right legal entity.
     "data": [
         "views/im_livechat_channel_views.xml",
     ],

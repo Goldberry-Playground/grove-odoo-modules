@@ -10,7 +10,7 @@
         <field name="arch" type="xml">
             <xpath expr="//div[hasclass('oe_title')]" position="after">
                 <group>
-                    <field name="company_id"
+                    <field name="grove_support_company_id"
                            groups="base.group_multi_company"
                            options="{'no_create': True}"/>
                 </group>
