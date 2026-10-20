@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.84.0",
+    "version": "19.0.1.85.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -60,7 +60,7 @@
         # mass_mailing makes Odoo Email Marketing the list of record for every
         # Grove newsletter (Ghost is blog-only) — Josh "option C", 2026-10-19,
         # GOL-3454. Provides mailing.list / mailing.contact /
-        # mailing.contact.subscription and mail.blacklist, which the newsletter
+        # mailing.subscription and mail.blacklist, which the newsletter
         # subscribe/unsubscribe/preferences routes read and write. Adding it
         # here auto-installs it on the next `-u grove_headless`.
         "mass_mailing",

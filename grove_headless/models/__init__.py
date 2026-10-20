@@ -9,7 +9,8 @@ from . import (
     grove_stripe_event,  # noqa: F401
     label_batch,  # noqa: F401  Pirate Ship label batch + rows (GOL-2271)
     mailgun_gateway,  # noqa: F401  pure HMAC verify + event parse (GOL-2903), no ORM models
-    newsletter,  # noqa: F401  pure tag-name helper (GOL-221), no ORM models
+    mailing_contact,  # noqa: F401  welcome-window gate on mailing.contact (GOL-3454)
+    newsletter,  # noqa: F401  pure list/tag helpers (GOL-221, GOL-3454), no ORM models
     order_rollup,  # noqa: F401  weekly order/preorder digest cron (GOL-1978)
     potting_batch,  # noqa: F401
     printify_client,  # noqa: F401  pure HTTP client, no ORM models
