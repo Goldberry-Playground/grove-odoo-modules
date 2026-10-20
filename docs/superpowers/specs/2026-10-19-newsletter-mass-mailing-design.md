@@ -1,25 +1,32 @@
 # Newsletter list of record → Odoo Email Marketing (design)
 
-**Status:** proposed for Josh to rule on this PR. Ruling that triggered it:
-Josh, 2026-10-19, "option C" — Odoo Email Marketing (`mass_mailing`) is the
-list of record for every Grove newsletter; Ghost is blog-only. This completes
-the 2026-10-15 capture ruling, under which consult/wholesale/farm-visit/
-new-state-waitlist requests became `crm.lead` records and back-in-stock alerts
-became Odoo stock notifications (gom#359, `hotfix/odoo-capture-leads-restock`).
-That PR's `capture_leads.py` still says *"only the newsletter stays in Ghost"* —
-this ruling is exactly what supersedes that line. Audit evidence:
+**Status:** **APPROVED by Josh on this PR, 2026-10-20** — Step 2 (implementation)
+is greenlit. This revision folds in Josh's two changes to the proposals below
+(single opt-in, one cross-brand checkbox) plus the confirmed CAN-SPAM address,
+the Mailgun handoff, and a legacy-import path; see the **Ruled** notes inline.
+Original ruling that triggered the work: Josh, 2026-10-19, "option C" — Odoo
+Email Marketing (`mass_mailing`) is the list of record for every Grove
+newsletter; Ghost is blog-only. This completes the 2026-10-15 capture ruling,
+under which consult/wholesale/farm-visit/new-state-waitlist requests became
+`crm.lead` records and back-in-stock alerts became Odoo stock notifications
+(gom#359, `hotfix/odoo-capture-leads-restock`). That PR's `capture_leads.py`
+still says *"only the newsletter stays in Ghost"* — this ruling is exactly what
+supersedes that line. Audit evidence:
 https://claude.ai/artifact/4J7M3Uk7478jRDmZZCEW4c
 
-Target: Release Train #4 (freeze Fri 2026-10-30, QA Mon 11-02, promote Wed
-11-04; manifest GOL-3303) **if** Josh puts it in the manifest — he decides.
-Builds on the newsletter opt-in endpoint (`/grove/api/v1/newsletter/subscribe`,
-GOL-221) and the capture-routing hotfix (gom#359, GOL-3405).
+Target: **Release Train #4** (freeze Fri 2026-10-30, QA Mon 11-02, promote Wed
+11-04; manifest GOL-3303) — Josh confirmed this issue, GOL-3455 and GOL-3456 are
+in Train #4. Builds on the newsletter opt-in endpoint
+(`/grove/api/v1/newsletter/subscribe`, GOL-221) and the capture-routing hotfix
+(gom#359, GOL-3405), which **merged as `c58fa05a`** — Step 2 branches off `main`.
 
 ## Why now
 
 No live capture form has ever saved an email. The Ghost hub, nursery and farm
-newsletters each have 0 members, and Odoo has 0 `crm.lead` records. Nothing
-needs migrating — we pick the list of record before there is a list.
+newsletters each have 0 members, and Odoo has 0 `crm.lead` records. We pick the
+list of record before there is a list. **Exception (Josh, 2026-10-20):** a
+**legacy Ghost droplet** may still hold a handful of farm-blog subscribers;
+those are the one thing that migrates — see §9.
 
 ## Facts on prod (2026-10-19)
 
@@ -32,26 +39,30 @@ needs migrating — we pick the list of record before there is a list.
   add a second one.
 - A `waitlist:<dept-slug>` interest already becomes a readable
   `Waitlist: <Department>` contact tag (GOL-2744) on this same route.
-- gom#359 (leads + restock, bumps `grove_headless` to `19.0.1.79.0`) is approved
-  but still **open**. It touches the same module and version line, so **it must
-  land first**; Josh merges it. This spec's implementation branches off the
-  post-#359 tree and bumps from there.
+- gom#359 (leads + restock, bumped `grove_headless` to `19.0.1.79.0`) **merged
+  as `c58fa05a`** (2026-10-20). Step 2's implementation branches off `main` and
+  bumps from there.
 - Odoo already sends through Mailgun SMTP per company
   (`send.gatheringatthegrove.com` / `mg.<brand>`). **That domain carries
   transactional mail only and must stay transactional** — bulk newsletter sends
   need their own `news.<brand>` server (see §F and the Terra sibling issue).
-- The storefront side (hub opt-in box, per-brand checkboxes, confirm/unsubscribe
-  pages) is a **separate issue for Iris**, blocked on this one.
+- The storefront side (opt-in box with the single "other Grove brands"
+  checkbox, unsubscribe / preferences pages) is a **separate issue for Iris**,
+  blocked on this one.
 
 ## Scope of this spec
 
 Step 1 (this PR) is the design only. Step 2 (a follow-up PR, after Josh approves
 this spec) is the Odoo implementation: add `mass_mailing` to `grove_headless`
-depends, extend the subscribe endpoint, add the confirm and unsubscribe routes,
-seed the lists, write tests. **No prod data is touched by either step.**
+depends, extend the subscribe endpoint (single opt-in + welcome email), add the
+unsubscribe + preferences routes, seed the lists, add the one-time legacy import
+path, write tests. **No prod data is touched except the Josh-gated one-time
+legacy import (§9), which is dry-run-first and out of the module install.**
 
-Everything under "Proposed answer" below is a recommendation for Josh to accept,
-amend, or reject in review. "Decision needed" marks the ones most worth his eye.
+Each question below carries its original "Proposed answer" plus a **Ruled
+(Josh, 2026-10-20)** note recording his decision — approved as proposed, or the
+change he made. The ruling notes are authoritative where they differ from the
+proposal; Step 2 implements the ruled design.
 
 ---
 
@@ -78,57 +89,57 @@ endpoint already resolves the tenant company from website routing
 input. Lists are seeded idempotently by XML data with stable external IDs
 (`grove_headless.mailing_list_nursery`, `…_farm`, `…_digest`).
 
-> **Decision needed.** Confirm three lists and that GGG rides the Digest rather
-> than getting its own list.
+> **Ruled (Josh, 2026-10-20).** Approved as proposed — three lists (Nursery
+> News, Farm News, Grove Digest); GGG rides the Digest.
 
 ### 2. Hub opt-in box: one "also Grove news" checkbox, or per-brand checkboxes?
 
-**Proposed answer.** One **primary** opt-in for the brand whose site the form is
-on, plus a single secondary **"Also send me the Grove Digest"** checkbox on the
-nursery and farm forms. The hub (GGG) form offers the Digest as its primary and
-optionally per-brand checkboxes for Nursery/Farm news. So at most two list ticks
-from any one form, and **one confirmation email covers every list ticked** (§3).
-This avoids a wall of brand checkboxes on a storefront footer while still letting
-someone opt into the cross-brand digest.
+> **Ruled (Josh, 2026-10-20) — CHANGED from the original proposal.** Every form,
+> **the hub included**, gets one **primary** opt-in for the brand whose site the
+> form is on, plus **one unticked** secondary checkbox worded **"Also send me
+> news from the other Grove brands"**. Ticked, it adds **every** other brand
+> list (not just the Digest). No wall of per-brand checkboxes anywhere.
 
-The endpoint accepts an explicit `lists: ["nursery","digest"]` array (slugs), so
-the storefront, not Odoo, decides which boxes to show; Odoo validates the slugs
-against the seeded lists and ignores unknowns. If `lists` is absent, the brand of
-the calling tenant is the single implied list (back-compat for the current body).
+Mechanics. The endpoint accepts an explicit `lists: ["nursery","farm","digest"]`
+array (slugs), so the storefront decides what the two controls map to; Odoo
+validates the slugs against the seeded lists and ignores unknowns. The
+storefront builds the array as: primary brand list always, plus — when the "other
+Grove brands" box is ticked — every seeded list the primary is not. If `lists`
+is absent, the brand of the calling tenant is the single implied list
+(back-compat for the current body). The hub's (GGG) primary list is the Grove
+Digest; its "other brands" box adds Nursery News and Farm News.
 
-> **Decision needed.** One secondary "Grove Digest" checkbox (proposed) vs. full
-> per-brand checkboxes on every form.
+### 3. Opt-in model: single opt-in + welcome email
 
-### 3. Double opt-in: pending until confirmed — token, expiry, re-signup
+> **Ruled (Josh, 2026-10-20) — CHANGED to single opt-in.** No confirmation
+> click gate. Add the subscriber to the chosen lists **on submit**; send one
+> **welcome email** right away that names the lists and carries one-click
+> unsubscribe. Clicking is **not** required to stay subscribed. The 32-byte
+> token / 7-day expiry / `/newsletter/confirm` route are **dropped**.
 
-**Proposed answer.** Subscription is **pending** (`opt_out=False` but not yet
-"confirmed") until the confirmation link is clicked. Mechanics:
+Mechanics:
 
 - On subscribe, upsert the `res.partner` as today, then for each ticked list
-  create/find the `mailing.contact` and a subscription row in **pending** state.
-  Send **one** confirmation email listing every pending list, with a single
-  confirm link.
-- **Token:** a random 32-byte URL-safe token (`secrets.token_urlsafe`) stored on
-  a small `grove.newsletter.confirmation` model `(token, partner_id, list_ids,
-  company_id, created_at, consumed_at)`. The token, not the partner id, is the
-  only thing in the URL — no enumerable ids, no PII in the link.
-- **Route:** `GET /grove/api/v1/newsletter/confirm?token=…` (`auth="public"`,
-  `website=True`, CSRF-exempt GET). On a valid unconsumed unexpired token: mark
-  each listed subscription confirmed, set `consumed_at`, redirect to a
-  storefront "you're subscribed" page. On expired/consumed/unknown: redirect to
-  a neutral "link expired — subscribe again" page (never reveal whether the
-  email exists).
-- **Expiry:** 7 days. A daily cron deletes consumed and expired rows.
-- **Re-signup:** if an unconfirmed subscription already exists for that
-  (partner, list), reissue a fresh token and resend the confirmation (invalidate
-  the old token); do not duplicate the contact. If the subscription is already
-  **confirmed**, the subscribe call is a no-op success (idempotent) — no second
-  confirmation email. If the contact is **blacklisted/opted-out**, re-signup is
-  treated as a fresh pending opt-in (a person may re-subscribe), issuing a new
-  confirmation; confirming it clears the opt-out for that list.
+  create/find the `mailing.contact` and add an **active** subscription
+  (`mailing.contact.subscription`, `opt_out=False`) immediately. No pending
+  state, no token model, no confirm route, no GC cron.
+- Send **one** welcome email naming every list the person was just added to,
+  with RFC 8058 one-click unsubscribe + a link to the per-list preferences page
+  (§4). This is a **transactional** 1:1 send (triggered by the subscribe), so it
+  goes on the existing transactional Mailgun server, not `news.<brand>` (§6).
+  Welcome-email wording and the consent copy are drafted on **GOL-3456** — reuse
+  that text.
+- **Re-signup is idempotent.** If the (partner, list) subscription already
+  exists and is active, the subscribe call is a no-op success — **no duplicate
+  contact and no second welcome** within a short de-dupe window (e.g. the
+  welcome is suppressed if one was sent to that address within the last 24h). If
+  the contact previously **opted out / was blacklisted**, a fresh submit is a
+  legitimate new opt-in: clear the opt-out for the ticked list(s) and send the
+  welcome again.
 
-> **Decision needed.** 7-day token expiry; neutral (non-enumerating) expired-link
-> page.
+Consent (`consent: true`) stays required on the route (§7); single opt-in means
+the submit itself is the recorded consent, so we capture consent source + UTM to
+chatter at subscribe time rather than at a later confirm.
 
 ### 4. Unsubscribe: one-click header + preferences page, blacklist handling
 
@@ -140,28 +151,31 @@ the calling tenant is the single implied list (back-compat for the current body)
   one click removes the recipient from **that list** (the list the mailing was
   sent to), not all brands.
 - **Preferences page:** `GET /grove/api/v1/newsletter/preferences?token=…` shows
-  the recipient's per-list opt-in state with checkboxes; `POST` saves it. Same
-  opaque-token model as confirm (a long-lived per-contact token, not the
-  one-shot confirm token). This is where someone opts out of one brand but keeps
-  another.
+  the recipient's per-list opt-in state with checkboxes; `POST` saves it. The
+  token is a long-lived per-contact opaque token (`secrets.token_urlsafe`, no
+  enumerable id or PII in the URL), reused across every mailing's unsubscribe /
+  preferences links for that contact. This is where someone opts out of one
+  brand but keeps another. (With single opt-in there is no longer a one-shot
+  confirm token — this per-contact token is the only token the design keeps.)
 - **Blacklist:** a global "stop all email" uses Odoo's `mail.blacklist` on the
   email address (list-independent). Blacklisted addresses are excluded from every
   send regardless of list membership; re-subscribing requires an explicit new
-  double opt-in (§3). Per-list opt-out uses the subscription's `opt_out`, not the
-  global blacklist.
+  opt-in submit (§3), which clears the blacklist for that address. Per-list
+  opt-out uses the subscription's `opt_out`, not the global blacklist.
 
 ### 5. CAN-SPAM footer: postal address + unsubscribe, per brand
 
 **Proposed answer.** Every mailing template ends with a footer carrying the
 sending company's **physical postal address** and the one-click unsubscribe +
-preferences links. The address comes from the company record per brand (seeded;
-Josh supplies the mailing address if the company records don't already carry a
-CAN-SPAM-valid one). Footer is part of the seeded mail template, not hand-entered
+preferences links. Footer is part of the seeded mail template, not hand-entered
 per send, so no mailing can go out without it.
 
-> **Decision needed.** Confirm the postal mailing address to print (one address
-> for all three brands, or a distinct address per company). This is a legal
-> requirement for every send.
+> **Ruled (Josh, 2026-10-20).** One address for every brand:
+> **2291 Armstrong Road, Summersville, WV 26651.** It already matches the
+> `res.company` street/city/zip on companies 1, 2 and 3, so the footer
+> **renders the address from the company record** (`company_id` of the mailing)
+> rather than hard-coding it — one QWeb footer, correct per brand, and it stays
+> correct if the registered address ever changes.
 
 ### 6. Which Mailgun server do bulk sends use?
 
@@ -174,14 +188,17 @@ bulk server for mailings and the transactional server for order/confirm mail.
 
 This is **infra owned by Terra** (DNS for `news.<brand>`, Mailgun domain
 creation, SMTP credentials, the `ir.mail_server` + `from_filter` rows). This spec
-only states the dependency; the Terra sibling issue provisions it. Step 2
-implementation is gated on those servers existing in QA, but the code reads the
-server by `from_filter` config, so it does not hard-code credentials.
+only states the dependency; GOL-3455 provisions it. Step 2 implementation is
+gated on those servers existing in QA, but the code reads the server by
+`from_filter` config, so it does not hard-code credentials.
 
-> **Decision needed / handoff.** Confirm `news.<brand>` naming and that Terra
-> provisions the bulk Mailgun domains + `ir.mail_server` rows. The confirmation
-> email in §3 is **transactional** (triggered, 1:1) and sends on the existing
-> transactional server; only true bulk mailings use `news.<brand>`.
+> **Ruled / handoff (Josh, 2026-10-20).** Approved. Terra provisioned
+> `news.<brand>` on all four domains (GOL-3455). Terra's handoff for this item is
+> **GOL-3455 §4**: one `ir.mail_server` per company, `from_filter=news.<domain>`,
+> From `<name>@news.<domain>`, Reply-To the brand `hello@`. **SMTP creds are on
+> Josh.** The welcome email in §3 is **transactional** (triggered, 1:1) and sends
+> on the existing transactional server; only true bulk mailings use
+> `news.<brand>`.
 
 ### 7. Leads and restock contacts are never added to marketing lists unless they opted in
 
@@ -208,35 +225,69 @@ waitlist.) If Josh later wants the launch announcement to flow through
 `mass_mailing` for the footer/unsubscribe compliance, we convert the tag to a
 one-shot `mailing.list` at launch — out of scope here.
 
+### 9. Legacy Ghost subscribers: one-time import
+
+> **Ruled (Josh, 2026-10-20) — NEW.** Any members found on the **legacy Ghost
+> droplet** are migrated into the matching Odoo list. Terra's GOL-3455 check
+> finds them; that box is the farm blog, so they go to **Farm News**.
+
+A **one-time import path**, separate from the live subscribe route:
+
+- **Source:** the member export Terra pulls from the legacy droplet (GOL-3455).
+- **Destination:** the `Farm News` list (company: Goldberry Grove Farm).
+- **Status:** **subscribed only** — import nobody who was unsubscribed/complained
+  on the legacy side.
+- **Provenance:** tag each imported `res.partner` / `mailing.contact`
+  `source:legacy-ghost-migrated` so these are distinguishable from form opt-ins.
+- **No welcome email** to imported people — the single-opt-in welcome (§3) fires
+  only on a live form submit, never on import. The importer must suppress it.
+- **Idempotent + QA-first:** safe to re-run (matches on email, no duplicates);
+  dry-run against QA before any prod run. Prod run is a deliberate, Josh-gated
+  one-off, not part of the module install.
+
+Shape: a guarded admin action (`ir.actions.server` or a short CLI script reading
+a CSV export), not a public route. It is **out of the request path** entirely.
+
 ---
 
 ## Implementation sketch (Step 2 — after this spec is approved)
 
-**Branches off the post-gom#359 tree; bumps `grove_headless` from `19.0.1.79.0`.**
+**Branches off `main` (gom#359 merged as `c58fa05a`); bumps `grove_headless`
+from the current main version. Check the live manifest and take the next free
+minor — do not collide with the order-builder / consult-line version line
+(GOL-3378 / GOL-3381).**
 
-- `__manifest__.py`: add `mass_mailing` to `depends`; version bump (→ `…81.0` or
-  the next free minor after #357/#358 land — do not collide with the order-builder
-  / consult-line version line; see GOL-3378 / GOL-3381).
-- `controllers/main.py`: extend `newsletter_subscribe` to create pending
-  `mailing.contact` + subscription rows and send one confirmation; add
-  `newsletter_confirm`, `newsletter_unsubscribe` (one-click), `newsletter_preferences`.
-- `models/newsletter_confirmation.py`: the token model + daily GC cron.
-- `data/mailing_lists.xml`: seed the three lists (idempotent, stable external IDs)
-  and the per-brand footer mail template.
-- `models/newsletter.py`: pure helpers get list-slug → external-id resolution and
-  token helpers, unit-tested standalone (same pattern as `newsletter_tag_names`).
-- Tests (`tests/test_newsletter_*.py`, native + pytest): double opt-in happy path,
-  token expiry/consume/reissue, re-signup idempotency, per-list unsubscribe,
-  blacklist exclusion, and the §7 "lead/restock adds zero mailing.contact" guard.
+- `__manifest__.py`: add `mass_mailing` to `depends`; version bump.
+- `controllers/main.py`: extend `newsletter_subscribe` to create **active**
+  `mailing.contact` + subscription rows (single opt-in, §3) and send one welcome
+  email; add `newsletter_unsubscribe` (RFC 8058 one-click) and
+  `newsletter_preferences` (GET/POST). **No `newsletter_confirm` route.**
+- `models/newsletter_token.py`: the long-lived **per-contact** preferences/
+  unsubscribe token (no one-shot confirm token, no GC cron).
+- `data/mailing_lists.xml`: seed the three lists (idempotent, stable external
+  IDs) and the per-brand footer mail template whose address renders from
+  `company_id` (§5). Welcome-email template text per GOL-3456.
+- `models/newsletter.py`: pure helpers for list-slug → external-id resolution
+  and the "other brands" fan-out (§2), unit-tested standalone (same pattern as
+  `newsletter_tag_names`).
+- Legacy import (§9): a guarded admin action / CLI reading the GOL-3455 export →
+  Farm News, `source:legacy-ghost-migrated`, subscribed-only, welcome suppressed,
+  idempotent. Not a route.
+- Tests (`tests/test_newsletter_*.py`, native + pytest): single-opt-in happy
+  path (contact active + one welcome), re-signup idempotency (no dup, no second
+  welcome in-window), "other brands" fan-out, per-list unsubscribe, blacklist
+  exclusion + re-opt-in clears it, legacy import (subscribed-only, no welcome),
+  and the §7 "lead/restock adds zero mailing.contact" guard.
 
-QA first (install `mass_mailing` in QA, seed lists, drive subscribe→confirm→
-unsubscribe against the QA Mailgun `news.<brand>` server once Terra provisions it).
-Candidate for Train #4; Josh decides the manifest.
+QA first (install `mass_mailing` in QA, seed lists, drive subscribe→welcome→
+unsubscribe against the QA Mailgun `news.<brand>` server Terra provisioned).
+Train #4 (GOL-3303), freeze Fri 2026-10-30.
 
 ## Non-goals
 
-- No migration — there are no existing members anywhere.
-- No change to Ghost beyond demoting it to blog-only (no newsletter members there).
+- No migration except the one-time legacy-Ghost-droplet import (§9); the live
+  Ghost instances (hub, nursery, farm) have 0 members.
+- No change to Ghost beyond demoting it to blog-only.
 - No change to the lead or restock routes' behaviour (§7 is a guard, not a change).
 - No new credential in code — the bulk Mailgun server is read from config by
   `from_filter`; Terra provisions it.
