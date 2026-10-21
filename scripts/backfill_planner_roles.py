@@ -247,8 +247,7 @@ def main() -> None:
         )
     else:
         print(
-            f"\nDone. {written} template(s) written; grove_facts_reviewed cleared on each. "
-            "Run the review sitting next."
+            f"\nDone. {written} template(s) written; grove_facts_reviewed cleared on each. Run the review sitting next."
         )
 
 
