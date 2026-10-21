@@ -670,7 +670,17 @@ class SaleOrder(models.Model):
         # concurrency, not just at human speed (GOL-2893).
         self.env.cr.execute("SELECT id FROM sale_order WHERE id = %s FOR UPDATE", (self.id,))
         self.invalidate_recordset(["grove_fulfillment_state", "grove_fulfillment_stage"])
-        return self._grove_advance_state("collected", source="operator", operator=operator)
+        newly_collected = self._grove_advance_state("collected", source="operator", operator=operator)
+        if newly_collected:
+            # Keep the raw label substatus in lockstep with the stage on the
+            # REAL transition only (GOL-3560). Nothing on the collection path
+            # ever wrote "collected" here before, so the weekly digest — which
+            # reads grove_delivery_status, not the stage — reported every
+            # collected pickup as awaiting forever. Written inside the same
+            # FOR UPDATE serialisation as the watermark move, and gated on the
+            # real transition so a double-click no-op never rewrites it.
+            self.grove_delivery_status = "collected"
+        return newly_collected
 
     def _grove_mark_collected_and_settle(self, operator=None):
         """Mark a pickup order collected AND settle its deferred balance (GOL-2893).

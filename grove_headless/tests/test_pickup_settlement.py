@@ -175,6 +175,26 @@ class TestPickupSettlement(GroveTaxFixtureMixin, TransactionCase):
         self.assertFalse(order.grove_is_outstanding)
         self.assertEqual(order.grove_checkout_status, "settlement_failed")
 
+    # ── collection stamps the raw label substatus (GOL-3560) ─────────────
+
+    def test_collection_writes_delivery_status(self):
+        """GOL-3560: the real collected transition stamps grove_delivery_status
+        = "collected" so the weekly digest (which reads the label substatus) no
+        longer reports a collected pickup as awaiting forever. The write is
+        gated on the real transition, so a second collect is a no-op that does
+        not touch it."""
+        order = self._order(grove_fulfillment="pickup", grove_checkout_status="paid")
+        self.assertNotEqual(order.grove_delivery_status, "collected")
+
+        first = order.action_grove_mark_collected(operator="josh")
+        self.assertTrue(first)
+        self.assertEqual(order.grove_fulfillment_stage, "collected")
+        self.assertEqual(order.grove_delivery_status, "collected")
+
+        second = order.action_grove_mark_collected(operator="josh")
+        self.assertFalse(second, "a double-collect is a no-op")
+        self.assertEqual(order.grove_delivery_status, "collected")
+
     # ── a non-pickup order is refused ─────────────────────────────────────
 
     @mute_logger("odoo.addons.grove_headless.models.sale_order")

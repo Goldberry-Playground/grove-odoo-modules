@@ -25,6 +25,7 @@ def _order(
     amount_total=100.00,
     checkout_status="paid",
     delivery_status=None,
+    stage=None,
     preorder_ids="",
     partner_name="Alice",
     zip_code="26651",
@@ -41,6 +42,7 @@ def _order(
         "settlement_attempts": settlement_attempts,
         "grove_checkout_status": checkout_status,
         "grove_delivery_status": delivery_status,
+        "grove_fulfillment_stage": stage,
         "grove_preorder_variant_ids": preorder_ids,
         "partner_name": partner_name,
         "partner_shipping_zip": zip_code,
@@ -236,6 +238,26 @@ class TestPickupSection(unittest.TestCase):
         orders = [_order(is_pickup=True, delivery_status="collected")]
         d = od.build_digest(orders, today=TODAY)
         self.assertEqual(d["pickup_count"], 0)
+
+    def test_collected_pickup_by_stage_not_awaiting(self):
+        # GOL-3560: production reaches collection through the fulfilment STAGE,
+        # with grove_delivery_status left None (the collection path never wrote
+        # it). The digest must read the stage, not the raw label substatus, or a
+        # collected pickup is reported as awaiting forever.
+        orders = [_order(is_pickup=True, stage="collected", delivery_status=None)]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertEqual(d["pickup_count"], 0)
+
+    def test_cancelled_pickup_by_stage_not_awaiting(self):
+        orders = [_order(is_pickup=True, stage="cancelled", delivery_status=None)]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertEqual(d["pickup_count"], 0)
+
+    def test_reserved_pickup_by_stage_is_awaiting(self):
+        # A non-terminal stage with no label substatus is still awaiting.
+        orders = [_order(is_pickup=True, stage="reserved", delivery_status=None)]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertEqual(d["pickup_count"], 1)
 
     def test_shipped_pickup_not_awaiting(self):
         orders = [_order(is_pickup=True, delivery_status="transit")]
