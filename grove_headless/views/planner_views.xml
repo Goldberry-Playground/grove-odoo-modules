@@ -1,0 +1,376 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Planner learning-loop admin UI (GOL-3549, planner winter beta spec B).
+     One "Planner" menu under Sales with a list view per learning-loop model;
+     the human-gate actions (mark reviewed, accept proposal, accept as catalog
+     candidate, approve as guild) hang off the form buttons. -->
+<odoo>
+
+    <!-- ── Rules ──────────────────────────────────────────────────────────── -->
+    <record id="view_grove_planner_rule_list" model="ir.ui.view">
+        <field name="name">grove.planner.rule.list</field>
+        <field name="model">grove.planner.rule</field>
+        <field name="arch" type="xml">
+            <list string="Planner Rules" editable="bottom">
+                <field name="scope" />
+                <field name="key" />
+                <field name="label" />
+                <field name="value" />
+                <field name="hint" />
+            </list>
+        </field>
+    </record>
+
+    <record id="view_grove_planner_rule_form" model="ir.ui.view">
+        <field name="name">grove.planner.rule.form</field>
+        <field name="model">grove.planner.rule</field>
+        <field name="arch" type="xml">
+            <form string="Planner Rule">
+                <sheet>
+                    <group>
+                        <field name="key" />
+                        <field name="scope" />
+                        <field name="value" />
+                        <field name="label" />
+                        <field name="hint" />
+                    </group>
+                </sheet>
+                <div class="oe_chatter">
+                    <field name="message_follower_ids" />
+                    <field name="message_ids" />
+                </div>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_grove_planner_rule" model="ir.actions.act_window">
+        <field name="name">Rules</field>
+        <field name="res_model">grove.planner.rule</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- ── Signals ────────────────────────────────────────────────────────── -->
+    <record id="view_grove_planner_signal_list" model="ir.ui.view">
+        <field name="name">grove.planner.signal.list</field>
+        <field name="model">grove.planner.signal</field>
+        <field name="arch" type="xml">
+            <list string="Planner Signals" default_order="create_date desc" create="false">
+                <field name="create_date" />
+                <field name="kind" />
+                <field name="product_tmpl_id" />
+                <field name="zone_band" />
+                <field name="zone" />
+                <field name="track" />
+                <field name="timing" />
+            </list>
+        </field>
+    </record>
+
+    <record id="view_grove_planner_signal_search" model="ir.ui.view">
+        <field name="name">grove.planner.signal.search</field>
+        <field name="model">grove.planner.signal</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="product_tmpl_id" />
+                <field name="kind" />
+                <field name="zone_band" />
+                <separator />
+                <filter string="Product" name="group_product" context="{'group_by': 'product_tmpl_id'}" />
+                <filter string="Zone Band" name="group_band" context="{'group_by': 'zone_band'}" />
+                <filter string="Kind" name="group_kind" context="{'group_by': 'kind'}" />
+            </search>
+        </field>
+    </record>
+
+    <record id="action_grove_planner_signal" model="ir.actions.act_window">
+        <field name="name">Signals</field>
+        <field name="res_model">grove.planner.signal</field>
+        <field name="view_mode">list</field>
+        <field name="context">{'search_default_group_product': 1, 'search_default_group_band': 1}</field>
+    </record>
+
+    <!-- ── Evidence ───────────────────────────────────────────────────────── -->
+    <record id="view_grove_planner_evidence_list" model="ir.ui.view">
+        <field name="name">grove.planner.evidence.list</field>
+        <field name="model">grove.planner.evidence</field>
+        <field name="arch" type="xml">
+            <list string="Planner Evidence" default_order="create_date desc" create="false">
+                <field name="create_date" />
+                <field name="product_tmpl_id" />
+                <field name="fact" />
+                <field name="contradicts" />
+                <field name="source" />
+                <field name="by" />
+                <field name="reviewed" decoration-success="reviewed == True" widget="boolean_toggle" />
+                <button name="action_mark_reviewed" type="object" string="Mark reviewed"
+                        icon="fa-check" invisible="reviewed == True" />
+            </list>
+        </field>
+    </record>
+
+    <record id="view_grove_planner_evidence_form" model="ir.ui.view">
+        <field name="name">grove.planner.evidence.form</field>
+        <field name="model">grove.planner.evidence</field>
+        <field name="arch" type="xml">
+            <form string="Planner Evidence">
+                <header>
+                    <button name="action_mark_reviewed" type="object" string="Mark reviewed"
+                            class="oe_highlight" invisible="reviewed == True" />
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="product_tmpl_id" />
+                            <field name="fact" />
+                            <field name="contradicts" />
+                            <field name="zone" />
+                        </group>
+                        <group>
+                            <field name="source" />
+                            <field name="by" />
+                            <field name="reviewed" />
+                            <field name="reviewed_by" />
+                            <field name="reviewed_at" />
+                        </group>
+                    </group>
+                    <group string="Note">
+                        <field name="note" nolabel="1" />
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_grove_planner_evidence" model="ir.actions.act_window">
+        <field name="name">Evidence</field>
+        <field name="res_model">grove.planner.evidence</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- ── Proposals ──────────────────────────────────────────────────────── -->
+    <record id="view_grove_planner_proposal_list" model="ir.ui.view">
+        <field name="name">grove.planner.proposal.list</field>
+        <field name="model">grove.planner.proposal</field>
+        <field name="arch" type="xml">
+            <list string="Planner Proposals" default_order="create_date desc" create="false"
+                  decoration-muted="status != 'pending'">
+                <field name="create_date" />
+                <field name="kind" />
+                <field name="product_tmpl_id" />
+                <field name="rule_id" />
+                <field name="reason" />
+                <field name="status" widget="badge"
+                       decoration-success="status == 'accepted'" decoration-danger="status == 'dismissed'" />
+                <button name="action_accept" type="object" string="Accept"
+                        icon="fa-check" invisible="status != 'pending'" />
+                <button name="action_dismiss" type="object" string="Dismiss"
+                        icon="fa-times" invisible="status != 'pending'" />
+            </list>
+        </field>
+    </record>
+
+    <record id="view_grove_planner_proposal_form" model="ir.ui.view">
+        <field name="name">grove.planner.proposal.form</field>
+        <field name="model">grove.planner.proposal</field>
+        <field name="arch" type="xml">
+            <form string="Planner Proposal">
+                <header>
+                    <button name="action_accept" type="object" string="Accept"
+                            class="oe_highlight" invisible="status != 'pending'" />
+                    <button name="action_dismiss" type="object" string="Dismiss"
+                            invisible="status != 'pending'" />
+                    <field name="status" widget="statusbar" statusbar_visible="pending,accepted" />
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="kind" />
+                            <field name="product_tmpl_id" />
+                            <field name="rule_id" />
+                        </group>
+                        <group>
+                            <field name="decided_by" />
+                            <field name="decided_at" />
+                        </group>
+                    </group>
+                    <group string="Change">
+                        <field name="change_display" nolabel="1" readonly="1" />
+                    </group>
+                    <group string="Reason">
+                        <field name="reason" nolabel="1" />
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_grove_planner_proposal" model="ir.actions.act_window">
+        <field name="name">Proposals</field>
+        <field name="res_model">grove.planner.proposal</field>
+        <field name="view_mode">list,form</field>
+        <field name="context">{'search_default_pending': 1}</field>
+    </record>
+
+    <record id="view_grove_planner_proposal_search" model="ir.ui.view">
+        <field name="name">grove.planner.proposal.search</field>
+        <field name="model">grove.planner.proposal</field>
+        <field name="arch" type="xml">
+            <search>
+                <field name="product_tmpl_id" />
+                <filter string="Pending" name="pending" domain="[('status', '=', 'pending')]" />
+                <separator />
+                <filter string="Kind" name="group_kind" context="{'group_by': 'kind'}" />
+                <filter string="Status" name="group_status" context="{'group_by': 'status'}" />
+            </search>
+        </field>
+    </record>
+
+    <!-- ── Suggestions ────────────────────────────────────────────────────── -->
+    <record id="view_grove_planner_suggestion_list" model="ir.ui.view">
+        <field name="name">grove.planner.suggestion.list</field>
+        <field name="model">grove.planner.suggestion</field>
+        <field name="arch" type="xml">
+            <list string="Planner Suggestions" default_order="create_date desc" create="false"
+                  decoration-muted="status != 'queued'">
+                <field name="create_date" />
+                <field name="name" />
+                <field name="stratum" />
+                <field name="by" />
+                <field name="status" widget="badge" decoration-success="status == 'accepted'" />
+                <field name="product_tmpl_id" />
+                <button name="action_accept_as_candidate" type="object" string="Accept as catalog candidate"
+                        icon="fa-plus" invisible="status != 'queued'" />
+            </list>
+        </field>
+    </record>
+
+    <record id="view_grove_planner_suggestion_form" model="ir.ui.view">
+        <field name="name">grove.planner.suggestion.form</field>
+        <field name="model">grove.planner.suggestion</field>
+        <field name="arch" type="xml">
+            <form string="Planner Suggestion">
+                <header>
+                    <button name="action_accept_as_candidate" type="object"
+                            string="Accept as catalog candidate" class="oe_highlight"
+                            invisible="status != 'queued'" />
+                </header>
+                <sheet>
+                    <group>
+                        <field name="name" />
+                        <field name="stratum" />
+                        <field name="by" />
+                        <field name="status" />
+                        <field name="product_tmpl_id" />
+                    </group>
+                    <group string="Why">
+                        <field name="note" nolabel="1" />
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_grove_planner_suggestion" model="ir.actions.act_window">
+        <field name="name">Suggestions</field>
+        <field name="res_model">grove.planner.suggestion</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- ── Saved plans ────────────────────────────────────────────────────── -->
+    <record id="view_grove_planner_plan_list" model="ir.ui.view">
+        <field name="name">grove.planner.plan.list</field>
+        <field name="model">grove.planner.plan</field>
+        <field name="arch" type="xml">
+            <list string="Saved Plans" default_order="create_date desc" create="false">
+                <field name="create_date" />
+                <field name="name" />
+                <field name="zone" />
+                <field name="track" />
+                <field name="status" widget="badge" decoration-success="status == 'guild'" />
+                <field name="guild_product_id" />
+            </list>
+        </field>
+    </record>
+
+    <record id="view_grove_planner_plan_form" model="ir.ui.view">
+        <field name="name">grove.planner.plan.form</field>
+        <field name="model">grove.planner.plan</field>
+        <field name="arch" type="xml">
+            <form string="Saved Plan">
+                <header>
+                    <button name="action_approve_as_guild" type="object" string="Approve as guild"
+                            class="oe_highlight" invisible="status == 'guild'"
+                            groups="grove_headless.group_nursery_staff" />
+                    <field name="status" widget="statusbar" statusbar_visible="saved,guild" />
+                </header>
+                <sheet>
+                    <group>
+                        <group>
+                            <field name="name" />
+                            <field name="zone" />
+                            <field name="track" />
+                        </group>
+                        <group>
+                            <field name="plan_url" widget="url" />
+                            <field name="guild_product_id" />
+                        </group>
+                    </group>
+                    <group string="Lines">
+                        <field name="line_ids" nolabel="1">
+                            <list editable="bottom">
+                                <field name="product_tmpl_id" />
+                                <field name="qty" />
+                                <field name="role" />
+                                <field name="stratum" />
+                            </list>
+                        </field>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_grove_planner_plan" model="ir.actions.act_window">
+        <field name="name">Saved Plans</field>
+        <field name="res_model">grove.planner.plan</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- ── Testers ────────────────────────────────────────────────────────── -->
+    <record id="view_grove_planner_tester_list" model="ir.ui.view">
+        <field name="name">grove.planner.tester.list</field>
+        <field name="model">grove.planner.tester</field>
+        <field name="arch" type="xml">
+            <list string="Planner Testers" editable="bottom">
+                <field name="name" />
+                <field name="email" />
+                <field name="token" />
+                <field name="active" widget="boolean_toggle" />
+            </list>
+        </field>
+    </record>
+
+    <record id="action_grove_planner_tester" model="ir.actions.act_window">
+        <field name="name">Testers</field>
+        <field name="res_model">grove.planner.tester</field>
+        <field name="view_mode">list</field>
+        <field name="context">{'active_test': False}</field>
+    </record>
+
+    <!-- ── Menu ───────────────────────────────────────────────────────────── -->
+    <menuitem id="menu_grove_planner_root" name="Planner" parent="sale.sale_menu_root" sequence="90" />
+    <menuitem id="menu_grove_planner_proposal" parent="menu_grove_planner_root"
+              action="action_grove_planner_proposal" sequence="10" />
+    <menuitem id="menu_grove_planner_suggestion" parent="menu_grove_planner_root"
+              action="action_grove_planner_suggestion" sequence="20" />
+    <menuitem id="menu_grove_planner_evidence" parent="menu_grove_planner_root"
+              action="action_grove_planner_evidence" sequence="30" />
+    <menuitem id="menu_grove_planner_plan" parent="menu_grove_planner_root"
+              action="action_grove_planner_plan" sequence="40" />
+    <menuitem id="menu_grove_planner_signal" parent="menu_grove_planner_root"
+              action="action_grove_planner_signal" sequence="50" />
+    <menuitem id="menu_grove_planner_rule" parent="menu_grove_planner_root"
+              action="action_grove_planner_rule" sequence="60" />
+    <menuitem id="menu_grove_planner_tester" parent="menu_grove_planner_root"
+              action="action_grove_planner_tester" sequence="70" />
+
+</odoo>
