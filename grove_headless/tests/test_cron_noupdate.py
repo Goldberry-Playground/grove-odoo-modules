@@ -64,7 +64,7 @@ class TestCronNoupdate(unittest.TestCase):
         self.assertEqual(
             offenders,
             {},
-            "ir.cron records must load under noupdate=\"1\" so `-u` never resets "
+            'ir.cron records must load under noupdate="1" so `-u` never resets '
             "a live schedule (GOL-3562); offenders: %s" % offenders,
         )
 
