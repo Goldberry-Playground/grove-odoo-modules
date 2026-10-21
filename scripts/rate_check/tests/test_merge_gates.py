@@ -65,5 +65,33 @@ class TestRateCheckDisarmsStaleAutoMerge(unittest.TestCase):
         self.assertNotIn("--delete-branch", self.text)
 
 
+class TestRateCheckSelfDispatchesRequiredChecks(unittest.TestCase):
+    """GOL-2114: the rates PR is pushed/opened with GITHUB_TOKEN, whose events never
+    start `on: pull_request` workflows, so rate-check.yml must dispatch ci.yml at
+    the branch itself (the odoocker GOL-2504 pattern) and ci.yml must accept it.
+    """
+
+    def setUp(self):
+        self.rate_check = _read("rate-check.yml")
+        self.ci = _read("ci.yml")
+
+    def test_ci_is_dispatchable(self):
+        on_block = self.ci.split("\njobs:", 1)[0]
+        self.assertIn("workflow_dispatch:", on_block, "ci.yml must carry a workflow_dispatch trigger")
+
+    def test_dispatch_targets_ci_at_the_rates_branch_after_the_push(self):
+        push = self.rate_check.index("git push -f origin chore/rate-check")
+        dispatch = self.rate_check.index("gh workflow run ci.yml --ref chore/rate-check")
+        self.assertLess(push, dispatch, "ci.yml must be dispatched AFTER the force-push")
+
+    def test_token_may_dispatch(self):
+        self.assertRegex(self.rate_check, r"(?m)^\s+actions: write")
+
+    def test_no_pat_fallback_remains(self):
+        # Josh (GOL-2116): no PAT. A dead `secrets.X || github.token` fallback is
+        # exactly the silent-degradation shape GOL-2642 removed.
+        self.assertNotIn("RATE_CHECK_PR_TOKEN", self.rate_check)
+
+
 if __name__ == "__main__":
     unittest.main()

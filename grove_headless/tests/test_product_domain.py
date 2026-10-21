@@ -132,3 +132,31 @@ def test_q_search_matches_name_or_code_across_catalog():
 def test_q_blank_adds_no_search_leaf():
     dom = product_domain.build_product_domain({"q": "   "}, 7)
     assert not any(isinstance(leaf, tuple) and leaf[0] == "name" for leaf in dom)
+
+
+# ── GOL-3314: Printify farm-tenant company visibility ────────────────────────
+
+
+def test_company_domain_default_includes_shared_products():
+    assert product_domain.company_domain(7, None) == [("company_id", "in", [7, False])]
+    assert product_domain.company_domain(7, "nursery") == [("company_id", "in", [7, False])]
+
+
+def test_company_domain_goldberry_only_shares_printify_products():
+    assert product_domain.company_domain(1, "goldberry") == [
+        "|",
+        ("company_id", "=", 1),
+        "&",
+        ("company_id", "=", False),
+        ("grove_fulfillment_route", "=", "printify"),
+    ]
+
+
+def test_build_product_domain_goldberry_uses_tenant_rule():
+    domain = product_domain.build_product_domain({}, 1, tenant="goldberry")
+    assert domain[:1] == [("website_published", "=", True)]
+    assert ("grove_fulfillment_route", "=", "printify") in domain
+
+
+def test_build_product_domain_unchanged_without_tenant():
+    assert product_domain.build_product_domain({}, 7) == BASE

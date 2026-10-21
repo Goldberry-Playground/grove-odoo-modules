@@ -108,5 +108,6 @@ the rate zone) to determine:
   `SHIPPO_API_KEY` guard step is gone and the checker always runs. The only
   optional secret is `DISCORD_OPS_WEBHOOK_URL` — the Discord notification step is
   individually skipped when it is absent (safe to merge before credentials exist).
-  `RATE_CHECK_PR_TOKEN` is optional too: absent, the PR still opens under the
-  default token but wedges at `action_required` until re-triggered (see runbook)
+  No PR token is needed either: the PR opens under the default token and the
+  workflow self-dispatches `ci.yml` at `chore/rate-check` so the required
+  checks run (GOL-2114, see runbook)

@@ -4,29 +4,40 @@ import json
 import logging
 import os
 import re
+import time
 from datetime import date as _date
 from datetime import datetime as _datetime
+from datetime import timedelta
 from datetime import timezone as _timezone
 from types import SimpleNamespace
 
 import psycopg2
 import requests
-from odoo import fields, http
+from markupsafe import Markup
+from odoo import fields, http, tools
 from odoo.http import Response, request
 
 from ..hooks import _get_company_wv_state_tax
-from ..models import bundle_substitution, promotions, stripe_gateway
+from ..models import bundle_substitution, capture_leads, printify_client, promotions, stripe_gateway
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
 from ..models.mail_from import mail_from_vals
-from ..models.newsletter import WAITLIST_INTEREST_PREFIX, newsletter_tag_names
+from ..models.newsletter import (
+    NEWSLETTER_LIST_KEYS,
+    WAITLIST_INTEREST_PREFIX,
+    _humanize_slug,
+    newsletter_tag_names,
+    resolve_newsletter_lists,
+)
 from ..models.order_alerts import (
     build_order_card_payload,
     format_merchant_email,
     format_new_order_discord,
 )
+from ..models.plant_compliance import blocked_states_for as compliance_blocked_states_for
 from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
 from ..models.plant_compliance import excluded_taxa_for_state
+from ..models.plant_compliance import genus_for as compliance_genus_for
 from ..models.preorder_email import (
     confirmation_deposit_line,
     preship_balance_line,
@@ -58,6 +69,7 @@ from ..models.shipping_zones import (
     GREEN_STATES,
     SEED_SHIP_EXCLUDED_STATES,
     SEED_SHIP_STATES,
+    STATE_ZONE_BANDS,
     canonical_state_code,
     compute_order_shipping,
     rate_feed,
@@ -67,7 +79,7 @@ from ..models.shipping_zones import (
     zone_for_state,
 )
 from ..models.shippo_client import is_valid_tracking
-from .product_domain import build_product_domain, slugify, zone_response
+from .product_domain import build_product_domain, company_domain, slugify, zone_response
 
 # Grove has sales-tax nexus only in West Virginia, so the WV 6% state tax (the
 # product default set by hooks.setup_wv_sales_tax) legally applies only to a
@@ -205,13 +217,18 @@ def _list_in_stock(product):
     return any(v.grove_shared_pool_qty("qty_available") > 0 for v in product.product_variant_ids)
 
 
-def _json_response(data, status=200):
-    """Return a plain JSON HTTP response (not Odoo JSON-RPC)."""
+def _json_response(data, status=200, headers=None):
+    """Return a plain JSON HTTP response (not Odoo JSON-RPC).
+
+    ``headers`` (a dict) is merged onto the response — used by the planner
+    catalog feed to set ``Cache-Control: public, max-age=300`` (GOL-3379).
+    """
     body = json.dumps(data, default=str)
     return Response(
         body,
         status=status,
         content_type="application/json",
+        headers=headers,
     )
 
 
@@ -438,6 +455,152 @@ def _serialize_facts(product):
         "chill_hours": product.grove_chill_hours or "",
         "pollination": product.grove_pollination or "",
         "years_to_fruit": product.grove_years_to_fruit or "",
+        # Planner facts (GOL-3378, order-builder §A): the scoreable subset plus
+        # the computed ready flag. Same blank conventions — integers to None when
+        # 0, chars to "", booleans as booleans, selection to None.
+        "years_to_fruit_min": product.grove_years_to_fruit_min or None,
+        "pollination_min": product.grove_pollination_min or None,
+        "harvest_months": product.grove_harvest_months or "",
+        "tolerates_wet": bool(product.grove_tolerates_wet),
+        "tolerates_poor_soil": bool(product.grove_tolerates_poor_soil),
+        "tolerates_shade": bool(product.grove_tolerates_shade),
+        "wildlife_value": product.grove_wildlife_value or None,
+        "planner_priority": product.grove_planner_priority or None,
+        "planner_ready": bool(product.grove_planner_ready),
+    }
+
+
+# Public category that holds the storefront bundle packages. The spec calls it
+# "public category 6"; 6 is its prod id, which we must not hardcode (QA/test ids
+# differ), so the feed resolves it by this stable name (GOL-3379 §B).
+FOOD_FOREST_PACKAGES_CATEGORY = "Food Forest Packages"
+
+# Cache the planner catalog at the edge/BFF for 5 minutes (GOL-3379 §B). The
+# storefront fetches it once per quiz run through a server-side BFF route, so a
+# short public TTL is safe and keeps the quiz snappy without hammering Odoo.
+PLANNER_CATALOG_CACHE_CONTROL = "public, max-age=300"
+
+
+def _harvest_months_list(value):
+    """Parse ``grove_harvest_months`` ("9,10,11") into ``[9, 10, 11]``.
+
+    Returns ``[]`` for a blank or unparseable value — the planner reads an empty
+    list as "no harvest-month data", never a ``False``. Non-numeric tokens are
+    dropped so a hand-typed stray can't 500 the feed.
+    """
+    if not value:
+        return []
+    months = []
+    for token in str(value).split(","):
+        token = token.strip()
+        if token.isdigit():
+            months.append(int(token))
+    return months
+
+
+def _planner_substitute_tmpl_id(genus, substitute_by_genus):
+    """Template id the substitution engine would swap in for ``genus``, or None.
+
+    Resolves the genus -> substitute (Castanea -> Carya ovata / Shagbark Hickory)
+    via ``bundle_substitution``, then maps the substitute's genus to a concrete
+    template in this storefront via ``substitute_by_genus`` (built from the
+    published, sale_ok catalog). ``None`` when the genus has no substitute or the
+    substitute isn't carried here.
+    """
+    if not genus:
+        return None
+    sub = bundle_substitution.substitute_for(genus)
+    if sub is None:
+        return None
+    return substitute_by_genus.get(compliance_genus_for(sub.botanical))
+
+
+def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
+    """One plant row for the planner catalog feed (GOL-3379 §B).
+
+    Blank conventions mirror ``_serialize_facts``: integers to ``None`` at 0,
+    selections to ``None`` when unset, booleans as booleans, ``harvest_months`` a
+    list (never a ``False``). ``blocked_states`` is the carve-out lookup on the
+    parsed genus, emptied by ``grove_compliance_exempt`` (the admin escape hatch),
+    and the regulated-state set for an empty/unparseable botanical name — the same
+    fail-safe the checkout gate applies.
+    """
+    botanical = product.grove_botanical_name or ""
+    genus = compliance_genus_for(botanical)
+    blocked_states = [] if product.grove_compliance_exempt else compliance_blocked_states_for(botanical)
+    return {
+        "id": product.id,
+        "slug": product.grove_slug or "",
+        "name": product.name or "",
+        "botanical_name": botanical,
+        "genus": genus,
+        "price": product.list_price,
+        "tier": product.grove_shipping_tier or None,
+        "pickup_only": bool(product.grove_pickup_only),
+        "in_stock": _list_in_stock(product) if has_stock_field else True,
+        "preorder_cap_reached": bool(product.grove_preorder_cap_reached),
+        "layer": product.grove_layer or None,
+        "zone_min": product.grove_zone_min or None,
+        "zone_max": product.grove_zone_max or None,
+        "years_to_fruit_min": product.grove_years_to_fruit_min or None,
+        "pollination_min": product.grove_pollination_min or None,
+        "harvest_months": _harvest_months_list(product.grove_harvest_months),
+        "tolerates": {
+            "wet": bool(product.grove_tolerates_wet),
+            "poor_soil": bool(product.grove_tolerates_poor_soil),
+            "shade": bool(product.grove_tolerates_shade),
+        },
+        "wildlife_value": product.grove_wildlife_value or None,
+        "priority": product.grove_planner_priority or None,
+        "blocked_states": blocked_states,
+        "substitute_id": _planner_substitute_tmpl_id(genus, substitute_by_genus),
+        "image": _image_url("product.template", product, "image_512"),
+    }
+
+
+def _bundle_component_ids(env, variant):
+    """Component template ids of a phantom-BoM bundle, repeated per unit qty.
+
+    e.g. a Mountain Mama kit of 2× template 93, 2× 91, 1× 133 -> ``[93, 93, 91,
+    91, 133]`` (the shape the storefront's bundle-match reads as a multiset).
+    Empty when there is no BoM (a consult-built package, GOL-2589 seeds the real
+    ones) or ``mrp`` is absent. Best-effort: a BoM explode hiccup logs and yields
+    ``[]`` rather than breaking the read-only feed.
+    """
+    if "mrp.bom" not in env.registry:
+        return []
+    bom = env["mrp.bom"].sudo()._bom_find(variant, bom_type="phantom").get(variant)
+    if not bom:
+        return []
+    try:
+        _boms, exploded = bom.explode(variant, 1)
+    except Exception:  # noqa: BLE001 — a bundle BoM gap must not break the feed
+        _logger.warning("GOL-3379: could not explode bundle BoM for variant %s", variant.id, exc_info=True)
+        return []
+    component_ids = []
+    for bom_line, line_data in exploded:
+        qty = int(line_data.get("qty") or bom_line.product_qty or 0)
+        if qty > 0:
+            component_ids.extend([bom_line.product_id.product_tmpl_id.id] * qty)
+    return component_ids
+
+
+def _serialize_planner_bundle(env, template):
+    """One bundle row for the planner catalog feed (GOL-3379 §B).
+
+    ``tree_count`` is the existing promo-engine count (``variant_tree_count``),
+    emitted on every bundle so the shape is uniform; for a consult-built package
+    with no BoM the engine's count is the only size signal the planner gets.
+    """
+    variant = template.product_variant_id
+    return {
+        "id": template.id,
+        "slug": template.grove_slug or "",
+        "name": template.name or "",
+        "price": template.list_price,
+        "component_ids": _bundle_component_ids(env, variant),
+        "consult_built": bool(template.grove_consult_built),
+        "tree_count": promotions.variant_tree_count(variant),
     }
 
 
@@ -503,6 +666,11 @@ def _fulfillment_flags(product, phantom_boms=None):
         "compliance_exempt": bool(product.grove_compliance_exempt),
         "consult_built": bool(product.grove_consult_built),
         "ships_all_green_states": _ships_all_green_states(product, phantom_boms),
+        # Printify merch (spec 2026-10-13-printify-merch-design.md §4): the route
+        # drives the storefront branch; lead_time renders "ships in ..." on
+        # Printify products and is None for every in-house product.
+        "fulfillment_route": product.grove_fulfillment_route or "in_house",
+        "lead_time": product.printify_lead_time if product.grove_fulfillment_route == "printify" else None,
     }
 
 
@@ -787,6 +955,9 @@ def _structure_variant(variant, template_rootstock=""):
         # template-wide no_variant value (see _template_rootstock). Absent -> "",
         # which the storefront reads as "no rootstock pill / selector" (GOL-1112).
         "rootstock": axis.get("Rootstock", "") or template_rootstock,
+        # Printify merch axes (spec 2026-10-13-printify-merch-design.md §4). Empty for plants.
+        "color": axis.get("Color", ""),
+        "size": axis.get("Size", ""),
         "price": variant.lst_price,
         # Shared-pool availability (GOL-2031 peat & bagged): a Bareroot variant
         # ships the potted stock too (de-potted + bagged at packing), so the
@@ -903,6 +1074,7 @@ class GroveHeadlessAPI(http.Controller):
             current_company.id,
             cat_category_ids=cat_category_ids,
             dept_category_ids=dept_category_ids,
+            tenant=website.grove_tenant_slug(),
         )
 
         limit = min(int(kwargs.get("limit", 40)), 200)
@@ -992,11 +1164,8 @@ class GroveHeadlessAPI(http.Controller):
             .sudo()
             .with_company(current_company)
             .search(
-                [
-                    ("id", "=", product_id),
-                    ("website_published", "=", True),
-                    ("company_id", "in", [current_company.id, False]),
-                ],
+                [("id", "=", product_id), ("website_published", "=", True)]
+                + company_domain(current_company.id, website.grove_tenant_slug()),
                 limit=1,
             )
         )
@@ -1050,6 +1219,101 @@ class GroveHeadlessAPI(http.Controller):
             data["seed_season"] = season
 
         return _json_response(data)
+
+    # ── Planner catalog feed ─────────────────────────────────────────────
+
+    @http.route(
+        "/grove/api/v1/planner/catalog",
+        type="http",
+        auth="public",
+        website=True,
+        methods=["GET"],
+        csrf=False,
+    )
+    def planner_catalog(self, **_kwargs):
+        """One cached JSON document the order-builder quiz runs over (GOL-3379 §B).
+
+        Public, no auth, same CORS and company scoping as ``/products``. The
+        storefront fetches it once per quiz run through a server-side BFF route,
+        never from the browser; a 5-minute public cache keeps it snappy. The
+        response is read-only and idempotent, so the nightly listing audit can
+        call and diff it.
+
+        ``plants`` are the planner-ready, published, for-sale, non-seed templates
+        for this storefront's company (``grove_planner_ready`` already excludes
+        bundles and consult-built mixes). Out-of-stock plants stay in the feed so
+        the planner can offer "notify me". ``bundles`` are the published Food
+        Forest Packages. ``states``/``state_zones`` ship the green list and the
+        ZIP-unknown USDA bands so the storefront carries no copy of either.
+        """
+        website = request.website
+        current_company = website.company_id
+        tenant = website.grove_tenant_slug()
+        Template = request.env["product.template"].sudo().with_company(current_company)
+        scope = company_domain(current_company.id, tenant)
+
+        # Published, for-sale, planner-ready plants — seeds are not plants and
+        # never appear in a tree-planting quiz (spec §C.2). grove_planner_ready
+        # already excludes BoM bundles and consult-built mixes (§A).
+        plant_domain = [
+            ("sale_ok", "=", True),
+            ("website_published", "=", True),
+            ("grove_planner_ready", "=", True),
+            ("grove_shipping_tier", "!=", "seed"),
+        ] + scope
+        plants = Template.search(plant_domain, order="grove_planner_priority asc, id asc")
+
+        # Warm the batched preorder-cap + stock computes once for the whole page
+        # so the per-plant reads below are cache hits, not N+1 (mirrors /products).
+        plants.mapped("grove_preorder_cap_reached")
+        has_stock_field = "qty_available" in request.env["product.product"]._fields
+        if has_stock_field:
+            plants.product_variant_ids.mapped("qty_available")
+
+        # genus -> template id for substitute resolution. Built from the whole
+        # published, sale_ok catalog (not just planner-ready plants) so a
+        # substitute such as Shagbark Hickory resolves even if it isn't itself
+        # recommendable. Smallest id wins for determinism.
+        substitute_by_genus = {}
+        sub_candidates = Template.search(
+            [
+                ("sale_ok", "=", True),
+                ("website_published", "=", True),
+                ("grove_botanical_name", "!=", False),
+            ]
+            + scope,
+            order="id asc",
+        )
+        for candidate in sub_candidates:
+            genus = compliance_genus_for(candidate.grove_botanical_name)
+            if genus and genus not in substitute_by_genus:
+                substitute_by_genus[genus] = candidate.id
+
+        plant_rows = [_serialize_planner_plant(p, substitute_by_genus, has_stock_field) for p in plants]
+
+        # Bundles: published templates in the Food Forest Packages public
+        # category, resolved by name (its prod id is 6; see the constant).
+        bundle_rows = []
+        ff_category = (
+            request.env["product.public.category"]
+            .sudo()
+            .search([("name", "=", FOOD_FOREST_PACKAGES_CATEGORY)], limit=1)
+        )
+        if ff_category:
+            bundles = Template.search(
+                [("website_published", "=", True), ("public_categ_ids", "in", ff_category.ids)] + scope,
+                order="id asc",
+            )
+            bundle_rows = [_serialize_planner_bundle(request.env, b) for b in bundles]
+
+        body = {
+            "generated_at": _datetime.now(_timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "states": sorted(GREEN_STATES),
+            "state_zones": {state: STATE_ZONE_BANDS[state] for state in sorted(STATE_ZONE_BANDS)},
+            "plants": plant_rows,
+            "bundles": bundle_rows,
+        }
+        return _json_response(body, headers={"Cache-Control": PLANNER_CATALOG_CACHE_CONTROL})
 
     # ── Catalog nav (department tree) ────────────────────────────────────
 
@@ -1913,6 +2177,37 @@ class GroveHeadlessAPI(http.Controller):
 
         lines = [(by_id[variant_id], qty) for variant_id, qty in parsed_items]
         today = _date.today()
+
+        # Printify merch quote (GOL-3314 §6): a Printify cart takes a LIVE
+        # Printify shipping quote and never mixes with trees. This mirrors the
+        # draft-order path so the storefront's pre-checkout summary matches what
+        # /checkout/session will charge. A cart with no destination yet quotes
+        # null shipping (the storefront re-quotes once the address is entered).
+        route_variants = [v for v in variants if v.product_tmpl_id.type != "service"]
+        printify = [v for v in route_variants if v.product_tmpl_id.grove_fulfillment_route == "printify"]
+        if printify and len(printify) != len(route_variants):
+            return _json_response({"error": PRINTIFY_MIXED_CART_MESSAGE}, status=409)
+        shipping_amount = None
+        if printify:
+            ship_to = payload.get("shipping") if isinstance(payload.get("shipping"), dict) else {}
+            dest = canonical_state_code(ship_to.get("state") or "")
+            if ship_to.get("state") and dest not in printify_client.US_50_AND_DC:
+                return _json_response({"error": PRINTIFY_DESTINATION_MESSAGE}, status=400)
+            if dest and ship_to.get("zip"):
+                qty_by_id = {variant_id: qty for variant_id, qty in parsed_items}
+                line_items = [
+                    {
+                        "product_id": v.product_tmpl_id.printify_product_id,
+                        "variant_id": v.printify_variant_id,
+                        "quantity": int(qty_by_id.get(v.id, 1)),
+                    }
+                    for v in printify
+                ]
+                try:
+                    shipping_amount = _printify_quote_cached(line_items, _printify_address({}, ship_to, dest))
+                except printify_client.PrintifyError:
+                    return _json_response({"error": PRINTIFY_SHIPPING_UNAVAILABLE}, status=503)
+
         # Same potted-season / no-mixing / wave rules _create_draft_order enforces
         # (the quote carries a ZIP only for ship carts that already have one).
         shipping = payload.get("shipping") if isinstance(payload.get("shipping"), dict) else {}
@@ -1973,6 +2268,8 @@ class GroveHeadlessAPI(http.Controller):
             "ship_wave": ship_wave,
             "consult_eligible": consult_eligible,
             "lines": line_quotes,
+            "fulfillment_route": "printify" if printify else "in_house",
+            "shipping_amount": shipping_amount,
         }
         seed_year = seed_cart_harvest_year(q.get("seed_harvest_year") for q in line_quotes)
         if seed_year is not None:
@@ -2329,6 +2626,32 @@ class GroveHeadlessAPI(http.Controller):
         ledger.write(ledger_vals)
         return _json_response({"ok": True, "result": result})
 
+    @http.route("/grove/api/v1/printify/webhook", type="http", auth="public", methods=["POST"], csrf=False)
+    def printify_webhook(self, **_kwargs):
+        """Receive Printify order/shipment webhooks (spec §7, GOL-3314).
+
+        type="http" so Printify sees real status codes and redelivers on 5xx.
+        HMAC-SHA256 verified against the raw body (X-Pfy-Signature: sha256=...),
+        confirmed against developers.printify.com. The handler is idempotent: the
+        tracking write is guarded and _apply_delivery_status dedupes and ranks, so
+        a redelivery or an out-of-order event never double-emails or regresses.
+        """
+        raw = request.httprequest.get_data() or b""
+        secret = os.environ.get("PRINTIFY_WEBHOOK_SECRET", "")
+        signature = request.httprequest.headers.get(PRINTIFY_SIGNATURE_HEADER, "")
+        if not printify_client.verify_signature(secret, raw, signature):
+            return _json_response({"error": "invalid signature"}, status=401)
+        try:
+            event = json.loads(raw or b"{}")
+        except ValueError:
+            return _json_response({"error": "invalid JSON"}, status=400)
+        try:
+            action = _handle_printify_event(request.env, event)
+        except printify_client.PrintifyError:
+            _logger.warning("grove_headless: Printify webhook could not fetch order", exc_info=True)
+            return _json_response({"error": "temporarily unavailable"}, status=503)
+        return _json_response({"ok": True, "action": action})
+
     # ── Newsletter ───────────────────────────────────────────────────────
 
     @http.route(
@@ -2442,14 +2765,226 @@ class GroveHeadlessAPI(http.Controller):
 
         _log_newsletter_attribution(partner, source, payload.get("attribution"))
 
+        # ── List of record: subscribe to the Odoo Email Marketing lists ──────
+        # (GOL-3454, Josh "option C"). The res.partner tagging above stays for
+        # order attribution; the mailing.list membership below is what actually
+        # makes someone a newsletter subscriber. A failure here must not fail
+        # the opt-in (best-effort, same stance as attribution logging), so it is
+        # wrapped and only annotates the response.
+        requested_lists = payload.get("lists")
+        if requested_lists is not None and not isinstance(requested_lists, list):
+            return _json_response({"error": "lists must be a list"}, status=400)
+        if isinstance(requested_lists, list):
+            for key in requested_lists:
+                if not isinstance(key, str) or key.strip().lower() not in NEWSLETTER_LIST_KEYS:
+                    return _json_response(
+                        {"error": f"unknown list key: {key!r}; expected one of {list(NEWSLETTER_LIST_KEYS)}"},
+                        status=400,
+                    )
+        tenant_slug = request.website.grove_tenant_slug()
+        list_keys = resolve_newsletter_lists(
+            tenant_slug,
+            requested=requested_lists,
+            multibrand=bool(payload.get("multibrand")),
+        )
+        subscribed_keys = []
+        welcomed = False
+        try:
+            subscribed_keys, welcomed = _apply_newsletter_subscription(
+                request.env, current_company, partner, email, payload.get("name"), list_keys
+            )
+        except Exception:  # noqa: BLE001 — list membership is best-effort; never fail the opt-in
+            _logger.warning("newsletter list subscription failed for %s", email, exc_info=True)
+
         return _json_response(
             {
                 "partner_id": partner.id,
                 "email": partner.email,
                 "tags": tag_names,
                 "created": created,
+                "lists": subscribed_keys,
+                "welcomed": welcomed,
             }
         )
+
+    # ── Newsletter: one-click unsubscribe + per-list preferences ─────────────
+
+    @http.route(
+        "/grove/api/v1/newsletter/unsubscribe",
+        type="http",
+        auth="public",
+        website=True,
+        methods=["GET", "POST"],
+        csrf=False,
+    )
+    def newsletter_unsubscribe(self, **kwargs):
+        """RFC 8058 one-click unsubscribe (the ``List-Unsubscribe-Post`` target).
+
+        A mail client POSTs here with no session when the recipient clicks
+        "unsubscribe". The link carries ``c`` (mailing.contact id) and ``t`` (a
+        per-contact HMAC token); we verify the token, opt the contact out of
+        *every* Grove list, and add the email to ``mail.blacklist`` so no future
+        mailing reaches it. Always returns 200 on a valid token (RFC 8058
+        requires the POST to succeed) and never reveals whether the contact
+        exists for a bad one.
+
+        A GET on the same URI (older clients open the ``List-Unsubscribe`` URI
+        in a browser instead of doing one-click) is non-destructive by HTTP
+        contract: it returns the preference state so the storefront can render a
+        confirm screen rather than silently unsubscribing on a link preview.
+        """
+        contact = _newsletter_contact_from_token(request.env, kwargs.get("c"), kwargs.get("t"))
+        if contact is None:
+            return _json_response({"error": "invalid or expired link"}, status=400)
+        if request.httprequest.method == "GET":
+            return _json_response(_newsletter_preferences_state(request.env, contact))
+        contact.sudo().subscription_ids.write({"opt_out": True})
+        if contact.email_normalized:
+            request.env["mail.blacklist"].sudo()._add(contact.email_normalized)
+        return _json_response({"ok": True, "unsubscribed": True})
+
+    @http.route(
+        "/grove/api/v1/newsletter/preferences",
+        type="http",
+        auth="public",
+        website=True,
+        methods=["GET", "POST"],
+        csrf=False,
+    )
+    def newsletter_preferences(self, **kwargs):
+        """Per-list preference centre behind a per-contact token (GOL-3454 §4).
+
+        GET  ?c=&t=            → { email, blacklisted, lists: [{key, name, subscribed}] }
+        POST { c, t, lists:{key: bool} } → apply each list's subscribed state and
+             return the same shape. Unsubscribing from every list also blacklists
+             the email; re-subscribing to any list lifts the blacklist (the
+             recipient is asking for mail again).
+        """
+        if request.httprequest.method == "GET":
+            contact = _newsletter_contact_from_token(request.env, kwargs.get("c"), kwargs.get("t"))
+            if contact is None:
+                return _json_response({"error": "invalid or expired link"}, status=400)
+            return _json_response(_newsletter_preferences_state(request.env, contact))
+
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        if not isinstance(payload, dict):
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        contact = _newsletter_contact_from_token(request.env, payload.get("c"), payload.get("t"))
+        if contact is None:
+            return _json_response({"error": "invalid or expired link"}, status=400)
+        desired = payload.get("lists")
+        if not isinstance(desired, dict):
+            return _json_response({"error": "lists must be an object of {key: bool}"}, status=400)
+        for key in desired:
+            if key not in NEWSLETTER_LIST_KEYS:
+                return _json_response({"error": f"unknown list key: {key!r}"}, status=400)
+        _apply_newsletter_preferences(request.env, contact, desired)
+        return _json_response(_newsletter_preferences_state(request.env, contact))
+
+    # ── Capture: CRM leads + back-in-stock (2026-10-15 hotfix) ───────────
+
+    @http.route(
+        "/grove/api/v1/leads",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def capture_lead(self, **_kwargs):
+        """Record a storefront consult / wholesale / farm-visit / state-waitlist
+        request as a CRM lead (Josh 2026-10-15: customer relationships live in
+        Odoo CRM; Ghost is only the newsletter).
+
+        Body: {email, kind, name?, phone?, message?, label?, state?, department?, product_id?, source?}
+        kind: food_forest_consult | wholesale | farm_visit | state_waitlist | dept_waitlist
+        -> 200 {lead_id, partner_id, created}
+
+        A ``dept_waitlist`` (shop "coming soon" notify-me) stays a CRM request
+        and is never added to a mailing.list; it carries a ``Waitlist: <Dept>``
+        contact tag so the launch pull matches the newsletter waitlist path.
+
+        Same email + kind within 24 h appends a note to the open lead instead of
+        creating a second one, so a double-submit never splits a relationship.
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        clean, err = capture_leads.validate_lead(payload)
+        if err:
+            return _json_response({"error": err}, status=400)
+        source = payload.get("source") if isinstance(payload.get("source"), str) else ""
+        company = request.website.company_id
+        lead, partner, created = _upsert_capture_lead(request.env, company, clean, source[:MAX_SOURCE])
+        if created:
+            _notify_discord(
+                f":seedling: New {capture_leads.LEAD_KINDS[clean['kind']]} lead ({company.name}): "
+                f"{lead.name} <{clean['email']}>"
+            )
+        return _json_response({"lead_id": lead.id, "partner_id": partner.id, "created": created})
+
+    @http.route(
+        "/grove/api/v1/products/<int:product_id>/notify-restock",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def notify_restock(self, product_id, **_kwargs):
+        """Subscribe an email to Odoo's back-in-stock alert for a product
+        template (``product_id`` = template id, as on /products/<id>).
+
+        Body: {email, name?, variant_id?} -> 200 {partner_id, variant_ids}
+        Without ``variant_id`` every variant is watched; the hourly cron
+        (product.product._send_availability_email) sends one email per template
+        when any of them has stock again, then clears the subscription.
+        """
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        if not isinstance(payload, dict):
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        email = payload.get("email")
+        if not isinstance(email, str) or len(email) > MAX_EMAIL or not EMAIL_RE.fullmatch(email.strip()):
+            return _json_response({"error": "email is not a valid email address"}, status=400)
+        email = email.strip()
+        name = payload.get("name") if isinstance(payload.get("name"), str) else ""
+
+        company = request.website.company_id
+        tmpl = (
+            request.env["product.template"]
+            .sudo()
+            .with_company(company)
+            .search(
+                [
+                    ("id", "=", product_id),
+                    ("website_published", "=", True),
+                    ("company_id", "in", [company.id, False]),
+                ],
+                limit=1,
+            )
+        )
+        if not tmpl:
+            return _json_response({"error": "Product not found"}, status=404)
+        variants = tmpl.product_variant_ids
+        variant_id = payload.get("variant_id")
+        if variant_id not in (None, ""):
+            try:
+                variants = variants.filtered(lambda v: v.id == int(variant_id))
+            except (TypeError, ValueError):
+                return _json_response({"error": "variant_id must be an integer"}, status=400)
+            if not variants:
+                return _json_response({"error": "Variant not found"}, status=404)
+
+        partner = _upsert_capture_partner(request.env, company, email, name[:MAX_NAME])
+        variants.write({"stock_notification_partner_ids": [(4, partner.id)]})
+        return _json_response({"partner_id": partner.id, "variant_ids": variants.ids})
 
     # ── Shipping webhook ─────────────────────────────────────────────────
 
@@ -2570,6 +3105,244 @@ def _log_newsletter_attribution(partner, source, attribution):
         partner.sudo().message_post(body="<br/>".join(lines))
     except Exception:  # noqa: BLE001 — audit log is best-effort, never fatal
         _logger.warning("newsletter attribution log failed for partner %s", partner.id, exc_info=True)
+
+
+# ── Newsletter list of record: subscription + token + welcome (GOL-3454) ──────
+
+# A repeat subscribe inside this window reuses the contact and does NOT fire a
+# second welcome email (Josh 2026-10-20, §3: "no second welcome within a short
+# window"). A fresh list added after the window does earn a new welcome.
+NEWSLETTER_WELCOME_WINDOW = timedelta(hours=24)
+
+# Scope string for the per-contact unsubscribe/preferences HMAC. Changing it
+# invalidates every link already in the wild.
+_NEWSLETTER_TOKEN_SCOPE = "grove-newsletter-contact"
+
+
+def _newsletter_list_record(env, key):
+    """Resolve a list KEY to its seeded mailing.list, or an empty recordset."""
+    try:
+        return env.ref(f"grove_headless.mailing_list_{key}").sudo()
+    except ValueError:
+        return env["mailing.list"].sudo().browse()
+
+
+def _newsletter_token(env, contact_id):
+    """Stable, storage-free per-contact token for unsubscribe/preferences links.
+
+    An HMAC over the contact id keyed by the database secret (``odoo.tools.hmac``)
+    — the same primitive Odoo uses for its own unsubscribe links. No row to
+    store and no GC cron to reap (Josh dropped the confirmation token entirely),
+    yet the link is unforgeable and survives upgrades.
+    """
+    return tools.hmac(env(su=True), _NEWSLETTER_TOKEN_SCOPE, str(contact_id))
+
+
+def _newsletter_contact_from_token(env, raw_id, token):
+    """Return the mailing.contact for a (c, t) link pair, or None if it fails.
+
+    Constant-time token comparison; a bad id or token yields None so callers
+    can return an opaque error without leaking whether the contact exists.
+    """
+    if not raw_id or not token:
+        return None
+    try:
+        contact_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None
+    if not tools.consteq(str(token), _newsletter_token(env, contact_id)):
+        return None
+    contact = env["mailing.contact"].sudo().browse(contact_id).exists()
+    return contact or None
+
+
+def _apply_newsletter_subscription(env, company, partner, email, name, list_keys):
+    """Subscribe ``email`` to each list in ``list_keys`` and send one welcome.
+
+    Returns ``(subscribed_keys, welcomed)``. Idempotent: an existing
+    mailing.contact (matched on ``email_normalized``) is reused, an existing
+    subscription is re-activated (``opt_out`` cleared) rather than duplicated,
+    and the welcome is suppressed when the contact was welcomed inside
+    :data:`NEWSLETTER_WELCOME_WINDOW`. A prior unsubscribe (blacklist) is
+    honored: this unauthenticated route never lifts suppression or re-mails a
+    previously opted-out address (that happens only on the token-gated
+    preferences/unsubscribe routes).
+    """
+    normalized = tools.email_normalize(email) or email.strip().lower()
+    Contact = env["mailing.contact"].sudo()
+    Subscription = env["mailing.subscription"].sudo()
+
+    # Honor a prior opt-out. This public route is authenticated only by the
+    # shared storefront key, not by the mailbox owner, so a third party must
+    # never re-subscribe, re-mail, or un-suppress an address that previously
+    # unsubscribed (CAN-SPAM §5(a)(4)). For a blacklisted address we record the
+    # intended keys for the response but make no durable consent change: leaving
+    # the existing rows opted-out prevents a later token re-opt-in to one list
+    # from silently reviving lists a stranger tried to add. Re-opt-in happens
+    # only on the token-gated preferences route, which proves mailbox control.
+    was_blacklisted = bool(normalized and env["mail.blacklist"].sudo().search([("email", "=", normalized)], limit=1))
+
+    contact = Contact.search([("email_normalized", "=", normalized)], limit=1)
+    if not contact:
+        contact = Contact.create({"name": (name or email), "email": email})
+
+    newly_active = False
+    subscribed_keys = []
+    for key in list_keys:
+        mailing_list = _newsletter_list_record(env, key)
+        if not mailing_list:
+            continue
+        subscribed_keys.append(key)
+        if was_blacklisted:
+            continue
+        sub = Subscription.search([("contact_id", "=", contact.id), ("list_id", "=", mailing_list.id)], limit=1)
+        if not sub:
+            Subscription.create({"contact_id": contact.id, "list_id": mailing_list.id, "opt_out": False})
+            newly_active = True
+        elif sub.opt_out:
+            sub.opt_out = False
+            newly_active = True
+
+    welcomed = False
+    now = fields.Datetime.now()
+    within_window = contact.grove_welcome_date and (now - contact.grove_welcome_date) < NEWSLETTER_WELCOME_WINDOW
+    if subscribed_keys and newly_active and not within_window and not was_blacklisted:
+        # The welcome is best-effort: the list membership above is the durable
+        # subscription, so a mail-server hiccup must not cost us the signup or
+        # the returned keys. Stamp the window only once the mail is queued.
+        try:
+            if _send_newsletter_welcome(env, company, contact, subscribed_keys):
+                contact.grove_welcome_date = now
+                welcomed = True
+        except Exception:  # noqa: BLE001 — welcome email is best-effort
+            _logger.warning("newsletter welcome send failed for contact %s", contact.id, exc_info=True)
+    return subscribed_keys, welcomed
+
+
+def _newsletter_preferences_state(env, contact):
+    """Serialise a contact's per-list subscription state for the prefs page."""
+    active_list_ids = set(contact.subscription_ids.filtered(lambda s: not s.opt_out).mapped("list_id").ids)
+    lists = []
+    for key in NEWSLETTER_LIST_KEYS:
+        mailing_list = _newsletter_list_record(env, key)
+        if not mailing_list:
+            continue
+        lists.append({"key": key, "name": mailing_list.name, "subscribed": mailing_list.id in active_list_ids})
+    blacklisted = bool(
+        contact.email_normalized
+        and env["mail.blacklist"].sudo().search([("email", "=", contact.email_normalized)], limit=1)
+    )
+    return {"email": contact.email, "blacklisted": blacklisted, "lists": lists}
+
+
+def _apply_newsletter_preferences(env, contact, desired):
+    """Apply a ``{key: bool}`` preference map to a contact's subscriptions.
+
+    Creates a subscription row for a newly-enabled list, flips ``opt_out`` for
+    the rest. Unsubscribing from every list blacklists the email; enabling any
+    list lifts the blacklist.
+    """
+    Subscription = env["mailing.subscription"].sudo()
+    for key, want in desired.items():
+        mailing_list = _newsletter_list_record(env, key)
+        if not mailing_list:
+            continue
+        sub = Subscription.search([("contact_id", "=", contact.id), ("list_id", "=", mailing_list.id)], limit=1)
+        if sub:
+            sub.opt_out = not want
+        elif want:
+            Subscription.create({"contact_id": contact.id, "list_id": mailing_list.id, "opt_out": False})
+
+    normalized = contact.email_normalized
+    if normalized:
+        any_active = bool(contact.subscription_ids.filtered(lambda s: not s.opt_out))
+        if any_active:
+            env["mail.blacklist"].sudo()._remove(normalized)
+        else:
+            env["mail.blacklist"].sudo()._add(normalized)
+
+
+def _send_newsletter_welcome(env, company, contact, subscribed_keys):
+    """Send the single-opt-in welcome email. Returns True if it was queued.
+
+    Transactional (sent through the existing per-company mail server, NOT the
+    bulk ``news.<brand>`` server — §3/§6), carrying RFC 8058 one-click
+    unsubscribe headers so the welcome itself is unsubscribable. The CAN-SPAM
+    footer address is rendered from ``res.company`` (§5), never hard-coded.
+
+    COPY PENDING GOL-3456: the body/subject wording and consent copy are drafted
+    on GOL-3456 (privacy notice attached there). The structure here — list
+    names, company postal address, one-click unsubscribe — is final; swap the
+    marked strings for the approved copy when GOL-3456 lands.
+    """
+    if not contact.email:
+        return False
+    base_url = env["ir.config_parameter"].sudo().get_param("web.base.url", "")
+    token = _newsletter_token(env, contact.id)
+    unsubscribe_url = f"{base_url}/grove/api/v1/newsletter/unsubscribe?c={contact.id}&t={token}"
+    preferences_url = f"{base_url}/grove/api/v1/newsletter/preferences?c={contact.id}&t={token}"
+
+    list_names = []
+    for key in subscribed_keys:
+        mailing_list = _newsletter_list_record(env, key)
+        if mailing_list:
+            list_names.append(mailing_list.name)
+    names_html = ", ".join(html.escape(n) for n in list_names) or "the Grove newsletter"
+
+    footer = _company_can_spam_address(company)
+    # --- COPY PENDING GOL-3456 (interim) ---------------------------------
+    subject = f"Welcome to {html.escape(company.name or 'the Grove')}"
+    body = Markup(
+        "<p>Thanks for subscribing. You're now on: <strong>{names}</strong>.</p>"
+        '<p>You can <a href="{prefs}">manage your preferences</a> or '
+        '<a href="{unsub}">unsubscribe</a> at any time.</p>'
+        '<hr/><p style="color:#888;font-size:12px">{footer}</p>'
+    ).format(
+        names=Markup(names_html),
+        prefs=Markup(html.escape(preferences_url, quote=True)),
+        unsub=Markup(html.escape(unsubscribe_url, quote=True)),
+        footer=Markup(footer),
+    )
+    # ---------------------------------------------------------------------
+
+    headers = {
+        "List-Unsubscribe": f"<{unsubscribe_url}>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    }
+    mail = (
+        env["mail.mail"]
+        .sudo()
+        .create(
+            {
+                "subject": subject,
+                "body_html": body,
+                "email_to": contact.email,
+                "auto_delete": True,
+                "headers": repr(headers),
+                **mail_from_vals(env, company),
+            }
+        )
+    )
+    mail.send(raise_exception=False)
+    return True
+
+
+def _company_can_spam_address(company):
+    """One-line HTML CAN-SPAM postal footer from a res.company (GOL-3454 §5).
+
+    The address lives on the company record (2291 Armstrong Road, Summersville,
+    WV 26651 on companies 1/2/3) so a correction there flows to every mailing;
+    nothing is hard-coded here.
+    """
+    if not company:
+        return ""
+    parts = [company.name, company.street, company.street2]
+    locality = " ".join(
+        p for p in [company.city, company.state_id.code if company.state_id else "", company.zip] if p
+    ).strip()
+    if locality:
+        parts.append(locality)
+    return html.escape(", ".join(p for p in parts if p))
 
 
 def _partner_vals_from_payload(env, contact, address):
@@ -2737,6 +3510,18 @@ def _apply_shipping_line(env, order, shipping, company):
             )
         return None
 
+    return _add_shipping_line(env, order, charge, state, company)
+
+
+def _add_shipping_line(env, order, charge, state, company):
+    """Write the GROVE-SHIP line with the WV state tax forced (GOL-2449). Shared by
+    the Box Engine path (`_apply_shipping_line`) and the Printify quote path (§5).
+
+    Force the WV 6% state tax on the shipping line regardless of the product's tax
+    data — shipping is taxable at the same rate as goods. For an out-of-state
+    destination `_apply_destination_tax` strips it again right after this line is
+    added.
+    """
     product = _get_shipping_product(env, company)
     ship_line = (
         env["sale.order.line"]
@@ -2751,15 +3536,265 @@ def _apply_shipping_line(env, order, shipping, company):
             }
         )
     )
-    # Force the WV 6% state tax on the shipping line regardless of the product's
-    # tax data (GOL-2449) — shipping is taxable at the same rate as goods. For an
-    # out-of-state destination `_apply_destination_tax` strips it again right
-    # after this line is added.
     wv_state = _get_company_wv_state_tax(env, company)
     if set(ship_line.tax_ids.ids) != set(wv_state.ids):
         ship_line.tax_ids = [(6, 0, wv_state.ids)]
     order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
     return charge
+
+
+# ── Printify merch checkout (spec 2026-10-13-printify-merch-design.md §5) ──
+PRINTIFY_MIXED_CART_MESSAGE = "Shirts check out separately from trees."
+PRINTIFY_DESTINATION_MESSAGE = "Shirts ship to the 50 US states and DC."
+PRINTIFY_SHIPPING_UNAVAILABLE = "Shipping is temporarily unavailable. Try again in a few minutes."
+PRINTIFY_PICKUP_MESSAGE = "Shirts ship to you. Farm pickup isn't available for them."
+PRINTIFY_FRACTIONAL_QTY_MESSAGE = "Shirts are sold in whole units. Enter a whole number quantity."
+
+
+def _printify_address(contact, shipping, state):
+    name = (contact.get("name") or "").strip()
+    first, _, last = name.partition(" ")
+    return {
+        "first_name": first or name,
+        "last_name": last or first or name,
+        "email": contact.get("email") or "",
+        "phone": contact.get("phone") or "",
+        "country": "US",
+        "region": state,
+        "address1": shipping.get("street") or "",
+        "address2": shipping.get("street2") or "",
+        "city": shipping.get("city") or "",
+        "zip": shipping.get("zip") or "",
+    }
+
+
+def _printify_line_items(order):
+    return [
+        {
+            "product_id": line.product_id.product_tmpl_id.printify_product_id,
+            "variant_id": line.product_id.printify_variant_id,
+            "quantity": int(line.product_uom_qty),
+        }
+        for line in order.order_line
+        if not line.display_type
+        and line.product_id
+        and line.product_id.product_tmpl_id.grove_fulfillment_route == "printify"
+    ]
+
+
+def _printify_quote(line_items, address):
+    token = os.environ.get("PRINTIFY_API_TOKEN", "")
+    shop_id = os.environ.get("PRINTIFY_SHOP_ID", "")
+    if not token or not shop_id:
+        raise printify_client.PrintifyError("Printify is not configured on this server")
+    return printify_client.calculate_shipping(token, shop_id, line_items, address)
+
+
+_PRINTIFY_QUOTE_TTL = 180  # seconds
+_printify_quote_cache: dict = {}
+
+
+def _printify_quote_cached(line_items, address):
+    """Memoize the live Printify shipping quote briefly, keyed by (region, ZIP,
+    lines), so the storefront's repeated /checkout/quote polls for the same cart
+    and destination don't hit Printify on every keystroke (GOL-3314 review
+    2026-10-14). Best-effort and per-worker; /checkout/session always takes a
+    fresh authoritative quote (via _printify_quote) before charging."""
+    key = (
+        address.get("region") or "",
+        address.get("zip") or "",
+        tuple(sorted((li["product_id"], li["variant_id"], li["quantity"]) for li in line_items)),
+    )
+    now = time.monotonic()
+    hit = _printify_quote_cache.get(key)
+    if hit and now - hit[0] < _PRINTIFY_QUOTE_TTL:
+        return hit[1]
+    amount = _printify_quote(line_items, address)
+    _printify_quote_cache[key] = (now, amount)
+    return amount
+
+
+# Printify sends the HMAC-SHA256 of the raw body as ``X-Pfy-Signature: sha256=...``
+# (developers.printify.com, Webhooks; confirmed 2026-10-13). A shipment event only
+# names the order, so the handler fetches the full order for shipment details and
+# never depends on the event's own shipment fields.
+PRINTIFY_SIGNATURE_HEADER = "X-Pfy-Signature"
+_PRINTIFY_STATE_RANK = {"in_production": 1, "shipped": 2, "delivered": 3}
+
+
+def _printify_set_state(order, state):
+    """Never move a Printify state backwards (delivered stays delivered).
+
+    canceled / on_hold are terminal signals that always apply (an order can be
+    canceled after it was in production); the shipped/delivered ladder only ever
+    advances so a late shipment:created after a delivered event can't regress it.
+    """
+    current = _PRINTIFY_STATE_RANK.get(order.printify_state or "", 0)
+    if _PRINTIFY_STATE_RANK.get(state, 0) >= current or state in ("canceled", "on_hold"):
+        order.sudo().write({"printify_state": state})
+
+
+def _handle_printify_event(env, event):
+    """Fold a Printify webhook event into the order (spec §7). Returns the action
+    taken ("in_production" | "transit" | "delivered" | "canceled" | "on_hold" |
+    "ignored"), for the route and tests."""
+    kind = event.get("type") or ""
+    resource = event.get("resource") or {}
+    order = env["sale.order"].sudo().search([("printify_order_id", "=", str(resource.get("id") or ""))], limit=1)
+    if not order:
+        return "ignored"
+    if kind == "order:sent-to-production":
+        _printify_set_state(order, "in_production")
+        return "in_production"
+    if kind in ("order:shipment:created", "order:shipment:delivered"):
+        token = os.environ.get("PRINTIFY_API_TOKEN", "")
+        shop_id = os.environ.get("PRINTIFY_SHOP_ID", "")
+        shipments = printify_client.get_order(token, shop_id, order.printify_order_id).get("shipments") or []
+        numbers = [s.get("number") for s in shipments if s.get("number")]
+        carriers = [(s.get("carrier") or "").upper() for s in shipments if s.get("number")]
+        # Tracking numbers / carriers FIRST, then the shipment-email path (spec
+        # §7). Guarded so a redelivery with the same tracking is a no-op write.
+        if numbers and order.grove_tracking_numbers != "\n".join(numbers):
+            order.sudo().write(
+                {"grove_tracking_numbers": "\n".join(numbers), "grove_shipping_carriers": "\n".join(carriers)}
+            )
+        status = "delivered" if kind == "order:shipment:delivered" else "transit"
+        _apply_delivery_status(env, order, status, "\n".join(numbers), source="printify")
+        _printify_set_state(order, "delivered" if status == "delivered" else "shipped")
+        return status
+    if kind == "order:updated":
+        data = resource.get("data") or {}
+        status = data.get("status") or ""
+        if status == "canceled":
+            # Provider out of stock, address rejected, admin cancel — Printify
+            # names the reason on the event when it has one (spec §7).
+            reason = data.get("reason") or data.get("cancel_reason") or "canceled"
+            return _printify_cancel_order(env, order, reason)
+        if status == "on-hold":
+            _printify_set_state(order, "on_hold")
+            _notify_discord(f":warning: Printify put {order.name} on hold. Check the Printify dashboard.")
+            return "on_hold"
+    return "ignored"
+
+
+# printify_state values that mean Printify has already committed the order to
+# print; a cancel at or after this point is NOT auto-refunded (Josh 2026-10-14)
+# because the merch may already have been produced or shipped.
+_PRINTIFY_NO_REFUND_STATES = ("in_production", "shipped", "delivered")
+
+
+def _printify_cancel_order(env, order, reason):
+    """Handle a Printify-side order cancellation (spec §7 + Josh 2026-10-14).
+
+    A cancel on a PAID, not-yet-in-production order is auto-refunded in full, the
+    sale order is cancelled, the customer gets a short branded apology, and ops
+    is pinged on Discord. A cancel once the order is in production/shipped is
+    never auto-refunded (the merch may already exist) — ops is alerted to handle
+    it by hand. Printify lines are non-storable, so there is no tree stock to
+    restore in any branch.
+
+    Idempotent two ways: a refund id already recorded on the order short-circuits
+    a redelivered webhook, and the Stripe refund carries an Idempotency-Key keyed
+    on the order + payment intent so a redelivery that races the first write
+    still only refunds once. Returns "canceled" (refunded / already handled /
+    refund failed), "canceled_in_production" (alert only), or "canceled_unpaid".
+    """
+    reason = reason or "canceled"
+    # Already refunded (redelivered webhook): never refund or email a second time.
+    if order.printify_refund_id:
+        return "canceled"
+    # In production / shipped: do not auto-refund, alert for manual handling.
+    if order.printify_state in _PRINTIFY_NO_REFUND_STATES:
+        _printify_set_state(order, "canceled")
+        _notify_discord(
+            f":rotating_light: Printify cancelled {order.name} ({reason}) after it went to "
+            f"production/shipping. No auto-refund issued; review and refund by hand."
+        )
+        return "canceled_in_production"
+    paid = order.grove_checkout_status in ("paid", "deposit_paid", "settled")
+    payment_intent = order.grove_stripe_payment_intent
+    if not paid or not payment_intent:
+        # Checkout never completed a charge: cancel the order, nothing to refund.
+        _printify_set_state(order, "canceled")
+        _grove_cancel_sale_order(order)
+        _notify_discord(f":warning: Printify cancelled {order.name} ({reason}); order was unpaid, no refund needed.")
+        return "canceled_unpaid"
+    # The payment_intent lives in the account that charged it, so the refund must
+    # use that same tenant's key (GOL-1766). The order carries its originating
+    # website, so resolve the tenant from it rather than the ambient env.
+    tenant = order.website_id.grove_tenant_slug() if order.website_id else None
+    secret_key = _tenant_secret_key(tenant)
+    refunded = False
+    try:
+        refund = stripe_gateway.create_refund(
+            secret_key,
+            payment_intent,
+            reason="requested_by_customer",
+            metadata={"order_ref": order.name, "reason": f"printify_cancel:{reason}"},
+            idempotency_key=f"printify-cancel-refund:{order.name}:{payment_intent}",
+        )
+        order.sudo().write({"printify_refund_id": refund.get("id") or payment_intent})
+        refunded = True
+    except stripe_gateway.StripeError as exc:
+        _logger.error("Printify cancel refund failed for %s: %s", order.name, exc)
+    _printify_set_state(order, "canceled")
+    _grove_cancel_sale_order(order)
+    if refunded:
+        order.message_post(body=f"Printify cancelled this order ({reason}); payment refunded in full.")
+        _notify_printify_cancel_customer(env, order)
+        _notify_discord(f":warning: Printify cancelled {order.name} ({reason}); full refund issued.")
+    else:
+        order.message_post(body=f"Printify cancelled this order ({reason}); refund FAILED, needs manual action.")
+        _notify_discord(f":rotating_light: Printify cancelled {order.name} ({reason}); refund FAILED, refund by hand.")
+    return "canceled"
+
+
+def _grove_cancel_sale_order(order):
+    """Set a sale order to the cancelled state without the back-office wizard.
+
+    Printify lines are non-storable services, so cancelling restores no tree
+    stock (Josh 2026-10-14). Best-effort: a failure here must never break the
+    webhook — the refund is already recorded on the order and in Stripe."""
+    try:
+        order.sudo().with_context(disable_cancel_warning=True)._action_cancel()
+    except Exception:  # noqa: BLE001 — fall back to a direct state write
+        _logger.warning(
+            "Printify cancel: _action_cancel failed for %s; writing state directly", order.name, exc_info=True
+        )
+        try:
+            order.sudo().write({"state": "cancel"})
+        except Exception:  # noqa: BLE001
+            _logger.exception("Printify cancel: could not cancel %s", order.name)
+
+
+def _notify_printify_cancel_customer(env, order):
+    """Short branded apology for a Printify-cancelled, fully-refunded order
+    (Josh 2026-10-14). No em dashes. Best-effort: never fatal, the refund and
+    chatter note stand on their own if outgoing mail is unconfigured."""
+    email = order.partner_id.email
+    if not email:
+        return
+    body = (
+        f"<p>Hi {order.partner_id.name or 'there'},</p>"
+        f"<p>We're sorry: your order {order.name} was cancelled and could not be printed, "
+        f"so we have refunded your payment in full. The refund will appear on your original "
+        f"payment method within a few business days.</p>"
+        f"<p>If you have any questions, just reply to this email and we'll be glad to help.</p>"
+        f"<p>Thank you,</p>"
+        f"<p>Goldberry Grove</p>"
+    )
+    try:
+        env["mail.mail"].sudo().create(
+            {
+                "subject": f"Your order {order.name} was cancelled and refunded",
+                "email_to": email,
+                **mail_from_vals(env, order.company_id),
+                "body_html": body,
+                "auto_delete": True,
+            }
+        ).send()
+    except Exception:  # noqa: BLE001 — apology email is best-effort
+        _logger.warning("Printify cancel apology email failed for %s", order.name, exc_info=True)
 
 
 def _apply_destination_tax(env, order, shipping):
@@ -2859,7 +3894,10 @@ def _stripe_tax_code_for(product):
     non-taxable at sale (tax lands on redemption) so a product in a Gift Card
     category gets the gift-card code; everything else is General Tangible Goods.
     The storefront sells no gift cards today, so this is a forward-looking hook —
-    plants always resolve to the goods code."""
+    plants always resolve to the goods code. Printify apparel uses the clothing
+    code (spec 2026-10-13-printify-merch-design.md §5)."""
+    if getattr(product, "grove_fulfillment_route", None) == "printify":
+        return stripe_gateway.TAX_CODE_APPAREL
     categ = product.categ_id
     name = (getattr(categ, "complete_name", "") or categ.name or "").lower()
     if "gift card" in name:
@@ -3398,7 +4436,79 @@ def _create_draft_order(website, env, payload, discount_out=None):
                     "or farm pickup."
                 )
             return None, _json_response({"error": error}, status=400)
-    if is_ship_to and not is_seed_order:
+
+    # Printify merch (spec 2026-10-13-printify-merch-design.md §5): one fulfillment
+    # route per order; shirts skip every plant rule and take a live Printify
+    # shipping quote instead of the Box Engine. ``ship_items`` stays [] for a
+    # Printify order so the no-$0 breaker below is a no-op (the quote is the line).
+    goods_lines = [
+        line
+        for line in order.order_line
+        if not line.display_type and line.product_id and line.product_id.product_tmpl_id.type != "service"
+    ]
+    printify_goods = [ln for ln in goods_lines if ln.product_id.product_tmpl_id.grove_fulfillment_route == "printify"]
+    is_printify = bool(printify_goods)
+    if is_printify and len(printify_goods) != len(goods_lines):
+        order.unlink()
+        return None, _json_response({"error": PRINTIFY_MIXED_CART_MESSAGE}, status=409)
+    printify_charge = None
+    ship_items = []
+    if is_printify:
+        # Printify prints whole shirts only. A fractional qty would charge the
+        # customer for e.g. 1.5 in Odoo while Printify received int(1.5)=1, so the
+        # buyer is billed for a unit that never prints (GOL-3314 review
+        # 2026-10-14). Refuse a non-integer Printify line outright.
+        if any(ln.product_uom_qty != int(ln.product_uom_qty) for ln in printify_goods):
+            order.unlink()
+            return None, _json_response({"error": PRINTIFY_FRACTIONAL_QTY_MESSAGE}, status=400)
+        if is_pickup or not is_ship_to:
+            order.unlink()
+            return None, _json_response({"error": PRINTIFY_PICKUP_MESSAGE}, status=400)
+        dest = canonical_state_code(ship_state)
+        if dest not in printify_client.US_50_AND_DC:
+            order.unlink()
+            return None, _json_response({"error": PRINTIFY_DESTINATION_MESSAGE}, status=400)
+        # Ship to the address quoted at THIS checkout, not a returning customer's
+        # stored address: _create_draft_order reuses an existing partner by email
+        # without mutating it (deliberate, for security), so a repeat buyer's
+        # shirt would otherwise auto-ship to their OLD saved address. Printify
+        # fulfilment is fully automatic — no human re-checks the address — so we
+        # attach a dedicated delivery contact built from the checkout payload and
+        # point the order's shipping partner at it (GOL-3314 review 2026-10-14).
+        # The destination gate above already refused a missing/out-of-region state.
+        us_country = env["res.country"].sudo().search([("code", "=", "US")], limit=1)
+        dest_state = (
+            env["res.country.state"].sudo().search([("country_id", "=", us_country.id), ("code", "=", dest)], limit=1)
+            if us_country
+            else env["res.country.state"].sudo().browse()
+        )
+        delivery = Partner.create(
+            {
+                "name": contact.get("name"),
+                "email": contact.get("email"),
+                "phone": contact.get("phone") or False,
+                "street": shipping.get("street") or False,
+                "street2": shipping.get("street2") or False,
+                "city": shipping.get("city") or False,
+                "zip": shipping.get("zip") or False,
+                "country_id": us_country.id if us_country else False,
+                "state_id": dest_state.id if dest_state else False,
+                "parent_id": partner.id,
+                "type": "delivery",
+                "company_id": current_company.id,
+            }
+        )
+        order.partner_shipping_id = delivery.id
+        try:
+            printify_charge = _printify_quote(
+                _printify_line_items(order), _printify_address(payload.get("contact") or {}, shipping, dest)
+            )
+        except printify_client.PrintifyError:
+            _logger.warning("grove_headless: Printify shipping quote failed for draft %s", order.name, exc_info=True)
+            order.unlink()
+            return None, _json_response({"error": PRINTIFY_SHIPPING_UNAVAILABLE}, status=503)
+
+    if is_ship_to and not is_seed_order and not is_printify:
         dest = canonical_state_code(ship_state)
         if dest is None or zone_for_state(dest) is None:
             # (1) Unsupported / non-green-list destination — reject at the source.
@@ -3585,10 +4695,16 @@ def _create_draft_order(website, env, payload, discount_out=None):
     # the form — pickup is the one legitimate $0-shipping fulfillment (GOL-1057).
     # Seeds are not quoted at checkout (GOL-3257) — the actual label cost is
     # billed at ship-time settlement — so a seed-only cart adds no rate line and
-    # is exempt from the no-$0-shipping breaker below.
-    shipping_charge = (
-        None if (is_pickup or is_seed_order) else _apply_shipping_line(env, order, shipping, current_company)
-    )
+    # is exempt from the no-$0-shipping breaker below. Printify shirts carry the
+    # live Printify quote as their ship line (GOL-3314) instead of the Box Engine.
+    if is_printify:
+        shipping_charge = _add_shipping_line(
+            env, order, printify_charge, canonical_state_code(ship_state), current_company
+        )
+    else:
+        shipping_charge = (
+            None if (is_pickup or is_seed_order) else _apply_shipping_line(env, order, shipping, current_company)
+        )
 
     # (3) No-$0-shipping circuit breaker: a ship-to order with shippable goods
     # that produced no positive shipping line is a rate-table gap — never let it
@@ -4289,6 +5405,12 @@ def _oversold_lines(order):
         product = line.product_id
         if product.default_code == SHIPPING_PRODUCT_CODE or product.id in preorder_ids:
             continue
+        # Printify merch is printed to order: there is no stock to oversell, and
+        # free_qty on a non-storable print-on-demand product is always 0, which
+        # would otherwise auto-refund a legitimately paid shirt (spec Review
+        # Focus 1, GOL-3314).
+        if product.product_tmpl_id.grove_fulfillment_route == "printify":
+            continue
         # Shared pool (GOL-2031): count the potted sibling too, or a paid
         # peat-and-bagged order gets auto-refunded as "oversold" while the
         # trees it ships sit potted on the bench.
@@ -4356,9 +5478,13 @@ def _shipping_handling_fee(env):
 def _order_handling_fee(env, order):
     """The flat shipping-handling fee this order bills at settlement: $0 for a
     seed pre-order (GOL-3257, Josh 2026-10-13 — seeds carry the actual label
-    cost only, no $2.50 handling), the standard ``_shipping_handling_fee`` for a
+    cost only, no $2.50 handling) and $0 for a Printify order (GOL-3314, Josh
+    2026-10-14 — shirts pass the live Printify shipping quote through at cost,
+    never the tree handling fee), the standard ``_shipping_handling_fee`` for a
     tree order."""
-    return 0.0 if _order_is_seed(order) else _shipping_handling_fee(env)
+    if order.grove_is_printify or _order_is_seed(order):
+        return 0.0
+    return _shipping_handling_fee(env)
 
 
 def _recompute_ship_total(env, order):
@@ -5091,6 +6217,15 @@ def _handle_session_completed(env, session):
     # still notify (Josh). Both are best-effort and must never fail the webhook.
     _notify_new_order(env, order, has_preorder)
     _notify_merchant_email(env, order, has_preorder)
+    # Printify merch is printed and shipped by Printify with no human step
+    # (GOL-3314 §6): queue the paid order for the 5-minute push cron. Best-effort
+    # — the payment is already recorded, so a queue hiccup must never fail the
+    # Stripe webhook (the order can be retried from the back office).
+    if order.grove_is_printify:
+        try:
+            order.sudo().write({"printify_state": "queued"})
+        except Exception:  # noqa: BLE001 — never fail the Stripe webhook
+            _logger.exception("grove_headless: could not queue Printify push for %s", order.name)
     if has_preorder:
         # Deposit explainer alongside the branded receipt (GOL-1666): the
         # standard sale template lists the charged-today totals; this line
@@ -5655,3 +6790,94 @@ def _notify_shipping_status(env, order, status, tracking):
             "auto_delete": True,
         },
     )
+
+
+# ── Capture helpers (2026-10-15 hotfix) ─────────────────────────────────────
+
+
+def _upsert_capture_partner(env, company, email, name="", phone=""):
+    """Find the contact by email within the storefront's company (or shared),
+    else create it. Never overwrites an existing name/email from a bearer POST
+    (same stance as newsletter_subscribe / order_create)."""
+    Partner = env["res.partner"].sudo().with_company(company)
+    partner = Partner.search([("email", "=", email), ("company_id", "in", [company.id, False])], limit=1)
+    if not partner:
+        vals = {"name": name or email, "email": email, "company_id": company.id}
+        if phone:
+            vals["phone"] = phone
+        partner = Partner.create(vals)
+    return partner
+
+
+def _crm_tags(env, names):
+    Tag = env["crm.tag"].sudo()
+    tags = Tag.browse()
+    for name in names:
+        tags |= Tag.search([("name", "=", name)], limit=1) or Tag.create({"name": name})
+    return tags
+
+
+def _upsert_capture_lead(env, company, clean, source=""):
+    """Create (or, within 24 h for the same email + kind, append to) a CRM lead.
+    Returns (lead, partner, created)."""
+    partner = _upsert_capture_partner(env, company, clean["email"], clean["name"], clean["phone"])
+    product_name = None
+    if clean.get("product_id"):
+        product = env["product.template"].sudo().browse(clean["product_id"]).exists()
+        product_name = product.name if product else None
+
+    # A department waitlist resolves its slug to the real department name so the
+    # lead title and the ``Waitlist: <Department>`` contact tag read the same as
+    # the newsletter waitlist path (GOL-2744/GOL-3494) — Josh's launch pull
+    # filters res.partner.category by that exact tag. Unknown slugs fall back to
+    # a title-cased slug, identical to newsletter_tag_names.
+    dept_name = None
+    if clean["kind"] == "dept_waitlist" and clean.get("department"):
+        resolved = _resolve_waitlist_dept_names(env, [WAITLIST_INTEREST_PREFIX + clean["department"]])
+        dept_name = resolved.get(clean["department"]) or _humanize_slug(clean["department"])
+        waitlist_category_ids = _get_or_create_partner_categories(env, [f"Waitlist: {dept_name}"])
+        if waitlist_category_ids:
+            partner.write({"category_id": [(4, cid) for cid in waitlist_category_ids]})
+
+    tags = _crm_tags(env, capture_leads.lead_tag_names(clean["kind"], clean["label"]))
+    kind_tag = tags[:1]
+    description = capture_leads.lead_description(clean, source=source)
+
+    Lead = env["crm.lead"].sudo().with_company(company)
+    since = fields.Datetime.subtract(fields.Datetime.now(), hours=24)
+    existing = Lead.search(
+        [
+            ("partner_id", "=", partner.id),
+            ("tag_ids", "in", kind_tag.ids),
+            ("create_date", ">=", since),
+            ("active", "=", True),
+        ],
+        limit=1,
+    )
+    if existing:
+        existing.write({"tag_ids": [(4, t.id) for t in tags]})
+        note = html.escape(description or "Submitted the form again.").replace("\n", "<br/>")
+        existing.message_post(body=Markup(note))
+        return existing, partner, False
+
+    lead = Lead.create(
+        {
+            "name": capture_leads.lead_title(
+                clean["kind"],
+                clean["name"],
+                clean["email"],
+                product_name=product_name,
+                state=clean["state"] or None,
+                dept_name=dept_name,
+            ),
+            "type": "opportunity",
+            "partner_id": partner.id,
+            "contact_name": clean["name"] or False,
+            "email_from": clean["email"],
+            "phone": clean["phone"] or False,
+            "description": description,
+            "tag_ids": [(6, 0, tags.ids)],
+            "company_id": company.id,
+        }
+    )
+    return lead, partner, True

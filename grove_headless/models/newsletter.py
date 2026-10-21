@@ -6,6 +6,63 @@ runner — same pattern as ``shipping_zones.py``. The controller in
 ``controllers/main.py`` imports :func:`newsletter_tag_names` from here.
 """
 
+# ── Newsletter lists of record (GOL-3454, Josh "option C" 2026-10-19) ─────────
+#
+# Three brand lists, seeded with stable external ids in data/mailing_lists.xml
+# (grove_headless.mailing_list_<key>). The controller maps a list KEY -> the
+# seeded mailing.list record by external id.
+NEWSLETTER_LIST_KEYS = ("nursery", "farm", "digest")
+
+# Which list a form defaults to, keyed by the tenant website slug it posts from
+# (the X-Grove-Tenant slugs in models/website.py). George GGG and the hub
+# (gatheringatthegrove.com, which has no Odoo website of its own) both ride the
+# Grove Digest — §1 of the design spec, "GGG rides the Digest".
+DEFAULT_LIST_BY_TENANT = {
+    "goldberry": "farm",
+    "nursery": "nursery",
+    "ggg": "digest",
+}
+# Hub / unknown tenant rides the Digest.
+FALLBACK_LIST_KEY = "digest"
+
+
+def resolve_newsletter_lists(tenant_slug, requested=None, multibrand=False):
+    """Resolve the ordered, de-duplicated set of list KEYS a submit subscribes to.
+
+    Two input shapes, matching Josh's 2026-10-20 ruling (§2):
+
+    * ``requested`` — an explicit ``lists`` array of keys from the storefront.
+      This is authoritative: the storefront already expands the "Also send me
+      news from the other Grove brands" checkbox into the full key set, so the
+      box ticked yields *every* list, not just the Digest. Unknown/blank/
+      non-string entries are dropped; if nothing valid survives we fall through
+      to the tenant default rather than subscribe the contact to nothing.
+    * no ``requested`` — default to the tenant's own list; when ``multibrand``
+      is truthy, append every *other* list (same semantics as a ticked box).
+
+    Returns a list of keys drawn from :data:`NEWSLETTER_LIST_KEYS`, primary
+    first, each at most once. Never empty.
+    """
+    if requested:
+        ordered = []
+        seen = set()
+        for key in requested:
+            if not isinstance(key, str):
+                continue
+            cleaned = key.strip().lower()
+            if cleaned in NEWSLETTER_LIST_KEYS and cleaned not in seen:
+                seen.add(cleaned)
+                ordered.append(cleaned)
+        if ordered:
+            return ordered
+
+    primary = DEFAULT_LIST_BY_TENANT.get((tenant_slug or "").strip().lower(), FALLBACK_LIST_KEY)
+    result = [primary]
+    if multibrand:
+        result.extend(key for key in NEWSLETTER_LIST_KEYS if key != primary)
+    return result
+
+
 # A shop-coming-soon "notify me" capture arrives as this interest (GOL-2744):
 # ``waitlist:<dept-slug>``. It becomes a human-readable ``Waitlist: <Department>``
 # contact tag — filterable for the launch email — rather than the machine

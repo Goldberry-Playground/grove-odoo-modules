@@ -185,6 +185,144 @@ class GroveSupportCase(TransactionCase):
             "a second handoff must not duplicate the lead",
         )
 
+    # ── GOL-3459 defect 1: lead on the no-operator (chatbot-advance) path ──
+
+    def _make_step(self):
+        """A trivial chatbot step to advance the channel onto (GOL-3459). The
+        step type is irrelevant here — we only need a valid id to write into
+        ``chatbot_current_step_id`` to fire the step-advance seam."""
+        script = self.env["chatbot.script"].create({"title": "Nursery Support Capture Bot"})
+        return self.env["chatbot.script.step"].create(
+            {"chatbot_script_id": script.id, "step_type": "text", "message": "Hi"}
+        )
+
+    def test_step_advance_creates_lead_without_operator(self):
+        """The main GOL-3459 path: no operator ever forwards, the chatbot just
+        advances past the email step. The step-advance write must create the
+        lead — this is the case that produced zero leads on prod QA."""
+        step = self._make_step()
+        channel = self._make_channel()
+        # Deliberately no live operator handoff: we never call
+        # _forward_human_operator; only the chatbot advances its step.
+        with patch.object(
+            type(channel),
+            "_chatbot_find_customer_values_in_messages",
+            return_value={"email_from": "offline@example.com"},
+        ):
+            channel.chatbot_current_step_id = step.id
+
+        self.assertTrue(channel.grove_support_lead_id, "a lead must be created when the bot advances past email")
+        self.assertEqual(channel.grove_support_lead_id.partner_id.email, "offline@example.com")
+        self.assertIn("livechat", channel.grove_support_lead_id.tag_ids.mapped("name"))
+
+    def test_step_advance_before_email_is_noop(self):
+        """Advancing steps before the email is collected must not create a lead;
+        the no-email guard in _grove_support_process_chat holds."""
+        step = self._make_step()
+        channel = self._make_channel()
+        with patch.object(type(channel), "_chatbot_find_customer_values_in_messages", return_value={}):
+            channel.chatbot_current_step_id = step.id
+        self.assertFalse(channel.grove_support_lead_id)
+
+    def test_step_advance_does_not_duplicate_existing_lead(self):
+        """A second step write on a conversation that already has a lead is a
+        no-op — the three lead seams must never collectively dupe a lead."""
+        step = self._make_step()
+        channel = self._make_channel()
+        with patch.object(
+            type(channel),
+            "_chatbot_find_customer_values_in_messages",
+            return_value={"email_from": "once@example.com"},
+        ):
+            channel.chatbot_current_step_id = step.id
+            first_lead = channel.grove_support_lead_id
+            channel.chatbot_current_step_id = step.id
+
+        self.assertEqual(channel.grove_support_lead_id, first_lead)
+        self.assertEqual(
+            self.env["crm.lead"].search_count([("partner_id", "=", first_lead.partner_id.id)]),
+            1,
+            "a second step advance must not duplicate the lead",
+        )
+
+    def test_non_chatbot_write_does_not_create_lead(self):
+        """A plain write that does not touch chatbot_current_step_id must not
+        run the glue, even when an email would be resolvable."""
+        channel = self._make_channel()
+        with patch.object(
+            type(channel),
+            "_chatbot_find_customer_values_in_messages",
+            return_value={"email_from": "noise@example.com"},
+        ):
+            channel.name = "Renamed conversation"
+        self.assertFalse(channel.grove_support_lead_id)
+
+    # ── GOL-3459 defect 2: lead/partner land in the channel's company ─────
+
+    def test_company_prefers_livechat_channel_company(self):
+        """The explicit channel company wins over the operator's company, so a
+        nursery chat handled by a farm-company operator still files under the
+        nursery."""
+        self.livechat_channel.grove_support_company_id = self.other_company
+        channel = self._make_channel()  # operator is the current user (company 1)
+        self.assertEqual(channel._grove_support_company(), self.other_company)
+
+    def test_company_falls_back_to_operator_when_channel_unset(self):
+        channel = self._make_channel()
+        self.assertFalse(self.livechat_channel.grove_support_company_id)
+        self.assertEqual(channel._grove_support_company(), self.env.user.company_id)
+
+    def test_lead_and_partner_land_in_channel_company(self):
+        self.livechat_channel.grove_support_company_id = self.other_company
+        channel = self._make_channel()
+        with patch.object(
+            type(channel),
+            "_chatbot_find_customer_values_in_messages",
+            return_value={"email_from": "nursery@example.com"},
+        ):
+            channel._grove_support_process_chat()
+
+        lead = channel.grove_support_lead_id
+        self.assertEqual(lead.company_id, self.other_company)
+        self.assertEqual(lead.partner_id.company_id, self.other_company)
+
+    # ── GOL-3482: the channel company pointer must NOT flip the loader url ──
+
+    def test_channel_company_field_is_not_named_company_id(self):
+        """Regression guard for GOL-3482. The website module's get_base_url()
+        override resolves a record's base URL to its company's website domain
+        whenever a field literally named ``company_id`` exists on the model;
+        im_livechat.channel.get_livechat_info() emits get_base_url() as the
+        embed's serverUrl. grove_support's company pointer must therefore NOT be
+        named ``company_id`` (it was in GOL-3459, which flipped serverUrl to
+        https://atthegrovenursery.com and broke the widget). im_livechat.channel
+        has no native company_id in Odoo 19, so the only way this field exists is
+        if grove_support (re)introduces it — which is exactly the regression."""
+        fields = self.env["im_livechat.channel"]._fields
+        self.assertNotIn(
+            "company_id",
+            fields,
+            "im_livechat.channel must not carry a field named company_id — it "
+            "flips the livechat loader's serverUrl to the company website domain "
+            "(GOL-3482). Use grove_support_company_id instead.",
+        )
+        self.assertIn("grove_support_company_id", fields)
+
+    def test_serverurl_stays_web_base_url_with_company_set(self):
+        """Behavioural contract for GOL-3482: with the channel company set,
+        get_livechat_info()['server_url'] (the loader's serverUrl) must still be
+        the Odoo web.base.url, never the company's website domain.
+
+        Note: the website domain resolution lives in the ``website`` module,
+        which the grove_support test harness does not install, so this asserts
+        the baseline the renamed field preserves. The true end-to-end flip was
+        reproduced on nursery.qa (loader/2) and is re-verified there after
+        deploy; test_channel_company_field_is_not_named_company_id is the
+        deterministic, website-independent guard."""
+        self.livechat_channel.grove_support_company_id = self.other_company
+        base_url = self.env["ir.config_parameter"].sudo().get_param("web.base.url")
+        self.assertEqual(self.livechat_channel.get_livechat_info()["server_url"], base_url)
+
     def test_process_chat_no_email_is_noop(self):
         channel = self._make_channel()
         with patch.object(type(channel), "_chatbot_find_customer_values_in_messages", return_value={}):

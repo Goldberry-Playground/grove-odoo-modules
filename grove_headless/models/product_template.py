@@ -1,3 +1,4 @@
+import base64
 import logging
 import os
 import re
@@ -14,6 +15,7 @@ from odoo.exceptions import UserError, ValidationError
 # the budgeted cron (models/grove_enrich_job.py).
 from ..services.plant_data import mapping as plant_mapping
 from ..services.plant_data.usda import USDAProvider
+from . import printify_client, printify_sync
 
 _logger = logging.getLogger(__name__)
 
@@ -754,6 +756,162 @@ class ProductTemplate(models.Model):
     )
     grove_wildlife = fields.Char(string="Wildlife", tracking=True, help='e.g. "Attracts bees, birds".')
 
+    # ── Planner facts (GOL-3378, order-builder spec 2026-10-14 §A) ───────────
+    # The scoreable subset the order-builder planner reads. The display Char
+    # facts above (grove_years_to_fruit, grove_pollination, grove_harvest_season,
+    # grove_wildlife) stay put as the human-readable values; nothing moves. These
+    # eight editable fields hold the typed subset a client-side scorer can use,
+    # plus one computed/stored "ready" flag the catalog feed filters on. All eight
+    # editable fields get tracking=True like the other facts.
+    grove_years_to_fruit_min = fields.Integer(
+        string="Years to first crop (min)",
+        tracking=True,
+        help='Scoreable: the first integer in Years to Fruit (e.g. 4 for "4–6 '
+        'years"). 1–30; 0 = unset. Drives timing scoring and the "first crop" '
+        "row; the prose stays in Years to Fruit.",
+    )
+    grove_pollination_min = fields.Integer(
+        string="Pollination partners (min)",
+        tracking=True,
+        help="Scoreable: 1 = self-fertile, 2+ = needs that many partner varieties; "
+        "0 = unset. The planner uses it as the per-line quantity floor.",
+    )
+    grove_harvest_months = fields.Char(
+        string="Harvest months",
+        tracking=True,
+        help='Comma list of month numbers, e.g. "9,10,11". Drives the harvest calendar and deer-season slots.',
+    )
+    grove_tolerates_wet = fields.Boolean(
+        string="Tolerates wet ground",
+        tracking=True,
+        help="Site filter: suited to a low, wet spot.",
+    )
+    grove_tolerates_poor_soil = fields.Boolean(
+        string="Tolerates poor soil",
+        tracking=True,
+        help="Site filter: suited to rough, rocky or thin ground.",
+    )
+    grove_tolerates_shade = fields.Boolean(
+        string="Tolerates shade",
+        tracking=True,
+        compute="_compute_grove_tolerates_shade",
+        store=True,
+        readonly=False,
+        help="Site filter: suited to a woods edge. Defaults from Sun Requirement "
+        "(partial / shade) and stays editable — a manual value persists until "
+        "Sun Requirement changes.",
+    )
+    grove_wildlife_value = fields.Selection(
+        [("high", "High"), ("medium", "Medium"), ("low", "Low")],
+        string="Wildlife value",
+        tracking=True,
+        help="Scoreable wildlife rating for the deer track; blank = unset. The prose stays in Wildlife.",
+    )
+    grove_planner_priority = fields.Integer(
+        string="Planner priority",
+        default=50,
+        tracking=True,
+        help="Merchandising order inside a planner slot; lower wins.",
+    )
+    grove_planner_ready = fields.Boolean(
+        string="Planner ready",
+        compute="_compute_grove_planner_ready",
+        store=True,
+        compute_sudo=True,
+        help="True when the listing is complete and the scoreable planner facts "
+        "(years to first crop, pollination partners, harvest months) are set, and "
+        "the template is not a bundle / consult-built mix. The order-builder "
+        "catalog feed only serves ready plants. A separate flag from the publish "
+        "gate on purpose: a plant can be published and not recommendable.",
+    )
+
+    @api.depends("grove_sun")
+    def _compute_grove_tolerates_shade(self):
+        # Editable computed default (store + readonly=False): seeds from the sun
+        # requirement and recomputes when it changes, but a manual edit persists
+        # in between — the standard Odoo "default from X, still editable" idiom.
+        for record in self:
+            record.grove_tolerates_shade = record.grove_sun in ("partial", "shade")
+
+    @api.depends(
+        "grove_listing_complete",
+        "grove_years_to_fruit_min",
+        "grove_pollination_min",
+        "grove_harvest_months",
+        "grove_tolerates_wet",
+        "grove_consult_built",
+    )
+    def _compute_grove_planner_ready(self):
+        # Recomputes on grove_listing_complete (itself stored/computed) plus the
+        # planner fields, so it re-runs on the same triggers as the listing flag
+        # without duplicating its long depends list. BoM membership is not an
+        # @api.depends trigger (mrp.bom is a separate model and prod carries none),
+        # so it is evaluated by lookup in the helper each recompute.
+        for record in self:
+            record.grove_planner_ready = record._grove_planner_ready_value()
+
+    # The scoreable planner fields whose unset state gates readiness and that the
+    # audit's "not planner-ready" section names. grove_tolerates_wet is the fourth
+    # planner field in the spec table, but a stored Boolean has no unset sentinel
+    # (False is a valid answer), so it is trivially set and never blocks — these
+    # three typed-unset fields are the effective gate.
+    _GROVE_PLANNER_CORE_FIELDS = (
+        "grove_years_to_fruit_min",
+        "grove_pollination_min",
+        "grove_harvest_months",
+    )
+
+    def _grove_planner_core_missing(self):
+        """Labels of the scoreable planner fields still unset (ordered)."""
+        self.ensure_one()
+        missing = []
+        for name in self._GROVE_PLANNER_CORE_FIELDS:
+            value = self[name]
+            if self._fields[name].type == "integer":
+                is_set = bool(value) and value > 0
+            else:
+                is_set = bool(str(value or "").strip())
+            if not is_set:
+                missing.append(self._fields[name].string)
+        return missing
+
+    def _grove_has_bom(self):
+        """True when this template (or any variant) carries a bill of materials.
+
+        A bundle/kit is defined by its BoM, so it is never planner-ready as a
+        species (§A): the planner recommends the components, then offers the
+        bundle when the set matches. Looked up rather than stored — prod carries
+        zero mrp.bom today and BoM membership is static, so there is no fact-write
+        to hang an @api.depends on.
+        """
+        self.ensure_one()
+        if "mrp.bom" not in self.env.registry:
+            return False
+        return bool(
+            self.env["mrp.bom"]
+            .sudo()
+            .search_count(
+                [
+                    "|",
+                    ("product_tmpl_id", "=", self.id),
+                    ("product_id", "in", self.product_variant_ids.ids),
+                ]
+            )
+        )
+
+    def _grove_planner_ready_value(self):
+        """True when this template is recommendable by the order-builder planner.
+
+        Needs the listing complete, the scoreable planner facts set, and the
+        template not a bundle (BoM) or consult-built mix.
+        """
+        self.ensure_one()
+        if not self.grove_listing_complete:
+            return False
+        if self.grove_consult_built or self._grove_has_bom():
+            return False
+        return not self._grove_planner_core_missing()
+
     # eCommerce marketing description + care guide are content fields too. The
     # storefront description becomes description_ecommerce (the PDP renders it as
     # description_html); description_sale reverts to its Odoo quotation/invoice
@@ -797,6 +955,24 @@ class ProductTemplate(models.Model):
         string="Content Draft State",
         default="none",
         help="Tracks the Paperclip content-drafter workflow (GOL-2384/C).",
+    )
+
+    # Printify print-on-demand merch (spec 2026-10-13-printify-merch-design.md).
+    # ``printify`` products skip every plant rule at checkout and are fulfilled by
+    # Printify; ``in_house`` (default) is every existing product, unchanged.
+    grove_fulfillment_route = fields.Selection(
+        [("in_house", "In-house"), ("printify", "Printify")],
+        string="Fulfillment route",
+        default="in_house",
+        required=True,
+        tracking=True,
+        help="Printify products are printed and shipped by Printify and skip plant shipping rules.",
+    )
+    printify_product_id = fields.Char(string="Printify product ID", index=True, copy=False, readonly=True)
+    printify_lead_time = fields.Char(
+        string="Printify production time",
+        default="3 to 7 business days",
+        help="Shown on the product page and confirmation: 'Printed to order, ships in ...'.",
     )
 
     # ── Enrichment / draft status UX (GOL-2541) ─────────────────────────
@@ -1401,15 +1577,26 @@ class ProductTemplate(models.Model):
         the audit is the follow-up that gets a human to finish the listing.
         """
         incomplete = self._grove_audit_incomplete_listings()
-        if not incomplete:
-            _logger.info("listing-content audit: no published plant listing is incomplete")
+        not_planner_ready = self._grove_audit_not_planner_ready()
+        if not incomplete and not not_planner_ready:
+            _logger.info("listing-content audit: every published plant listing is complete and planner-ready")
             return
-        self._grove_audit_post_discord(incomplete)
-        scheduled = self._grove_audit_schedule_activities(incomplete)
+        scheduled = 0
+        if incomplete:
+            self._grove_audit_post_discord(incomplete)
+            scheduled = self._grove_audit_schedule_activities(incomplete)
+        if not_planner_ready:
+            # Second section (GOL-3378): same ops channel, same format. Discord
+            # only — the listing audit above already schedules a To-Do per
+            # product, and a plant that is published but not yet recommendable
+            # is a softer nudge than a dark listing.
+            self._grove_audit_post_discord(not_planner_ready, planner=True)
         _logger.info(
-            "listing-content audit: %d incomplete published listing(s), %d new activity(ies) scheduled",
+            "listing-content audit: %d incomplete published listing(s), %d new activity(ies) scheduled; "
+            "%d published plant(s) not planner-ready",
             len(incomplete),
             scheduled,
+            len(not_planner_ready),
         )
 
     @api.model
@@ -1428,29 +1615,75 @@ class ProductTemplate(models.Model):
         return candidates.filtered(lambda t: t._grove_is_gated())
 
     @api.model
-    def _grove_audit_discord_text(self, products):
+    def _grove_audit_not_planner_ready(self):
+        """Published, gated plant templates that are not planner-ready (GOL-3378).
+
+        The second audit section: plants a customer can buy, whose listing is
+        otherwise complete, but the order-builder planner will not recommend
+        because a scoreable planner fact is missing. Three exclusions:
+        - listing-incomplete plants are already chased by section 1 (and scheduled
+          a To-Do there); reporting them here too would double-chase, so the
+          domain requires grove_listing_complete. That also keeps the reported
+          "missing field names" purely the planner facts, not listing items.
+        - bundles and consult-built mixes are *never* planner-ready as a species
+          by design (the planner offers them via their components), so chasing one
+          to become ready would be wrong.
+        grove_planner_ready and grove_listing_complete are both stored, so the
+        core of the selection is a plain domain; the bundle exclusion filters the
+        already-tiny set in Python.
+        """
+        candidates = self.sudo().search(
+            [
+                ("website_published", "=", True),
+                ("grove_listing_complete", "=", True),
+                ("grove_planner_ready", "=", False),
+            ],
+            order="name",
+        )
+        return candidates.filtered(
+            lambda t: t._grove_is_gated() and not t.grove_consult_built and not t._grove_has_bom()
+        )
+
+    @api.model
+    def _grove_audit_discord_text(self, products, planner=False):
         """Build the ops-channel summary line (kept pure for payload-shape tests).
 
-        Mirrors the spec example: "3 published listings incomplete: Apple —
-        Plant Spacing, Soil, Description, Care guide; ...".
+        Listing section mirrors the spec example: "3 published listing(s)
+        incomplete: Apple — Plant Spacing, Soil, Description, Care guide; ...".
+        The planner section (GOL-3378) uses the same shape with the missing
+        planner-fact names: "2 published plant(s) not planner-ready: Pawpaw —
+        Years to first crop (min), Harvest months; ...".
         """
+        if planner:
+            parts = [f"{p.display_name} — {', '.join(p._grove_planner_missing())}" for p in products]
+            return f"{len(products)} published plant(s) not planner-ready: " + "; ".join(parts)
         parts = [f"{p.display_name} — {p.grove_listing_missing}" for p in products]
         return f"{len(products)} published listing(s) incomplete: " + "; ".join(parts)
 
+    def _grove_planner_missing(self):
+        """Human labels for why this template is not planner-ready (ordered).
+
+        The audit only surfaces listing-complete, non-bundle plants here, so the
+        only remaining gap is one or more unset scoreable planner facts.
+        """
+        self.ensure_one()
+        return self._grove_planner_core_missing()
+
     @api.model
-    def _grove_audit_post_discord(self, products):
-        """Post the audit summary to the ops Discord webhook (best-effort).
+    def _grove_audit_post_discord(self, products, planner=False):
+        """Post an audit summary to the ops Discord webhook (best-effort).
 
         Reuses the same env-var mechanism as grove.order.rollup._discord_digest;
         this is a data-quality/ops report so it targets DISCORD_OPS_WEBHOOK_URL
         (not the orders channel). A missing webhook logs and no-ops rather than
-        raising — the activities below are the durable half of the audit.
+        raising — the activities are the durable half of the audit. ``planner``
+        selects the "not planner-ready" section (GOL-3378) on the same channel.
         """
         url = os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
         if not url:
             _logger.info("listing-content audit: DISCORD_OPS_WEBHOOK_URL unset — skipping Discord post")
             return
-        text = self._grove_audit_discord_text(products)
+        text = self._grove_audit_discord_text(products, planner=planner)
         try:
             requests.post(url, json={"content": text[:2000]}, timeout=10)
         except Exception:
@@ -1576,3 +1809,138 @@ class ProductTemplate(models.Model):
         lowered = (value or "").lower()
         collapsed = re.sub(r"[^a-z0-9]+", "-", lowered)
         return collapsed.strip("-")
+
+    # ── Printify print-on-demand sync (spec 2026-10-13-printify-merch-design.md §3) ──
+
+    @api.model
+    def _grove_printify_attribute_value(self, attr_name, value_name):
+        Attribute = self.env["product.attribute"].sudo()
+        # Bind only to an attribute that actually spins up variants. A pre-existing
+        # "Color"/"Size" attribute configured with create_variant != "always" (a
+        # no-variant or dynamic attribute) would leave the shirt with NO variants
+        # to price or push (GOL-3314 review 2026-10-14), so we scope the match to
+        # create_variant="always" and create our own if none qualifies.
+        attribute = Attribute.search(
+            [("name", "=", attr_name), ("create_variant", "=", "always")], limit=1
+        ) or Attribute.create({"name": attr_name, "create_variant": "always"})
+        Value = self.env["product.attribute.value"].sudo()
+        value = Value.search([("attribute_id", "=", attribute.id), ("name", "=", value_name)], limit=1)
+        return attribute, value or Value.create({"attribute_id": attribute.id, "name": value_name})
+
+    @api.model
+    def _grove_printify_sync(self, fetch=None):
+        """Upsert every Printify shop product (spec §3). New templates land unpublished
+        on the farm company; Odoo's sale price wins after the first create."""
+        token = os.environ.get("PRINTIFY_API_TOKEN", "")
+        shop_id = os.environ.get("PRINTIFY_SHOP_ID", "")
+        if not token or not shop_id:
+            raise UserError("PRINTIFY_API_TOKEN and PRINTIFY_SHOP_ID must be configured on this server.")
+        fetch = fetch or requests.get
+        company = self.env.ref("base.main_company")
+        Template = self.sudo().with_context(active_test=False)
+        result = {"created": 0, "updated": 0, "archived": 0}
+        try:
+            raws = printify_client.list_products(token, shop_id)
+        except printify_client.PrintifyError as exc:
+            raise UserError(f"Printify sync failed: {exc}") from exc
+
+        for raw in raws:
+            mapped = printify_sync.map_product(raw)
+            enabled = [v for v in mapped["variants"] if v["enabled"]]
+            if not enabled:
+                continue
+            values = {}
+            for v in enabled:
+                for axis in ("Color", "Size"):
+                    name = v[axis.lower()]
+                    if name:
+                        attribute, value = self._grove_printify_attribute_value(axis, name)
+                        values.setdefault(attribute, self.env["product.attribute.value"])
+                        values[attribute] |= value
+
+            tmpl = Template.search([("printify_product_id", "=", mapped["printify_product_id"])], limit=1)
+            if not tmpl:
+                tmpl = Template.create(
+                    {
+                        "name": mapped["name"],
+                        "description_sale": mapped["description"],
+                        "type": "consu",
+                        "is_storable": False,
+                        "company_id": company.id,
+                        "website_published": False,
+                        "grove_fulfillment_route": "printify",
+                        "grove_gate_exempt": True,
+                        "printify_product_id": mapped["printify_product_id"],
+                        "list_price": min(v["price"] for v in enabled),
+                        "attribute_line_ids": [
+                            (0, 0, {"attribute_id": attribute.id, "value_ids": [(6, 0, vals.ids)]})
+                            for attribute, vals in values.items()
+                        ],
+                    }
+                )
+                result["created"] += 1
+                if mapped["image_url"]:
+                    resp = fetch(mapped["image_url"], timeout=15)
+                    if resp.status_code == 200:
+                        tmpl.image_1920 = base64.b64encode(resp.content)
+            else:
+                for attribute, vals in values.items():
+                    line = tmpl.attribute_line_ids.filtered(lambda ln, a=attribute: ln.attribute_id == a)
+                    missing = vals - line.value_ids
+                    if line and missing:
+                        line.value_ids = [(4, val.id) for val in missing]
+                result["updated"] += 1
+
+            by_combo = {(v["color"], v["size"]): v for v in mapped["variants"]}
+            # Anchor per-variant upcharges to PRINTIFY's own base (its cheapest
+            # enabled variant), not tmpl.list_price: that keeps the extra an
+            # upcharge ABOVE whatever base the operator has set (spec §3, "Odoo
+            # price wins after first sync") while still pricing 2XL/3XL correctly.
+            printify_base = min(v["price"] for v in enabled)
+            for variant in tmpl.with_context(active_test=False).product_variant_ids:
+                axis = {ptav.attribute_id.name: ptav.name for ptav in variant.product_template_attribute_value_ids}
+                pv = by_combo.get((axis.get("Color", ""), axis.get("Size", "")))
+                if not pv or not pv["enabled"]:
+                    if variant.active:
+                        variant.active = False
+                        if variant.printify_variant_id:
+                            result["archived"] += 1
+                    continue
+                vals = {}
+                if variant.printify_variant_id != pv["printify_variant_id"]:
+                    vals["printify_variant_id"] = pv["printify_variant_id"]
+                if variant.standard_price != pv["cost"]:
+                    vals["standard_price"] = pv["cost"]
+                if not variant.active:
+                    vals["active"] = True
+                if vals:
+                    variant.write(vals)
+                # Keep every enabled variant's upcharge in lockstep with Printify's
+                # variant price on EVERY sync, not just first create: a size or
+                # colour added in Printify after the first sync (2XL, 3XL) would
+                # otherwise sell at the base price, possibly below cost (GOL-3314
+                # review 2026-10-14). The base list_price stays Odoo's (spec §3,
+                # "Odoo price wins after first sync") — only the per-variant extra
+                # tracks Printify. The extra sits on the Size axis when present
+                # (shirt pricing is size-driven), else Colour, so colour-driven
+                # price differences are captured too rather than only Size.
+                extra = round(pv["price"] - printify_base, 2)
+                target_ptav = (
+                    variant.product_template_attribute_value_ids.filtered(lambda p: p.attribute_id.name == "Size")
+                    or variant.product_template_attribute_value_ids.filtered(lambda p: p.attribute_id.name == "Color")
+                )[:1]
+                if target_ptav and target_ptav.price_extra != extra:
+                    target_ptav.price_extra = extra
+        return result
+
+    def action_grove_printify_sync(self):
+        result = self._grove_printify_sync()
+        return {
+            "type": "ir.actions.client",
+            "tag": "display_notification",
+            "params": {
+                "title": "Printify sync",
+                "message": f"Created {result['created']}, updated {result['updated']}, archived {result['archived']}.",
+                "sticky": False,
+            },
+        }

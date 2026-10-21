@@ -64,6 +64,16 @@
                             clears <b>Facts reviewed</b>.
                         </div>
                     </group>
+                    <!-- Printify print-on-demand routing (GOL-3314). A product on
+                         the "printify" route is printed and shipped by Printify;
+                         the product + lead time are set by "Sync from Printify". -->
+                    <group string="Printify" name="grove_printify">
+                        <field name="grove_fulfillment_route" />
+                        <field name="printify_product_id"
+                               invisible="grove_fulfillment_route != 'printify'" />
+                        <field name="printify_lead_time"
+                               invisible="grove_fulfillment_route != 'printify'" />
+                    </group>
                     <group>
                         <group string="Storefront">
                             <field name="grove_featured" />
@@ -116,6 +126,25 @@
                             <field name="grove_pollination" />
                             <field name="grove_years_to_fruit" />
                             <field name="grove_chill_hours" />
+                        </group>
+                        <!-- Planner facts (GOL-3378): scoreable subset the
+                             order-builder reads. The display facts above stay the
+                             human copy; these are the typed values the planner
+                             scores on. "Planner ready" is computed. -->
+                        <group string="Planner (order-builder scoring)" name="grove_planner_facts" colspan="2">
+                            <group>
+                                <field name="grove_years_to_fruit_min" />
+                                <field name="grove_pollination_min" />
+                                <field name="grove_harvest_months" />
+                                <field name="grove_wildlife_value" />
+                                <field name="grove_planner_priority" />
+                            </group>
+                            <group>
+                                <field name="grove_tolerates_wet" />
+                                <field name="grove_tolerates_poor_soil" />
+                                <field name="grove_tolerates_shade" />
+                                <field name="grove_planner_ready" readonly="1" />
+                            </group>
                         </group>
                         <!-- Enrichment status panel (GOL-2541): what ran, how far
                              along, and did it succeed/fail — from the latest

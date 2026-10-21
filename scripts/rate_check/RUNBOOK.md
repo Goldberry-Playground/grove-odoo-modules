@@ -1,7 +1,9 @@
 # rate-check — operations runbook
 
-The `rate-check` workflow (`.github/workflows/rate-check.yml`) runs daily at
-07:00 ET, quotes **Pirate Ship** (public rate calculator, no auth — GOL-2270)
+The `rate-check` workflow (`.github/workflows/rate-check.yml`) is designed to
+run daily at 07:00 ET (**schedule removed 2026-10-14 — see "Quote source
+unavailable" below; `workflow_dispatch` only until it is restored**), quotes
+**Pirate Ship** (public rate calculator, no auth — GOL-2270)
 for the shipping zones, and — when rates have drifted ≥ $1 — force-pushes
 `chore/rate-check` and opens/refreshes a PR against `main`. Each published cell
 records the winning carrier/service (`shipping_rates.json` `_schema` 3); the
@@ -11,15 +13,14 @@ Odoo loader reads `base` only. Shippo is retired from quoting (spec
 
 ## Ops secrets — what fails silently without them
 
-This workflow has two integrations that **degrade quietly** rather than fail, so
+This workflow has one integration that **degrades quietly** rather than fail, so
 a missing secret is invisible unless you go looking. The first step of the job
-(`Ops-alerting preflight`) now reports each one as a `::warning::` plus a line in
+(`Ops-alerting preflight`) now reports it as a `::warning::` plus a line in
 the run summary, and never fails the run.
 
 | Secret | Scope | Without it |
 |---|---|---|
 | `DISCORD_OPS_WEBHOOK_URL` | repo (or org) secret, the shared ops webhook | All three Discord alerts — rate drift, "regenerated table FAILED its invariants, PR held as DRAFT", and "rate-check failed, rates NOT updated" — short-circuit and send nothing. The money-path rate alarm surfaces only as a red CI badge plus a router-filed GitHub issue. |
-| `RATE_CHECK_PR_TOKEN` | `contents:write` + `pull_requests:write` on this repo only | The daily rates PR is pushed and opened with `github.token`, whose events GitHub suppresses, so the PR wedges at `action_required` until a human re-triggers it. Provisioning details below. |
 
 **GOL-2642 (2026-09-29).** A live read of
 `GET /repos/Goldberry-Playground/grove-odoo-modules/actions/secrets` returned
@@ -197,47 +198,55 @@ The old workflow pushed the branch and opened the PR with `GITHUB_TOKEN`, so the
 for `github-actions[bot]` pushes and `success` for `agenticos-developer[bot]` /
 human pushes.
 
-**Fix.** The workflow now uses `secrets.RATE_CHECK_PR_TOKEN` for BOTH the
-`actions/checkout` (so `git push` fires a real `synchronize`) and the PR
-create/edit step (so `opened` fires). It falls back to `GITHUB_TOKEN` when the
-secret is absent, so the change is a no-op until the secret is provisioned — no
-regression, but the daily wedge persists until then.
+**Fix (2026-10-14, replaces the PAT design).** The workflow now starts the
+required checks itself: after the force-push and PR create/edit it runs
 
-## Provisioning `RATE_CHECK_PR_TOKEN` (one-time, human step)
-
-This is the arming step. It requires adding a repo Actions secret, which the ops
-service account cannot do — Josh / CEO must run it.
-
-Preferred: a **fine-grained PAT** on a bot account (not a human seat), scoped to
-**only** `Goldberry-Playground/grove-odoo-modules`:
-
-- Repository access: only `grove-odoo-modules`
-- Permissions: **Contents: Read and write**, **Pull requests: Read and write**
-- Expiry: set a calendar reminder to rotate before it lapses (fine-grained PATs
-  expire; max 1 year).
-
-Then add it as a repo secret:
-
-```bash
-gh secret set RATE_CHECK_PR_TOKEN \
-  --repo Goldberry-Playground/grove-odoo-modules \
-  --body '<the-fine-grained-PAT>'
+```
+gh workflow run ci.yml --ref chore/rate-check
 ```
 
-Alternative (more hardened, no user seat, short-lived tokens): a **GitHub App**
-installed on the repo with the same two permissions, minted in-workflow via
-`actions/create-github-app-token`. Requires two secrets (`APP_ID`,
-`APP_PRIVATE_KEY`) instead of one PAT; adopt this if/when the org standardises on
-an App identity for bot PRs (the org already uses `agenticos-developer[bot]`).
+with the ambient `github.token` (`permissions: actions: write`). GitHub's
+suppression rule has one documented exception — `workflow_dispatch` /
+`repository_dispatch` — and a dispatched `ci.yml` run at the branch ref reports
+its check-runs on the **same head SHA** the PR points at, so the five required
+contexts (`Lint Python`, `Validate Module Manifests`, `Validate Tenant Slug Map`,
+`Pure-Python unit tests`, `Install + test module against Odoo 19`) satisfy the
+ruleset with no human re-trigger. `ci.yml` carries a `workflow_dispatch:` trigger
+for exactly this (every job in it is a read-only lint/validate/test). This is the
+pattern odoocker-goldberrygrove already runs for its reconcile PRs (GOL-2504,
+#728 + #2519): on odoocker #878 the GITHUB_TOKEN-triggered `CI` run was held
+while the `workflow_dispatch` run on the same SHA completed `success`.
 
-## Verifying the fix after provisioning
+The earlier `RATE_CHECK_PR_TOKEN` design (a fine-grained PAT used for checkout +
+PR create, PR #182) was **withdrawn** on Josh's direction (GOL-2116, 2026-09-23:
+"don't provision a PAT"). The secret was never created, every `secrets.… ||
+github.token` fallback in the workflow was dead, and the preflight warned about
+it daily. All of that is removed; the PR author stays `github-actions[bot]`,
+which is what keeps `auto-approve.yml` from auto-merging a money-adjacent rate
+change (it classifies by author — an agent-App author would be auto-merged).
 
-1. Manually dispatch: `gh workflow run rate-check.yml -R Goldberry-Playground/grove-odoo-modules`
-   (or wait for the next 07:00 ET cron), on a day where rates drift ≥ $1.
-2. Confirm the `chore/rate-check` PR head SHA gets a fresh `ci.yml` run with
-   `event=pull_request` and `conclusion=success` (not `action_required`), and the
-   required checks report. `gh pr checks chore/rate-check -R Goldberry-Playground/grove-odoo-modules`.
-3. The PR should reach `mergeable_state: clean` without any manual re-trigger.
+**Fail-soft.** The dispatch step never fails the run: the PR is already pushed
+and open, so a failed dispatch only costs a reviewer the manual re-run that was
+the status quo. It surfaces as a `::warning::` plus a run-summary line, and the
+`Missing required-check sweep` (GOL-1958) still files an issue if a required
+context is absent past its grace window.
+
+## Verifying the self-dispatch (after the workflow change merges)
+
+1. On a day where rates drift ≥ $1 (or dispatch `rate-check.yml` by hand with
+   a quote source available — see GOL-2605 below while Pirate Ship is closed),
+   confirm the run summary shows `Required checks self-dispatched: ci.yml @
+   chore/rate-check`.
+2. `gh run list -R Goldberry-Playground/grove-odoo-modules -w ci.yml -b chore/rate-check`
+   should show a run with `event=workflow_dispatch`, actor `github-actions[bot]`,
+   `conclusion=success`, on the PR's head SHA.
+3. `gh pr checks chore/rate-check -R Goldberry-Playground/grove-odoo-modules`
+   reports all five required contexts, and the PR reaches
+   `mergeable_state: clean` (or `blocked` only on the human review) with no
+   manual re-trigger.
+
+If the required checks are still missing, re-run them by hand:
+`gh workflow run ci.yml --ref chore/rate-check -R Goldberry-Playground/grove-odoo-modules`.
 
 ## Quote source refused the query (GOL-2605)
 
@@ -281,12 +290,25 @@ outside CI with a bare `POST` to the same URL. There is nothing to retry:
   ship-to order, which is the exact failure GOL-1312's guard exists to surface.
   Treat weeks-scale staleness as a pricing incident, not a CI annoyance.
 
-**Do not "fix" the red by silencing it.** Exit 1 here *is* the alarm. Likewise do
-not pause the `schedule:` cron: the CI failure router dedupes on
-`<!-- d3-ci-failure:rate-check:main -->`, so a still-broken source only adds a
-"Failed again." comment to the one open issue, and the router auto-closes that
-issue the moment a run goes green. The daily run is the cheapest possible probe
-for "is the source back?".
+**Do not "fix" the red by silencing the probe.** Exit 1 here *is* the alarm.
+
+**The `schedule:` cron is removed while the source is down (GOL-2605, Josh
+2026-10-14).** The original posture was to leave the daily run as the cheapest
+"is the source back?" probe (the CI failure router dedupes on
+`<!-- d3-ci-failure:rate-check:main -->`), but after 15 consecutive identical
+reds the daily re-fire cost more attention than it returned and no "it is back"
+is expected: Pirate Ship's persisted-queries-only mode is deliberate, and the
+sanctioned way forward is the Train #4 keyless persisted `RatesQuery` client
+(gom#347). The cron lines are kept, commented, in the workflow with the
+re-enable condition next to them. **Re-enable only when both hold:**
+
+1. the gom#347 step-1 client (`RATES_QUERY_HASH` pin, watched weekly by
+   `pirateship-query-drift.yml`) is merged to main, and
+2. a manual `workflow_dispatch` with `dry_run=true` on main exits 0.
+
+While the cron is off, the freshness guard (`staleness.py`, warn 14 d / fail
+28 d) only runs on dispatch — refresh the table by hand on the cadence below and
+keep `_rates_verified_on` current.
 
 **Restoring automation requires a replacement quote source** (board decision —
 money path). The three live options, with the trade-off that matters:

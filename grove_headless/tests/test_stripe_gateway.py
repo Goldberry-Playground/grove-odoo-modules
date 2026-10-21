@@ -247,6 +247,18 @@ class TestRefund(unittest.TestCase):
         with self.assertRaises(sg.StripeError):
             sg.create_refund("sk", "", post=mock.Mock())
 
+    def test_refund_sends_idempotency_key_header(self):
+        # A redelivered Printify cancel webhook replays the same refund with the
+        # same key, so Stripe returns the original refund instead of a second one.
+        post = mock.Mock(return_value=_ok(200, {"id": "re_1", "status": "succeeded"}))
+        sg.create_refund("sk", "pi_1", idempotency_key="printify-cancel-refund:S1:pi_1", post=post)
+        self.assertEqual(post.call_args.kwargs["headers"], {"Idempotency-Key": "printify-cancel-refund:S1:pi_1"})
+
+    def test_refund_without_idempotency_key_sends_no_header(self):
+        post = mock.Mock(return_value=_ok(200, {"id": "re_1"}))
+        sg.create_refund("sk", "pi_1", post=post)
+        self.assertIsNone(post.call_args.kwargs["headers"])
+
 
 class TestPaymentIntent(unittest.TestCase):
     """GOL-2052: off-session ship-time settlement primitive."""

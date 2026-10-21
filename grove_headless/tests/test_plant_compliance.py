@@ -209,5 +209,65 @@ class TestSeedTierExemption(unittest.TestCase):
         self.assertTrue(failsafe)
 
 
+class TestGenusFor(unittest.TestCase):
+    """The public genus-only view of parse_taxon (GOL-3379 catalog feed)."""
+
+    def test_genus_of_binomial(self):
+        self.assertEqual(pc.genus_for("Diospyros virginiana"), "diospyros")
+
+    def test_bare_genus(self):
+        self.assertEqual(pc.genus_for("Cornus"), "cornus")
+
+    def test_cultivar_ignored(self):
+        self.assertEqual(pc.genus_for("Morus alba 'Maple Leaf'"), "morus")
+
+    def test_empty_or_unparseable_is_none(self):
+        for value in ("", "   ", None, "123 mystery"):
+            self.assertIsNone(pc.genus_for(value), repr(value))
+
+
+class TestBlockedStatesFor(unittest.TestCase):
+    """blocked_states_for must mirror the order gate's decision exactly."""
+
+    def test_block_rule_returns_sorted_states(self):
+        self.assertEqual(pc.blocked_states_for("Castanea mollissima"), ["FL", "OR", "WA"])
+
+    def test_single_state_block(self):
+        self.assertEqual(pc.blocked_states_for("Diospyros virginiana"), ["CA"])
+
+    def test_morus_alba_blocked(self):
+        self.assertEqual(pc.blocked_states_for("Morus alba 'Maple Leaf'"), ["IN", "OH", "WI"])
+
+    def test_morus_rubra_and_bare_morus_are_clean(self):
+        # The species-level split: only "morus alba" is a key.
+        self.assertEqual(pc.blocked_states_for("Morus rubra"), [])
+        self.assertEqual(pc.blocked_states_for("Morus"), [])
+
+    def test_unrestricted_genus_is_empty(self):
+        self.assertEqual(pc.blocked_states_for("Malus domestica"), [])
+
+    def test_unparseable_yields_the_regulated_set(self):
+        expected = sorted(pc.REGULATED_STATES)
+        for value in ("", "   ", None, "123 mystery"):
+            self.assertEqual(pc.blocked_states_for(value), expected, repr(value))
+
+    def test_agrees_with_evaluate_line_across_regulated_states(self):
+        # For a parseable taxon, a state is in blocked_states_for iff the order
+        # gate blocks a (non-seed) line into it. One source of truth, no drift.
+        for botanical in (
+            "Castanea mollissima",
+            "Prunus americana",
+            "Morus alba 'Maple Leaf'",
+            "Morus rubra",
+            "Diospyros virginiana",
+            "Cornus florida",
+            "Malus domestica",
+        ):
+            blocked = set(pc.blocked_states_for(botanical))
+            for state in pc.REGULATED_STATES:
+                reason, _failsafe = pc.evaluate_line(botanical, state, state, tier="bareroot")
+                self.assertEqual(state in blocked, reason is not None, f"{botanical} / {state}")
+
+
 if __name__ == "__main__":
     unittest.main()

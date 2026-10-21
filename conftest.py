@@ -35,6 +35,7 @@ sys.modules.setdefault("grove_headless.tests", _stub_pkg("grove_headless.tests",
 # half-imported death. Pure-Python tests (loaded via importlib by file path)
 # stay collected.
 collect_ignore_glob = [
+    "grove_headless/tests/test_capture_endpoints.py",
     "grove_headless/tests/test_growing_facts.py",
     "grove_headless/tests/test_html_field_tracking.py",
     "grove_headless/tests/test_effective_shipping_tier.py",
@@ -71,6 +72,8 @@ collect_ignore_glob = [
     "grove_headless/tests/test_order_rollup.py",
     "grove_headless/tests/test_listing_gate.py",
     "grove_headless/tests/test_listing_audit.py",
+    "grove_headless/tests/test_planner_catalog.py",
+    "grove_headless/tests/test_planner_facts.py",
     "grove_headless/tests/test_enrich_job.py",
     "grove_headless/tests/test_enrich_status.py",
     "grove_headless/tests/test_content_draft_request.py",
@@ -81,4 +84,10 @@ collect_ignore_glob = [
     "grove_headless/tests/test_usda_zone.py",
     "grove_headless/tests/test_seed_checkout.py",
     "grove_headless/tests/test_seed_settlement.py",
+    "grove_headless/tests/test_printify_product_sync.py",
+    "grove_headless/tests/test_printify_catalog.py",
+    "grove_headless/tests/test_printify_checkout.py",
+    "grove_headless/tests/test_printify_push.py",
+    "grove_headless/tests/test_printify_webhook.py",
+    "grove_headless/tests/test_printify_exclusions.py",
 ]

@@ -1,7 +1,24 @@
 name: rate-check
 on:
-  schedule:
-    - cron: "0 11 * * *"   # 07:00 ET daily (design: vault Grove Shipping)
+  # GOL-2605 (Josh, 2026-10-14): the daily schedule is REMOVED, not merely
+  # paused in the Actions UI, while Pirate Ship's public GraphQL endpoint is
+  # persisted-queries-only (since 2026-09-29). Every scheduled run since then
+  # was red, carried no new information, and re-fired the CI failure router
+  # each morning. Manual `workflow_dispatch` is kept so the probe (and the
+  # freshness guard below) can still be run by hand.
+  #
+  # RE-ENABLE CONDITION — restore the two commented lines below ONLY when
+  # BOTH hold:
+  #   1. the Train #4 keyless persisted RatesQuery client (gom#347 step 1,
+  #      `RATES_QUERY_HASH` pin + scripts/ci/pirateship-rates-query.sha256)
+  #      is merged to main, and
+  #   2. a `workflow_dispatch` with dry_run=true on main exits 0 (all probe
+  #      cells quoted; freshness guard green).
+  # Until then the rate table is refreshed BY HAND per
+  # scripts/rate_check/RUNBOOK.md ("Refreshing the table without a quote source").
+  #
+  # schedule:
+  #   - cron: "0 11 * * *"   # 07:00 ET daily (design: vault Grove Shipping)
   workflow_dispatch:
     inputs:
       dry_run:
@@ -12,6 +29,7 @@ on:
 permissions:
   contents: write
   pull-requests: write
+  actions: write  # gh workflow run ci.yml -- self-dispatch the required checks (GOL-2114)
 
 jobs:
   rate-check:
@@ -19,9 +37,8 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Ops-alerting preflight
-        # GOL-2642: both ops integrations below fail SILENTLY when their secret is
-        # absent — the Discord steps short-circuit, and checkout / PR-create fall
-        # back to `github.token`. Until now those short-circuits logged
+        # GOL-2642: the Discord alerts below fail SILENTLY when their secret is
+        # absent — every Discord step short-circuits. Until now that short-circuit logged
         # `::notice::`, which does NOT surface in the run summary, so the alerting
         # layer for a MONEY-PATH signal ("rates drifted", "regenerated table failed
         # its invariants", "the quote source is gone") was itself invisible: the
@@ -30,36 +47,24 @@ jobs:
         # and NEVER fail on it: a missing ops secret must not take down the rate
         # check itself. Emptiness is all we test — no secret value is ever echoed,
         # and the warning self-clears the moment the secret is provisioned.
+        # (This preflight used to also test for a PR-identity PAT; that secret
+        # is gone -- GOL-2114 is closed by the `Self-dispatch required checks`
+        # step below, not by a token. Josh, GOL-2116: do not provision one.)
         env:
           HAS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK_URL != '' }}
-          HAS_PR_TOKEN: ${{ secrets.RATE_CHECK_PR_TOKEN != '' }}
         run: |
-          missing=0
           if [ "$HAS_WEBHOOK" != "true" ]; then
-            missing=1
             echo "::warning title=No Discord ops webhook::DISCORD_OPS_WEBHOOK_URL is not set in this repo - every rate-check Discord alert (drift / invariants-failed / run-failure) is a silent no-op. See scripts/rate_check/RUNBOOK.md, GOL-2642."
             echo "- :warning: **DISCORD_OPS_WEBHOOK_URL is missing** - rate-drift, invariant-failure and run-failure Discord alerts are no-ops (GOL-2642)." >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ "$HAS_PR_TOKEN" != "true" ]; then
-            missing=1
-            echo "::warning title=No rate-check PR token::RATE_CHECK_PR_TOKEN is not set - the rates PR is pushed/opened with github.token, so its required checks stay at action_required until a human re-triggers them. See scripts/rate_check/RUNBOOK.md, GOL-2114."
-            echo "- :warning: **RATE_CHECK_PR_TOKEN is missing** - the rates PR will wedge at action_required (GOL-2114)." >> "$GITHUB_STEP_SUMMARY"
-          fi
-          if [ "$missing" = "0" ]; then
-            echo "ops alerting fully configured (Discord webhook + rate-check PR token both present)"
+          else
+            echo "ops alerting fully configured (Discord webhook present)"
           fi
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-        with:
-          # GOL-2114: persist a NON-GITHUB_TOKEN identity so the later
-          # `git push` to chore/rate-check fires a `synchronize` event that
-          # actually triggers the required checks. Pushes made with the default
-          # GITHUB_TOKEN are suppressed by GitHub's anti-recursion rule, so the
-          # PR wedges at "action_required" every morning until a human/App pushes
-          # an empty re-trigger commit. RATE_CHECK_PR_TOKEN is a purpose-scoped
-          # token (contents:write + pull_requests:write on THIS repo only).
-          # Falls back to the default token when unset → no regression, but the
-          # daily wedge persists until the secret is provisioned (see runbook).
-          token: ${{ secrets.RATE_CHECK_PR_TOKEN || github.token }}
+        # Checks out with the default `github.token` on purpose (GOL-2114): the
+        # later `git push -f origin chore/rate-check` is therefore a GITHUB_TOKEN
+        # push, whose `synchronize` event GitHub suppresses (anti-recursion).
+        # That is fine -- the required checks are started by the explicit
+        # `Self-dispatch required checks` step below, not by the push.
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: "3.11"
@@ -139,12 +144,13 @@ jobs:
       - name: Open / refresh rates PR
         if: steps.check.outputs.code == '3'
         env:
-          # GOL-2114: open/edit the PR under a non-GITHUB_TOKEN identity so the
-          # `opened` event triggers required checks (Lint Python, Validate Module
-          # Manifests, Validate Tenant Slug Map, …). Same token as checkout above
-          # so push + PR-create both come from the bot identity. Falls back to the
-          # default token when unset (current behaviour — checks stay wedged).
-          GH_TOKEN: ${{ secrets.RATE_CHECK_PR_TOKEN || secrets.GITHUB_TOKEN }}
+          # GOL-2114: the PR is opened/edited with the default token, so its
+          # author stays `github-actions[bot]`. auto-approve.yml classifies by
+          # author, and that identity is what keeps the HUMAN review gate on a
+          # money-adjacent rate change (an agent-App author would auto-merge it).
+          # The `opened`/`synchronize` events this token produces do not start
+          # the required checks; the self-dispatch step below does.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # GOL-2212: "false" when the regenerated table failed the invariants above.
           INVARIANTS_OK: ${{ steps.invariants.outputs.ok }}
         run: |
@@ -190,6 +196,35 @@ jobs:
           # it only clears the flag, never closes the PR.
           gh pr merge chore/rate-check --disable-auto 2>/dev/null \
             || echo "::notice::auto-merge was not armed on chore/rate-check (nothing to disarm)"
+      - name: Self-dispatch required checks
+        # GOL-2114 (pattern ported from odoocker GOL-2504, #728 + #2519): every
+        # event the push + PR-create above produce comes from GITHUB_TOKEN, and
+        # GitHub never starts `on: pull_request` / `on: push` workflows for those
+        # (anti-recursion). So the five required contexts (Lint Python, Validate
+        # Module Manifests, Validate Tenant Slug Map, Pure-Python unit tests,
+        # Install + test module against Odoo 19) were created `action_required`
+        # and the PR wedged at "Expected -- waiting for status" every morning until
+        # a human pushed an empty re-trigger commit (GOL-2113 #180, GOL-2314 #238,
+        # GOL-2397 #249, GOL-2606 #281 -- one agent heartbeat each).
+        # `workflow_dispatch` is the documented EXCEPTION to that rule, and a
+        # dispatched ci.yml run at the chore/rate-check ref reports its check-runs
+        # on the very same head SHA the PR points at, so the context names satisfy
+        # the ruleset. No PAT, no App secret: `actions: write` on the ambient token
+        # is all `gh workflow run` needs.
+        # Fail SOFT: the PR is already pushed and open; a failed dispatch only
+        # costs a reviewer the manual re-run that was the status quo, and the
+        # merge queue's `merge_group` path re-runs the same checks regardless.
+        if: steps.check.outputs.code == '3'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh workflow run ci.yml --ref chore/rate-check; then
+            echo "dispatched ci.yml @ chore/rate-check"
+            echo "- Required checks self-dispatched: ci.yml @ chore/rate-check (GOL-2114)" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning title=Required checks NOT dispatched::could not dispatch ci.yml at chore/rate-check - the rates PR will sit at action_required until the checks are re-run by hand (gh workflow run ci.yml --ref chore/rate-check) or the merge queue runs them. GOL-2114."
+            echo "- :warning: **Required checks NOT self-dispatched** - re-run ci.yml at chore/rate-check by hand (GOL-2114)." >> "$GITHUB_STEP_SUMMARY"
+          fi
       - name: Discord alert
         if: steps.check.outputs.code == '3'
         env:

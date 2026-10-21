@@ -6,6 +6,21 @@ on:
   merge_group:
   push:
     branches: [main]
+  # GOL-2114: the daily rates PR (rate-check.yml -> chore/rate-check) is pushed
+  # and opened with the default GITHUB_TOKEN, so GitHub's anti-recursion guard
+  # never fires the `on: pull_request` run for it -- the five required contexts
+  # (Lint Python, Validate Module Manifests, Validate Tenant Slug Map,
+  # Pure-Python unit tests, Install + test module against Odoo 19) sit at
+  # `action_required` and the PR wedges at "Expected -- waiting for status".
+  # rate-check.yml re-dispatches THIS workflow at the branch ref
+  # (`gh workflow run ci.yml --ref chore/rate-check`) so every required context
+  # reports a real check-run at the PR head SHA. `workflow_dispatch` is the
+  # documented exception to the GITHUB_TOKEN suppression rule, and it is
+  # dispatchable only because this trigger lives on the default branch. Every
+  # job here is a read-only validator/linter/test -- there is no deploy or
+  # publish job -- so running them on a manual dispatch is safe. Same pattern as
+  # odoocker-goldberrygrove GOL-2504 (#728 / #2519).
+  workflow_dispatch:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}

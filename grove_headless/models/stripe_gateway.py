@@ -33,6 +33,7 @@ DEFAULT_TIMEOUT = 30
 TAX_CODE_GOODS = "txcd_99999999"  # General — Tangible Goods
 TAX_CODE_SHIPPING = "txcd_92010001"  # Shipping
 TAX_CODE_GIFT_CARD = "txcd_10401000"  # Gift card (non-taxable at sale)
+TAX_CODE_APPAREL = "txcd_30011000"  # Clothing (Printify merch)
 
 # Deposit rule (GOL-2233, ratified by Josh in the 2026-09-07 release-train
 # session): an order that triggers a deposit — sold-out bareroot OR any order
@@ -347,12 +348,24 @@ def create_checkout_session(
 
 
 def create_refund(
-    secret_key, payment_intent, *, reason=None, metadata=None, post=requests.post, timeout=DEFAULT_TIMEOUT
+    secret_key,
+    payment_intent,
+    *,
+    reason=None,
+    metadata=None,
+    idempotency_key=None,
+    post=requests.post,
+    timeout=DEFAULT_TIMEOUT,
 ):
     """Refund a payment intent in full. Returns the parsed refund dict.
 
     `reason` must be one of Stripe's enum values (duplicate | fraudulent |
-    requested_by_customer) or None. Raises StripeError on any non-2xx."""
+    requested_by_customer) or None.
+
+    ``idempotency_key`` is sent as Stripe's ``Idempotency-Key`` header so a
+    replayed refund (e.g. a redelivered Printify cancel webhook that races the
+    first) returns the ORIGINAL refund instead of creating a second one — the
+    charge is only ever refunded once. Raises StripeError on any non-2xx."""
     if not secret_key:
         raise StripeError("Stripe secret key is not configured")
     if not payment_intent:
@@ -362,10 +375,12 @@ def create_refund(
         nested["reason"] = reason
     if metadata:
         nested["metadata"] = metadata
+    headers = {"Idempotency-Key": idempotency_key} if idempotency_key else None
     resp = post(
         f"{STRIPE_API_BASE}/v1/refunds",
         data=_flatten("", nested, {}),
         auth=(secret_key, ""),
+        headers=headers,
         timeout=timeout,
     )
     return _parse(resp, "refund")

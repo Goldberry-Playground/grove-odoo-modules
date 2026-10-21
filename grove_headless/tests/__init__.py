@@ -9,6 +9,8 @@ from . import (
     test_availability_events,  # noqa: F401
     test_bundle_packing_slip,  # noqa: F401
     test_bundle_substitution,  # noqa: F401
+    test_capture_endpoints,  # noqa: F401
+    test_capture_leads,  # noqa: F401
     test_carrier_tracking,  # noqa: F401
     test_carrier_tracking_cron,  # noqa: F401
     test_checkout_compliance_gate,  # noqa: F401
@@ -37,12 +39,22 @@ from . import (
     test_order_digest,  # noqa: F401
     test_order_rollup,  # noqa: F401
     test_pickup_settlement,  # noqa: F401
+    test_planner_catalog,  # noqa: F401
+    test_planner_facts,  # noqa: F401
     test_plant_compliance,  # noqa: F401
     test_poller_lifecycle,  # noqa: F401
     test_pos,  # noqa: F401
     test_potting_batch,  # noqa: F401
     test_preorder_cap,  # noqa: F401
     test_preorder_label_skip,  # noqa: F401
+    test_printify_catalog,  # noqa: F401
+    test_printify_checkout,  # noqa: F401
+    test_printify_client,  # noqa: F401
+    test_printify_exclusions,  # noqa: F401
+    test_printify_product_sync,  # noqa: F401
+    test_printify_push,  # noqa: F401
+    test_printify_sync_map,  # noqa: F401
+    test_printify_webhook,  # noqa: F401
     test_product_slug,  # noqa: F401
     test_promotions,  # noqa: F401
     test_publish_event,  # noqa: F401

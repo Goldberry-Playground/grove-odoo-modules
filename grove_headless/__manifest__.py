@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.80.0",
+    "version": "19.0.1.88.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -28,6 +28,13 @@
         # _apply_promo_code (GOL-2088). Already present on prod via
         # website_sale_loyalty; listed explicitly because we call it directly.
         "sale_loyalty",
+        # crm: storefront consult / wholesale / farm-visit / state-waitlist
+        # requests become crm.lead records (2026-10-15 capture hotfix).
+        "crm",
+        # website_sale_stock: back-in-stock alerts ride its
+        # product.product.stock_notification_partner_ids + hourly cron, which
+        # grove_headless overrides for the headless multi-company storefronts.
+        "website_sale_stock",
         # mrp provides mrp.bom (Bills of Materials), required for Kit-type
         # BOMs that bundle multiple variants behind one storefront line item,
         # and for the variant→variant transformation in potting-up batches.
@@ -50,6 +57,13 @@
         # _setup_company_pos aborts (silently skipping ALL POS wiring), which is
         # exactly what a chart-less CI DB exposed (GOL-2014).
         "pos_sale",
+        # mass_mailing makes Odoo Email Marketing the list of record for every
+        # Grove newsletter (Ghost is blog-only) — Josh "option C", 2026-10-19,
+        # GOL-3454. Provides mailing.list / mailing.contact /
+        # mailing.subscription and mail.blacklist, which the newsletter
+        # subscribe/unsubscribe/preferences routes read and write. Adding it
+        # here auto-installs it on the next `-u grove_headless`.
+        "mass_mailing",
     ],
     "data": [
         "security/grove_groups.xml",
@@ -81,7 +95,11 @@
         "data/enrich_job_cron.xml",
         "data/grove_dormancy_params.xml",
         "data/grove_zone_filters.xml",
+        "data/restock_email_templates.xml",
+        "data/mailing_lists.xml",
         "data/grove_seed_filters.xml",
+        "data/printify_actions.xml",
+        "data/printify_cron.xml",
     ],
     "installable": True,
     "application": False,

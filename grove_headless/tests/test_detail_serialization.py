@@ -59,7 +59,12 @@ class TestDetailSerialization(GroveTaxFixtureMixin, TransactionCase):
     def test_fulfillment_flags_default_and_set(self):
         """GOL-2587/GOL-3019/GOL-2988: pickup_only + compliance_exempt +
         consult_built + ships_all_green_states serialize as plain bools on both
-        list and detail. Default False; reflect the template flags when set."""
+        list and detail. Default False; reflect the template flags when set.
+
+        GOL-3314: the same block also carries the Printify route — a default
+        in-house template serializes fulfillment_route="in_house" and
+        lead_time=None (the printify-routed case is pinned in
+        test_printify_catalog)."""
         flags = _fulfillment_flags(self.tmpl)
         self.assertEqual(
             flags,
@@ -68,6 +73,8 @@ class TestDetailSerialization(GroveTaxFixtureMixin, TransactionCase):
                 "compliance_exempt": False,
                 "consult_built": False,
                 "ships_all_green_states": False,
+                "fulfillment_route": "in_house",
+                "lead_time": None,
             },
         )
         self.tmpl.grove_pickup_only = True

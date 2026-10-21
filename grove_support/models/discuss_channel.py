@@ -18,9 +18,19 @@ This module does FOUR jobs and no more, additively — grove_headless is untouch
 
 Trigger seams (Odoo 19 im_livechat):
   * ``create()`` — chat-start Discord ping for ``channel_type == 'livechat'``.
-  * ``_forward_human_operator()`` — fired once when the chatbot hands off to a
-    human; by then the email has been collected. Jobs 1-3 run here, guarded
-    idempotent by ``grove_support_lead_id`` so a re-forward never dupes a lead.
+  * ``write()`` of ``chatbot_current_step_id`` — the chatbot advancing to its
+    next step. This is the MAIN lead-creation seam (GOL-3459): the controller
+    ``/chatbot/step/trigger`` stores the ``question_email`` answer and only then
+    writes ``chatbot_current_step_id`` to the following step, so by the time this
+    fires the email is collected. It fires whether or not an operator is online —
+    the offline path (no operator) is the common nursery case and used to create
+    no lead at all when jobs 1-3 hung off ``_forward_human_operator`` alone.
+  * ``_forward_human_operator()`` — fired when the chatbot hands off to a live
+    human. Kept as a belt-and-suspenders seam for any forward path; by now the
+    step write above has usually already run jobs 1-3.
+
+All three lead seams funnel through ``_grove_support_process_chat``, guarded
+idempotent by ``grove_support_lead_id`` so no seam ever dupes a lead.
 
 Security note (from the doc): ``X-Grove-Tenant`` is grove_headless's concern and
 is never trusted here; livechat is scoped by company on the Odoo side, resolved
@@ -64,6 +74,29 @@ class DiscussChannel(models.Model):
             if channel.channel_type == "livechat":
                 channel._grove_support_notify_chat_start()
         return channels
+
+    def write(self, vals):
+        """Run the partner/lead/orders glue (jobs 1-3) when the chatbot advances
+        a step (GOL-3459). The ``question_email`` answer is persisted before the
+        controller writes ``chatbot_current_step_id`` to the next step, so the
+        email is available here — and this fires regardless of operator
+        availability, which ``_forward_human_operator`` alone did not cover for
+        the no-operator path. Best-effort and idempotent, so a chat step write
+        never fails because the glue did, and a lead is created at most once."""
+        res = super().write(vals)
+        if vals.get("chatbot_current_step_id"):
+            for channel in self:
+                if channel.channel_type != "livechat" or channel.grove_support_lead_id:
+                    continue
+                try:
+                    channel._grove_support_process_chat()
+                except Exception:  # noqa: BLE001 — glue is best-effort
+                    _logger.warning(
+                        "grove_support: chat processing failed for channel %s",
+                        channel.id,
+                        exc_info=True,
+                    )
+        return res
 
     def _forward_human_operator(self, *args, **kwargs):
         """When the chatbot hands off to a human, run the partner/lead/orders
@@ -147,15 +180,18 @@ class DiscussChannel(models.Model):
         """Company that scopes the partner match / lead / orders.
 
         Livechat is not natively company-scoped in Odoo community, so resolve
-        defensively (never trusting an edge-supplied tenant header): an explicit
-        company on the livechat channel if the deployment adds one, else the
-        human operator's company, else the environment company. The partner
-        search is ``company_id in [company, False]`` regardless, so a shared
-        (company-less) partner still matches."""
+        defensively (never trusting an edge-supplied tenant header): the explicit
+        ``grove_support_company_id`` grove_support adds to ``im_livechat.channel``
+        (GOL-3459; deliberately not named ``company_id`` — see
+        im_livechat_channel.py / GOL-3482) when set, else the human operator's
+        company, else the environment company. Set the channel's company so
+        nursery leads land in the nursery rather than the operator's company. The
+        partner search is ``company_id in [company, False]`` regardless, so a
+        shared (company-less) partner still matches."""
         self.ensure_one()
         lc = self.livechat_channel_id
-        if lc and "company_id" in lc._fields and lc.company_id:
-            return lc.company_id
+        if lc and lc.grove_support_company_id:
+            return lc.grove_support_company_id
         operator = self.livechat_operator_id
         if operator:
             op_user = operator.user_ids[:1]
