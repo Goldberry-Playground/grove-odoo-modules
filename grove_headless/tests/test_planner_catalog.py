@@ -123,6 +123,33 @@ class TestPlannerCatalogSerializer(GroveTaxFixtureMixin, TransactionCase):
         row = _serialize_planner_plant(plant, {}, has_stock_field=False)
         self.assertEqual(row["harvest_months"], [9, 10, 11])
 
+    def test_variant_id_and_price_default_to_sole_variant(self):
+        # A single-variant template: the planner line adds its only variant, and
+        # the variant price mirrors the (equal) template list price.
+        plant = self._plant(grove_botanical_name="Malus domestica", list_price=18.5)
+        row = _serialize_planner_plant(plant, {}, has_stock_field=False)
+        self.assertEqual(row["variant_id"], plant.product_variant_id.id)
+        self.assertEqual(row["variant_price"], 18.5)
+
+    def test_variant_id_prefers_the_tier_matching_variant(self):
+        # A bareroot-tier tree sold in Bareroot + Potted formats: the planner line
+        # adds the Bareroot variant (effective tier == template tier), not the
+        # pickup-only Potted sibling.
+        fmt = self.env["product.attribute"].create({"name": "Format", "create_variant": "always"})
+        v_potted = self.env["product.attribute.value"].create({"name": "Potted", "attribute_id": fmt.id})
+        v_bareroot = self.env["product.attribute.value"].create({"name": "Bareroot", "attribute_id": fmt.id})
+        plant = self._plant(
+            grove_botanical_name="Malus domestica",
+            grove_shipping_tier="bareroot",
+            attribute_line_ids=[(0, 0, {"attribute_id": fmt.id, "value_ids": [(6, 0, [v_potted.id, v_bareroot.id])]})],
+        )
+        bareroot_variant = plant.product_variant_ids.filtered(
+            lambda v: v.grove_effective_shipping_tier == "bareroot"
+        )
+        row = _serialize_planner_plant(plant, {}, has_stock_field=False)
+        self.assertEqual(row["variant_id"], bareroot_variant.id)
+        self.assertEqual(row["variant_price"], bareroot_variant.lst_price)
+
     def test_substitute_id_resolves_via_genus_map(self):
         chestnut = self._plant(grove_botanical_name="Castanea mollissima")
         row = _serialize_planner_plant(chestnut, {"carya": 4242}, has_stock_field=False)
@@ -239,14 +266,19 @@ class TestPlannerCatalogFeed(GroveTaxFixtureMixin, HttpCase):
         # Component template ids, repeated per unit qty (2× apple, 1× plum).
         self.assertEqual(sorted(mm["component_ids"]), sorted([comp_a.id, comp_a.id, comp_b.id]))
         self.assertIn("tree_count", mm)
+        # A bundle adds its default variant; price mirrors the template list price.
+        self.assertEqual(mm["variant_id"], bom_bundle.product_variant_id.id)
+        self.assertEqual(mm["variant_price"], 50.0)
 
         ff50 = bundles[consult_bundle.id]
         self.assertTrue(ff50["consult_built"])
         self.assertEqual(ff50["component_ids"], [])
         self.assertIn("tree_count", ff50)
+        self.assertEqual(ff50["variant_id"], consult_bundle.product_variant_id.id)
+        self.assertEqual(ff50["variant_price"], 200.0)
 
     def test_feed_has_no_stray_false_where_none_expected(self):
-        self._plant(ready=True, name="Serialisable Persimmon", grove_botanical_name="Diospyros virginiana")
+        persimmon = self._plant(ready=True, name="Serialisable Persimmon", grove_botanical_name="Diospyros virginiana")
         body = self._fetch().json()
         for plant in body["plants"]:
             for key in (
@@ -259,6 +291,13 @@ class TestPlannerCatalogFeed(GroveTaxFixtureMixin, HttpCase):
                 "substitute_id",
                 "genus",
                 "tier",
+                "variant_id",
+                "variant_price",
             ):
                 self.assertIsNot(plant[key], False, f"{plant['id']}.{key}")
             self.assertIsInstance(plant["harvest_months"], list)
+        # The planner line variant is carried so the storefront BFF skips the
+        # per-plant /products/<id> detail fetch (GOL-3524).
+        row = next(p for p in body["plants"] if p["id"] == persimmon.id)
+        self.assertEqual(row["variant_id"], persimmon.product_variant_id.id)
+        self.assertEqual(row["variant_price"], persimmon.product_variant_id.lst_price)

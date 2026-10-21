@@ -515,6 +515,32 @@ def _planner_substitute_tmpl_id(genus, substitute_by_genus):
     return substitute_by_genus.get(compliance_genus_for(sub.botanical))
 
 
+def _planner_line_variant(product, has_stock_field):
+    """The ``product.product`` a planner line should add for this template.
+
+    Cart lines and the checkout session key on ``product.product`` (``variant_id``),
+    not on the template, so the feed resolves the variant here — otherwise the
+    storefront BFF spends one ``/products/<id>`` detail call per plant just to find
+    it (GOL-3524). Prefer a variant whose effective shipping tier matches the
+    template's tier (the advertised format — the Bareroot variant of a
+    bareroot-tier tree, not its pickup-only Potted sibling), and among those a
+    variant with sellable stock so the planner never adds a sold-out line. Fall
+    back to the template's default variant (``product_variant_id``) when nothing
+    matches. Stock is only consulted when ``stock`` is installed (``has_stock_field``),
+    mirroring the ``_list_in_stock`` guard.
+    """
+    candidates = product.product_variant_ids.filtered(
+        lambda v: v.grove_effective_shipping_tier == product.grove_shipping_tier
+    )
+    if not candidates:
+        return product.product_variant_id
+    if has_stock_field:
+        in_stock = candidates.filtered(lambda v: v.grove_shared_pool_qty("qty_available") > 0)
+        if in_stock:
+            return in_stock[0]
+    return candidates[0]
+
+
 def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
     """One plant row for the planner catalog feed (GOL-3379 §B).
 
@@ -528,6 +554,7 @@ def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
     botanical = product.grove_botanical_name or ""
     genus = compliance_genus_for(botanical)
     blocked_states = [] if product.grove_compliance_exempt else compliance_blocked_states_for(botanical)
+    line_variant = _planner_line_variant(product, has_stock_field)
     return {
         "id": product.id,
         "slug": product.grove_slug or "",
@@ -535,6 +562,8 @@ def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
         "botanical_name": botanical,
         "genus": genus,
         "price": product.list_price,
+        "variant_id": line_variant.id if line_variant else None,
+        "variant_price": line_variant.lst_price if line_variant else None,
         "tier": product.grove_shipping_tier or None,
         "pickup_only": bool(product.grove_pickup_only),
         "in_stock": _list_in_stock(product) if has_stock_field else True,
@@ -598,6 +627,8 @@ def _serialize_planner_bundle(env, template):
         "slug": template.grove_slug or "",
         "name": template.name or "",
         "price": template.list_price,
+        "variant_id": variant.id if variant else None,
+        "variant_price": variant.lst_price if variant else None,
         "component_ids": _bundle_component_ids(env, variant),
         "consult_built": bool(template.grove_consult_built),
         "tree_count": promotions.variant_tree_count(variant),
