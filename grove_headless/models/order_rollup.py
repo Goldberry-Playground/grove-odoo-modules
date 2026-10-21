@@ -136,6 +136,11 @@ class SaleOrderRollup(models.AbstractModel):
                     "settlement_attempts": o.grove_settlement_attempts,
                     "grove_checkout_status": o.grove_checkout_status,
                     "grove_delivery_status": o.grove_delivery_status,
+                    # Queryable fulfilment lifecycle state (watermark if set, else
+                    # derived). The digest's pickups-awaiting section keys off this
+                    # so a collected pickup drops out even if grove_delivery_status
+                    # lags (GOL-3559).
+                    "grove_fulfillment_stage": o.grove_fulfillment_stage,
                     "grove_preorder_variant_ids": o.grove_preorder_variant_ids,
                     "partner_name": o.partner_id.name or "",
                     "partner_shipping_zip": (window_zip or "").strip(),

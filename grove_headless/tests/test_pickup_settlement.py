@@ -123,6 +123,26 @@ class TestPickupSettlement(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_fulfillment_stage, "collected")
         pi.assert_not_called()
 
+    # ── collection stamps grove_delivery_status (GOL-3559) ────────────────
+
+    def test_mark_collected_writes_delivery_status(self):
+        """The raw collect transition stamps grove_delivery_status = "collected"
+        so the weekly rollup digest (which keys off the stage, but the raw field
+        must not drift) and legacy readers agree. The write happens only on the
+        real transition — a second call is an idempotent no-op that neither moves
+        the stage nor rewrites the field (GOL-3559)."""
+        order = self._order(grove_fulfillment="pickup", grove_checkout_status="paid")
+        self.assertNotEqual(order.grove_delivery_status, "collected")
+
+        first = order.action_grove_mark_collected(operator="josh")
+        self.assertTrue(first, "the real transition returns True")
+        self.assertEqual(order.grove_fulfillment_stage, "collected")
+        self.assertEqual(order.grove_delivery_status, "collected")
+
+        second = order.action_grove_mark_collected(operator="josh")
+        self.assertFalse(second, "an already-collected order is an idempotent no-op")
+        self.assertEqual(order.grove_delivery_status, "collected")
+
     # ── a double collect never double-charges ─────────────────────────────
 
     def test_double_collect_never_double_charges(self):
