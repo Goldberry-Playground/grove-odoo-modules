@@ -32,6 +32,7 @@ def _order(
     units=1,
     amount_charged=None,
     settlement_attempts=0,
+    stage=None,
 ):
     return {
         "name": name,
@@ -41,6 +42,7 @@ def _order(
         "settlement_attempts": settlement_attempts,
         "grove_checkout_status": checkout_status,
         "grove_delivery_status": delivery_status,
+        "grove_fulfillment_stage": stage,
         "grove_preorder_variant_ids": preorder_ids,
         "partner_name": partner_name,
         "partner_shipping_zip": zip_code,
@@ -236,6 +238,27 @@ class TestPickupSection(unittest.TestCase):
         orders = [_order(is_pickup=True, delivery_status="collected")]
         d = od.build_digest(orders, today=TODAY)
         self.assertEqual(d["pickup_count"], 0)
+
+    def test_collected_stage_pickup_not_awaiting(self):
+        """The production bug (GOL-3559): a collected pickup whose stage is
+        "collected" but whose grove_delivery_status was never written must NOT
+        appear as awaiting. The digest keys off the fulfilment stage now, so the
+        two fields can no longer drift the order into the section forever."""
+        orders = [_order(is_pickup=True, stage="collected", delivery_status=None)]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertEqual(d["pickup_count"], 0)
+
+    def test_cancelled_stage_pickup_not_awaiting(self):
+        """A cancelled pickup is terminal and never awaiting collection."""
+        orders = [_order(is_pickup=True, stage="cancelled", delivery_status=None)]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertEqual(d["pickup_count"], 0)
+
+    def test_reserved_stage_pickup_still_awaiting(self):
+        """A reserved (not yet collected) pickup is still awaiting collection."""
+        orders = [_order(is_pickup=True, stage="reserved", checkout_status="paid")]
+        d = od.build_digest(orders, today=TODAY)
+        self.assertEqual(d["pickup_count"], 1)
 
     def test_shipped_pickup_not_awaiting(self):
         orders = [_order(is_pickup=True, delivery_status="transit")]
