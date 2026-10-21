@@ -3143,12 +3143,24 @@ def _apply_newsletter_subscription(env, company, partner, email, name, list_keys
     mailing.contact (matched on ``email_normalized``) is reused, an existing
     subscription is re-activated (``opt_out`` cleared) rather than duplicated,
     and the welcome is suppressed when the contact was welcomed inside
-    :data:`NEWSLETTER_WELCOME_WINDOW`. Re-subscribing also lifts a prior
-    blacklist on that email — the person is asking for mail again.
+    :data:`NEWSLETTER_WELCOME_WINDOW`. A prior unsubscribe (blacklist) is
+    honored: this unauthenticated route never lifts suppression or re-mails a
+    previously opted-out address (that happens only on the token-gated
+    preferences/unsubscribe routes).
     """
     normalized = tools.email_normalize(email) or email.strip().lower()
     Contact = env["mailing.contact"].sudo()
     Subscription = env["mailing.subscription"].sudo()
+
+    # Honor a prior opt-out. This public route is authenticated only by the
+    # shared storefront key, not by the mailbox owner, so a third party must
+    # never re-subscribe, re-mail, or un-suppress an address that previously
+    # unsubscribed (CAN-SPAM §5(a)(4)). For a blacklisted address we record the
+    # intended keys for the response but make no durable consent change: leaving
+    # the existing rows opted-out prevents a later token re-opt-in to one list
+    # from silently reviving lists a stranger tried to add. Re-opt-in happens
+    # only on the token-gated preferences route, which proves mailbox control.
+    was_blacklisted = bool(normalized and env["mail.blacklist"].sudo().search([("email", "=", normalized)], limit=1))
 
     contact = Contact.search([("email_normalized", "=", normalized)], limit=1)
     if not contact:
@@ -3161,6 +3173,8 @@ def _apply_newsletter_subscription(env, company, partner, email, name, list_keys
         if not mailing_list:
             continue
         subscribed_keys.append(key)
+        if was_blacklisted:
+            continue
         sub = Subscription.search([("contact_id", "=", contact.id), ("list_id", "=", mailing_list.id)], limit=1)
         if not sub:
             Subscription.create({"contact_id": contact.id, "list_id": mailing_list.id, "opt_out": False})
@@ -3169,14 +3183,10 @@ def _apply_newsletter_subscription(env, company, partner, email, name, list_keys
             sub.opt_out = False
             newly_active = True
 
-    # Re-subscribing lifts a prior one-click blacklist (consent re-granted).
-    if subscribed_keys and normalized:
-        env["mail.blacklist"].sudo()._remove(normalized)
-
     welcomed = False
     now = fields.Datetime.now()
     within_window = contact.grove_welcome_date and (now - contact.grove_welcome_date) < NEWSLETTER_WELCOME_WINDOW
-    if subscribed_keys and newly_active and not within_window:
+    if subscribed_keys and newly_active and not within_window and not was_blacklisted:
         # The welcome is best-effort: the list membership above is the durable
         # subscription, so a mail-server hiccup must not cost us the signup or
         # the returned keys. Stamp the window only once the mail is queued.

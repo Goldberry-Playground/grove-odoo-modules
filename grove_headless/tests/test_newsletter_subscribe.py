@@ -309,6 +309,73 @@ class TestNewsletterListOfRecord(HttpCase):
             "one-click unsubscribe blacklists the email",
         )
 
+    def test_public_resubscribe_does_not_lift_blacklist_or_rewelcome(self):
+        """CAN-SPAM §5(a)(4): the unauthenticated subscribe route must honor a
+        prior opt-out — it may not un-suppress a blacklisted address or re-mail
+        it. Only the token-gated preferences/unsubscribe routes lift suppression.
+        """
+        # Subscribe, then one-click unsubscribe (which blacklists the address).
+        self._subscribe({"email": "optout@example.com", "consent": True, "multibrand": True})
+        contact = self._contact("optout@example.com")
+        token = _newsletter_token(self.env, contact.id)
+        self.url_open(
+            f"/grove/api/v1/newsletter/unsubscribe?c={contact.id}&t={token}",
+            data=b"List-Unsubscribe=One-Click",
+            headers={"X-Odoo-Database": get_db_name(), "X-Grove-Tenant": "goldberry"},
+        )
+        self.assertTrue(
+            self.env["mail.blacklist"].search([("email", "=", "optout@example.com")]),
+            "precondition: unsubscribe blacklisted the address",
+        )
+
+        # A third party resubmits the same address through the public route.
+        resp = self._subscribe({"email": "optout@example.com", "consent": True, "multibrand": True})
+        self.assertEqual(resp.status_code, 200)
+        self.assertFalse(
+            resp.json()["welcomed"],
+            "a blacklisted (opted-out) address must not be re-welcomed via the public route",
+        )
+        self.assertTrue(
+            self.env["mail.blacklist"].search([("email", "=", "optout@example.com")]),
+            "the public subscribe route must not lift a prior unsubscribe's blacklist",
+        )
+        contact.invalidate_recordset(["subscription_ids"])
+        self.assertEqual(
+            self._active_list_ids(contact),
+            set(),
+            "the public route must not revive opted-out lists for a blacklisted address",
+        )
+
+    def test_token_preferences_reenable_lifts_blacklist(self):
+        """The compliant re-opt-in path: an address that unsubscribed can only be
+        un-suppressed through the token-gated preferences route (mailbox owner)."""
+        self._subscribe({"email": "backin@example.com", "consent": True, "multibrand": True})
+        contact = self._contact("backin@example.com")
+        token = _newsletter_token(self.env, contact.id)
+        # Unsubscribe from everything → blacklisted.
+        self.url_open(
+            f"/grove/api/v1/newsletter/unsubscribe?c={contact.id}&t={token}",
+            data=b"List-Unsubscribe=One-Click",
+            headers={"X-Odoo-Database": get_db_name(), "X-Grove-Tenant": "goldberry"},
+        )
+        self.assertTrue(self.env["mail.blacklist"].search([("email", "=", "backin@example.com")]))
+
+        # Re-enable a list through the token-authenticated preferences route.
+        posted = self.url_open(
+            "/grove/api/v1/newsletter/preferences",
+            data=json.dumps({"c": contact.id, "t": token, "lists": {"farm": True}}).encode(),
+            headers={
+                "X-Odoo-Database": get_db_name(),
+                "X-Grove-Tenant": "goldberry",
+                "Content-Type": "application/json",
+            },
+        )
+        self.assertEqual(posted.status_code, 200)
+        self.assertFalse(
+            self.env["mail.blacklist"].search([("email", "=", "backin@example.com")]),
+            "an authenticated re-opt-in through the token route lifts the blacklist",
+        )
+
     def test_unsubscribe_with_bad_token_is_rejected(self):
         self._subscribe({"email": "safe@example.com", "consent": True})
         contact = self._contact("safe@example.com")
