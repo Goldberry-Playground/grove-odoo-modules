@@ -3,7 +3,15 @@
      Reports every published plant listing still missing required content to
      the ops Discord channel and schedules a To-Do activity on each product's
      responsible user. Never unpublishes anything. -->
-<odoo>
+<!-- noupdate="1" (GOL-3562): the fixed past nextcall below is a *first-run*
+     seed only. Without noupdate this record sits under the default
+     noupdate="0", so every `-u grove_headless` rewrites the live ir.cron row —
+     including nextcall — back to the past, firing the audit off-schedule on the
+     next scheduler tick after any module upgrade. With noupdate="1" an upgrade
+     leaves the existing row's advanced nextcall untouched; the seed applies
+     only on a fresh install. Matches Odoo's base crons and the sibling
+     *_cron.xml files here. A schedule change is then a migration. -->
+<odoo noupdate="1">
     <record id="ir_cron_audit_listing_content" model="ir.cron">
         <field name="name">Grove: nightly listing-content audit</field>
         <field name="model_id" ref="product.model_product_template"/>
