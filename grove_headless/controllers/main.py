@@ -555,15 +555,24 @@ def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
     genus = compliance_genus_for(botanical)
     blocked_states = [] if product.grove_compliance_exempt else compliance_blocked_states_for(botanical)
     line_variant = _planner_line_variant(product, has_stock_field)
+    variant_price = line_variant.lst_price if line_variant else None
     return {
         "id": product.id,
         "slug": product.grove_slug or "",
         "name": product.name or "",
         "botanical_name": botanical,
         "genus": genus,
-        "price": product.list_price,
+        # ``price`` is the cart-relevant price: the storefront planner engine
+        # sums ``plant.price`` for the subtotal and the cart line keys on it
+        # (@grove/planner plan.ts / bundle.ts), and the BFF's detail-fetch path
+        # already overwrites it with the variant price. Carrying the resolved
+        # variant lets the BFF skip that fetch, so the feed must set ``price`` to
+        # the variant's ``lst_price`` here (GOL-3524) — otherwise every now-
+        # unenriched row would quote the template list price. ``variant_price``
+        # is the same value under the spec's explicit name.
+        "price": variant_price if variant_price is not None else product.list_price,
         "variant_id": line_variant.id if line_variant else None,
-        "variant_price": line_variant.lst_price if line_variant else None,
+        "variant_price": variant_price,
         "tier": product.grove_shipping_tier or None,
         "pickup_only": bool(product.grove_pickup_only),
         "in_stock": _list_in_stock(product) if has_stock_field else True,
@@ -622,13 +631,16 @@ def _serialize_planner_bundle(env, template):
     with no BoM the engine's count is the only size signal the planner gets.
     """
     variant = template.product_variant_id
+    variant_price = variant.lst_price if variant else None
     return {
         "id": template.id,
         "slug": template.grove_slug or "",
         "name": template.name or "",
-        "price": template.list_price,
+        # See _serialize_planner_plant: ``price`` carries the cart variant's price
+        # so the storefront needs no detail fetch and no change (GOL-3524).
+        "price": variant_price if variant_price is not None else template.list_price,
         "variant_id": variant.id if variant else None,
-        "variant_price": variant.lst_price if variant else None,
+        "variant_price": variant_price,
         "component_ids": _bundle_component_ids(env, variant),
         "consult_built": bool(template.grove_consult_built),
         "tree_count": promotions.variant_tree_count(variant),

@@ -125,28 +125,38 @@ class TestPlannerCatalogSerializer(GroveTaxFixtureMixin, TransactionCase):
 
     def test_variant_id_and_price_default_to_sole_variant(self):
         # A single-variant template: the planner line adds its only variant, and
-        # the variant price mirrors the (equal) template list price.
+        # both price keys mirror the (equal) template list price.
         plant = self._plant(grove_botanical_name="Malus domestica", list_price=18.5)
         row = _serialize_planner_plant(plant, {}, has_stock_field=False)
         self.assertEqual(row["variant_id"], plant.product_variant_id.id)
         self.assertEqual(row["variant_price"], 18.5)
+        self.assertEqual(row["price"], 18.5)
 
-    def test_variant_id_prefers_the_tier_matching_variant(self):
-        # A bareroot-tier tree sold in Bareroot + Potted formats: the planner line
-        # adds the Bareroot variant (effective tier == template tier), not the
-        # pickup-only Potted sibling.
+    def test_variant_id_prefers_the_tier_matching_variant_and_its_price(self):
+        # A bareroot-tier tree sold in Bareroot + Potted formats, with a price
+        # bump on the Bareroot option: the planner line adds the Bareroot variant
+        # (effective tier == template tier), and both ``price`` and
+        # ``variant_price`` quote THAT variant's lst_price — not the template list
+        # price — so the cart line and planner subtotal agree with checkout.
         fmt = self.env["product.attribute"].create({"name": "Format", "create_variant": "always"})
         v_potted = self.env["product.attribute.value"].create({"name": "Potted", "attribute_id": fmt.id})
         v_bareroot = self.env["product.attribute.value"].create({"name": "Bareroot", "attribute_id": fmt.id})
         plant = self._plant(
             grove_botanical_name="Malus domestica",
             grove_shipping_tier="bareroot",
+            list_price=30.0,
             attribute_line_ids=[(0, 0, {"attribute_id": fmt.id, "value_ids": [(6, 0, [v_potted.id, v_bareroot.id])]})],
         )
+        # Bump the Bareroot option so its variant price diverges from the list price.
+        plant.attribute_line_ids.product_template_value_ids.filtered(
+            lambda ptav: ptav.name == "Bareroot"
+        ).price_extra = 5.0
         bareroot_variant = plant.product_variant_ids.filtered(lambda v: v.grove_effective_shipping_tier == "bareroot")
+        self.assertEqual(bareroot_variant.lst_price, 35.0)  # list 30 + 5 extra
         row = _serialize_planner_plant(plant, {}, has_stock_field=False)
         self.assertEqual(row["variant_id"], bareroot_variant.id)
-        self.assertEqual(row["variant_price"], bareroot_variant.lst_price)
+        self.assertEqual(row["variant_price"], 35.0)
+        self.assertEqual(row["price"], 35.0)
 
     def test_substitute_id_resolves_via_genus_map(self):
         chestnut = self._plant(grove_botanical_name="Castanea mollissima")
@@ -264,9 +274,10 @@ class TestPlannerCatalogFeed(GroveTaxFixtureMixin, HttpCase):
         # Component template ids, repeated per unit qty (2× apple, 1× plum).
         self.assertEqual(sorted(mm["component_ids"]), sorted([comp_a.id, comp_a.id, comp_b.id]))
         self.assertIn("tree_count", mm)
-        # A bundle adds its default variant; price mirrors the template list price.
+        # A bundle adds its default variant; both price keys agree with it.
         self.assertEqual(mm["variant_id"], bom_bundle.product_variant_id.id)
         self.assertEqual(mm["variant_price"], 50.0)
+        self.assertEqual(mm["price"], 50.0)
 
         ff50 = bundles[consult_bundle.id]
         self.assertTrue(ff50["consult_built"])
@@ -299,3 +310,5 @@ class TestPlannerCatalogFeed(GroveTaxFixtureMixin, HttpCase):
         row = next(p for p in body["plants"] if p["id"] == persimmon.id)
         self.assertEqual(row["variant_id"], persimmon.product_variant_id.id)
         self.assertEqual(row["variant_price"], persimmon.product_variant_id.lst_price)
+        # price carries the cart variant's price, so no storefront enrich fetch.
+        self.assertEqual(row["price"], row["variant_price"])
