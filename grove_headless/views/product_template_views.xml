@@ -146,6 +146,23 @@
                                 <field name="grove_planner_ready" readonly="1" />
                             </group>
                         </group>
+                        <!-- Syntropic framing (GOL-3548): role, succession and the
+                             stratum (derived from the layer), plus the living-mulch,
+                             substrate and review-flag markers. Role and succession
+                             also gate planner readiness; substrate gates it for a
+                             Fungal (spawn) plant. -->
+                        <group string="Planner (syntropic framing)" name="grove_planner_syntropy" colspan="2">
+                            <group>
+                                <field name="grove_planner_role" />
+                                <field name="grove_succession" />
+                                <field name="grove_planner_stratum" readonly="1" />
+                            </group>
+                            <group>
+                                <field name="grove_living_mulch" />
+                                <field name="grove_substrate" />
+                                <field name="grove_planner_flagged" />
+                            </group>
+                        </group>
                         <!-- Enrichment status panel (GOL-2541): what ran, how far
                              along, and did it succeed/fail — from the latest
                              grove.enrich.job, provenance, the drain cron and the
