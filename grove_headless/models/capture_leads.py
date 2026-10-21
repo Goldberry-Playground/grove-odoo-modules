@@ -17,6 +17,11 @@ LEAD_KINDS = {
     "wholesale": "Wholesale inquiry",
     "farm_visit": "Farm visit request",
     "state_waitlist": "New-state waitlist",
+    # Shop "coming soon" department waitlist (GOL-3494 / GOL-3456 §8). Stays a
+    # restock-style CRM request and is NEVER added to a mailing.list — the
+    # /leads route never touches Email Marketing, so a "tell me when X opens"
+    # ask can't turn into a standing newsletter opt-in.
+    "dept_waitlist": "Department waitlist",
 }
 
 MAX_EMAIL = 254
@@ -25,6 +30,12 @@ MAX_PHONE = 30
 MAX_MESSAGE = 2000
 MAX_LABEL = 100
 MAX_STATE = 2
+MAX_DEPARTMENT = 60
+
+# A department waitlist slug (``mycoforestry``, ``forest-farming``) — the same
+# shape ``product.public.category.grove_effective_slug()`` emits, so the
+# controller can resolve it back to the real department name (GOL-2744).
+DEPT_SLUG_RE = re.compile(r"[a-z0-9]+(?:[-_][a-z0-9]+)*")
 
 
 def _text(payload, key):
@@ -53,6 +64,7 @@ def validate_lead(payload):
         "message": _text(payload, "message"),
         "label": _text(payload, "label"),
         "state": _text(payload, "state").upper(),
+        "department": _text(payload, "department").lower(),
         "product_id": None,
     }
     for key, limit in (("name", MAX_NAME), ("phone", MAX_PHONE), ("message", MAX_MESSAGE), ("label", MAX_LABEL)):
@@ -62,6 +74,13 @@ def validate_lead(payload):
         return None, "state must be a two-letter state code"
     if kind == "state_waitlist" and not clean["state"]:
         return None, "state is required for state_waitlist"
+    if kind == "dept_waitlist":
+        if not clean["department"]:
+            return None, "department is required for dept_waitlist"
+        if len(clean["department"]) > MAX_DEPARTMENT:
+            return None, f"department exceeds {MAX_DEPARTMENT} characters"
+        if not DEPT_SLUG_RE.fullmatch(clean["department"]):
+            return None, "department must be a lowercase slug"
 
     raw_product = payload.get("product_id")
     if raw_product not in (None, ""):
@@ -72,9 +91,9 @@ def validate_lead(payload):
     return clean, None
 
 
-def lead_title(kind, name, email, product_name=None, state=None):
+def lead_title(kind, name, email, product_name=None, state=None, dept_name=None):
     title = f"{LEAD_KINDS[kind]}: {name or email}"
-    context = product_name or state
+    context = product_name or dept_name or state
     return f"{title} ({context})" if context else title
 
 

@@ -41,6 +41,29 @@ class TestValidateLead(unittest.TestCase):
         _clean, err = cl.validate_lead({"email": "a@b.co", "kind": "wholesale", "message": "x" * (cl.MAX_MESSAGE + 1)})
         self.assertIn("message", err)
 
+    def test_dept_waitlist_needs_department(self):
+        self.assertEqual(
+            cl.validate_lead({"email": "a@b.co", "kind": "dept_waitlist"})[1],
+            "department is required for dept_waitlist",
+        )
+
+    def test_dept_waitlist_accepts_slug_and_lowercases(self):
+        clean, err = cl.validate_lead({"email": "a@b.co", "kind": "dept_waitlist", "department": " Mycoforestry "})
+        self.assertIsNone(err)
+        self.assertEqual(clean["department"], "mycoforestry")
+
+    def test_dept_waitlist_rejects_non_slug(self):
+        self.assertEqual(
+            cl.validate_lead({"email": "a@b.co", "kind": "dept_waitlist", "department": "not a slug!"})[1],
+            "department must be a lowercase slug",
+        )
+        self.assertIn(
+            "department exceeds",
+            cl.validate_lead({"email": "a@b.co", "kind": "dept_waitlist", "department": "x" * (cl.MAX_DEPARTMENT + 1)})[
+                1
+            ],
+        )
+
     def test_product_id_must_be_int(self):
         self.assertEqual(
             cl.validate_lead({"email": "a@b.co", "kind": "food_forest_consult", "product_id": "abc"})[1],
@@ -59,6 +82,10 @@ class TestLeadText(unittest.TestCase):
             "Food forest consult: Ada (Centennial Food Forest (100 Trees))",
         )
         self.assertEqual(cl.lead_title("state_waitlist", "Ada", "a@b.co", state="CA"), "New-state waitlist: Ada (CA)")
+        self.assertEqual(
+            cl.lead_title("dept_waitlist", "Ada", "a@b.co", dept_name="Mycoforestry"),
+            "Department waitlist: Ada (Mycoforestry)",
+        )
 
     def test_tag_names(self):
         self.assertEqual(cl.lead_tag_names("farm_visit", "upick"), ["Farm visit request", "farm-visit:upick"])
