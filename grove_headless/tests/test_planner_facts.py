@@ -49,6 +49,9 @@ _READY_VALS = {
     "grove_years_to_fruit_min": 4,
     "grove_pollination_min": 2,
     "grove_harvest_months": "9,10,11",
+    # Role and succession now also gate readiness (GOL-3548 §A).
+    "grove_planner_role": "anchor",
+    "grove_succession": "long",
 }
 
 _EDITABLE_PLANNER_FIELDS = [
