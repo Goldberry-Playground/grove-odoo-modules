@@ -30,9 +30,12 @@ class GrovePlannerTester(models.Model):
     )
     active = fields.Boolean(string="Active", default=True)
 
-    _sql_constraints = [
-        ("token_uniq", "unique(token)", "A tester token must be unique."),
-    ]
+    # Odoo 19 dropped the `_sql_constraints` list attribute (it warns and never
+    # creates the constraint); declared with the modern `models.Constraint`.
+    _token_uniq = models.Constraint(
+        "unique(token)",
+        "A tester token must be unique.",
+    )
 
     @api.model
     def name_for_token(self, token):

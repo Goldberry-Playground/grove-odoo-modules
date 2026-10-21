@@ -50,13 +50,13 @@ class GrovePlannerRule(models.Model):
     label = fields.Char(string="Label", help="Shown to testers on the what-if slider.")
     hint = fields.Char(string="Hint", help="One line of guidance shown to testers.")
 
-    _sql_constraints = [
-        (
-            "key_scope_uniq",
-            "unique(key, scope)",
-            "A planner rule key must be unique within a scope.",
-        ),
-    ]
+    # Odoo 19 dropped the `_sql_constraints` list attribute (it warns and never
+    # creates the constraint); declared with the modern `models.Constraint` so
+    # the UNIQUE is created on `-u grove_headless`.
+    _key_scope_uniq = models.Constraint(
+        "unique(key, scope)",
+        "A planner rule key must be unique within a scope.",
+    )
 
     @api.model
     def rules_for_scope(self, scope="retail"):
