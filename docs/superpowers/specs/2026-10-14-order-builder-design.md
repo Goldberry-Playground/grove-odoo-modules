@@ -310,7 +310,7 @@ Done means the catalog feed serves at least 20 planner-ready plants on prod befo
 
 Order of landing: A and B first (the storefront package is developed against a fixture, so C can start the same day and switch to the live feed on QA). D last. One board issue per row; create them on the board directly, not as GitHub issues, so github-sync does not twin them.
 
-Kill switch: the home-page section and `/plan` route are behind a `NEXT_PUBLIC_PLANNER` flag baked at image build; the Odoo endpoint stays up regardless. The consult checkbox is governed by the Odoo threshold parameter; setting it to 0 disables the offer without a deploy.
+Kill switch: the home-page section and `/plan` route are behind `PLANNER_ENABLED`, a runtime server env read per request (both consumers are server components on `force-dynamic` routes), so QA sets it as a plain App Platform `RUN_TIME` var on the same image prod runs with it unset, and flipping prod is a redeploy, not a rebuild (GOL-3527; `NEXT_PUBLIC_PLANNER` is accepted as an alias for local renders); the Odoo endpoint stays up regardless. The consult checkbox is governed by the Odoo threshold parameter; setting it to 0 disables the offer without a deploy.
 
 ## Open items (not blocking)
 
