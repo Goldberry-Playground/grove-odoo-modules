@@ -2302,6 +2302,11 @@ class GroveHeadlessAPI(http.Controller):
         # Computed the SAME way _create_draft_order's gate will decide, so the
         # cart checkbox and the checkout can never disagree.
         consult_eligible = _consult_eligible_for_quote(request.website, request.env, lines, payload.get("promo_code"))
+        # The product.product id for the consult service line (GOL-3541 spec
+        # D.2). Emitted on every quote (eligible or not) so the shape is uniform;
+        # the storefront only renders the checkbox and appends the line when
+        # consult_eligible is true. `null` when the ref is missing.
+        consult_variant_id = _consult_variant_id_for_quote(request.website, request.env)
         response = {
             "deposit_now": deposit_now,
             "deposit_reason": reason,
@@ -2310,6 +2315,7 @@ class GroveHeadlessAPI(http.Controller):
             "after_cutover": _after_deposit_cutover(request.env, today),
             "ship_wave": ship_wave,
             "consult_eligible": consult_eligible,
+            "consult_variant_id": consult_variant_id,
             "lines": line_quotes,
             "fulfillment_route": "printify" if printify else "in_house",
             "shipping_amount": shipping_amount,
@@ -4221,6 +4227,25 @@ def _consult_eligible_for_quote(website, env, lines, promo_code):
     except _Rollback:
         pass
     return eligible
+
+
+def _consult_variant_id_for_quote(website, env):
+    """The ``product.product`` id of the free planting consult (GOL-3541 spec
+    D.2), so the storefront's consult checkbox can POST it without hardcoding a
+    prod id. The consult product is ``website_published: False``, so the
+    storefront never finds it in the catalog list and must be handed the id
+    here. ``None`` when the ref is missing.
+
+    The consult template carries no variant attributes, so its ``product.product``
+    is the single ``product_variant_id``, resolved under the request website's
+    company (the tenant _create_draft_order will accept the id for). Emitted on
+    every quote for a uniform shape; the storefront only acts on it when
+    ``consult_eligible`` is true.
+    """
+    consult_tmpl = env.ref("grove_headless.product_planting_consult", raise_if_not_found=False)
+    if not consult_tmpl:
+        return None
+    return consult_tmpl.sudo().with_company(website.company_id).product_variant_id.id or None
 
 
 def _create_draft_order(website, env, payload, discount_out=None):
