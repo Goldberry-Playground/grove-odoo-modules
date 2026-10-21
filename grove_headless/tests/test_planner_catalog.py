@@ -143,9 +143,7 @@ class TestPlannerCatalogSerializer(GroveTaxFixtureMixin, TransactionCase):
             grove_shipping_tier="bareroot",
             attribute_line_ids=[(0, 0, {"attribute_id": fmt.id, "value_ids": [(6, 0, [v_potted.id, v_bareroot.id])]})],
         )
-        bareroot_variant = plant.product_variant_ids.filtered(
-            lambda v: v.grove_effective_shipping_tier == "bareroot"
-        )
+        bareroot_variant = plant.product_variant_ids.filtered(lambda v: v.grove_effective_shipping_tier == "bareroot")
         row = _serialize_planner_plant(plant, {}, has_stock_field=False)
         self.assertEqual(row["variant_id"], bareroot_variant.id)
         self.assertEqual(row["variant_price"], bareroot_variant.lst_price)
