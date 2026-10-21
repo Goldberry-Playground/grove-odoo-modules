@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.83.0",
+    "version": "19.0.1.86.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -57,6 +57,13 @@
         # _setup_company_pos aborts (silently skipping ALL POS wiring), which is
         # exactly what a chart-less CI DB exposed (GOL-2014).
         "pos_sale",
+        # mass_mailing makes Odoo Email Marketing the list of record for every
+        # Grove newsletter (Ghost is blog-only) — Josh "option C", 2026-10-19,
+        # GOL-3454. Provides mailing.list / mailing.contact /
+        # mailing.subscription and mail.blacklist, which the newsletter
+        # subscribe/unsubscribe/preferences routes read and write. Adding it
+        # here auto-installs it on the next `-u grove_headless`.
+        "mass_mailing",
     ],
     "data": [
         "security/grove_groups.xml",
@@ -88,6 +95,7 @@
         "data/grove_dormancy_params.xml",
         "data/grove_zone_filters.xml",
         "data/restock_email_templates.xml",
+        "data/mailing_lists.xml",
         "data/grove_seed_filters.xml",
         "data/printify_actions.xml",
         "data/printify_cron.xml",

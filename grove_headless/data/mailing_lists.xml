@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!--
+        Grove newsletter lists of record (GOL-3454, Josh "option C" 2026-10-19).
+
+        Three brand lists seeded with stable external IDs so the subscribe
+        endpoint maps a brand slug -> list by external id rather than by name:
+
+            nursery -> grove_headless.mailing_list_nursery   (At The Grove Nursery)
+            farm    -> grove_headless.mailing_list_farm       (Goldberry Grove Farm)
+            digest  -> grove_headless.mailing_list_digest      (Gathering at the Grove;
+                                                                GGG rides the Digest)
+
+        mailing.list is a GLOBAL model in standard Odoo — it carries no
+        company_id. Per-brand sender identity, the Mailgun news.<brand> server,
+        and the CAN-SPAM footer address all resolve at SEND time from the
+        mailing.mailing's company (§1, §5 of the design spec), not from the list
+        record. The brand->company mapping lives in the controller, keyed off
+        the tenant website's company.
+
+        noupdate="1": seed once, then leave admin edits (name tweaks, archiving)
+        alone on subsequent `-u grove_headless`.
+    -->
+    <data noupdate="1">
+        <record id="mailing_list_nursery" model="mailing.list">
+            <field name="name">Nursery News</field>
+            <field name="active" eval="True" />
+            <field name="is_public" eval="True" />
+        </record>
+
+        <record id="mailing_list_farm" model="mailing.list">
+            <field name="name">Farm News</field>
+            <field name="active" eval="True" />
+            <field name="is_public" eval="True" />
+        </record>
+
+        <record id="mailing_list_digest" model="mailing.list">
+            <field name="name">Grove Digest</field>
+            <field name="active" eval="True" />
+            <field name="is_public" eval="True" />
+        </record>
+    </data>
+</odoo>

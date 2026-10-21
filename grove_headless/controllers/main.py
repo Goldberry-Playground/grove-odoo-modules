@@ -7,13 +7,14 @@ import re
 import time
 from datetime import date as _date
 from datetime import datetime as _datetime
+from datetime import timedelta
 from datetime import timezone as _timezone
 from types import SimpleNamespace
 
 import psycopg2
 import requests
 from markupsafe import Markup
-from odoo import fields, http
+from odoo import fields, http, tools
 from odoo.http import Response, request
 
 from ..hooks import _get_company_wv_state_tax
@@ -21,7 +22,12 @@ from ..models import bundle_substitution, capture_leads, printify_client, promot
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
 from ..models.mail_from import mail_from_vals
-from ..models.newsletter import WAITLIST_INTEREST_PREFIX, newsletter_tag_names
+from ..models.newsletter import (
+    NEWSLETTER_LIST_KEYS,
+    WAITLIST_INTEREST_PREFIX,
+    newsletter_tag_names,
+    resolve_newsletter_lists,
+)
 from ..models.order_alerts import (
     build_order_card_payload,
     format_merchant_email,
@@ -2743,14 +2749,124 @@ class GroveHeadlessAPI(http.Controller):
 
         _log_newsletter_attribution(partner, source, payload.get("attribution"))
 
+        # ── List of record: subscribe to the Odoo Email Marketing lists ──────
+        # (GOL-3454, Josh "option C"). The res.partner tagging above stays for
+        # order attribution; the mailing.list membership below is what actually
+        # makes someone a newsletter subscriber. A failure here must not fail
+        # the opt-in (best-effort, same stance as attribution logging), so it is
+        # wrapped and only annotates the response.
+        requested_lists = payload.get("lists")
+        if requested_lists is not None and not isinstance(requested_lists, list):
+            return _json_response({"error": "lists must be a list"}, status=400)
+        if isinstance(requested_lists, list):
+            for key in requested_lists:
+                if not isinstance(key, str) or key.strip().lower() not in NEWSLETTER_LIST_KEYS:
+                    return _json_response(
+                        {"error": f"unknown list key: {key!r}; expected one of {list(NEWSLETTER_LIST_KEYS)}"},
+                        status=400,
+                    )
+        tenant_slug = request.website.grove_tenant_slug()
+        list_keys = resolve_newsletter_lists(
+            tenant_slug,
+            requested=requested_lists,
+            multibrand=bool(payload.get("multibrand")),
+        )
+        subscribed_keys = []
+        welcomed = False
+        try:
+            subscribed_keys, welcomed = _apply_newsletter_subscription(
+                request.env, current_company, partner, email, payload.get("name"), list_keys
+            )
+        except Exception:  # noqa: BLE001 — list membership is best-effort; never fail the opt-in
+            _logger.warning("newsletter list subscription failed for %s", email, exc_info=True)
+
         return _json_response(
             {
                 "partner_id": partner.id,
                 "email": partner.email,
                 "tags": tag_names,
                 "created": created,
+                "lists": subscribed_keys,
+                "welcomed": welcomed,
             }
         )
+
+    # ── Newsletter: one-click unsubscribe + per-list preferences ─────────────
+
+    @http.route(
+        "/grove/api/v1/newsletter/unsubscribe",
+        type="http",
+        auth="public",
+        website=True,
+        methods=["GET", "POST"],
+        csrf=False,
+    )
+    def newsletter_unsubscribe(self, **kwargs):
+        """RFC 8058 one-click unsubscribe (the ``List-Unsubscribe-Post`` target).
+
+        A mail client POSTs here with no session when the recipient clicks
+        "unsubscribe". The link carries ``c`` (mailing.contact id) and ``t`` (a
+        per-contact HMAC token); we verify the token, opt the contact out of
+        *every* Grove list, and add the email to ``mail.blacklist`` so no future
+        mailing reaches it. Always returns 200 on a valid token (RFC 8058
+        requires the POST to succeed) and never reveals whether the contact
+        exists for a bad one.
+
+        A GET on the same URI (older clients open the ``List-Unsubscribe`` URI
+        in a browser instead of doing one-click) is non-destructive by HTTP
+        contract: it returns the preference state so the storefront can render a
+        confirm screen rather than silently unsubscribing on a link preview.
+        """
+        contact = _newsletter_contact_from_token(request.env, kwargs.get("c"), kwargs.get("t"))
+        if contact is None:
+            return _json_response({"error": "invalid or expired link"}, status=400)
+        if request.httprequest.method == "GET":
+            return _json_response(_newsletter_preferences_state(request.env, contact))
+        contact.sudo().subscription_ids.write({"opt_out": True})
+        if contact.email_normalized:
+            request.env["mail.blacklist"].sudo()._add(contact.email_normalized)
+        return _json_response({"ok": True, "unsubscribed": True})
+
+    @http.route(
+        "/grove/api/v1/newsletter/preferences",
+        type="http",
+        auth="public",
+        website=True,
+        methods=["GET", "POST"],
+        csrf=False,
+    )
+    def newsletter_preferences(self, **kwargs):
+        """Per-list preference centre behind a per-contact token (GOL-3454 §4).
+
+        GET  ?c=&t=            → { email, blacklisted, lists: [{key, name, subscribed}] }
+        POST { c, t, lists:{key: bool} } → apply each list's subscribed state and
+             return the same shape. Unsubscribing from every list also blacklists
+             the email; re-subscribing to any list lifts the blacklist (the
+             recipient is asking for mail again).
+        """
+        if request.httprequest.method == "GET":
+            contact = _newsletter_contact_from_token(request.env, kwargs.get("c"), kwargs.get("t"))
+            if contact is None:
+                return _json_response({"error": "invalid or expired link"}, status=400)
+            return _json_response(_newsletter_preferences_state(request.env, contact))
+
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        if not isinstance(payload, dict):
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        contact = _newsletter_contact_from_token(request.env, payload.get("c"), payload.get("t"))
+        if contact is None:
+            return _json_response({"error": "invalid or expired link"}, status=400)
+        desired = payload.get("lists")
+        if not isinstance(desired, dict):
+            return _json_response({"error": "lists must be an object of {key: bool}"}, status=400)
+        for key in desired:
+            if key not in NEWSLETTER_LIST_KEYS:
+                return _json_response({"error": f"unknown list key: {key!r}"}, status=400)
+        _apply_newsletter_preferences(request.env, contact, desired)
+        return _json_response(_newsletter_preferences_state(request.env, contact))
 
     # ── Capture: CRM leads + back-in-stock (2026-10-15 hotfix) ───────────
 
@@ -2969,6 +3085,244 @@ def _log_newsletter_attribution(partner, source, attribution):
         partner.sudo().message_post(body="<br/>".join(lines))
     except Exception:  # noqa: BLE001 — audit log is best-effort, never fatal
         _logger.warning("newsletter attribution log failed for partner %s", partner.id, exc_info=True)
+
+
+# ── Newsletter list of record: subscription + token + welcome (GOL-3454) ──────
+
+# A repeat subscribe inside this window reuses the contact and does NOT fire a
+# second welcome email (Josh 2026-10-20, §3: "no second welcome within a short
+# window"). A fresh list added after the window does earn a new welcome.
+NEWSLETTER_WELCOME_WINDOW = timedelta(hours=24)
+
+# Scope string for the per-contact unsubscribe/preferences HMAC. Changing it
+# invalidates every link already in the wild.
+_NEWSLETTER_TOKEN_SCOPE = "grove-newsletter-contact"
+
+
+def _newsletter_list_record(env, key):
+    """Resolve a list KEY to its seeded mailing.list, or an empty recordset."""
+    try:
+        return env.ref(f"grove_headless.mailing_list_{key}").sudo()
+    except ValueError:
+        return env["mailing.list"].sudo().browse()
+
+
+def _newsletter_token(env, contact_id):
+    """Stable, storage-free per-contact token for unsubscribe/preferences links.
+
+    An HMAC over the contact id keyed by the database secret (``odoo.tools.hmac``)
+    — the same primitive Odoo uses for its own unsubscribe links. No row to
+    store and no GC cron to reap (Josh dropped the confirmation token entirely),
+    yet the link is unforgeable and survives upgrades.
+    """
+    return tools.hmac(env(su=True), _NEWSLETTER_TOKEN_SCOPE, str(contact_id))
+
+
+def _newsletter_contact_from_token(env, raw_id, token):
+    """Return the mailing.contact for a (c, t) link pair, or None if it fails.
+
+    Constant-time token comparison; a bad id or token yields None so callers
+    can return an opaque error without leaking whether the contact exists.
+    """
+    if not raw_id or not token:
+        return None
+    try:
+        contact_id = int(raw_id)
+    except (TypeError, ValueError):
+        return None
+    if not tools.consteq(str(token), _newsletter_token(env, contact_id)):
+        return None
+    contact = env["mailing.contact"].sudo().browse(contact_id).exists()
+    return contact or None
+
+
+def _apply_newsletter_subscription(env, company, partner, email, name, list_keys):
+    """Subscribe ``email`` to each list in ``list_keys`` and send one welcome.
+
+    Returns ``(subscribed_keys, welcomed)``. Idempotent: an existing
+    mailing.contact (matched on ``email_normalized``) is reused, an existing
+    subscription is re-activated (``opt_out`` cleared) rather than duplicated,
+    and the welcome is suppressed when the contact was welcomed inside
+    :data:`NEWSLETTER_WELCOME_WINDOW`. A prior unsubscribe (blacklist) is
+    honored: this unauthenticated route never lifts suppression or re-mails a
+    previously opted-out address (that happens only on the token-gated
+    preferences/unsubscribe routes).
+    """
+    normalized = tools.email_normalize(email) or email.strip().lower()
+    Contact = env["mailing.contact"].sudo()
+    Subscription = env["mailing.subscription"].sudo()
+
+    # Honor a prior opt-out. This public route is authenticated only by the
+    # shared storefront key, not by the mailbox owner, so a third party must
+    # never re-subscribe, re-mail, or un-suppress an address that previously
+    # unsubscribed (CAN-SPAM §5(a)(4)). For a blacklisted address we record the
+    # intended keys for the response but make no durable consent change: leaving
+    # the existing rows opted-out prevents a later token re-opt-in to one list
+    # from silently reviving lists a stranger tried to add. Re-opt-in happens
+    # only on the token-gated preferences route, which proves mailbox control.
+    was_blacklisted = bool(normalized and env["mail.blacklist"].sudo().search([("email", "=", normalized)], limit=1))
+
+    contact = Contact.search([("email_normalized", "=", normalized)], limit=1)
+    if not contact:
+        contact = Contact.create({"name": (name or email), "email": email})
+
+    newly_active = False
+    subscribed_keys = []
+    for key in list_keys:
+        mailing_list = _newsletter_list_record(env, key)
+        if not mailing_list:
+            continue
+        subscribed_keys.append(key)
+        if was_blacklisted:
+            continue
+        sub = Subscription.search([("contact_id", "=", contact.id), ("list_id", "=", mailing_list.id)], limit=1)
+        if not sub:
+            Subscription.create({"contact_id": contact.id, "list_id": mailing_list.id, "opt_out": False})
+            newly_active = True
+        elif sub.opt_out:
+            sub.opt_out = False
+            newly_active = True
+
+    welcomed = False
+    now = fields.Datetime.now()
+    within_window = contact.grove_welcome_date and (now - contact.grove_welcome_date) < NEWSLETTER_WELCOME_WINDOW
+    if subscribed_keys and newly_active and not within_window and not was_blacklisted:
+        # The welcome is best-effort: the list membership above is the durable
+        # subscription, so a mail-server hiccup must not cost us the signup or
+        # the returned keys. Stamp the window only once the mail is queued.
+        try:
+            if _send_newsletter_welcome(env, company, contact, subscribed_keys):
+                contact.grove_welcome_date = now
+                welcomed = True
+        except Exception:  # noqa: BLE001 — welcome email is best-effort
+            _logger.warning("newsletter welcome send failed for contact %s", contact.id, exc_info=True)
+    return subscribed_keys, welcomed
+
+
+def _newsletter_preferences_state(env, contact):
+    """Serialise a contact's per-list subscription state for the prefs page."""
+    active_list_ids = set(contact.subscription_ids.filtered(lambda s: not s.opt_out).mapped("list_id").ids)
+    lists = []
+    for key in NEWSLETTER_LIST_KEYS:
+        mailing_list = _newsletter_list_record(env, key)
+        if not mailing_list:
+            continue
+        lists.append({"key": key, "name": mailing_list.name, "subscribed": mailing_list.id in active_list_ids})
+    blacklisted = bool(
+        contact.email_normalized
+        and env["mail.blacklist"].sudo().search([("email", "=", contact.email_normalized)], limit=1)
+    )
+    return {"email": contact.email, "blacklisted": blacklisted, "lists": lists}
+
+
+def _apply_newsletter_preferences(env, contact, desired):
+    """Apply a ``{key: bool}`` preference map to a contact's subscriptions.
+
+    Creates a subscription row for a newly-enabled list, flips ``opt_out`` for
+    the rest. Unsubscribing from every list blacklists the email; enabling any
+    list lifts the blacklist.
+    """
+    Subscription = env["mailing.subscription"].sudo()
+    for key, want in desired.items():
+        mailing_list = _newsletter_list_record(env, key)
+        if not mailing_list:
+            continue
+        sub = Subscription.search([("contact_id", "=", contact.id), ("list_id", "=", mailing_list.id)], limit=1)
+        if sub:
+            sub.opt_out = not want
+        elif want:
+            Subscription.create({"contact_id": contact.id, "list_id": mailing_list.id, "opt_out": False})
+
+    normalized = contact.email_normalized
+    if normalized:
+        any_active = bool(contact.subscription_ids.filtered(lambda s: not s.opt_out))
+        if any_active:
+            env["mail.blacklist"].sudo()._remove(normalized)
+        else:
+            env["mail.blacklist"].sudo()._add(normalized)
+
+
+def _send_newsletter_welcome(env, company, contact, subscribed_keys):
+    """Send the single-opt-in welcome email. Returns True if it was queued.
+
+    Transactional (sent through the existing per-company mail server, NOT the
+    bulk ``news.<brand>`` server — §3/§6), carrying RFC 8058 one-click
+    unsubscribe headers so the welcome itself is unsubscribable. The CAN-SPAM
+    footer address is rendered from ``res.company`` (§5), never hard-coded.
+
+    COPY PENDING GOL-3456: the body/subject wording and consent copy are drafted
+    on GOL-3456 (privacy notice attached there). The structure here — list
+    names, company postal address, one-click unsubscribe — is final; swap the
+    marked strings for the approved copy when GOL-3456 lands.
+    """
+    if not contact.email:
+        return False
+    base_url = env["ir.config_parameter"].sudo().get_param("web.base.url", "")
+    token = _newsletter_token(env, contact.id)
+    unsubscribe_url = f"{base_url}/grove/api/v1/newsletter/unsubscribe?c={contact.id}&t={token}"
+    preferences_url = f"{base_url}/grove/api/v1/newsletter/preferences?c={contact.id}&t={token}"
+
+    list_names = []
+    for key in subscribed_keys:
+        mailing_list = _newsletter_list_record(env, key)
+        if mailing_list:
+            list_names.append(mailing_list.name)
+    names_html = ", ".join(html.escape(n) for n in list_names) or "the Grove newsletter"
+
+    footer = _company_can_spam_address(company)
+    # --- COPY PENDING GOL-3456 (interim) ---------------------------------
+    subject = f"Welcome to {html.escape(company.name or 'the Grove')}"
+    body = Markup(
+        "<p>Thanks for subscribing. You're now on: <strong>{names}</strong>.</p>"
+        '<p>You can <a href="{prefs}">manage your preferences</a> or '
+        '<a href="{unsub}">unsubscribe</a> at any time.</p>'
+        '<hr/><p style="color:#888;font-size:12px">{footer}</p>'
+    ).format(
+        names=Markup(names_html),
+        prefs=Markup(html.escape(preferences_url, quote=True)),
+        unsub=Markup(html.escape(unsubscribe_url, quote=True)),
+        footer=Markup(footer),
+    )
+    # ---------------------------------------------------------------------
+
+    headers = {
+        "List-Unsubscribe": f"<{unsubscribe_url}>",
+        "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+    }
+    mail = (
+        env["mail.mail"]
+        .sudo()
+        .create(
+            {
+                "subject": subject,
+                "body_html": body,
+                "email_to": contact.email,
+                "auto_delete": True,
+                "headers": repr(headers),
+                **mail_from_vals(env, company),
+            }
+        )
+    )
+    mail.send(raise_exception=False)
+    return True
+
+
+def _company_can_spam_address(company):
+    """One-line HTML CAN-SPAM postal footer from a res.company (GOL-3454 §5).
+
+    The address lives on the company record (2291 Armstrong Road, Summersville,
+    WV 26651 on companies 1/2/3) so a correction there flows to every mailing;
+    nothing is hard-coded here.
+    """
+    if not company:
+        return ""
+    parts = [company.name, company.street, company.street2]
+    locality = " ".join(
+        p for p in [company.city, company.state_id.code if company.state_id else "", company.zip] if p
+    ).strip()
+    if locality:
+        parts.append(locality)
+    return html.escape(", ".join(p for p in parts if p))
 
 
 def _partner_vals_from_payload(env, contact, address):
