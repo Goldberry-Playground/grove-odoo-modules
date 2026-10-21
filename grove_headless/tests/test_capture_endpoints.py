@@ -124,6 +124,36 @@ class TestLeadEndpoint(_BearerMixin, HttpCase):
         self.assertEqual(self._post("/grove/api/v1/leads", {"email": "a@b.co", "kind": "nope"}).status_code, 400)
         self.assertFalse(self._leads("a@b.co"))
 
+    def test_dept_waitlist_is_a_lead_not_a_mailing_subscription(self):
+        """Shop "coming soon" waitlist lands as a CRM request tagged for the
+        launch pull — and NEVER joins a mailing.list (GOL-3456 §7/§8)."""
+        self.env["product.public.category"].create(
+            {"name": "Mycoforestry", "grove_slug": "mycoforestry", "grove_node_kind": "department"}
+        )
+        email = "coming-soon@example.com"
+        with mock.patch.object(grove_main, "_notify_discord"):
+            resp = self._post(
+                "/grove/api/v1/leads",
+                {
+                    "email": email,
+                    "kind": "dept_waitlist",
+                    "department": "mycoforestry",
+                    "label": "nursery-waitlist-mycoforestry",
+                    "source": "notify-me",
+                },
+            )
+        self.assertEqual(resp.status_code, 200, resp.content)
+        lead = self._leads(email)
+        self.assertEqual(len(lead), 1)
+        self.assertEqual(lead.name, "Department waitlist: coming-soon@example.com (Mycoforestry)")
+        self.assertIn("Department waitlist", lead.tag_ids.mapped("name"))
+        # The contact carries the readable launch-pull tag, same as the
+        # newsletter waitlist path (GOL-2744).
+        self.assertIn("Waitlist: Mycoforestry", lead.partner_id.category_id.mapped("name"))
+        # Structural guarantee: zero Email Marketing footprint.
+        self.assertFalse(self.env["mailing.contact"].sudo().search([("email", "=", email)]))
+        self.assertFalse(self.env["mailing.subscription"].sudo().search([("contact_id.email", "=", email)]))
+
 
 @tagged("grove_headless", "post_install", "-at_install")
 class TestRestockEndpoint(_ShrubFixture, _BearerMixin, GroveTaxFixtureMixin, HttpCase):

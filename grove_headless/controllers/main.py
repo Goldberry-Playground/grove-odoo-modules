@@ -25,6 +25,7 @@ from ..models.mail_from import mail_from_vals
 from ..models.newsletter import (
     NEWSLETTER_LIST_KEYS,
     WAITLIST_INTEREST_PREFIX,
+    _humanize_slug,
     newsletter_tag_names,
     resolve_newsletter_lists,
 )
@@ -2883,9 +2884,13 @@ class GroveHeadlessAPI(http.Controller):
         request as a CRM lead (Josh 2026-10-15: customer relationships live in
         Odoo CRM; Ghost is only the newsletter).
 
-        Body: {email, kind, name?, phone?, message?, label?, state?, product_id?, source?}
-        kind: food_forest_consult | wholesale | farm_visit | state_waitlist
+        Body: {email, kind, name?, phone?, message?, label?, state?, department?, product_id?, source?}
+        kind: food_forest_consult | wholesale | farm_visit | state_waitlist | dept_waitlist
         -> 200 {lead_id, partner_id, created}
+
+        A ``dept_waitlist`` (shop "coming soon" notify-me) stays a CRM request
+        and is never added to a mailing.list; it carries a ``Waitlist: <Dept>``
+        contact tag so the launch pull matches the newsletter waitlist path.
 
         Same email + kind within 24 h appends a note to the open lead instead of
         creating a second one, so a double-submit never splits a relationship.
@@ -6666,6 +6671,20 @@ def _upsert_capture_lead(env, company, clean, source=""):
     if clean.get("product_id"):
         product = env["product.template"].sudo().browse(clean["product_id"]).exists()
         product_name = product.name if product else None
+
+    # A department waitlist resolves its slug to the real department name so the
+    # lead title and the ``Waitlist: <Department>`` contact tag read the same as
+    # the newsletter waitlist path (GOL-2744/GOL-3494) — Josh's launch pull
+    # filters res.partner.category by that exact tag. Unknown slugs fall back to
+    # a title-cased slug, identical to newsletter_tag_names.
+    dept_name = None
+    if clean["kind"] == "dept_waitlist" and clean.get("department"):
+        resolved = _resolve_waitlist_dept_names(env, [WAITLIST_INTEREST_PREFIX + clean["department"]])
+        dept_name = resolved.get(clean["department"]) or _humanize_slug(clean["department"])
+        waitlist_category_ids = _get_or_create_partner_categories(env, [f"Waitlist: {dept_name}"])
+        if waitlist_category_ids:
+            partner.write({"category_id": [(4, cid) for cid in waitlist_category_ids]})
+
     tags = _crm_tags(env, capture_leads.lead_tag_names(clean["kind"], clean["label"]))
     kind_tag = tags[:1]
     description = capture_leads.lead_description(clean, source=source)
@@ -6690,7 +6709,12 @@ def _upsert_capture_lead(env, company, clean, source=""):
     lead = Lead.create(
         {
             "name": capture_leads.lead_title(
-                clean["kind"], clean["name"], clean["email"], product_name=product_name, state=clean["state"] or None
+                clean["kind"],
+                clean["name"],
+                clean["email"],
+                product_name=product_name,
+                state=clean["state"] or None,
+                dept_name=dept_name,
             ),
             "type": "opportunity",
             "partner_id": partner.id,
