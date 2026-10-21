@@ -1355,6 +1355,11 @@ class GroveHeadlessAPI(http.Controller):
             "state_zones": {state: STATE_ZONE_BANDS[state] for state in sorted(STATE_ZONE_BANDS)},
             "plants": plant_rows,
             "bundles": bundle_rows,
+            # Editable scoring weights for the storefront engine (GOL-3549 §B.1).
+            # Only keys that exist as rows ship; the engine falls back to its
+            # constants (== the seed) for any missing key, so the first feed
+            # after this lands changes nothing.
+            "rules": request.env["grove.planner.rule"].sudo().rules_for_scope("retail"),
         }
         return _json_response(body, headers={"Cache-Control": PLANNER_CATALOG_CACHE_CONTROL})
 
