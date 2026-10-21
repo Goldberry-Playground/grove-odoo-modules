@@ -21,6 +21,9 @@ tests/__init__.py AND the root conftest's collect_ignore_glob so it is not
 double-skipped (GOL-1936).
 """
 
+from datetime import date
+from unittest import mock
+
 from odoo.addons.grove_headless.controllers import main as grove_main
 from odoo.addons.grove_headless.models import order_digest, promotions
 from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
@@ -143,6 +146,19 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
         payload.update(extra)
         return payload
 
+    # In-season date for the checkout calls. The eligibility carts carry plain
+    # storable trees, which default to the "potted" shipping tier, and the
+    # nursery's wave gate (_validate_ship_wave) refuses a potted line outside
+    # LEAFED_WINDOW (May 1 to Oct 15) — so without a pinned clock these tests
+    # pass until Oct 15 and fail from Oct 16 (they did, on 2026-10-21). Same
+    # pattern as test_checkout_ship_wave / test_seed_checkout; the consult gate
+    # under test does not read the date.
+    IN_SEASON = date(2026, 9, 15)
+
+    def _draft(self, payload):
+        with mock.patch.object(grove_main, "_today_utc", return_value=self.IN_SEASON):
+            return grove_main._create_draft_order(self._website(), self.env, payload)
+
     # ── D.1 the product ────────────────────────────────────────────────────
 
     def test_product_is_a_zero_service_unpublished_gate_exempt(self):
@@ -210,7 +226,7 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
     def test_create_draft_order_rejects_the_consult_line_when_ineligible(self):
         payload = self._cart_payload([{"variant_id": self.consult_variant.id, "quantity": 1}])
         with mute_logger("odoo.addons.grove_headless.controllers.main"):
-            order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+            order, error = self._draft(payload)
         self.assertIsNone(order)
         self.assertIsNotNone(error)
         self.assertEqual(error.status_code, 400)
@@ -232,7 +248,7 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
                 {"variant_id": self.consult_variant.id, "quantity": 1},
             ]
         )
-        order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        order, error = self._draft(payload)
         self.assertIsNone(error)
         self.assertTrue(order)
         self.assertTrue(order.grove_consult_requested)
@@ -312,7 +328,7 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
             "timing": "mixed",
         }
         payload = self._cart_payload([{"variant_id": built.id, "quantity": 1}], plan=plan)
-        order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        order, error = self._draft(payload)
         self.assertIsNone(error)
         self.assertEqual(order.grove_planner_plan, plan)
         self.assertEqual(order.grove_planner_plan_url, plan["url"])
@@ -323,6 +339,6 @@ class TestConsultLine(GroveTaxFixtureMixin, TransactionCase):
             [{"variant_id": self.tree.id, "quantity": 1}],
             plan={"url": "https://nursery.example/plan", "lines": []},
         )
-        order, error = grove_main._create_draft_order(self._website(), self.env, payload)
+        order, error = self._draft(payload)
         self.assertIsNone(error)
         self.assertFalse(order.grove_planner_plan)
