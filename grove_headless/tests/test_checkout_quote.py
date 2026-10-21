@@ -375,6 +375,22 @@ class TestCheckoutQuoteEndpoint(_PoolFixture, GroveTaxFixtureMixin, HttpCase):
         self.assertNotIn("seed_harvest_year", body)
         self.assertNotIn("seed_harvest_year", body["lines"][0])
 
+    def test_quote_exposes_the_consult_variant_id(self):
+        # GOL-3541 (spec D.2): every quote carries `consult_variant_id` beside
+        # `consult_eligible`, equal to the consult template's single variant, so
+        # the storefront can POST the consult line without finding the
+        # website_published=False product in the catalog. Emitted even when the
+        # cart is NOT eligible (this small bareroot cart is below the $500
+        # threshold) so the shape is uniform. Acceptance of this id on an
+        # eligible cart (and the 400 on an ineligible one) is pinned in
+        # test_consult_line's _create_draft_order tests, which POST the same
+        # product_variant_id.
+        self._stock(self.bareroot, 5)
+        body = self._post({"items": [{"variant_id": self.bareroot.id, "quantity": 1}]}).json()
+        consult = self.env.ref("grove_headless.product_planting_consult")
+        self.assertFalse(body["consult_eligible"])
+        self.assertEqual(body["consult_variant_id"], consult.product_variant_id.id)
+
     def test_validation_and_unknown_variant(self):
         self.assertEqual(self._post({"items": []}).status_code, 400)
         self.assertEqual(self._post({"items": [{"variant_id": "x", "quantity": 1}]}).status_code, 400)
