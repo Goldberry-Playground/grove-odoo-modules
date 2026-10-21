@@ -6,7 +6,7 @@ from odoo import api, fields, models
 from odoo.exceptions import UserError
 from odoo.tools import config
 
-from . import carrier_tracking, printify_client, shippo_client
+from . import carrier_tracking, printify_client, promotions, shippo_client
 from .shipment_email import normalize_carrier
 from .shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from .shipping_calendar import merge_calendar_override, preorder_waves, usda_zone_for_zip
@@ -103,6 +103,37 @@ class SaleOrder(models.Model):
     # inherits a stale deferral.
     grove_consult_compliance_deferred = fields.Boolean(readonly=True, copy=False)
     grove_consult_deferred_state = fields.Char(readonly=True, copy=False)
+
+    # ── $0 advice-only planting consult (GOL-3381, spec D) ──────────────────
+    # The additive, advice-only consult line is a SEPARATE product from the
+    # grove_consult_built mix (134/135): a $0 service a shopper may add at
+    # checkout when the cart is eligible (sale.order._grove_consult_eligible).
+    # grove_consult_requested is computed-stored so the order list, the morning
+    # digest and the confirmation-email block can filter / word off it without
+    # re-walking the lines on every read.
+    grove_consult_requested = fields.Boolean(
+        string="Consult requested",
+        compute="_compute_grove_consult_requested",
+        store=True,
+        help="A free 15-minute planting consult was added to this order (the "
+        "grove_headless.product_planting_consult service line). Advice-only; it "
+        "is separate from the consult-built mix invoice gate.",
+    )
+    # The storefront planner's mix carried onto a consult-built order (spec C.4)
+    # so Wesley starts the SOP from the customer's own plan. The raw quiz payload
+    # {url, lines:[{id, qty}], zone, state, site, track, subgoal, timing};
+    # rendered read-only on the order form under "Compliance check / substitutions".
+    grove_planner_plan = fields.Json(readonly=True, copy=False)
+    grove_planner_plan_url = fields.Char(
+        string="Planner quiz link",
+        compute="_compute_grove_planner_plan_display",
+        help="Shareable quiz URL from the carried planner plan (spec C.4).",
+    )
+    grove_planner_plan_summary = fields.Text(
+        string="Planner plan",
+        compute="_compute_grove_planner_plan_display",
+        help="Human-readable summary of the carried planner plan (spec C.4).",
+    )
 
     # Stripe Checkout linkage (GOL-642). Written when a checkout session is
     # created; read by the webhook to reconcile session.completed/expired back
@@ -1178,6 +1209,96 @@ class SaleOrder(models.Model):
             order._grove_settle_at_ship()
 
         return True
+
+    # ── $0 advice-only planting consult (GOL-3381, spec D) ──────────────────
+    CONSULT_PRODUCT_XMLID = "grove_headless.product_planting_consult"
+    GROVE_CONSULT_THRESHOLD_PARAM = "grove_headless.consult_threshold"
+    GROVE_CONSULT_THRESHOLD_DEFAULT = 500.0
+
+    def _grove_consult_template(self):
+        """The $0 planting-consult service template (spec D.1), or an empty
+        recordset when the data record is absent (a minimal DB before the data
+        file loads). env.ref caches the lookup."""
+        return self.env.ref(self.CONSULT_PRODUCT_XMLID, raise_if_not_found=False) or self.env["product.template"]
+
+    def _grove_consult_threshold(self):
+        """Goods subtotal (after promotions, before shipping and tax) at or above
+        which the free consult is offered — grove_headless.consult_threshold,
+        default $500 (spec D.2). Set it to 0 to switch the subtotal offer off
+        without a deploy (kill switch). A non-numeric value falls back to the
+        default rather than crashing the quote/checkout path."""
+        raw = (
+            self.env["ir.config_parameter"]
+            .sudo()
+            .get_param(self.GROVE_CONSULT_THRESHOLD_PARAM, self.GROVE_CONSULT_THRESHOLD_DEFAULT)
+        )
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return self.GROVE_CONSULT_THRESHOLD_DEFAULT
+
+    @api.depends("order_line.product_template_id")
+    def _compute_grove_consult_requested(self):
+        consult = self._grove_consult_template()
+        for order in self:
+            order.grove_consult_requested = bool(consult) and any(
+                line.product_template_id == consult for line in order.order_line
+            )
+
+    @api.depends("grove_planner_plan")
+    def _compute_grove_planner_plan_display(self):
+        for order in self:
+            plan = order.grove_planner_plan if isinstance(order.grove_planner_plan, dict) else {}
+            order.grove_planner_plan_url = plan.get("url") or False
+            order.grove_planner_plan_summary = order._grove_planner_plan_summary(plan) if plan else False
+
+    def _grove_planner_plan_summary(self, plan):
+        """One-line-per-fact readable rendering of a carried planner plan for the
+        order form (spec C.4). Best-effort: resolves line template names when the
+        ids still exist, falls back to the raw id otherwise, and never raises on a
+        malformed payload."""
+        self.ensure_one()
+        facts = []
+        for key in ("track", "subgoal", "zone", "state", "site", "timing"):
+            value = plan.get(key)
+            if value not in (None, "", []):
+                facts.append(f"{key.capitalize()}: {value}")
+        bits = []
+        if facts:
+            bits.append(" · ".join(facts))
+        lines = plan.get("lines") or []
+        if isinstance(lines, list) and lines:
+            rendered = []
+            for entry in lines:
+                if not isinstance(entry, dict):
+                    continue
+                tmpl_id = entry.get("id")
+                qty = entry.get("qty")
+                name = None
+                if isinstance(tmpl_id, int):
+                    tmpl = self.env["product.template"].browse(tmpl_id).exists()
+                    name = tmpl.name if tmpl else None
+                rendered.append(f"{qty}x {name or ('#' + str(tmpl_id))}")
+            if rendered:
+                bits.append("Lines: " + ", ".join(rendered))
+        return "\n".join(bits) if bits else False
+
+    def _grove_consult_eligible(self):
+        """True when this order qualifies for the $0 planting-consult line
+        (spec D.2): a line already carries a grove_consult_built mix (how every
+        agroforestry plan arrives), OR the goods subtotal after promotions and
+        before shipping and tax is at or above grove_headless.consult_threshold.
+        Threshold 0 disables the subtotal offer (kill switch); the consult-built
+        path is independent of it. The $0 consult line itself contributes nothing
+        to the subtotal, so its presence never changes eligibility."""
+        self.ensure_one()
+        if any(line.product_template_id.grove_consult_built for line in self.order_line if line.product_template_id):
+            return True
+        threshold = self._grove_consult_threshold()
+        if threshold <= 0:
+            return False
+        net = round(promotions.goods_subtotal(self) - promotions.reward_magnitude(self), 2)
+        return net >= threshold
 
     # ── Consult-built mix compliance backstop (GOL-3007) ────────────────────
     # The $10 deposit on a consult-built SKU (134/135) is taken at checkout long

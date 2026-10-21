@@ -85,6 +85,14 @@
                     decoration-warning="grove_fulfillment == 'pickup'"
                     decoration-info="grove_fulfillment == 'ship'"
                 />
+                <!-- Free $0 planting-consult flag (GOL-3381 spec D.3): shown only
+                     when set so Wesley sees "book the call" at a glance. -->
+                <field
+                    name="grove_consult_requested"
+                    readonly="1"
+                    invisible="not grove_consult_requested"
+                    string="Consult requested"
+                />
             </xpath>
             <!-- Consult-built compliance surface (GOL-3007). Editable, under the
                  order lines on the default tab — where Wesley works the order,
@@ -112,6 +120,19 @@
                         nolabel="1"
                         placeholder="Destination state, species list checked against the carve-outs, any substitutions, and who cleared it. See the SOP in the product's Internal Notes."
                     />
+                    <!-- Planner plan carried from the storefront quiz (GOL-3381
+                         spec C.4). Read-only: the SOP step 3 (swap or drop, tell
+                         the customer what changed) starts from this list. Hidden
+                         on every order without a carried plan. -->
+                    <field name="grove_planner_plan_summary"
+                           string="Planner plan (from the storefront quiz)"
+                           readonly="1"
+                           invisible="not grove_planner_plan_summary" />
+                    <field name="grove_planner_plan_url"
+                           widget="url"
+                           readonly="1"
+                           string="Customer's quiz"
+                           invisible="not grove_planner_plan_url" />
                 </group>
             </xpath>
             <!-- Printify fulfilment state (GOL-3314). Shown only on a Printify
@@ -127,6 +148,20 @@
                             class="btn-danger btn-sm" icon="fa-refresh" invisible="printify_state != 'push_failed'"
                             groups="sales_team.group_sale_manager" />
                 </group>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- "Consult requested" as an optional column on the sale-order list (GOL-3381
+         spec D.3) so Wesley can filter the week's bookings without opening each
+         order. -->
+    <record id="view_order_tree_grove_consult" model="ir.ui.view">
+        <field name="name">sale.order.list.grove.consult</field>
+        <field name="model">sale.order</field>
+        <field name="inherit_id" ref="sale.view_order_tree" />
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='partner_id']" position="after">
+                <field name="grove_consult_requested" optional="hide" widget="boolean" />
             </xpath>
         </field>
     </record>

@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+    <!-- GOL-3381 (spec D.1): the $0, advice-only "planting consult" service line.
+         Offered at checkout only when the cart is eligible (goods subtotal at or
+         above grove_headless.consult_threshold, or the cart carries a
+         grove_consult_built mix — see sale.order._grove_consult_eligible). It is
+         a SERVICE, so it never counts as a tree for the $10 deposit rule, the
+         bundle tree count, or the box plan: every tree-counting path already
+         filters on storable products, which a service is not (test_consult_line
+         asserts this explicitly).
+
+         Distinct from grove_consult_built (the invoice-gated 50/100-tree mix on
+         templates 134/135): this line is additive and advice-only and does NOT
+         use that invoice gate.
+
+         website_published False: it is never browsable or orderable on its own,
+         only added through the eligible-cart checkout path. grove_gate_exempt so
+         it publishes/exists without the growing-facts / description / guide gate.
+         company_id = At The Grove Nursery (company 3). No taxes. -->
+    <record id="product_planting_consult" model="product.template">
+        <field name="name">Planting consult, 15 minutes</field>
+        <field name="type">service</field>
+        <field name="list_price">0.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field
+            name="description_sale"
+        >A 15-minute call with the nursery to review your plan before it ships. You will get a booking link after checkout.</field>
+    </record>
+</odoo>

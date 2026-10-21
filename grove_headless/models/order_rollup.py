@@ -141,6 +141,9 @@ class SaleOrderRollup(models.AbstractModel):
                     "partner_shipping_zip": (window_zip or "").strip(),
                     "is_pickup": is_pickup,
                     "units": units,
+                    # GOL-3381 spec D.3: surface orders that added the free $0
+                    # planting consult so the digest tags them for Wesley to book.
+                    "grove_consult_requested": o.grove_consult_requested,
                 }
             )
         return result
