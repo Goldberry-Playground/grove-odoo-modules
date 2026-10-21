@@ -215,6 +215,10 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
+          # GOL-3489: the only branch with a merge queue. A PR whose base is
+          # any OTHER branch is a stacked PR and is approved but never merged
+          # here (see the stacked-PR block in the step body).
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           # Empty unless the App identity above was minted. Consumed ONLY by the
           # enqueue call; every other `gh` call keeps the default token. (GOL-2524)
           ENQUEUE_TOKEN: ${{ steps.enqueue-identity.outputs.token }}
@@ -461,6 +465,29 @@ jobs:
           if [ "$KIND" = "maintainer" ]; then
             resolve_bot_threads
             echo "PR #$PR is a maintainer PR: review gate cleared; leaving the merge decision to the author."
+            exit 0
+          fi
+
+          # ── GOL-3489: stacked PR (non-default base) => approve ONLY ──────
+          # `main` has a merge queue, so the `gh pr merge` call below is an
+          # ENQUEUE there. A topic branch has no queue: the same call (with or
+          # without `--auto` — gh merges an already-clean PR immediately) is a
+          # DIRECT merge, and with ENQUEUE_TOKEN empty (the App pair is still
+          # unset — GOL-3337) that merge is pushed by GITHUB_TOKEN. The push
+          # moves the head of the PARENT PR (the one whose base is this topic
+          # branch) under a self-triggered identity, so GitHub materialises
+          # every `pull_request` workflow on the parent at `action_required`
+          # and the same head move dismisses the parent's approving review.
+          # Net: the parent shows no CI and REVIEW_REQUIRED, silently
+          # (GOL-2504, GOL-2732, GOL-2800, GOL-3488 — four occurrences across
+          # the fleet; odoocker #877 and #799 were merged this way). The
+          # approval above stands; the merge belongs to the owning agent under
+          # its broker-minted App token, whose push is a normal collaborator
+          # push: the parent's workflows run and its review survives.
+          BASE_REF=$(gh pr view "$PR" --repo "$REPO" --json baseRefName -q '.baseRefName')
+          if [ "$BASE_REF" != "${DEFAULT_BRANCH:-main}" ]; then
+            echo "::notice title=Stacked PR approved, not merged (GOL-3489)::PR #$PR targets '$BASE_REF', not '${DEFAULT_BRANCH:-main}'. The approval stands; this workflow does not merge into a topic branch because a GITHUB_TOKEN merge push parks the parent PR's workflows at action_required and dismisses its approval. Owner action: merge it under the agent App identity (broker-minted token, never GITHUB_TOKEN): GH_TOKEN=<app token> gh pr merge $PR --repo $REPO --squash."
+            echo "PR #$PR is stacked on '$BASE_REF': approved only, not merged (GOL-3489)."
             exit 0
           fi
 
