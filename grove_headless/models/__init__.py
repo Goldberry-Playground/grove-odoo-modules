@@ -12,6 +12,13 @@ from . import (
     mailing_contact,  # noqa: F401  welcome-window gate on mailing.contact (GOL-3454)
     newsletter,  # noqa: F401  pure list/tag helpers (GOL-221, GOL-3454), no ORM models
     order_rollup,  # noqa: F401  weekly order/preorder digest cron (GOL-1978)
+    planner_evidence,  # noqa: F401  planner fact evidence / disputes (GOL-3549)
+    planner_plan,  # noqa: F401  saved plans + Approve as guild (GOL-3549)
+    planner_proposal,  # noqa: F401  learning-loop proposals + nightly cron (GOL-3549)
+    planner_rule,  # noqa: F401  engine weights served by the feed (GOL-3549)
+    planner_signal,  # noqa: F401  anonymous cart/plan signals (GOL-3549)
+    planner_suggestion,  # noqa: F401  community plant suggestions (GOL-3549)
+    planner_tester,  # noqa: F401  tester tokens (GOL-3549)
     potting_batch,  # noqa: F401
     printify_client,  # noqa: F401  pure HTTP client, no ORM models
     printify_sync,  # noqa: F401  pure mapping, no ORM models

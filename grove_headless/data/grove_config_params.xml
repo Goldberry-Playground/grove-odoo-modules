@@ -98,4 +98,18 @@
         <field name="value"></field>
     </record>
 
+    <!-- Planner learning-loop kill switch (GOL-3549 spec B / F). The public
+         planner routes (/grove/api/v1/planner/signal, /suggest, /save,
+         /dispute, /propose) return 503 when this is false, which the storefront
+         treats as a silent no-op. Default True. Flip to False in Settings /
+         Technical / System Parameters to stop accepting learning signals without
+         a deploy (the kill switch is the requirement, so the default must never
+         be a code constant). noupdate="1" so the operator value survives module
+         upgrades. The whole /plan page has its own switch (PLANNER_ENABLED,
+         section F); this one governs only the learning writes. -->
+    <record id="planner_learning_enabled_param" model="ir.config_parameter">
+        <field name="key">grove_headless.planner_learning_enabled</field>
+        <field name="value">True</field>
+    </record>
+
 </odoo>
