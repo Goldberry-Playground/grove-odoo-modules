@@ -19,6 +19,7 @@ from odoo import http
 from odoo.http import request
 
 from ..services.planner.rules import (
+    RATE_LIMIT_GLOBAL_PER_HOUR,
     RATE_LIMIT_PER_HOUR,
     RATE_LIMIT_WINDOW_SECONDS,
     validate_dispute,
@@ -51,20 +52,23 @@ class PlannerLearningController(http.Controller):
             return None, _json_response({"error": "Invalid JSON body"}, status=400)
 
     def _rate_limited(self, model_name, browser_id):
-        """True once a browser id has written ``RATE_LIMIT_PER_HOUR`` rows to the
-        given model inside the sliding hour window (spec B.2)."""
+        """True once this browser id has written ``RATE_LIMIT_PER_HOUR`` rows to
+        the given model in the sliding hour window (spec B.2), or once *all*
+        browser ids together have written ``RATE_LIMIT_GLOBAL_PER_HOUR`` — a
+        flood backstop that does not trust the client-supplied browser id
+        (GOL-3549 audit, finding 5)."""
+        since = datetime.now(timezone.utc) - timedelta(seconds=RATE_LIMIT_WINDOW_SECONDS)
+        since_str = since.strftime("%Y-%m-%d %H:%M:%S")
+        model = request.env[model_name].sudo()
+        if model.search_count([("create_date", ">=", since_str)]) >= RATE_LIMIT_GLOBAL_PER_HOUR:
+            return True
         if not browser_id:
             return False
-        since = datetime.now(timezone.utc) - timedelta(seconds=RATE_LIMIT_WINDOW_SECONDS)
-        count = (
-            request.env[model_name]
-            .sudo()
-            .search_count(
-                [
-                    ("browser_id", "=", browser_id),
-                    ("create_date", ">=", since.strftime("%Y-%m-%d %H:%M:%S")),
-                ]
-            )
+        count = model.search_count(
+            [
+                ("browser_id", "=", browser_id),
+                ("create_date", ">=", since_str),
+            ]
         )
         return count >= RATE_LIMIT_PER_HOUR
 

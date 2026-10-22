@@ -119,6 +119,21 @@ class TestPlannerRoutes(GroveTaxFixtureMixin, HttpCase):
             )
             self.assertEqual(second.status_code, 429)
 
+    def test_global_cap_ignores_rotated_browser_id(self):
+        # The global ceiling must bite even when every request carries a fresh
+        # (client-supplied) browser id, so an id-rotating flood can't bypass it.
+        with mock.patch("odoo.addons.grove_headless.controllers.planner.RATE_LIMIT_GLOBAL_PER_HOUR", 1):
+            first = self._post(
+                "/grove/api/v1/planner/signal",
+                {"kind": "built", "browser_id": "route-g1"},
+            )
+            self.assertEqual(first.status_code, 200, first.content)
+            second = self._post(
+                "/grove/api/v1/planner/signal",
+                {"kind": "built", "browser_id": "route-g2"},
+            )
+            self.assertEqual(second.status_code, 429)
+
     def test_dispute_requires_a_tester_token(self):
         # No token → 403.
         resp = self._post(

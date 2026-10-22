@@ -371,6 +371,7 @@
     <menuitem id="menu_grove_planner_rule" parent="menu_grove_planner_root"
               action="action_grove_planner_rule" sequence="60" />
     <menuitem id="menu_grove_planner_tester" parent="menu_grove_planner_root"
-              action="action_grove_planner_tester" sequence="70" />
+              action="action_grove_planner_tester" sequence="70"
+              groups="grove_headless.group_nursery_staff" />
 
 </odoo>

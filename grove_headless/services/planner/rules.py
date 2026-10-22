@@ -90,6 +90,14 @@ MAX_LINES = 60
 RATE_LIMIT_PER_HOUR = 60
 RATE_LIMIT_WINDOW_SECONDS = 3600
 
+# browser_id is client-supplied, so the per-browser cap alone can be defeated by
+# rotating the id. A second, global ceiling across *all* browser ids on the same
+# model in the window is a flood backstop that does not depend on any client
+# value (GOL-3549 audit, finding 5). Sized well above plausible winter-beta
+# traffic — a few dozen testers at the 60/hr per-browser cap — so it only bites
+# an abusive rotation; the planner_learning_enabled kill switch is the hard stop.
+RATE_LIMIT_GLOBAL_PER_HOUR = 1000
+
 
 def _text(payload, key):
     value = payload.get(key)
