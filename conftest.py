@@ -74,6 +74,7 @@ collect_ignore_glob = [
     "grove_headless/tests/test_listing_audit.py",
     "grove_headless/tests/test_planner_catalog.py",
     "grove_headless/tests/test_planner_facts.py",
+    "grove_headless/tests/test_planner_roles.py",
     "grove_headless/tests/test_planner_learning.py",
     "grove_headless/tests/test_planner_routes.py",
     "grove_headless/tests/test_enrich_job.py",

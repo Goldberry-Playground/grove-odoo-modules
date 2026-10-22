@@ -541,6 +541,16 @@ def _planner_line_variant(product, has_stock_field):
     return candidates[0]
 
 
+def _planner_is_nitrogen_fixer(product):
+    """True when the plant reads as a nitrogen fixer (GOL-3548 §A.3).
+
+    A text match on the Wildlife and Soil prose for now — a proper
+    ``grove_nitrogen_fixer`` boolean is a tracked open item in the spec.
+    """
+    text = f"{product.grove_wildlife or ''} {product.grove_soil or ''}".lower()
+    return "nitrogen" in text
+
+
 def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
     """One plant row for the planner catalog feed (GOL-3379 §B).
 
@@ -590,6 +600,18 @@ def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
         },
         "wildlife_value": product.grove_wildlife_value or None,
         "priority": product.grove_planner_priority or None,
+        # Syntropic framing (GOL-3548 §A.3): role, succession and stratum words,
+        # the living-mulch and substrate markers, the review flag, and the
+        # (text-matched) nitrogen fixer bit. Blank conventions as above:
+        # selections to None when unset, booleans as booleans, substrate a
+        # string or null.
+        "role": product.grove_planner_role or None,
+        "succession": product.grove_succession or None,
+        "stratum": product.grove_planner_stratum or None,
+        "living_mulch": bool(product.grove_living_mulch),
+        "substrate": product.grove_substrate or None,
+        "flagged": bool(product.grove_planner_flagged),
+        "nitrogen_fixer": _planner_is_nitrogen_fixer(product),
         "blocked_states": blocked_states,
         "substitute_id": _planner_substitute_tmpl_id(genus, substitute_by_genus),
         "image": _image_url("product.template", product, "image_512"),
@@ -1351,6 +1373,11 @@ class GroveHeadlessAPI(http.Controller):
 
         body = {
             "generated_at": _datetime.now(_timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            # Which catalog snapshot this feed is (GOL-3548 §A.3): a monotonic
+            # integer bumped by any write to a planner field, so a planner signal
+            # can record the catalog it was made against. The `rules` object is
+            # planner beta B.
+            "catalog_version": Template._grove_planner_catalog_version(),
             "states": sorted(GREEN_STATES),
             "state_zones": {state: STATE_ZONE_BANDS[state] for state in sorted(STATE_ZONE_BANDS)},
             "plants": plant_rows,

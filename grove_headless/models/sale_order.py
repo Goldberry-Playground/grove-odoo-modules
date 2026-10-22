@@ -670,7 +670,17 @@ class SaleOrder(models.Model):
         # concurrency, not just at human speed (GOL-2893).
         self.env.cr.execute("SELECT id FROM sale_order WHERE id = %s FOR UPDATE", (self.id,))
         self.invalidate_recordset(["grove_fulfillment_state", "grove_fulfillment_stage"])
-        return self._grove_advance_state("collected", source="operator", operator=operator)
+        moved = self._grove_advance_state("collected", source="operator", operator=operator)
+        if moved:
+            # Mirror the terminal stage onto the raw delivery substatus so the weekly
+            # rollup digest and any legacy reader of grove_delivery_status agree with
+            # the fulfilment stage. Nothing in the collection path wrote it before, so
+            # a collected pickup used to read forever as "awaiting collection" in the
+            # digest (GOL-3559). Written on the real transition ONLY — a double-click
+            # no-op returns False above and must not rewrite it — and inside this FOR
+            # UPDATE so it is serialised with the watermark move.
+            self.grove_delivery_status = "collected"
+        return moved
 
     def _grove_mark_collected_and_settle(self, operator=None):
         """Mark a pickup order collected AND settle its deferred balance (GOL-2893).

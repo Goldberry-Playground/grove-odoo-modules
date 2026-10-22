@@ -111,6 +111,14 @@ _GROVE_LISTING_DEPENDS = (
 )
 
 
+# ── Planner catalog version (GOL-3548 §A.3) ──────────────────────────────────
+# A monotonic integer in ir.config_parameter, bumped whenever a write (or a
+# create) touches a planner-relevant field, so a planner signal can record which
+# catalog snapshot it was made against. Global, not per-record: the feed is one
+# document and the storefront only needs to know the catalog moved.
+_GROVE_PLANNER_CATALOG_VERSION_PARAM = "grove_headless.planner_catalog_version"
+
+
 # ── Spec-text format gate (GOL-2906) ─────────────────────────────────────────
 # The PDP "Growing specs" table prints these grove_* fields verbatim — the field
 # value IS the customer-facing string, with no formatter between Odoo and the
@@ -248,6 +256,50 @@ class ProductTemplate(models.Model):
     # crosses through stock.quant (see stock_quant.py).
     _GROVE_AVAILABILITY_FIELDS = frozenset({"sale_ok", "website_published", "is_published", "active"})
 
+    # Planner-relevant fields whose value is served in the planner catalog feed
+    # (GOL-3548 §A.3). A write to any of them moves the catalog, so it bumps the
+    # global catalog version. Includes the prose facts nitrogen_fixer/living_mulch
+    # derive from (grove_wildlife, grove_soil) because a change there changes the
+    # served row. Over-bumping is harmless (a monotonic counter signals read);
+    # under-bumping would leave a signal pointing at a stale snapshot.
+    _GROVE_PLANNER_VERSIONED_FIELDS = frozenset(
+        {
+            "grove_years_to_fruit_min",
+            "grove_pollination_min",
+            "grove_harvest_months",
+            "grove_tolerates_wet",
+            "grove_tolerates_poor_soil",
+            "grove_tolerates_shade",
+            "grove_wildlife_value",
+            "grove_planner_priority",
+            "grove_zone_min",
+            "grove_zone_max",
+            "grove_layer",
+            "grove_planner_role",
+            "grove_succession",
+            "grove_living_mulch",
+            "grove_substrate",
+            "grove_planner_flagged",
+            "grove_wildlife",
+            "grove_soil",
+        }
+    )
+
+    @api.model
+    def _grove_planner_catalog_version(self):
+        """Current planner catalog version (GOL-3548 §A.3); 0 until first bump."""
+        raw = self.env["ir.config_parameter"].sudo().get_param(_GROVE_PLANNER_CATALOG_VERSION_PARAM, "0")
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            return 0
+
+    @api.model
+    def _grove_bump_planner_catalog_version(self):
+        """Increment the global planner catalog version by one (GOL-3548 §A.3)."""
+        param = self.env["ir.config_parameter"].sudo()
+        param.set_param(_GROVE_PLANNER_CATALOG_VERSION_PARAM, str(self._grove_planner_catalog_version() + 1))
+
     @api.model_create_multi
     def create(self, vals_list):
         records = super().create(vals_list)
@@ -255,6 +307,9 @@ class ProductTemplate(models.Model):
         for record in records:
             if record.website_published:
                 record._grove_check_publish_gate()
+        # A create that sets any planner field moves the catalog (GOL-3548 §A.3).
+        if records and any(self._GROVE_PLANNER_VERSIONED_FIELDS.intersection(vals) for vals in vals_list):
+            records._grove_bump_planner_catalog_version()
         return records
 
     def write(self, vals):
@@ -302,6 +357,10 @@ class ProductTemplate(models.Model):
                     super(ProductTemplate, record).write({"grove_facts_provenance": provenance})
         for record in transitioning:
             record._grove_check_publish_gate()
+        # A write that changed any planner field moves the catalog (GOL-3548
+        # §A.3) — once per write, after a successful super().write().
+        if self._GROVE_PLANNER_VERSIONED_FIELDS.intersection(vals):
+            self._grove_bump_planner_catalog_version()
         return res
 
     grove_featured = fields.Boolean(
@@ -708,6 +767,10 @@ class ProductTemplate(models.Model):
             ("shrub", "Shrub"),
             ("ground", "Ground cover"),
             ("vine", "Vine"),
+            # Mushroom spawn is a planner plant (GOL-3548 §A): a spawn product
+            # carries a substrate line and lands in a mushroom slot. Existing
+            # values are untouched.
+            ("fungal", "Fungal"),
         ],
         string="Food Forest Layer",
         tracking=True,
@@ -825,6 +888,72 @@ class ProductTemplate(models.Model):
         "gate on purpose: a plant can be published and not recommendable.",
     )
 
+    # ── Syntropic framing (GOL-3548, planner winter-beta spec 2026-10-21 §A) ──
+    # Every planner plant carries a role (what it is there to do), a succession
+    # word (how fast/long it lives) and a stratum word (which layer it occupies),
+    # projections of the consultant vocabularies the retail planner reads. The
+    # stratum is derived from the existing Food Forest Layer (§A.1); the rest are
+    # editable facts the backfill seeds (§A.2) and the review sitting confirms.
+    grove_planner_role = fields.Selection(
+        [("anchor", "Anchor"), ("companion", "Companion")],
+        string="Planner role",
+        tracking=True,
+        help="Anchor = a long-lived tree the system is built around; companion = "
+        "feeds the soil, pollinators and the person while anchors grow. Blank = "
+        "unset; a plant without a role is not planner-ready.",
+    )
+    grove_succession = fields.Selection(
+        [("fast", "Fast"), ("mid", "Mid"), ("long", "Long-lived")],
+        string="Succession",
+        tracking=True,
+        help="How quickly the plant matures and how long it holds its slot. Orders "
+        "plants within a stratum and drives the succession badge. Blank = unset; a "
+        "plant without a succession word is not planner-ready.",
+    )
+    grove_living_mulch = fields.Boolean(
+        string="Living mulch",
+        tracking=True,
+        help="Marks a ground cover as living mulch; it fills the ground slot in the planner.",
+    )
+    grove_substrate = fields.Char(
+        string="Substrate",
+        tracking=True,
+        help='Shown on spawn picks, e.g. "oak or maple logs from your thinnings". '
+        "Required for planner-ready when the layer is Fungal.",
+    )
+    grove_planner_stratum = fields.Selection(
+        [("overstory", "Overstory"), ("understory", "Understory"), ("mushroom", "Mushroom")],
+        string="Planner stratum",
+        compute="_compute_grove_planner_stratum",
+        store=True,
+        help="Derived from the Food Forest Layer by the fixed mapping in the "
+        "planner spec §A.1 (canopy→overstory; understory/shrub/vine/ground→"
+        "understory; fungal→mushroom). Computed and stored, not edited directly.",
+    )
+    grove_planner_flagged = fields.Boolean(
+        string="Needs review (planner)",
+        tracking=True,
+        help="Set by the nightly planner audit when a fact has three open "
+        'contradictions; shown on the result card as "Needs review". Cleared by '
+        "staff once the fact is checked.",
+    )
+
+    # Fixed layer→stratum projection (§A.1). A layer with no mapping (or unset)
+    # leaves the stratum blank.
+    _GROVE_STRATUM_BY_LAYER = {
+        "canopy": "overstory",
+        "understory": "understory",
+        "shrub": "understory",
+        "vine": "understory",
+        "ground": "understory",
+        "fungal": "mushroom",
+    }
+
+    @api.depends("grove_layer")
+    def _compute_grove_planner_stratum(self):
+        for record in self:
+            record.grove_planner_stratum = self._GROVE_STRATUM_BY_LAYER.get(record.grove_layer, False)
+
     @api.depends("grove_sun")
     def _compute_grove_tolerates_shade(self):
         # Editable computed default (store + readonly=False): seeds from the sun
@@ -840,6 +969,12 @@ class ProductTemplate(models.Model):
         "grove_harvest_months",
         "grove_tolerates_wet",
         "grove_consult_built",
+        # Syntropic framing now also gates readiness (GOL-3548 §A): role and
+        # succession are always required; substrate is required when fungal.
+        "grove_planner_role",
+        "grove_succession",
+        "grove_substrate",
+        "grove_layer",
     )
     def _compute_grove_planner_ready(self):
         # Recomputes on grove_listing_complete (itself stored/computed) plus the
@@ -859,10 +994,20 @@ class ProductTemplate(models.Model):
         "grove_years_to_fruit_min",
         "grove_pollination_min",
         "grove_harvest_months",
+        # Role and succession are always required for a recommendable plant
+        # (GOL-3548 §A). Both are Selections, so the char "non-blank" branch
+        # below treats an unset (falsy) value as missing.
+        "grove_planner_role",
+        "grove_succession",
     )
 
     def _grove_planner_core_missing(self):
-        """Labels of the scoreable planner fields still unset (ordered)."""
+        """Labels of the scoreable planner fields still unset (ordered).
+
+        Appends ``grove_substrate`` only for a Fungal (spawn) plant — a spawn
+        product is not recommendable without the substrate line it is grown on
+        (§A), but the field is irrelevant for every other layer.
+        """
         self.ensure_one()
         missing = []
         for name in self._GROVE_PLANNER_CORE_FIELDS:
@@ -873,6 +1018,8 @@ class ProductTemplate(models.Model):
                 is_set = bool(str(value or "").strip())
             if not is_set:
                 missing.append(self._fields[name].string)
+        if self.grove_layer == "fungal" and not (self.grove_substrate or "").strip():
+            missing.append(self._fields["grove_substrate"].string)
         return missing
 
     def _grove_has_bom(self):
