@@ -282,6 +282,20 @@ class ProductTemplate(models.Model):
             "grove_planner_flagged",
             "grove_wildlife",
             "grove_soil",
+            # Consultant facts served in the consult feed (GOL-3574 §B); a write
+            # to any moves the catalog. grove_nitrogen_fixer is computed from
+            # wildlife/soil (already versioned) but is editable, so a manual
+            # override must bump too.
+            "grove_syntropic_stratum",
+            "grove_succession_stage",
+            "grove_nitrogen_fixer",
+            "grove_mature_height_m",
+            "grove_canopy_closure_years",
+            "grove_coppice_tolerant",
+            "grove_pruning_response",
+            "grove_root_type",
+            "grove_allelopathy",
+            "grove_log_suitability",
         }
     )
 
@@ -906,9 +920,15 @@ class ProductTemplate(models.Model):
         [("fast", "Fast"), ("mid", "Mid"), ("long", "Long-lived")],
         string="Succession",
         tracking=True,
+        compute="_compute_grove_succession",
+        store=True,
+        readonly=False,
         help="How quickly the plant matures and how long it holds its slot. Orders "
         "plants within a stratum and drives the succession badge. Blank = unset; a "
-        "plant without a succession word is not planner-ready.",
+        "plant without a succession word is not planner-ready. When the consultant "
+        "facts (Syntropic stratum AND Succession stage) are both set this becomes a "
+        "read-only projection of the 4-value stage (GOL-3574 §B); otherwise it is the "
+        "editable planner-beta value and a manual value persists.",
     )
     grove_living_mulch = fields.Boolean(
         string="Living mulch",
@@ -938,6 +958,106 @@ class ProductTemplate(models.Model):
         "staff once the fact is checked.",
     )
 
+    # ── Consultant facts (GOL-3574, consult-dashboard spec 2026-10-22 §B) ─────
+    # The consultant depth behind the retail planner. The eight-value stratum and
+    # the four-value succession stage are the full farm_syntropic vocabularies;
+    # the retail grove_planner_stratum / grove_succession become read-only
+    # projections of them once both are set (see the computes below). The rest
+    # are typed syntropic-design facts the consult feed serves and the generator
+    # (phases 3+) reads. Editable facts are tracked like every other fact.
+    grove_syntropic_stratum = fields.Selection(
+        [
+            ("emergent", "Emergent"),
+            ("high_canopy", "High canopy"),
+            ("low_canopy", "Low canopy"),
+            ("shrub", "Shrub"),
+            ("herbaceous", "Herbaceous"),
+            ("ground_cover", "Ground cover"),
+            ("root_tuber", "Root / tuber"),
+            ("fungal", "Fungal"),
+        ],
+        string="Syntropic stratum",
+        tracking=True,
+        help="The full eight-value syntropic stratum, matching the farm_syntropic "
+        "vocabulary one to one. Required (with the succession stage) for "
+        "consult-ready; once both are set the retail Planner stratum becomes a "
+        "read-only projection of this.",
+    )
+    grove_succession_stage = fields.Selection(
+        [
+            ("placenta", "Placenta"),
+            ("accumulation_1", "Accumulation I"),
+            ("accumulation_2", "Accumulation II"),
+            ("abundance", "Abundance"),
+        ],
+        string="Succession stage",
+        tracking=True,
+        help="The four-value syntropic succession stage. Required (with the "
+        "syntropic stratum) for consult-ready; once both are set the retail "
+        "Succession word becomes a read-only projection of this (placenta→fast, "
+        "both accumulation stages→mid, abundance→long).",
+    )
+    grove_nitrogen_fixer = fields.Boolean(
+        string="Nitrogen fixer",
+        tracking=True,
+        compute="_compute_grove_nitrogen_fixer",
+        store=True,
+        readonly=False,
+        help="Whether the plant fixes nitrogen. Defaults from the Wildlife/Soil "
+        "prose (the retail feed's old text match, now a seed) and stays editable "
+        "so a consultant can correct it; a manual value persists until the prose "
+        "changes. The retail and consult feeds read this field (GOL-3574 §B).",
+    )
+    grove_mature_height_m = fields.Float(
+        string="Mature height (m)",
+        tracking=True,
+        help="Mature height in metres; drives the schematic and the canopy model.",
+    )
+    grove_canopy_closure_years = fields.Integer(
+        string="Canopy closure (years)",
+        tracking=True,
+        help="Years to canopy closure at the design spacing.",
+    )
+    grove_coppice_tolerant = fields.Boolean(
+        string="Coppice tolerant",
+        tracking=True,
+        help="Whether the plant resprouts from the stump; drives chop-and-drop and coppice rotations.",
+    )
+    grove_pruning_response = fields.Selection(
+        [("strong", "Strong"), ("moderate", "Moderate"), ("none", "None")],
+        string="Pruning response",
+        tracking=True,
+        help="How vigorously the plant responds to pruning; drives the chop-and-drop and log-yield rules.",
+    )
+    grove_root_type = fields.Selection(
+        [("tap", "Tap"), ("fibrous", "Fibrous"), ("runner", "Runner")],
+        string="Root type",
+        tracking=True,
+        help="Dominant root habit; drives spacing, competition and the swale/berm placement rules.",
+    )
+    grove_allelopathy = fields.Selection(
+        [("none", "None"), ("minor", "Minor"), ("notable", "Notable")],
+        string="Allelopathy",
+        tracking=True,
+        help="How strongly the plant suppresses neighbours. Juglone (walnut, "
+        "pecan) stays 'minor' — never worded as poison.",
+    )
+    grove_log_suitability = fields.Selection(
+        [("oak_maple", "Oak / maple"), ("poplar_soft", "Poplar / softwood"), ("none", "None")],
+        string="Log suitability",
+        tracking=True,
+        help="Whether the wood suits mushroom logs, and which class — for the mushroom layer.",
+    )
+    grove_consult_ready = fields.Boolean(
+        string="Consult ready",
+        compute="_compute_grove_consult_ready",
+        store=True,
+        compute_sudo=True,
+        help="True when the plant is planner-ready AND both consultant required "
+        "facts (Syntropic stratum, Succession stage) are set. The consult feed and "
+        "the nightly consult-ready audit filter on it.",
+    )
+
     # Fixed layer→stratum projection (§A.1). A layer with no mapping (or unset)
     # leaves the stratum blank.
     _GROVE_STRATUM_BY_LAYER = {
@@ -949,10 +1069,75 @@ class ProductTemplate(models.Model):
         "fungal": "mushroom",
     }
 
-    @api.depends("grove_layer")
+    # Consultant eight-value stratum → retail three-value stratum (GOL-3574 §B).
+    _GROVE_STRATUM_BY_SYNTROPIC = {
+        "emergent": "overstory",
+        "high_canopy": "overstory",
+        "low_canopy": "understory",
+        "shrub": "understory",
+        "herbaceous": "understory",
+        "ground_cover": "understory",
+        "root_tuber": "understory",
+        "fungal": "mushroom",
+    }
+
+    # Consultant four-value succession stage → retail three-value word (§B).
+    _GROVE_SUCCESSION_BY_STAGE = {
+        "placenta": "fast",
+        "accumulation_1": "mid",
+        "accumulation_2": "mid",
+        "abundance": "long",
+    }
+
+    def _grove_has_consult_projection(self):
+        """True when both consultant required facts are set (GOL-3574 §B).
+
+        When true, the retail stratum and succession words are projections of the
+        eight-value stratum and four-value stage and are read-only on the form;
+        when false the template keeps the planner-beta editable behaviour, so
+        nothing in flight breaks.
+        """
+        self.ensure_one()
+        return bool(self.grove_syntropic_stratum) and bool(self.grove_succession_stage)
+
+    @api.depends("grove_layer", "grove_syntropic_stratum", "grove_succession_stage")
     def _compute_grove_planner_stratum(self):
         for record in self:
-            record.grove_planner_stratum = self._GROVE_STRATUM_BY_LAYER.get(record.grove_layer, False)
+            if record._grove_has_consult_projection():
+                record.grove_planner_stratum = self._GROVE_STRATUM_BY_SYNTROPIC.get(
+                    record.grove_syntropic_stratum, False
+                )
+            else:
+                record.grove_planner_stratum = self._GROVE_STRATUM_BY_LAYER.get(record.grove_layer, False)
+
+    @api.depends("grove_syntropic_stratum", "grove_succession_stage")
+    def _compute_grove_succession(self):
+        # Editable computed projection (store + readonly=False): when both
+        # consultant facts are set the word is projected from the four-value stage
+        # and the form makes it read-only; otherwise it keeps the planner-beta
+        # editable value — the else branch reassigns the current value so a manual
+        # edit persists and the compute never wipes it.
+        for record in self:
+            if record._grove_has_consult_projection():
+                record.grove_succession = self._GROVE_SUCCESSION_BY_STAGE.get(record.grove_succession_stage, False)
+            else:
+                record.grove_succession = record.grove_succession
+
+    @api.depends("grove_wildlife", "grove_soil")
+    def _compute_grove_nitrogen_fixer(self):
+        # Editable computed default: seeds from the Wildlife/Soil prose (the retail
+        # feed's old text match) and recomputes when the prose changes, but a
+        # manual value persists in between — same idiom as grove_tolerates_shade.
+        for record in self:
+            text = f"{record.grove_wildlife or ''} {record.grove_soil or ''}".lower()
+            record.grove_nitrogen_fixer = "nitrogen" in text
+
+    @api.depends("grove_planner_ready", "grove_syntropic_stratum", "grove_succession_stage")
+    def _compute_grove_consult_ready(self):
+        for record in self:
+            record.grove_consult_ready = bool(
+                record.grove_planner_ready and record.grove_syntropic_stratum and record.grove_succession_stage
+            )
 
     @api.depends("grove_sun")
     def _compute_grove_tolerates_shade(self):
@@ -1725,8 +1910,11 @@ class ProductTemplate(models.Model):
         """
         incomplete = self._grove_audit_incomplete_listings()
         not_planner_ready = self._grove_audit_not_planner_ready()
-        if not incomplete and not not_planner_ready:
-            _logger.info("listing-content audit: every published plant listing is complete and planner-ready")
+        not_consult_ready = self._grove_audit_not_consult_ready()
+        if not incomplete and not not_planner_ready and not not_consult_ready:
+            _logger.info(
+                "listing-content audit: every published plant listing is complete, planner-ready and consult-ready"
+            )
             return
         scheduled = 0
         if incomplete:
@@ -1738,12 +1926,19 @@ class ProductTemplate(models.Model):
             # product, and a plant that is published but not yet recommendable
             # is a softer nudge than a dark listing.
             self._grove_audit_post_discord(not_planner_ready, planner=True)
+        if not_consult_ready:
+            # Third section (GOL-3574 §B): a recommendable plant that still lacks
+            # its consultant depth (syntropic stratum / succession stage). Discord
+            # only, same as the planner section — the consultant fills these in
+            # the dashboard, no storefront listing is dark.
+            self._grove_audit_post_discord(not_consult_ready, consult=True)
         _logger.info(
             "listing-content audit: %d incomplete published listing(s), %d new activity(ies) scheduled; "
-            "%d published plant(s) not planner-ready",
+            "%d published plant(s) not planner-ready; %d not consult-ready",
             len(incomplete),
             scheduled,
             len(not_planner_ready),
+            len(not_consult_ready),
         )
 
     @api.model
@@ -1792,7 +1987,31 @@ class ProductTemplate(models.Model):
         )
 
     @api.model
-    def _grove_audit_discord_text(self, products, planner=False):
+    def _grove_audit_not_consult_ready(self):
+        """Published, gated, planner-ready plants that are not consult-ready (§B).
+
+        The third audit section: a plant the retail planner already recommends
+        (grove_planner_ready) whose consultant facts are still incomplete, so the
+        consult dashboard and feed will not treat it as consult-ready. Requiring
+        grove_planner_ready keeps this from double-chasing plants already named by
+        sections 1/2 and keeps the reported missing names purely the consultant
+        required facts. Bundles and consult-built mixes are never recommendable as
+        a species, so they are excluded like the planner section.
+        """
+        candidates = self.sudo().search(
+            [
+                ("website_published", "=", True),
+                ("grove_planner_ready", "=", True),
+                ("grove_consult_ready", "=", False),
+            ],
+            order="name",
+        )
+        return candidates.filtered(
+            lambda t: t._grove_is_gated() and not t.grove_consult_built and not t._grove_has_bom()
+        )
+
+    @api.model
+    def _grove_audit_discord_text(self, products, planner=False, consult=False):
         """Build the ops-channel summary line (kept pure for payload-shape tests).
 
         Listing section mirrors the spec example: "3 published listing(s)
@@ -1801,6 +2020,9 @@ class ProductTemplate(models.Model):
         planner-fact names: "2 published plant(s) not planner-ready: Pawpaw —
         Years to first crop (min), Harvest months; ...".
         """
+        if consult:
+            parts = [f"{p.display_name} — {', '.join(p._grove_consult_missing())}" for p in products]
+            return f"{len(products)} published plant(s) not consult-ready: " + "; ".join(parts)
         if planner:
             parts = [f"{p.display_name} — {', '.join(p._grove_planner_missing())}" for p in products]
             return f"{len(products)} published plant(s) not planner-ready: " + "; ".join(parts)
@@ -1816,21 +2038,36 @@ class ProductTemplate(models.Model):
         self.ensure_one()
         return self._grove_planner_core_missing()
 
+    def _grove_consult_missing(self):
+        """Human labels for the consultant required facts still unset (ordered).
+
+        The audit only surfaces planner-ready, non-bundle plants here, so the gap
+        is one or both of the two consult-ready required facts.
+        """
+        self.ensure_one()
+        missing = []
+        if not self.grove_syntropic_stratum:
+            missing.append(self._fields["grove_syntropic_stratum"].string)
+        if not self.grove_succession_stage:
+            missing.append(self._fields["grove_succession_stage"].string)
+        return missing
+
     @api.model
-    def _grove_audit_post_discord(self, products, planner=False):
+    def _grove_audit_post_discord(self, products, planner=False, consult=False):
         """Post an audit summary to the ops Discord webhook (best-effort).
 
         Reuses the same env-var mechanism as grove.order.rollup._discord_digest;
         this is a data-quality/ops report so it targets DISCORD_OPS_WEBHOOK_URL
         (not the orders channel). A missing webhook logs and no-ops rather than
         raising — the activities are the durable half of the audit. ``planner``
-        selects the "not planner-ready" section (GOL-3378) on the same channel.
+        selects the "not planner-ready" section (GOL-3378); ``consult`` selects
+        the "not consult-ready" section (GOL-3574) on the same channel.
         """
         url = os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
         if not url:
             _logger.info("listing-content audit: DISCORD_OPS_WEBHOOK_URL unset — skipping Discord post")
             return
-        text = self._grove_audit_discord_text(products, planner=planner)
+        text = self._grove_audit_discord_text(products, planner=planner, consult=consult)
         try:
             requests.post(url, json={"content": text[:2000]}, timeout=10)
         except Exception:
