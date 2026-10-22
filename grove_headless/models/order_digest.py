@@ -54,6 +54,9 @@ def build_digest(
       - amount_total: float
       - grove_checkout_status: str | None
       - grove_delivery_status: str | None
+      - grove_fulfillment_stage: str | None  (queryable lifecycle state; the
+        pickups-awaiting section excludes the terminal stages collected /
+        delivered / cancelled — GOL-3559)
       - grove_preorder_variant_ids: str | None  (comma-sep variant ids when deposit taken)
       - partner_name: str
       - partner_shipping_zip: str | None  (window zip: customer's, or the farm's for pickup)
@@ -122,11 +125,19 @@ def build_digest(
     preorder_entries = _build_preorder_entries(outstanding_preorders, today, next_wave_fn, usda_zone_fn)
 
     # --- Pickups awaiting collection ---
-    # Pickup orders with no terminal status (not shipped/collected/delivered)
+    # Keyed off the fulfilment STAGE, not grove_delivery_status: the stage is the
+    # queryable source of truth for the lifecycle (see sale_order._GROVE_TERMINAL_STATES
+    # and the comment block at sale_order.py:480). The collection path advances the
+    # stage to "collected" but historically never wrote grove_delivery_status, so a
+    # collected pickup reported as awaiting forever (GOL-3559). Exclude the terminal
+    # stages. The old delivery-status guard is kept belt-and-braces: it still drops a
+    # shipped/collected pickup on a legacy row whose stage was never recomputed.
+    terminal_stages = {"collected", "delivered", "cancelled"}
     pickup_awaiting = [
         o
         for o in orders
         if o.get("is_pickup")
+        and (o.get("grove_fulfillment_stage") or "") not in terminal_stages
         and (o.get("grove_delivery_status") or "") not in shipped_statuses | {"collected"}
         and (o.get("grove_checkout_status") or "") in ("paid", "deposit_paid", "settled")
     ]
