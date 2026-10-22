@@ -316,6 +316,19 @@ class ProductTemplate(models.Model):
 
     @api.model_create_multi
     def create(self, vals_list):
+        # grove_succession is an editable stored-computed projection (§B): once
+        # both consultant facts are set it is projected from the stage and read
+        # only. Odoo lets an explicit value for an editable computed field win at
+        # create time and skips the compute, so a create that carries both facts
+        # *and* a stale grove_succession (data import / XML-RPC) would keep the
+        # stale word. Drop it there so the projection owns the value; the form
+        # can't send it in that case because it is read-only once both are set.
+        vals_list = [
+            {k: v for k, v in vals.items() if k != "grove_succession"}
+            if (vals.get("grove_syntropic_stratum") and vals.get("grove_succession_stage"))
+            else vals
+            for vals in vals_list
+        ]
         records = super().create(vals_list)
         # A create that publishes a gated plant must still pass the gate.
         for record in records:

@@ -1360,7 +1360,7 @@ class GroveHeadlessAPI(http.Controller):
         current_company = website.company_id
         tenant = website.grove_tenant_slug()
         Template = request.env["product.template"].sudo().with_company(current_company)
-        scope = company_domain(current_company.id, tenant)
+        company_scope = company_domain(current_company.id, tenant)
 
         # Published, for-sale, planner-ready plants — seeds are not plants and
         # never appear in a tree-planting quiz (spec §C.2). grove_planner_ready
@@ -1370,7 +1370,7 @@ class GroveHeadlessAPI(http.Controller):
             ("website_published", "=", True),
             ("grove_planner_ready", "=", True),
             ("grove_shipping_tier", "!=", "seed"),
-        ] + scope
+        ] + company_scope
         plants = Template.search(plant_domain, order="grove_planner_priority asc, id asc")
 
         # Warm the batched preorder-cap + stock computes once for the whole page
@@ -1391,7 +1391,7 @@ class GroveHeadlessAPI(http.Controller):
                 ("website_published", "=", True),
                 ("grove_botanical_name", "!=", False),
             ]
-            + scope,
+            + company_scope,
             order="id asc",
         )
         for candidate in sub_candidates:
@@ -1417,7 +1417,7 @@ class GroveHeadlessAPI(http.Controller):
         )
         if ff_category:
             bundles = Template.search(
-                [("website_published", "=", True), ("public_categ_ids", "in", ff_category.ids)] + scope,
+                [("website_published", "=", True), ("public_categ_ids", "in", ff_category.ids)] + company_scope,
                 order="id asc",
             )
             bundle_rows = [_serialize_planner_bundle(request.env, b) for b in bundles]
