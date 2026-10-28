@@ -16,8 +16,9 @@
              checkout (grove_headless controllers/main.py ~1571).
           2. Lead creation — one crm.lead per chat, tagged `livechat`, linked to
              the partner, with a transcript deep-link.
-          3. Recent-orders note — a one-line internal note (never relayed to the
-             visitor) with the partner's 3 most recent orders.
+          3. Recent-orders note — a one-line internal note on the lead's
+             chatter (never in the chat the visitor sees) with the partner's 3
+             most recent orders.
           4. Discord ping — a best-effort ops ping on chat start via the existing
              DISCORD_OPS_WEBHOOK_URL.
 
