@@ -15,9 +15,11 @@ When the Grove support chatbot hands a conversation to a human operator,
    existing partner from chat input.**
 2. **Lead creation.** One `crm.lead` per chat, tagged `livechat`, linked to the
    partner, with a transcript deep-link in the description.
-3. **Recent-orders note.** A one-line **internal note** (`mail.mt_note`, never
-   relayed to the visitor) into the operator's chat thread with the partner's
-   three most recent orders. The operator uses the native partner form for
+3. **Recent-orders note.** A one-line **internal note** (`mail.mt_note`) on the
+   **lead's chatter** with the partner's three most recent orders. Never in the
+   chat channel itself: the visitor is a member of that channel and sees every
+   message in it, `mt_note` included, and the email that picked the partner is
+   unverified (2026-10-28 leak). The operator uses the native partner form for
    anything deeper (it already lists sale orders) — no new order endpoints.
 4. **Discord ping.** A best-effort ops ping on chat start via the existing
    `DISCORD_OPS_WEBHOOK_URL` (mirrors `grove_headless` `_notify_discord`).

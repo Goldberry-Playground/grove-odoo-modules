@@ -43,6 +43,12 @@ class GroveSupportCase(TransactionCase):
             }
         )
 
+    def _make_lead(self, partner):
+        return self.env["crm.lead"].create({"name": "Livechat lead", "partner_id": partner.id})
+
+    def _orders_notes(self, record):
+        return record.message_ids.filtered(lambda m: "Recent orders" in (m.body or ""))
+
     # ── Job 1: partner match (checkout discipline) ───────────────────────
 
     def test_match_reuses_existing_partner_as_is(self):
@@ -124,12 +130,12 @@ class GroveSupportCase(TransactionCase):
             )
         oldest = orders[0]  # base + 0 days -> excluded from the top 3
         channel = self._make_channel()
-        channel._grove_support_post_recent_orders(partner, self.company)
+        lead = self._make_lead(partner)
+        channel._grove_support_post_recent_orders(lead, partner, self.company)
 
-        note = channel.message_ids.filtered(
-            lambda m: m.subtype_id == self.env.ref("mail.mt_note") and "Recent orders" in (m.body or "")
-        )
-        self.assertEqual(len(note), 1, "exactly one recent-orders note should be posted")
+        note = self._orders_notes(lead).filtered(lambda m: m.subtype_id == self.env.ref("mail.mt_note"))
+        self.assertEqual(len(note), 1, "exactly one recent-orders note should be posted on the lead")
+        self.assertEqual(note.author_id, self.env.ref("base.partner_root"))
         body = note.body
         for recent in orders[1:]:
             self.assertIn(recent.name, body)
@@ -140,8 +146,9 @@ class GroveSupportCase(TransactionCase):
             {"name": "No Orders", "email": "noorders@example.com", "company_id": self.company.id}
         )
         channel = self._make_channel()
-        channel._grove_support_post_recent_orders(partner, self.company)
-        note = channel.message_ids.filtered(lambda m: "Recent orders" in (m.body or ""))
+        lead = self._make_lead(partner)
+        channel._grove_support_post_recent_orders(lead, partner, self.company)
+        note = self._orders_notes(lead)
         self.assertEqual(len(note), 1)
         self.assertIn("none on file", note.body)
 
@@ -162,10 +169,31 @@ class GroveSupportCase(TransactionCase):
         # email_normalize lowercases + strips before the partner is matched.
         self.assertEqual(partner.email, "chat@example.com")
         self.assertIn("livechat", lead.tag_ids.mapped("name"))
-        self.assertTrue(
-            channel.message_ids.filtered(lambda m: "Recent orders" in (m.body or "")),
-            "a recent-orders note should be posted",
+        self.assertTrue(self._orders_notes(lead), "a recent-orders note should be posted on the lead")
+
+    def test_orders_never_posted_into_visitor_channel(self):
+        """Regression guard (2026-10-28 leak): the visitor is a member of the
+        livechat channel and sees every message in it, mt_note included. Order
+        history must never be posted there — the email that selects the partner
+        is unverified chat input, so anyone could pull a customer's orders."""
+        partner = self.env["res.partner"].create(
+            {"name": "Victim", "email": "victim@example.com", "company_id": self.company.id}
         )
+        order = self.env["sale.order"].create({"partner_id": partner.id, "company_id": self.company.id})
+        channel = self._make_channel()
+        with patch.object(
+            type(channel),
+            "_chatbot_find_customer_values_in_messages",
+            return_value={"email_from": "victim@example.com"},
+        ):
+            channel._grove_support_process_chat()
+
+        self.assertFalse(self._orders_notes(channel), "order history leaked into the visitor's chat")
+        self.assertFalse(
+            channel.message_ids.filtered(lambda m: order.name in (m.body or "")),
+            "an order reference leaked into the visitor's chat",
+        )
+        self.assertIn(order.name, self._orders_notes(channel.grove_support_lead_id).body)
 
     def test_process_chat_is_idempotent(self):
         channel = self._make_channel()
