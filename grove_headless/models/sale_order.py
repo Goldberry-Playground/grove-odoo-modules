@@ -1523,6 +1523,12 @@ class SaleOrder(models.Model):
     # lost or stuck, not in transit.
     _CARRIER_POLL_MAX_AGE = timedelta(days=30)
 
+    # ir.config_parameter holding the UTC date (ISO) a carrier-health ops note
+    # was last posted, so the "tracking OFF / failing" alert fires at most once
+    # per day instead of every 2-hour poll (GOL-3681). Internal state, not an
+    # operator knob — created on first write by set_param.
+    _CARRIER_HEALTH_ALERT_PARAM = "grove_headless.carrier_health_alert_date"
+
     def _grove_tracking_pairs(self):
         """(carrier_key, tracking_number) pairs for this order's boxes, carrier
         folded to the canonical "UPS"/"USPS"/"" key. Index-aligned reads of
@@ -1563,13 +1569,16 @@ class SaleOrder(models.Model):
         An exception status posts a silent Discord ops note (once per order); the
         30-day cap posts one note and drops the order from the poll. Per-call
         errors are logged and skipped; three consecutive auth failures for a
-        carrier post one ops alert and pause that carrier until the next run."""
+        carrier post one ops alert and pause that carrier until the next run.
+
+        Loud-when-broken (GOL-3681): at most once per UTC day, post an ops note
+        when a carrier's credentials are absent while orders wait on it, or when
+        every call for a carrier failed this run (non-auth). Stale-label email
+        suppression lives in ``_apply_delivery_status`` (the carrier_poll source
+        gate), so turning the creds on can never blast the backlog by email."""
         from ..controllers.main import _apply_delivery_status, _notify_discord
 
         clients = carrier_tracking.build_clients()
-        if not any(clients.values()):
-            _logger.info("poll_carrier_tracking: no UPS/USPS credentials configured; nothing to poll")
-            return
 
         orders = self.sudo().search(
             [
@@ -1582,8 +1591,33 @@ class SaleOrder(models.Model):
                 ("grove_is_printify", "=", False),
             ]
         )
+
+        # Loud-when-broken health lines (GOL-3681), batched and posted to ops at
+        # most once per UTC day at the end of the run. First signal: a carrier
+        # whose credentials are absent while orders are waiting on it — so
+        # switching the poll on (or forgetting to) is never silent.
+        health_problems = []
+        for carrier_key, waiting in self._carrier_poll_inflight_counts(orders).items():
+            if clients.get(carrier_key) is None and waiting:
+                health_problems.append(
+                    f"Carrier tracking OFF for {carrier_key}: {waiting} order(s) waiting. "
+                    f"Set {carrier_key}_CLIENT_ID/{carrier_key}_CLIENT_SECRET."
+                )
+
+        if not any(clients.values()):
+            # No carrier configured — nothing to poll, but the missing-creds note
+            # above still owes ops a daily ping while the switch stays off.
+            self._maybe_post_carrier_health(health_problems)
+            _logger.info("poll_carrier_tracking: no UPS/USPS credentials configured; nothing to poll")
+            return
+
         now = fields.Datetime.now()
         auth_failures = {"UPS": 0, "USPS": 0}
+        # Per-carrier call accounting for the second health signal: a carrier
+        # whose EVERY call this run was a non-auth failure (auth failures have
+        # their own alert at 3) is down or misconfigured.
+        calls = {"UPS": 0, "USPS": 0}
+        hard_failures = {"UPS": 0, "USPS": 0}
         paused = set()
 
         for order in orders:
@@ -1605,6 +1639,7 @@ class SaleOrder(models.Model):
                     # Unknown carrier, or credentials for it not provisioned this
                     # stage — skip the box, not the whole order.
                     continue
+                calls[carrier_key] = calls.get(carrier_key, 0) + 1
                 try:
                     status = client.track(tracking)
                     auth_failures[carrier_key] = 0
@@ -1625,6 +1660,7 @@ class SaleOrder(models.Model):
                         )
                     continue
                 except Exception:  # noqa: BLE001 — one bad call never stops the sweep
+                    hard_failures[carrier_key] = hard_failures.get(carrier_key, 0) + 1
                     _logger.warning(
                         "Carrier track failed for %s on %s (%s)", order.name, carrier_key, tracking, exc_info=True
                     )
@@ -1644,6 +1680,49 @@ class SaleOrder(models.Model):
                 _apply_delivery_status(
                     order.env, order, new_status, order.grove_tracking_numbers or "", source="carrier_poll"
                 )
+
+        # Second health signal (GOL-3681): a carrier whose every call this run was
+        # a non-auth failure. Auth failures already trip the pause alert at 3, so
+        # they are excluded here to avoid a duplicate ops ping.
+        for carrier_key in ("UPS", "USPS"):
+            made = calls.get(carrier_key, 0)
+            if made and hard_failures.get(carrier_key, 0) == made:
+                health_problems.append(
+                    f"Carrier tracking failing for {carrier_key}: all {made} tracking call(s) failed "
+                    f"this run. Check the {carrier_key} API and credentials."
+                )
+
+        self._maybe_post_carrier_health(health_problems)
+
+    def _carrier_poll_inflight_counts(self, orders):
+        """``{carrier_key: number of in-flight orders carrying a box on that
+        carrier}`` for UPS and USPS, over the already-filtered poll ``orders``.
+        Drives the "tracking OFF" ops note (GOL-3681) so a carrier with no
+        credentials but orders waiting on it is never a silent no-op."""
+        counts = {"UPS": 0, "USPS": 0}
+        for order in orders:
+            seen = {carrier_key for carrier_key, _tracking in order._grove_tracking_pairs()}
+            for carrier_key in counts:
+                if carrier_key in seen:
+                    counts[carrier_key] += 1
+        return counts
+
+    def _maybe_post_carrier_health(self, problems):
+        """Post carrier-health ``problems`` (missing creds, all-calls-failed) to
+        the ops Discord at most once per UTC day (GOL-3681). Empty means healthy
+        and posts nothing. The last-sent UTC date lives in an ir.config_parameter
+        so a wedged or switched-off carrier pings ops once a day, not every
+        2-hour run."""
+        if not problems:
+            return
+        from ..controllers.main import _notify_discord
+
+        param = self.env["ir.config_parameter"].sudo()
+        today = fields.Datetime.now().date().isoformat()
+        if param.get_param(self._CARRIER_HEALTH_ALERT_PARAM) == today:
+            return
+        _notify_discord("\n".join(problems))
+        param.set_param(self._CARRIER_HEALTH_ALERT_PARAM, today)
 
 
 class SaleOrderLine(models.Model):

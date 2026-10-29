@@ -6723,6 +6723,44 @@ def _shipment_notice_key(order, status, tracking):
     return f"{status}:{','.join(numbers)}"
 
 
+# Carrier-poll stale-event suppression (GOL-3681). A carrier scan that arrives
+# for a label bought more than this many days ago — or for an order with no
+# recorded label-purchase date (the Shippo-era orders) — is a backlog catch-up,
+# not a fresh shipment: the status, the fulfilment-state move and the notice key
+# are still applied (so it can never email later) but the customer email is
+# replaced by an operator chatter note. Shipping creds go live AFTER this lands,
+# so without the rule, switching them on would email every stuck order at once
+# (incl. a "delivered" for 10-05 labels). Operator-tunable via ir.config_parameter
+# without a deploy; the constant is only the missing-row fallback.
+_CARRIER_NOTICE_MAX_AGE_PARAM = "grove_headless.carrier_notice_max_age_days"
+_CARRIER_NOTICE_MAX_AGE_DAYS_DEFAULT = 10
+
+
+def _carrier_notice_max_age_days(env):
+    """The operator-tunable stale-label cut-off in days (ir.config_parameter
+    ``grove_headless.carrier_notice_max_age_days``), falling back to the default
+    when the row is missing or unparseable/negative."""
+    raw = (
+        env["ir.config_parameter"].sudo().get_param(_CARRIER_NOTICE_MAX_AGE_PARAM, _CARRIER_NOTICE_MAX_AGE_DAYS_DEFAULT)
+    )
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return _CARRIER_NOTICE_MAX_AGE_DAYS_DEFAULT
+    return days if days >= 0 else _CARRIER_NOTICE_MAX_AGE_DAYS_DEFAULT
+
+
+def _carrier_notice_is_stale(order):
+    """True when a ``carrier_poll`` notice for this order must be suppressed: the
+    label was bought more than N days ago, or there is no recorded purchase date
+    (Shippo-era orders count as stale, per Josh's GOL-3681 ruling)."""
+    purchased_at = order.grove_label_purchased_at
+    if not purchased_at:
+        return True
+    max_age = timedelta(days=_carrier_notice_max_age_days(order.env))
+    return (fields.Datetime.now() - purchased_at) > max_age
+
+
 def _apply_delivery_status(env, order, new_status, tracking, source="shippo"):
     """Fold one carrier event (Shippo webhook, carrier poll, operator button)
     into the order: record the delivery status, advance the GOL-1981 fulfilment
@@ -6780,7 +6818,19 @@ def _apply_delivery_status(env, order, new_status, tracking, source="shippo"):
         sent = (order.grove_shipment_notices_sent or "").splitlines()
         if key not in sent:
             order.grove_shipment_notices_sent = "\n".join([*sent, key])
-            _notify_shipping_status(env, order, new_status, tracking)
+            if source == "carrier_poll" and _carrier_notice_is_stale(order):
+                # Durable catch-up rule (GOL-3681): the notice key is marked above
+                # so this scan can never email later, but a label this old is
+                # already-shipped history — tell the operator via chatter instead
+                # of emailing the customer a "shipped"/"delivered" out of the blue.
+                order.message_post(
+                    body=(
+                        f"Carrier reported “{new_status}”; customer email suppressed, "
+                        f"label older than {_carrier_notice_max_age_days(env)} days (GOL-3681)."
+                    )
+                )
+            else:
+                _notify_shipping_status(env, order, new_status, tracking)
     return True
 
 
