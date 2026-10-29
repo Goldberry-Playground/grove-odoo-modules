@@ -341,3 +341,17 @@ class GroveSupportCase(TransactionCase):
         with patch.object(gs_channel, "notify_discord") as mock_notify:
             self.env["discuss.channel"].create({"name": "team room", "channel_type": "channel"})
         mock_notify.assert_not_called()
+
+    # ── Duplicate-chat fix: livechat_service_patch.js ships in the embed ──
+
+    def test_persist_patch_is_in_both_embed_bundles(self):
+        """The persist() patch must reach the widget the storefronts load.
+        /im_livechat/assets_embed.js serves ``assets_embed_cors`` cross-origin
+        (the storefronts) and ``assets_embed_external`` otherwise; both include
+        ``assets_embed_core``, where the manifest registers the patch. The JS
+        behaviour itself was verified in a browser against a cross-origin page
+        (second send after ~5 s: two channels without the patch, one with)."""
+        patch_url = "/grove_support/static/src/embed/livechat_service_patch.js"
+        for bundle in ("im_livechat.assets_embed_cors", "im_livechat.assets_embed_external"):
+            files, _external = self.env["ir.qweb"]._get_asset_content(bundle)
+            self.assertIn(patch_url, [f["url"] for f in files], f"{bundle} is missing the duplicate-chat patch")
