@@ -52,6 +52,16 @@ lead owner, the Grove chatbot script should hand off with a plain
 idempotency guard protects against re-processing but does not deduplicate a lead
 created by a different mechanism.
 
+## Widget patch — one conversation per chat
+
+`static/src/embed/livechat_service_patch.js` (in `im_livechat.assets_embed_core`)
+patches Odoo 19's `LivechatService.persist()`. Upstream clears its in-flight guard
+as soon as the server channel exists, before the temporary thread is swapped
+out, so a second send from the stale composer opened a **second** channel: two
+chat windows, the bot asking twice, leads split (seen on prod 2026-10-28/29).
+The patch returns the same saved thread for the same temporary thread. Drop it
+if a later Odoo 19 build fixes `persist()` upstream.
+
 ## Company scoping / security
 
 `X-Grove-Tenant` is `grove_headless`'s concern and is never trusted here.
