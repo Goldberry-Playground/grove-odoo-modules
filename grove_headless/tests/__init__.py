@@ -41,6 +41,8 @@ from . import (
     test_pickup_settlement,  # noqa: F401
     test_planner_catalog,  # noqa: F401
     test_planner_facts,  # noqa: F401
+    test_planner_learning,  # noqa: F401
+    test_planner_routes,  # noqa: F401
     test_plant_compliance,  # noqa: F401
     test_poller_lifecycle,  # noqa: F401
     test_pos,  # noqa: F401

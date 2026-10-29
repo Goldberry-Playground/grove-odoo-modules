@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Planner scoring weights (GOL-3549, planner winter beta spec B.1).
+
+     Seeded from the shipped order-builder constants (2, 1.5, 40, 4, 10, 10, 3,
+     2) for scope `retail`, so the first feed the storefront reads leaves the
+     engine's scores unchanged. The storefront engine keeps those same constants
+     as its fallback for any key the feed omits.
+
+     noupdate="1" so an operator edit — or an accepted tester proposal (B.5) —
+     survives a module upgrade, the same way the system-parameter seeds do; the
+     adjustability is the whole point, so these values must never become code
+     constants on the Odoo side. -->
+<odoo noupdate="1">
+
+    <record id="planner_rule_priority_weight" model="grove.planner.rule">
+        <field name="key">priority_weight</field>
+        <field name="scope">retail</field>
+        <field name="value">2</field>
+        <field name="label">Priority weight</field>
+        <field name="hint">How strongly a plant's merchandising priority pulls it up the list.</field>
+    </record>
+
+    <record id="planner_rule_years_weight" model="grove.planner.rule">
+        <field name="key">years_weight</field>
+        <field name="scope">retail</field>
+        <field name="value">1.5</field>
+        <field name="label">Years-to-fruit weight</field>
+        <field name="hint">How much a shorter wait to first crop is rewarded.</field>
+    </record>
+
+    <record id="planner_rule_marginal_penalty" model="grove.planner.rule">
+        <field name="key">marginal_penalty</field>
+        <field name="scope">retail</field>
+        <field name="value">40</field>
+        <field name="label">Marginal-slot penalty</field>
+        <field name="hint">Score docked from a plant that only marginally fits the site.</field>
+    </record>
+
+    <record id="planner_rule_season_bonus" model="grove.planner.rule">
+        <field name="key">season_bonus</field>
+        <field name="scope">retail</field>
+        <field name="value">4</field>
+        <field name="label">In-season bonus</field>
+        <field name="hint">Bonus for a plant whose planting window is open now.</field>
+    </record>
+
+    <record id="planner_rule_wildlife_bonus" model="grove.planner.rule">
+        <field name="key">wildlife_bonus</field>
+        <field name="scope">retail</field>
+        <field name="value">10</field>
+        <field name="label">Wildlife bonus</field>
+        <field name="hint">Bonus for a plant that feeds pollinators or wildlife.</field>
+    </record>
+
+    <record id="planner_rule_nitrogen_bonus" model="grove.planner.rule">
+        <field name="key">nitrogen_bonus</field>
+        <field name="scope">retail</field>
+        <field name="value">10</field>
+        <field name="label">Nitrogen-fixer bonus</field>
+        <field name="hint">Bonus for a nitrogen-fixing companion.</field>
+    </record>
+
+    <record id="planner_rule_timing_fast" model="grove.planner.rule">
+        <field name="key">timing_fast</field>
+        <field name="scope">retail</field>
+        <field name="value">3</field>
+        <field name="label">Fast-timing bonus</field>
+        <field name="hint">Bonus when the buyer wants quick results and the plant is fast.</field>
+    </record>
+
+    <record id="planner_rule_timing_patient" model="grove.planner.rule">
+        <field name="key">timing_patient</field>
+        <field name="scope">retail</field>
+        <field name="value">2</field>
+        <field name="label">Patient-timing bonus</field>
+        <field name="hint">Bonus when the buyer is patient and the plant is long-lived.</field>
+    </record>
+
+</odoo>

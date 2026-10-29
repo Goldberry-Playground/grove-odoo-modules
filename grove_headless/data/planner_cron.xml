@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Nightly planner learning loop (GOL-3549, planner winter beta spec B.4).
+     Tallies 30 days of signals into priority proposals, counts un-reviewed
+     contradictions into the product flag, and posts a summary to the same ops
+     Discord channel as the listing-content audit. Machines propose; a named
+     human accepts — this job never changes a fact or a weight on its own. -->
+<odoo noupdate="1">
+    <record id="ir_cron_planner_learning" model="ir.cron">
+        <field name="name">Grove: nightly planner learning loop</field>
+        <field name="model_id" ref="model_grove_planner_proposal"/>
+        <field name="state">code</field>
+        <field name="code">model.cron_planner_learning()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">days</field>
+        <!-- 06:30 America/New_York, half an hour after the listing-content audit
+             (10:00 UTC) so this runs "after" it (spec B.4). ir.cron stores
+             nextcall in UTC with no timezone field, so it is pinned to EDT
+             (UTC-4) → 10:30 UTC; it drifts one hour during EST, acceptable for a
+             nightly data-quality job. -->
+        <field name="nextcall">2026-11-16 10:30:00</field>
+        <field name="active" eval="True"/>
+    </record>
+</odoo>
