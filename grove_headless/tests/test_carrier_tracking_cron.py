@@ -191,3 +191,84 @@ class TestCarrierTrackingCron(GroveTaxFixtureMixin, TransactionCase):
         order = self._order()
         self._run({"UPS": None, "USPS": None})
         self.assertEqual(order.grove_delivery_status, "label_purchased")
+
+    # ── GOL-3681: stale-label email suppression ──────────────────────────
+
+    def test_stale_label_applies_status_suppresses_email_posts_chatter(self):
+        # A delivered scan on a label bought 11 days ago (default cut-off 10):
+        # the status still advances and the notice key is still marked, but the
+        # customer email is replaced by an operator chatter note.
+        order = self._order(grove_label_purchased_at=fields.Datetime.now() - timedelta(days=11))
+        ups = _FakeClient(lambda t: carrier_tracking.STATUS_DELIVERED)
+        _discord, notify = self._run({"UPS": ups, "USPS": None})
+        self.assertEqual(order.grove_delivery_status, "delivered", "status still advances for the backlog")
+        notify.assert_not_called()
+        bodies = " ".join(order.message_ids.mapped("body"))
+        self.assertIn("suppressed", bodies)
+        self.assertIn("GOL-3681", bodies)
+        # The notice key is marked, so a later run can never email it.
+        self.assertIn("delivered:", order.grove_shipment_notices_sent or "")
+
+    def test_missing_label_date_counts_as_stale(self):
+        # Shippo-era orders have no grove_label_purchased_at and must be treated
+        # as stale (Josh's ruling), so they never email on catch-up.
+        order = self._order(grove_label_purchased_at=False)
+        ups = _FakeClient(lambda t: carrier_tracking.STATUS_TRANSIT)
+        _discord, notify = self._run({"UPS": ups, "USPS": None})
+        self.assertEqual(order.grove_delivery_status, "transit")
+        notify.assert_not_called()
+        self.assertIn("suppressed", " ".join(order.message_ids.mapped("body")))
+
+    def test_fresh_label_still_emails(self):
+        # A label bought today is a real, fresh shipment — the customer email
+        # fires as before and no suppression note is posted.
+        order = self._order()  # grove_label_purchased_at defaults to now()
+        ups = _FakeClient(lambda t: carrier_tracking.STATUS_DELIVERED)
+        _discord, notify = self._run({"UPS": ups, "USPS": None})
+        self.assertEqual(order.grove_delivery_status, "delivered")
+        notify.assert_called_once()
+        self.assertNotIn("suppressed", " ".join(order.message_ids.mapped("body")))
+
+    def test_stale_cutoff_is_config_parameter(self):
+        # Raising the cut-off to 30 makes an 11-day-old label fresh again.
+        self.env["ir.config_parameter"].sudo().set_param("grove_headless.carrier_notice_max_age_days", "30")
+        order = self._order(grove_label_purchased_at=fields.Datetime.now() - timedelta(days=11))
+        ups = _FakeClient(lambda t: carrier_tracking.STATUS_DELIVERED)
+        _discord, notify = self._run({"UPS": ups, "USPS": None})
+        self.assertEqual(order.grove_delivery_status, "delivered")
+        notify.assert_called_once()
+
+    # ── GOL-3681: loud-when-broken daily ops note ────────────────────────
+
+    def test_missing_creds_with_inflight_posts_one_note_per_day(self):
+        order = self._order(carriers="UPS")
+        discord, _notify = self._run({"UPS": None, "USPS": None})
+        off_notes = [c for c in discord.call_args_list if "tracking OFF for UPS" in c[0][0]]
+        self.assertEqual(len(off_notes), 1)
+        self.assertIn("1 order(s) waiting", off_notes[0][0][0])
+        self.assertIn("UPS_CLIENT_ID", off_notes[0][0][0])
+        self.assertEqual(order.grove_delivery_status, "label_purchased")
+        # A second run the same UTC day must not re-post.
+        discord2, _n2 = self._run({"UPS": None, "USPS": None})
+        discord2.assert_not_called()
+
+    def test_all_calls_fail_posts_one_note(self):
+        self._order(carriers="UPS")
+
+        def boom(_t):
+            raise RuntimeError("carrier down")
+
+        ups = _FakeClient(boom)
+        discord, _notify = self._run({"UPS": ups, "USPS": None})
+        fail_notes = [c for c in discord.call_args_list if "tracking failing for UPS" in c[0][0]]
+        self.assertEqual(len(fail_notes), 1)
+        self.assertIn("all 1 tracking call(s) failed", fail_notes[0][0][0])
+
+    def test_missing_creds_for_unused_carrier_is_quiet(self):
+        # USPS creds absent but every in-flight order ships UPS: no ops note,
+        # because nothing is actually waiting on USPS.
+        self._order(carriers="UPS")
+        ups = _FakeClient(lambda t: carrier_tracking.STATUS_TRANSIT)
+        discord, _notify = self._run({"UPS": ups, "USPS": None})
+        off_notes = [c for c in discord.call_args_list if "tracking OFF" in c[0][0]]
+        self.assertEqual(off_notes, [])
