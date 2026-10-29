@@ -542,13 +542,14 @@ def _planner_line_variant(product, has_stock_field):
 
 
 def _planner_is_nitrogen_fixer(product):
-    """True when the plant reads as a nitrogen fixer (GOL-3548 §A.3).
+    """True when the plant is a nitrogen fixer (GOL-3574 §B).
 
-    A text match on the Wildlife and Soil prose for now — a proper
-    ``grove_nitrogen_fixer`` boolean is a tracked open item in the spec.
+    Reads the explicit ``grove_nitrogen_fixer`` boolean, which GOL-3574 resolves
+    the old open item with: the field is a computed default seeded from the same
+    Wildlife/Soil text match (so untouched rows read identically) but stays
+    editable, so a consultant correction wins.
     """
-    text = f"{product.grove_wildlife or ''} {product.grove_soil or ''}".lower()
-    return "nitrogen" in text
+    return bool(product.grove_nitrogen_fixer)
 
 
 def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
@@ -616,6 +617,42 @@ def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
         "substitute_id": _planner_substitute_tmpl_id(genus, substitute_by_genus),
         "image": _image_url("product.template", product, "image_512"),
     }
+
+
+def _serialize_consult_facts(product):
+    """The consultant-depth facts added to a plant row for ``scope=consult`` (GOL-3574 §B).
+
+    Merged onto the base planner row by the feed. Blank conventions mirror
+    ``_serialize_planner_plant``: selections to ``None`` when unset, floats/ints
+    to ``None`` at 0, booleans as booleans. ``nitrogen_fixer`` is deliberately
+    NOT repeated here — the base row already carries it from the same field.
+    """
+    return {
+        "syntropic_stratum": product.grove_syntropic_stratum or None,
+        "succession_stage": product.grove_succession_stage or None,
+        "mature_height_m": product.grove_mature_height_m or None,
+        "canopy_closure_years": product.grove_canopy_closure_years or None,
+        "coppice_tolerant": bool(product.grove_coppice_tolerant),
+        "pruning_response": product.grove_pruning_response or None,
+        "root_type": product.grove_root_type or None,
+        "allelopathy": product.grove_allelopathy or None,
+        "log_suitability": product.grove_log_suitability or None,
+        "consult_ready": bool(product.grove_consult_ready),
+    }
+
+
+def _planner_rules_for_scope(env, scope):
+    """``{key: value}`` planner scoring weights for ``scope`` (planner beta B, GOL-3549).
+
+    Guarded: the ``grove.planner.rule`` table ships in planner beta B. Until it
+    lands this returns ``{}`` and the storefront engine falls back to its own
+    constants, so the consult feed is serveable and green on its own (GOL-3574 is
+    blocked only by planner beta A). When beta B merges, the seeded rows populate
+    the object with no feed change.
+    """
+    if "grove.planner.rule" not in env:
+        return {}
+    return env["grove.planner.rule"].sudo().rules_for_scope(scope)
 
 
 def _bundle_component_ids(env, variant):
@@ -1295,7 +1332,7 @@ class GroveHeadlessAPI(http.Controller):
         methods=["GET"],
         csrf=False,
     )
-    def planner_catalog(self, **_kwargs):
+    def planner_catalog(self, scope="retail", **_kwargs):
         """One cached JSON document the order-builder quiz runs over (GOL-3379 §B).
 
         Public, no auth, same CORS and company scoping as ``/products``. The
@@ -1310,12 +1347,20 @@ class GroveHeadlessAPI(http.Controller):
         the planner can offer "notify me". ``bundles`` are the published Food
         Forest Packages. ``states``/``state_zones`` ship the green list and the
         ZIP-unknown USDA bands so the storefront carries no copy of either.
+
+        ``?scope=consult`` (GOL-3574 §B) serves the same plant set with the
+        consultant-depth facts merged onto each plant row and a ``rules`` object
+        for the consult scope (from the planner rule table, planner beta B). The
+        facts are catalog data, not secrets, so the endpoint stays public,
+        read-only and company-scoped like the retail feed. Any other value falls
+        back to the retail shape.
         """
+        scope = "consult" if scope == "consult" else "retail"
         website = request.website
         current_company = website.company_id
         tenant = website.grove_tenant_slug()
         Template = request.env["product.template"].sudo().with_company(current_company)
-        scope = company_domain(current_company.id, tenant)
+        company_scope = company_domain(current_company.id, tenant)
 
         # Published, for-sale, planner-ready plants — seeds are not plants and
         # never appear in a tree-planting quiz (spec §C.2). grove_planner_ready
@@ -1325,7 +1370,7 @@ class GroveHeadlessAPI(http.Controller):
             ("website_published", "=", True),
             ("grove_planner_ready", "=", True),
             ("grove_shipping_tier", "!=", "seed"),
-        ] + scope
+        ] + company_scope
         plants = Template.search(plant_domain, order="grove_planner_priority asc, id asc")
 
         # Warm the batched preorder-cap + stock computes once for the whole page
@@ -1346,7 +1391,7 @@ class GroveHeadlessAPI(http.Controller):
                 ("website_published", "=", True),
                 ("grove_botanical_name", "!=", False),
             ]
-            + scope,
+            + company_scope,
             order="id asc",
         )
         for candidate in sub_candidates:
@@ -1355,6 +1400,12 @@ class GroveHeadlessAPI(http.Controller):
                 substitute_by_genus[genus] = candidate.id
 
         plant_rows = [_serialize_planner_plant(p, substitute_by_genus, has_stock_field) for p in plants]
+
+        # scope=consult: merge the consultant-depth facts onto each row in order
+        # (plant_rows is built from `plants` 1:1) (GOL-3574 §B).
+        if scope == "consult":
+            for row, plant in zip(plant_rows, plants):
+                row.update(_serialize_consult_facts(plant))
 
         # Bundles: published templates in the Food Forest Packages public
         # category, resolved by name (its prod id is 6; see the constant).
@@ -1366,7 +1417,7 @@ class GroveHeadlessAPI(http.Controller):
         )
         if ff_category:
             bundles = Template.search(
-                [("website_published", "=", True), ("public_categ_ids", "in", ff_category.ids)] + scope,
+                [("website_published", "=", True), ("public_categ_ids", "in", ff_category.ids)] + company_scope,
                 order="id asc",
             )
             bundle_rows = [_serialize_planner_bundle(request.env, b) for b in bundles]
@@ -1383,6 +1434,12 @@ class GroveHeadlessAPI(http.Controller):
             "plants": plant_rows,
             "bundles": bundle_rows,
         }
+        # scope=consult serves the consult-scope scoring rules (planner beta B's
+        # table; {} until it lands). The retail feed's own `rules` object is
+        # owned by planner beta B (GOL-3549) and added there.
+        if scope == "consult":
+            body["scope"] = "consult"
+            body["rules"] = _planner_rules_for_scope(request.env, "consult")
         return _json_response(body, headers={"Cache-Control": PLANNER_CATALOG_CACHE_CONTROL})
 
     # ── Catalog nav (department tree) ────────────────────────────────────
