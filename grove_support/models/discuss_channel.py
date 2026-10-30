@@ -15,8 +15,9 @@ This module does FOUR jobs and no more, additively — grove_headless is untouch
      included (2026-10-28 leak — anyone typing a customer's email saw their orders).
      Everything deeper lives on the native partner form, which already lists
      the customer's sale orders — no new order endpoints.
-  4. Discord ping — a best-effort ops ping on chat start via the existing
-     ``DISCORD_OPS_WEBHOOK_URL`` (grove_headless ``_notify_discord`` pattern).
+  4. Discord ping — a best-effort ping on chat start via
+     ``DISCORD_SUPPORT_WEBHOOK_URL``, falling back to ``DISCORD_OPS_WEBHOOK_URL``
+     (grove_headless ``_notify_discord`` pattern).
 
 Trigger seams (Odoo 19 im_livechat):
   * ``create()`` — chat-start Discord ping for ``channel_type == 'livechat'``.

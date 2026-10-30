@@ -605,13 +605,13 @@ grove-odoo-modules/
 │   ├── setup_ghost_integration.py
 │   ├── build_zip_zone_matrix.py      # Rebuilds data/zip_usda_zone.csv from PHZM source
 │   └── rate_check/
-│       ├── rate_check.py             # Morning rate-checker: Shippo quotes → PR + Discord
+│       ├── rate_check.py             # Rate-checker: Pirate Ship quotes → PR + Discord
 │       └── tests/
 │           └── test_rate_check.py
 ├── .github/
 │   └── workflows/
 │       ├── ci.yml               # Lint + manifest + tenant + XML data + smoke install
-│       └── rate-check.yml       # Daily 07:00 ET cron: Shippo rate drift → PR + Discord
+│       └── rate-check.yml       # Pirate Ship rate drift → PR + Discord (manual dispatch; cron off, GOL-2605)
 ├── .ruff.toml                   # Ruff linter config
 ├── requirements-ci.txt          # CI extras (pinned tooling for the smoke-install job)
 ├── CLAUDE.md                    # AI assistant context

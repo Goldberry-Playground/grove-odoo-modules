@@ -1,9 +1,9 @@
-"""Best-effort Discord ops ping for grove_support (GOL-2022).
+"""Best-effort Discord support-channel ping for grove_support (GOL-2022).
 
 Mirrors the ``_notify_discord`` pattern in grove_headless
-``controllers/main.py`` (~2251): a missing ``DISCORD_OPS_WEBHOOK_URL`` or a
-failed POST is swallowed so a chat event never fails because the ops channel is
-unreachable. Kept in its own module (no ``odoo`` import) so the message
+``controllers/main.py``: a missing webhook (``DISCORD_SUPPORT_WEBHOOK_URL``, then
+``DISCORD_OPS_WEBHOOK_URL``) or a failed POST is swallowed so a chat event never
+fails because the channel is unreachable. Kept in its own module (no ``odoo`` import) so the message
 formatter stays trivially unit-testable and the network I/O is a single,
 monkeypatchable seam in tests.
 """

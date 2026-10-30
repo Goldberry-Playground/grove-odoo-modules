@@ -36,7 +36,8 @@ publish-webhook prod env gap is tracked separately and not bundled here.
 | Job | Seam | Notes |
 | --- | --- | --- |
 | 4 (Discord) | `discuss.channel.create()` for `channel_type == 'livechat'` | fires on chat start |
-| 1–3 | `discuss.channel._forward_human_operator()` | fires once at chatbot→operator handoff |
+| 1–3 | `discuss.channel.write()` of `chatbot_current_step_id` | MAIN seam (GOL-3459): fires when the chatbot advances past the email step, operator online or not (the offline path is the common nursery case) |
+| 1–3 | `discuss.channel._forward_human_operator()` | secondary seam at chatbot→operator handoff; usually a no-op because the step write already ran |
 
 Jobs 1–3 read the collected email through im_livechat's own
 `_chatbot_find_customer_values_in_messages({'question_email': 'email_from'})`
