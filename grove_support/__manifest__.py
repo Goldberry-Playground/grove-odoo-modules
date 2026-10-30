@@ -44,12 +44,14 @@
     "data": [
         "views/im_livechat_channel_views.xml",
     ],
-    # One JS patch on the livechat embed bundle (the storefronts load the cors
-    # flavour, which includes assets_embed_core): stop a second send during the
-    # temporary->saved thread swap from opening a duplicate conversation.
+    # Two JS patches on the livechat embed bundle (the storefronts load the
+    # cors flavour, which includes assets_embed_core): stop a second send during
+    # the temporary->saved thread swap from opening a duplicate conversation,
+    # and empty the text box after each send once that swap has happened.
     "assets": {
         "im_livechat.assets_embed_core": [
             "grove_support/static/src/embed/livechat_service_patch.js",
+            "grove_support/static/src/embed/composer_patch.js",
         ],
     },
     "installable": True,

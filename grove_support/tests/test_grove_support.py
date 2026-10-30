@@ -344,14 +344,21 @@ class GroveSupportCase(TransactionCase):
 
     # ── Duplicate-chat fix: livechat_service_patch.js ships in the embed ──
 
-    def test_persist_patch_is_in_both_embed_bundles(self):
-        """The persist() patch must reach the widget the storefronts load.
+    def test_widget_patches_are_in_both_embed_bundles(self):
+        """Both widget patches must reach the widget the storefronts load.
         /im_livechat/assets_embed.js serves ``assets_embed_cors`` cross-origin
         (the storefronts) and ``assets_embed_external`` otherwise; both include
-        ``assets_embed_core``, where the manifest registers the patch. The JS
+        ``assets_embed_core``, where the manifest registers the patches. The JS
         behaviour itself was verified in a browser against a cross-origin page
-        (second send after ~5 s: two channels without the patch, one with)."""
-        patch_url = "/grove_support/static/src/embed/livechat_service_patch.js"
+        (second send after ~5 s: two channels without the persist patch, one
+        with) and on prod (text box left holding the sent text without the
+        composer patch, empty with it)."""
+        patch_urls = (
+            "/grove_support/static/src/embed/livechat_service_patch.js",
+            "/grove_support/static/src/embed/composer_patch.js",
+        )
         for bundle in ("im_livechat.assets_embed_cors", "im_livechat.assets_embed_external"):
             files, _external = self.env["ir.qweb"]._get_asset_content(bundle)
-            self.assertIn(patch_url, [f["url"] for f in files], f"{bundle} is missing the duplicate-chat patch")
+            urls = [f["url"] for f in files]
+            for patch_url in patch_urls:
+                self.assertIn(patch_url, urls, f"{bundle} is missing {patch_url}")
