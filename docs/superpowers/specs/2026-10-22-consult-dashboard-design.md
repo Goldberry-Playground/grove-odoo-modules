@@ -30,7 +30,7 @@ The stack is the one AgriforestryOS already runs for the home farm: farmOS is th
 - Phases 3 to 5: site model from DEM, SSURGO and imagery; row drawing and the consortium grid; plan generation; quote, install, handover and the bundle; stewardship calendar; trials. They are designed in the draft and specified after phase 2.
 - No change to the retail planner, the publish gate, the deposit rule, shipping or compliance.
 - No new external credentials. Drive-time estimates use straight-line distance with a road factor; parcel and soil pulls are phase 3 and use keyless public services.
-- No LLM in the generator. Sections are templates over records.
+- No LLM in the generator. Sections are templates over records. C.8 keeps the drafts and the human edits from day one so a model can be trained later; it adds no model.
 
 ---
 
@@ -124,7 +124,32 @@ All company 3, `sale_ok` true, `website_published` false, `grove_gate_exempt` tr
 
 ### C.7 Staff routes `/grove/api/v1/consult/*`
 
-Authenticated with the existing headless API key the storefront BFF holds; never called from a browser. `GET /pipeline` (leads with consult fields, areas, stage), `GET /lead/<id>`, `POST /lead` (create or update the consult fields, areas, modules, step), `POST /lead/<id>/stage`, `GET /modules`, `GET /practices`, `POST /lead/<id>/plan` (create a draft plan with the skeleton sections), `GET /travel?zip=` (straight-line distance from the farm ZIP centroid to the client ZIP centroid times 1.3, hours at 45 mph, billable hours after the first, the $600 three-hour rule applied; the ZIP centroid table is the one the zone lookup already carries plus a lat and lon column). Every route is company-scoped and tested.
+Authenticated with the existing headless API key the storefront BFF holds; never called from a browser. Section writes go through `POST /lead/<id>/plan/<version>/section/<key>` (body, `edit_note`, or `approve: true`), so the C.8 snapshots are taken in one place. `GET /pipeline` (leads with consult fields, areas, stage), `GET /lead/<id>`, `POST /lead` (create or update the consult fields, areas, modules, step), `POST /lead/<id>/stage`, `GET /modules`, `GET /practices`, `POST /lead/<id>/plan` (create a draft plan with the skeleton sections), `GET /travel?zip=` (straight-line distance from the farm ZIP centroid to the client ZIP centroid times 1.3, hours at 45 mph, billable hours after the first, the $600 three-hour rule applied; the ZIP centroid table is the one the zone lookup already carries plus a lat and lon column). Every route is company-scoped and tested.
+
+### C.8 Draft and approval snapshots (training capture)
+
+Every section a person edits is a lesson: what the machine drafted, what the inputs were, and what a named human turned it into. Keeping all three from the first client costs a few fields; recovering them later is impossible. This is capture only. Whether a model ever drafts sections is a later decision, and the generator stays templates over records (Non-goals).
+
+Fields on `grove.consult.plan.section`, beside the C.4 fields:
+
+| Field | Type | Written | Notes |
+|---|---|---|---|
+| `draft_body` | Text, read-only | once, when the section is first filled | Never overwritten. Skeleton sections created empty in phase 2 leave it empty until the phase 3 generator fills them |
+| `draft_source` | Char, read-only | with `draft_body` | `skeleton`, `template:<module key>@<template version>`, or later a model name and version. The template version is a hash of `section_template` so a changed template is visible in the data |
+| `draft_inputs` | Json, read-only | with `draft_body` | The ids the draft was built from: lead, modules, practice and area ids, catalog product template ids, rule ids, plus the catalog `write_date` maximum, so the facts can be reproduced as they stood |
+| `approved_body` | Text, read-only | on every move to `approved` | The text a named person signed off. Re-approval after a later edit overwrites it; `approved_at` and `by` move with it |
+| `approved_at` | Datetime, read-only | with `approved_body` | |
+| `edit_note` | Char, optional | by the editor | One line on why the draft was wrong ("wrong spacing for silvopasture", "too salesy"). Never required to approve |
+
+Rules:
+- Any write to `body` on an `approved` section moves it back to `edited`, so the plan's approval constraint (C.4) cannot be met by an edit after sign-off. The plan's own status does not move back once `sent`; a changed sent plan is a new `version`.
+- The snapshots are written by the model layer (`write` and the approve action), not by the dashboard, so Odoo form edits, MCP writes and the C.7 route all capture the same way. MCP and script writes set `draft_source` like any generator and clear `grove_facts_reviewed` as every machine write does.
+- `draft_body`, `draft_source`, `draft_inputs`, `approved_body` and `approved_at` are read-only for all groups, including Settings; tests assert a write is refused.
+- Nothing is deleted: archiving a lead archives its plans and sections, and the snapshots stay.
+
+Privacy: section bodies carry the client's own words and property details. They are staff-only (same access group as the rest of C) and never leave Odoo in phase 2. The phase 5 export (F) strips names, addresses and emails, replaces the ZIP with the zone and state, and hashes the lead id; the client agreement gets one line saying de-identified plan text may be used to improve our tools (Josh's wording, before the first client at #6).
+
+Tests: `test_consult_section_snapshots.py` covers first fill sets the three draft fields once, a second fill does not overwrite them, approve writes `approved_body`, edit after approve returns to `edited` and blocks plan approval, read-only fields refuse writes.
 
 ---
 
@@ -135,7 +160,7 @@ Authenticated with the existing headless API key the storefront BFF holds; never
 - **Pipeline.** Leads by consult stage with practices by area, acres, zone, service step, next action and days in stage. Filters by stage. "New client" creates a lead.
 - **Client workspace, Intake tab.** Client and land (ZIP with the zone lookup, acres, service step from the product list, hands-on, goals in the client's words, what they already have, travel estimate), goal modules as chips, areas table with practice, acres, wet, poor soil, shade, aspect, and the practice's site needs and infrastructure defaults shown read-only. Save and go to Site.
 - **Site tab, phase 2 scope.** The schematic map from the prototype (areas sized by acreage, wet areas marked), the site facts panel from the areas, and the walk checklist stored on the lead. The real map (PostGIS, DEM, soils) is phase 3.
-- **Design tab, phase 2 scope.** Shows the plan versions and their skeleton sections with the edited and approved states and the approval lock. The generator and the consortium grid are phase 3.
+- **Design tab, phase 2 scope.** Shows the plan versions and their skeleton sections with the edited and approved states and the approval lock. Each section editor has the optional one-line "why I changed it" field (`edit_note`, C.8) and a "show draft" toggle that diffs `body` against `draft_body`. The generator and the consortium grid are phase 3.
 - The stage tabs, badges and the planting-order and gap conventions follow the Grove Consult Flow prototype.
 - Auth: the app is served on `consult.gatheringatthegrove.com` behind Cloudflare Access (the same mechanism Paperclip uses), staff emails only. The BFF holds the Odoo key; the browser never sees it.
 - Tests: component tests for the intake form round trip and the areas table; one Playwright flow: new client, three areas, modules, save, pipeline shows the lead at Intake.
@@ -152,7 +177,7 @@ Authenticated with the existing headless API key the storefront BFF holds; never
 
 3. **Site model and design.** Parcel from county GIS or upload, 3DEP elevation clip, SSURGO drainage classes, NAIP canopy, contours and aspect in PostGIS per client; rows drawn on contour or keyline; the eight-by-four consortium grid with explainable gaps; planting points from rows and spacing; the generator that drafts rows, consortia and every plan section from the modules and practices; the consortia library keyed by practice and site class.
 4. **Quote, install, handover.** Plan to sale.order with stock, spawn, infrastructure and service lines; per-client stock location; sync-service multi-location; Wesley's phone install view with lots and substitutions; the export bundle (plan PDF, site brief, GeoJSON and KML, planting points, QGIS project, calendar, pruning guides, lot list) to Spaces; the archive step.
-5. **Stewardship, trials and learning.** Calendar from the plan, log templates, the `trial` plan type with treatment and control groups, `trial_summary` tool, evidence and proposals shared with the retail planner, consortia performance roll-ups, the Ask pane.
+5. **Stewardship, trials and learning.** Calendar from the plan, log templates, the `trial` plan type with treatment and control groups, `trial_summary` tool, evidence and proposals shared with the retail planner, consortia performance roll-ups, the Ask pane. Also `scripts/export_section_pairs.py`: de-identified JSONL of `draft_inputs`, `draft_body`, `approved_body`, `edit_note` and `draft_source` per approved section (C.8), `DRY_RUN` by default, local file only. It is the training set for a small self-hosted drafting model if we decide to build one (candidate: Qwen3-4B with LoRA, Apache 2.0); approved bodies feed supervised tuning and draft-versus-approved pairs feed preference tuning. Facts are never trained in; a model drafts from the feed and the rules like the templates do.
 
 ---
 
@@ -162,7 +187,7 @@ Authenticated with the existing headless API key the storefront BFF holds; never
 |---|---|---|---|
 | A. Fungal stratum, `client` tenure and its filters, `property` and `water` land types, sync and harvest-sync rules, map style | AgriforestryOS 4.x | Ada, Josh reviews and deploys | #5 |
 | B. Consultant facts, projections, backfill script, consult feed scope | grove-odoo-modules | Ada, blocked by GOL-3548 | #5 |
-| C. Consult models, seed data, service products, crm.lead fields, staff routes | grove-odoo-modules | Ada | #6 |
+| C. Consult models, seed data, service products, crm.lead fields, staff routes, section snapshots (C.8) | grove-odoo-modules | Ada | #6 |
 | D. `apps/consult` shell: pipeline, intake, site and design tabs at phase 2 scope | grove-sites | Iris, blocked by C | #6 |
 | E. Consult host, Cloudflare Access, Spaces prefix, QGIS client-project script | grove-sites deploy, AgriforestryOS, Terraform | Terra | #6 |
 | Prices on the service products; first client entered | prod ops | Josh | at #6 promote |
@@ -177,3 +202,5 @@ Kill switch: the consult app is a separate host; removing the Access policy or t
 - Per-client PostGIS schema naming and the ETL change that writes to it (phase 3).
 - The parcel source per state (phase 3).
 - Exact prices and the overnight allowance rule.
+- The client-agreement line on de-identified reuse of plan text (C.8), Josh's wording.
+- Whether retail planner signals (planner beta B) join the C.8 export as a second source, once both exist.
