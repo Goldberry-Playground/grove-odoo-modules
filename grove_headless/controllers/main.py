@@ -2274,7 +2274,7 @@ class GroveHeadlessAPI(http.Controller):
                     for v in printify
                 ]
                 try:
-                    shipping_amount = _printify_quote_cached(line_items, _printify_address({}, ship_to, dest))
+                    shipping_amount = _printify_quote_cached(line_items, _printify_quote_address(ship_to, dest))
                 except printify_client.PrintifyError:
                     return _json_response({"error": PRINTIFY_SHIPPING_UNAVAILABLE}, status=503)
 
@@ -3642,6 +3642,28 @@ def _printify_address(contact, shipping, state):
         "city": shipping.get("city") or "",
         "zip": shipping.get("zip") or "",
     }
+
+
+# Printify's shipping.json validates a complete address (first/last name,
+# address1, city, phone) and 400s otherwise, but the rate depends only on
+# country, region and ZIP. The pre-checkout quote knows just state + ZIP, so the
+# rest carry placeholders. /checkout/session always quotes with the shopper's
+# real address via _printify_address.
+_PRINTIFY_QUOTE_PLACEHOLDERS = {
+    "first_name": "Shipping",
+    "last_name": "Quote",
+    "address1": "Address pending",
+    "city": "City pending",
+    "phone": "0000000000",
+}
+
+
+def _printify_quote_address(shipping, state):
+    address = _printify_address({}, shipping, state)
+    for field, placeholder in _PRINTIFY_QUOTE_PLACEHOLDERS.items():
+        if not address[field]:
+            address[field] = placeholder
+    return address
 
 
 def _printify_line_items(order):
