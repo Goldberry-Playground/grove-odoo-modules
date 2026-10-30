@@ -14,6 +14,9 @@ from .shipping_zones import pack_for_state, unshippable_reason
 
 _logger = logging.getLogger(__name__)
 
+# How long an anonymous headless-API cart may sit before the autovacuum deletes it.
+GROVE_API_CART_TTL = timedelta(days=1)
+
 
 class SaleOrder(models.Model):
     _inherit = "sale.order"
@@ -358,6 +361,30 @@ class SaleOrder(models.Model):
                 order._printify_record_push_crash(exc)
             if not config["test_enable"]:
                 self.env.cr.commit()
+
+    @api.autovacuum
+    def _gc_grove_abandoned_api_carts(self):
+        """Delete headless-API session carts nobody took to checkout.
+
+        ``POST /grove/api/v1/cart`` creates a website_sale cart: a draft on the
+        website's public partner with no Stripe session. Nothing expires those,
+        and the prod synthetic cart-flow journey makes one a minute (119 farm
+        drafts on 2026-10-30). A cart that started checkout carries a session id
+        and a named customer, so it never matches.
+        """
+        public_partners = self.env["website"].sudo().search([]).user_id.partner_id
+        carts = self.sudo().search(
+            [
+                ("state", "=", "draft"),
+                ("website_id", "!=", False),
+                ("partner_id", "in", public_partners.ids),
+                ("grove_stripe_session_id", "=", False),
+                ("create_date", "<", fields.Datetime.now() - GROVE_API_CART_TTL),
+            ]
+        )
+        if carts:
+            _logger.info("Deleting %d abandoned headless-API cart(s)", len(carts))
+            carts.unlink()
 
     def action_grove_retry_printify_push(self):
         """Re-queue a push_failed Printify order from the back office. Only a
