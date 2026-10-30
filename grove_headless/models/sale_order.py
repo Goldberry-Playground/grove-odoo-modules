@@ -1535,6 +1535,18 @@ class SaleOrder(models.Model):
     # operator knob — created on first write by set_param.
     _CARRIER_HEALTH_ALERT_PARAM = "grove_headless.carrier_health_alert_date"
 
+    # Operator knob (GOL-3681, UPS-only launch): comma list of carrier keys to
+    # mute, e.g. "USPS". A muted carrier never trips the daily missing-creds or
+    # all-calls-failed ops note — the USPS keys can't be minted yet (COP sign-in
+    # is wedged for Josh), so nagging daily would be noise. Its gap is still
+    # reported, once a week, by the summary below so it never goes unseen.
+    _CARRIER_POLL_MUTED_PARAM = "grove_headless.carrier_poll_muted"
+
+    # ir.config_parameter holding the ISO year-week ("2026-W44") a muted-carrier
+    # summary was last posted, so the weekly gap line fires at most once per ISO
+    # week. Internal state, not an operator knob.
+    _CARRIER_MUTED_SUMMARY_PARAM = "grove_headless.carrier_muted_summary_week"
+
     def _grove_tracking_pairs(self):
         """(carrier_key, tracking_number) pairs for this order's boxes, carrier
         folded to the canonical "UPS"/"USPS"/"" key. Index-aligned reads of
@@ -1579,9 +1591,12 @@ class SaleOrder(models.Model):
 
         Loud-when-broken (GOL-3681): at most once per UTC day, post an ops note
         when a carrier's credentials are absent while orders wait on it, or when
-        every call for a carrier failed this run (non-auth). Stale-label email
-        suppression lives in ``_apply_delivery_status`` (the carrier_poll source
-        gate), so turning the creds on can never blast the backlog by email."""
+        every call for a carrier failed this run (non-auth). A carrier named in
+        ``grove_headless.carrier_poll_muted`` is exempt from that daily note (the
+        UPS-only launch mutes USPS until its keys can be minted); its untracked
+        backlog is reported once a week instead. Stale-label email suppression
+        lives in ``_apply_delivery_status`` (the carrier_poll source gate), so
+        turning the creds on can never blast the backlog by email."""
         from ..controllers.main import _apply_delivery_status, _notify_discord
 
         clients = carrier_tracking.build_clients()
@@ -1601,19 +1616,29 @@ class SaleOrder(models.Model):
         # Loud-when-broken health lines (GOL-3681), batched and posted to ops at
         # most once per UTC day at the end of the run. First signal: a carrier
         # whose credentials are absent while orders are waiting on it — so
-        # switching the poll on (or forgetting to) is never silent.
+        # switching the poll on (or forgetting to) is never silent. A muted
+        # carrier (USPS at the UPS-only launch) is held out of the daily note and
+        # folded into a once-a-week summary instead.
+        muted = self._carrier_poll_muted()
         health_problems = []
+        muted_untracked = {}
         for carrier_key, waiting in self._carrier_poll_inflight_counts(orders).items():
-            if clients.get(carrier_key) is None and waiting:
-                health_problems.append(
-                    f"Carrier tracking OFF for {carrier_key}: {waiting} order(s) waiting. "
-                    f"Set {carrier_key}_CLIENT_ID/{carrier_key}_CLIENT_SECRET."
-                )
+            if clients.get(carrier_key) is not None or not waiting:
+                continue
+            if carrier_key in muted:
+                muted_untracked[carrier_key] = waiting
+                continue
+            health_problems.append(
+                f"Carrier tracking OFF for {carrier_key}: {waiting} order(s) waiting. "
+                f"Set {carrier_key}_CLIENT_ID/{carrier_key}_CLIENT_SECRET."
+            )
 
         if not any(clients.values()):
             # No carrier configured — nothing to poll, but the missing-creds note
-            # above still owes ops a daily ping while the switch stays off.
+            # above still owes ops a daily ping while the switch stays off, and a
+            # muted carrier still owes its weekly gap line.
             self._maybe_post_carrier_health(health_problems)
+            self._maybe_post_carrier_muted_summary(muted_untracked)
             _logger.info("poll_carrier_tracking: no UPS/USPS credentials configured; nothing to poll")
             return
 
@@ -1692,8 +1717,12 @@ class SaleOrder(models.Model):
 
         # Second health signal (GOL-3681): a carrier whose every call this run was
         # a non-auth failure. Auth failures already trip the pause alert at 3, so
-        # they are excluded here to avoid a duplicate ops ping.
+        # they are excluded here to avoid a duplicate ops ping. A muted carrier is
+        # exempt — we have deliberately switched it off, so a failing call is
+        # expected noise, not an alert.
         for carrier_key in ("UPS", "USPS"):
+            if carrier_key in muted:
+                continue
             made = calls.get(carrier_key, 0)
             if made and hard_failures.get(carrier_key, 0) == made:
                 health_problems.append(
@@ -1702,6 +1731,7 @@ class SaleOrder(models.Model):
                 )
 
         self._maybe_post_carrier_health(health_problems)
+        self._maybe_post_carrier_muted_summary(muted_untracked)
 
     def _carrier_poll_inflight_counts(self, orders):
         """``{carrier_key: number of in-flight orders carrying a box on that
@@ -1732,6 +1762,38 @@ class SaleOrder(models.Model):
             return
         _notify_discord("\n".join(problems), channel="shipping")
         param.set_param(self._CARRIER_HEALTH_ALERT_PARAM, today)
+
+    def _carrier_poll_muted(self):
+        """Set of carrier keys the operator has muted via ir.config_parameter
+        ``grove_headless.carrier_poll_muted`` (comma list, e.g. "USPS"). Values
+        are folded through ``normalize_carrier`` so "usps"/"USPS" both match, and
+        blanks are dropped. A muted carrier is held out of the daily ops note
+        (GOL-3681, UPS-only launch)."""
+        raw = self.env["ir.config_parameter"].sudo().get_param(self._CARRIER_POLL_MUTED_PARAM, "") or ""
+        return {key for key in (normalize_carrier(part) for part in raw.split(",")) if key}
+
+    def _maybe_post_carrier_muted_summary(self, muted_untracked):
+        """Post a once-a-week ops summary of muted carriers that still have
+        untracked in-flight orders (GOL-3681). ``muted_untracked`` is
+        ``{carrier_key: waiting count}``; empty posts nothing. The last-sent ISO
+        year-week lives in an ir.config_parameter so the USPS gap surfaces weekly
+        — loud enough not to be forgotten, quiet enough not to nag daily like a
+        live carrier would."""
+        if not muted_untracked:
+            return
+        from ..controllers.main import _notify_discord
+
+        param = self.env["ir.config_parameter"].sudo()
+        iso = fields.Datetime.now().isocalendar()
+        week = f"{iso[0]}-W{iso[1]:02d}"
+        if param.get_param(self._CARRIER_MUTED_SUMMARY_PARAM) == week:
+            return
+        lines = [
+            f"Carrier {carrier_key} is muted (no tracking): {waiting} in-flight order(s) untracked."
+            for carrier_key, waiting in sorted(muted_untracked.items())
+        ]
+        _notify_discord("\n".join(["Weekly muted-carrier summary (GOL-3681):", *lines]))
+        param.set_param(self._CARRIER_MUTED_SUMMARY_PARAM, week)
 
 
 class SaleOrderLine(models.Model):
