@@ -272,3 +272,73 @@ class TestCarrierTrackingCron(GroveTaxFixtureMixin, TransactionCase):
         discord, _notify = self._run({"UPS": ups, "USPS": None})
         off_notes = [c for c in discord.call_args_list if "tracking OFF" in c[0][0]]
         self.assertEqual(off_notes, [])
+
+    # ── GOL-3681 (UPS-only launch): per-carrier mute + weekly summary ────
+
+    def _mute(self, value):
+        self.env["ir.config_parameter"].sudo().set_param("grove_headless.carrier_poll_muted", value)
+
+    def test_muted_carrier_no_daily_note_but_weekly_summary(self):
+        # USPS is muted and its creds are absent while a USPS order waits: the
+        # daily "tracking OFF for USPS" note is suppressed, but a once-a-week
+        # muted-carrier summary surfaces the gap so it is not forgotten.
+        self._mute("USPS")
+        self._order(carriers="USPS", tracking="9400111899223")
+        discord, _notify = self._run({"UPS": None, "USPS": None})
+        off_notes = [c for c in discord.call_args_list if "tracking OFF for USPS" in c[0][0]]
+        self.assertEqual(off_notes, [], "a muted carrier never trips the daily missing-creds note")
+        weekly = [c for c in discord.call_args_list if "Weekly muted-carrier summary" in c[0][0]]
+        self.assertEqual(len(weekly), 1)
+        self.assertIn("USPS is muted", weekly[0][0][0])
+        self.assertIn("1 in-flight order(s) untracked", weekly[0][0][0])
+        # A second run the same ISO week must not re-post the weekly summary.
+        discord2, _n2 = self._run({"UPS": None, "USPS": None})
+        weekly2 = [c for c in discord2.call_args_list if "Weekly muted-carrier summary" in c[0][0]]
+        self.assertEqual(weekly2, [])
+
+    def test_unmuted_carrier_still_gets_daily_note(self):
+        # With the mute cleared, the same USPS gap trips the daily note again —
+        # proving the mute param is what suppresses it, nothing else.
+        self._mute("")
+        self._order(carriers="USPS", tracking="9400111899223")
+        discord, _notify = self._run({"UPS": None, "USPS": None})
+        off_notes = [c for c in discord.call_args_list if "tracking OFF for USPS" in c[0][0]]
+        self.assertEqual(len(off_notes), 1)
+        weekly = [c for c in discord.call_args_list if "Weekly muted-carrier summary" in c[0][0]]
+        self.assertEqual(weekly, [], "an unmuted carrier gets the daily note, not the weekly summary")
+
+    def test_muted_value_is_carrier_normalized(self):
+        # A lower-case / spaced mute value still matches the canonical key.
+        self._mute(" usps ")
+        self._order(carriers="USPS", tracking="9400111899223")
+        discord, _notify = self._run({"UPS": None, "USPS": None})
+        off_notes = [c for c in discord.call_args_list if "tracking OFF for USPS" in c[0][0]]
+        self.assertEqual(off_notes, [])
+
+    def test_muted_carrier_excluded_from_all_calls_failed(self):
+        # A muted carrier whose every call fails is expected noise, not an alert:
+        # no "tracking failing" note.
+        self._mute("USPS")
+        self._order(carriers="USPS", tracking="9400111899223")
+
+        def boom(_t):
+            raise RuntimeError("carrier down")
+
+        discord, _notify = self._run({"UPS": None, "USPS": _FakeClient(boom)})
+        fail_notes = [c for c in discord.call_args_list if "tracking failing for USPS" in c[0][0]]
+        self.assertEqual(fail_notes, [])
+
+    def test_muting_one_carrier_leaves_the_other_loud(self):
+        # USPS muted, UPS not: a UPS gap still fires the daily note while USPS is
+        # folded into the weekly summary — both in the same run.
+        self._mute("USPS")
+        self._order(carriers="UPS")
+        self._order(carriers="USPS", tracking="9400111899223")
+        discord, _notify = self._run({"UPS": None, "USPS": None})
+        ups_off = [c for c in discord.call_args_list if "tracking OFF for UPS" in c[0][0]]
+        self.assertEqual(len(ups_off), 1)
+        usps_off = [c for c in discord.call_args_list if "tracking OFF for USPS" in c[0][0]]
+        self.assertEqual(usps_off, [])
+        weekly = [c for c in discord.call_args_list if "Weekly muted-carrier summary" in c[0][0]]
+        self.assertEqual(len(weekly), 1)
+        self.assertIn("USPS is muted", weekly[0][0][0])
