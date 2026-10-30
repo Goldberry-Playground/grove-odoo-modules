@@ -11,11 +11,12 @@ Side-effect free by design: the caller owns the actual Discord POST and the
 ``mail.mail`` send, and their best-effort error handling — a formatter never
 does I/O and never raises on ordinary input.
 
-Only stdlib is imported (``html``), so the pure-pytest file-path load still works
+Only stdlib is imported (``html``, ``re``), so the pure-pytest file-path load still works
 and the module stays odoo-free.
 """
 
 import html
+import re
 
 _FULFILLMENT_LABELS = {"ship": "Shipping", "pickup": "Farm pickup"}
 
@@ -86,6 +87,58 @@ def format_new_order_discord(
             ship_bits.append(f"Tracking: {tracking}")
         parts.append(" · ".join(ship_bits))
     return "\n".join(parts)
+
+
+# Paid orders at or above this total get a sales-channel note (Josh
+# 2026-10-30: "anything above 500"). Overridable per database through the
+# ``grove_headless.sales_large_order_threshold`` system parameter.
+SALES_LARGE_ORDER_THRESHOLD = 500.0
+
+_PROMO_LINE_RE = re.compile(r"^Discount \((?P<code>[^)]+)\)$")
+
+
+def promo_codes_from_line_names(names):
+    """Codes behind the ``Discount (CODE)`` lines ``promotions.normalize_reward_line``
+    writes (GOL-2450), in order, without duplicates. Automatic volume tiers are
+    labelled ``Volume discount ...`` and are not campaigns, so they never match."""
+    codes = []
+    for name in names:
+        match = _PROMO_LINE_RE.match((name or "").strip())
+        if match and match.group("code") not in codes:
+            codes.append(match.group("code"))
+    return codes
+
+
+def format_sales_order_note(
+    *,
+    order_ref,
+    brand=None,
+    total,
+    currency="USD",
+    large_threshold=SALES_LARGE_ORDER_THRESHOLD,
+    promo_codes=(),
+    promo_discount=0.0,
+    consult=False,
+):
+    """Sales-channel line for a notable paid order, or "" when nothing is
+    notable. Notable = total at or above ``large_threshold``, a promo code
+    redeemed, or the planting consult added. One message per order, so an order
+    that is large AND used a code reads as one line, not two pings."""
+    reasons = []
+    try:
+        if large_threshold and float(total) >= float(large_threshold):
+            reasons.append(f"large order ({format_money(large_threshold, currency).split(' ')[0]}+)")
+    except (TypeError, ValueError):
+        pass
+    if promo_codes:
+        saved = f", -{format_money(promo_discount, currency).split(' ')[0]}" if promo_discount else ""
+        reasons.append(f"promo {', '.join(promo_codes)}{saved}")
+    if consult:
+        reasons.append("planting consult added")
+    if not reasons:
+        return ""
+    where = f" ({brand})" if brand else ""
+    return f":moneybag: {order_ref}{where} {format_money(total, currency)}: " + " · ".join(reasons)
 
 
 def build_order_card_payload(*, order_id, company_id, is_deposit, context):

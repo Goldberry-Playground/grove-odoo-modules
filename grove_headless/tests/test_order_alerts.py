@@ -184,3 +184,28 @@ class OrderCardPayloadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SalesNoteTests(unittest.TestCase):
+    def test_ordinary_order_is_silent(self):
+        self.assertEqual(oa.format_sales_order_note(order_ref="S1", total=120.0), "")
+
+    def test_threshold_is_inclusive(self):
+        msg = oa.format_sales_order_note(order_ref="S2", brand="At The Grove Nursery", total=500.0)
+        self.assertEqual(msg, ":moneybag: S2 (At The Grove Nursery) $500.00 USD: large order ($500.00+)")
+
+    def test_reasons_combine_into_one_line(self):
+        msg = oa.format_sales_order_note(
+            order_ref="S3", total=612.4, promo_codes=["FALL10"], promo_discount=10.0, consult=True
+        )
+        self.assertEqual(
+            msg, ":moneybag: S3 $612.40 USD: large order ($500.00+) · promo FALL10, -$10.00 · planting consult added"
+        )
+
+    def test_small_order_with_code_still_notes(self):
+        msg = oa.format_sales_order_note(order_ref="S4", total=40.0, promo_codes=["SPRING"], promo_discount=5.0)
+        self.assertEqual(msg, ":moneybag: S4 $40.00 USD: promo SPRING, -$5.00")
+
+    def test_promo_codes_from_line_names(self):
+        names = ["Discount (FALL10)", "Volume discount 10%", "Discount (FALL10)", "Discount (MYCO)", False]
+        self.assertEqual(oa.promo_codes_from_line_names(names), ["FALL10", "MYCO"])

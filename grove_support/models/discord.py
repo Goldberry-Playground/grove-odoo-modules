@@ -24,14 +24,16 @@ def format_chat_start(*, brand=None, visitor=None):
 
 
 def notify_discord(message):
-    """POST ``message`` to ``DISCORD_OPS_WEBHOOK_URL``.
+    """POST ``message`` to ``DISCORD_SUPPORT_WEBHOOK_URL`` (the support channel,
+    Josh 2026-10-30), falling back to ``DISCORD_OPS_WEBHOOK_URL`` so an unset
+    support webhook keeps the ping where it landed before.
 
     Best-effort: a missing URL or a failed request is logged and swallowed,
     never raised to the caller. ``allowed_mentions`` is disarmed so a visitor
     display name of ``@everyone``/``@here`` can never ping staff (same stance as
     grove_headless order alerts).
     """
-    url = os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+    url = os.environ.get("DISCORD_SUPPORT_WEBHOOK_URL", "") or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
     if not url:
         return
     try:

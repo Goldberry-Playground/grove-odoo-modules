@@ -564,7 +564,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             ),
             mock.patch.object(stripe_gateway, "create_tax_transaction") as txn,
             mock.patch.object(stripe_gateway, "create_payment_intent", side_effect=fake_pi),
-            mock.patch.object(grove_main, "_notify_discord", side_effect=pings.append),
+            mock.patch.object(grove_main, "_notify_discord", side_effect=lambda m, channel=None: pings.append(m)),
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
         ):
             self.assertEqual(grove_main.settle_order_at_ship(self.env, order), "settled")
@@ -591,7 +591,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
             mock.patch.object(
                 stripe_gateway, "create_payment_intent", return_value={"id": "pi_off", "status": "succeeded"}
             ),
-            mock.patch.object(grove_main, "_notify_discord", side_effect=pings.append),
+            mock.patch.object(grove_main, "_notify_discord", side_effect=lambda m, channel=None: pings.append(m)),
             mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
         ):
             self.assertEqual(grove_main.settle_order_at_ship(self.env, order), "settled")
@@ -1812,7 +1812,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         order.grove_stripe_session_id = "cs_disc"
         pings = []
         orig = grove_main._notify_discord
-        grove_main._notify_discord = lambda message: pings.append(message)
+        grove_main._notify_discord = lambda message, channel=None: pings.append(message)
         try:
             with mute_logger("odoo.addons.mail.models.mail_mail"):
                 result = grove_main._handle_session_completed(self.env, {"id": "cs_disc", "payment_intent": "pi_disc"})
@@ -1839,7 +1839,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         order.grove_preorder_variant_ids = str(self.product.id)
         pings = []
         orig = grove_main._notify_discord
-        grove_main._notify_discord = lambda message: pings.append(message)
+        grove_main._notify_discord = lambda message, channel=None: pings.append(message)
         try:
             with mute_logger("odoo.addons.mail.models.mail_mail"):
                 result = grove_main._handle_session_completed(
@@ -1860,7 +1860,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         order.grove_stripe_session_id = "cs_pickup"
         pings = []
         orig = grove_main._notify_discord
-        grove_main._notify_discord = lambda message: pings.append(message)
+        grove_main._notify_discord = lambda message, channel=None: pings.append(message)
         try:
             with mute_logger("odoo.addons.mail.models.mail_mail"):
                 grove_main._handle_session_completed(self.env, {"id": "cs_pickup", "payment_intent": "pi_pickup"})
@@ -1926,7 +1926,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         order.grove_fulfillment = "ship"
         order.grove_stripe_session_id = "cs_notify_raise"
 
-        def boom(message):
+        def boom(message, channel=None):
             raise RuntimeError("discord down")
 
         orig = grove_main._notify_discord
