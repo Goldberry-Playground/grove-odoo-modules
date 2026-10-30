@@ -230,6 +230,20 @@ class TestPrintifyQuoteEndpoint(_PrintifyFixture, GroveTaxFixtureMixin, HttpCase
         self.assertEqual(data["shipping_amount"], 4.75)
         self.assertFalse(data["deposit_now"])
 
+    def test_quote_sends_printify_a_complete_address(self):
+        # Printify's shipping.json rejects an address missing first/last name,
+        # address1, city or phone (400 "Validation failed"), but the pre-checkout
+        # quote only knows state + ZIP. The rate depends on the destination alone,
+        # so those fields carry placeholders; the real region and ZIP still drive
+        # the price (prod 2026-10-30: every farm quote 503'd on this).
+        with mock.patch.object(grove_main, "_printify_quote", return_value=4.75) as quoted:
+            data = json.loads(self._post(self._body()).content)
+        self.assertEqual(data["shipping_amount"], 4.75)
+        _line_items, address = quoted.call_args.args
+        for field in ("first_name", "last_name", "address1", "city", "phone"):
+            self.assertTrue(address[field], f"{field} must not be empty")
+        self.assertEqual((address["country"], address["region"], address["zip"]), ("US", "CA", "90001"))
+
     def test_quote_without_address_has_null_shipping(self):
         with mock.patch.object(grove_main, "_printify_quote") as quoted:
             data = json.loads(self._post(self._body(shipping=None)).content)
