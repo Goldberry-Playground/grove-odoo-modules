@@ -19,8 +19,8 @@
           3. Recent-orders note — a one-line internal note on the lead's
              chatter (never in the chat the visitor sees) with the partner's 3
              most recent orders.
-          4. Discord ping — a best-effort ops ping on chat start via the existing
-             DISCORD_OPS_WEBHOOK_URL.
+          4. Discord ping — a best-effort ping on chat start via
+             DISCORD_SUPPORT_WEBHOOK_URL (falls back to DISCORD_OPS_WEBHOOK_URL).
 
         Non-goals (ratified): no customer-facing order-status lookup, no AI
         operator, no Chatwoot bridge, no other brands, newsletter capture

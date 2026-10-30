@@ -374,6 +374,20 @@ class GroveSupportCase(TransactionCase):
             self._make_channel()
         mock_notify.assert_called_once()
 
+    def test_chat_start_prefers_support_webhook_over_ops(self):
+        from odoo.addons.grove_support.models import discord as gs_discord
+
+        env = {"DISCORD_SUPPORT_WEBHOOK_URL": "https://d/support", "DISCORD_OPS_WEBHOOK_URL": "https://d/ops"}
+        with patch.dict("os.environ", env, clear=True), patch.object(gs_discord.requests, "post") as post:
+            gs_discord.notify_discord("hello")
+        self.assertEqual(post.call_args[0][0], "https://d/support")
+        with (
+            patch.dict("os.environ", {"DISCORD_OPS_WEBHOOK_URL": "https://d/ops"}, clear=True),
+            patch.object(gs_discord.requests, "post") as post,
+        ):
+            gs_discord.notify_discord("hello")
+        self.assertEqual(post.call_args[0][0], "https://d/ops")
+
     def test_chat_start_does_not_ping_for_non_livechat(self):
         with patch.object(gs_channel, "notify_discord") as mock_notify:
             self.env["discuss.channel"].create({"name": "team room", "channel_type": "channel"})

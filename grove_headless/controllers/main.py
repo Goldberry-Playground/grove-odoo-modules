@@ -30,9 +30,12 @@ from ..models.newsletter import (
     resolve_newsletter_lists,
 )
 from ..models.order_alerts import (
+    SALES_LARGE_ORDER_THRESHOLD,
     build_order_card_payload,
     format_merchant_email,
     format_new_order_discord,
+    format_sales_order_note,
+    promo_codes_from_line_names,
 )
 from ..models.plant_compliance import blocked_states_for as compliance_blocked_states_for
 from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
@@ -2999,7 +3002,8 @@ class GroveHeadlessAPI(http.Controller):
         if created:
             _notify_discord(
                 f":seedling: New {capture_leads.LEAD_KINDS[clean['kind']]} lead ({company.name}): "
-                f"{lead.name} <{clean['email']}>"
+                f"{lead.name} <{clean['email']}>",
+                channel="sales",
             )
         return _json_response({"lead_id": lead.id, "partner_id": partner.id, "created": created})
 
@@ -3059,7 +3063,18 @@ class GroveHeadlessAPI(http.Controller):
                 return _json_response({"error": "Variant not found"}, status=404)
 
         partner = _upsert_capture_partner(request.env, company, email, name[:MAX_NAME])
+        is_new_request = any(partner not in v.stock_notification_partner_ids for v in variants)
         variants.write({"stock_notification_partner_ids": [(4, partner.id)]})
+        if is_new_request:
+            # Demand signal for sales (Josh 2026-10-30): how many people are
+            # waiting on this product across all its variants. A repeat
+            # subscribe is silent so a double-click never inflates the count.
+            waiting = len(tmpl.product_variant_ids.mapped("stock_notification_partner_ids"))
+            _notify_discord(
+                f":bell: Back-in-stock request ({company.name}): {tmpl.name}, "
+                f"{waiting} {'person' if waiting == 1 else 'people'} waiting",
+                channel="sales",
+            )
         return _json_response({"partner_id": partner.id, "variant_ids": variants.ids})
 
     # ── Shipping webhook ─────────────────────────────────────────────────
@@ -3748,7 +3763,9 @@ def _handle_printify_event(env, event):
             return _printify_cancel_order(env, order, reason)
         if status == "on-hold":
             _printify_set_state(order, "on_hold")
-            _notify_discord(f":warning: Printify put {order.name} on hold. Check the Printify dashboard.")
+            _notify_discord(
+                f":warning: Printify put {order.name} on hold. Check the Printify dashboard.", channel="shipping"
+            )
             return "on_hold"
     return "ignored"
 
@@ -3784,7 +3801,8 @@ def _printify_cancel_order(env, order, reason):
         _printify_set_state(order, "canceled")
         _notify_discord(
             f":rotating_light: Printify cancelled {order.name} ({reason}) after it went to "
-            f"production/shipping. No auto-refund issued; review and refund by hand."
+            f"production/shipping. No auto-refund issued; review and refund by hand.",
+            channel="shipping",
         )
         return "canceled_in_production"
     paid = order.grove_checkout_status in ("paid", "deposit_paid", "settled")
@@ -3793,7 +3811,10 @@ def _printify_cancel_order(env, order, reason):
         # Checkout never completed a charge: cancel the order, nothing to refund.
         _printify_set_state(order, "canceled")
         _grove_cancel_sale_order(order)
-        _notify_discord(f":warning: Printify cancelled {order.name} ({reason}); order was unpaid, no refund needed.")
+        _notify_discord(
+            f":warning: Printify cancelled {order.name} ({reason}); order was unpaid, no refund needed.",
+            channel="shipping",
+        )
         return "canceled_unpaid"
     # The payment_intent lives in the account that charged it, so the refund must
     # use that same tenant's key (GOL-1766). The order carries its originating
@@ -3818,10 +3839,15 @@ def _printify_cancel_order(env, order, reason):
     if refunded:
         order.message_post(body=f"Printify cancelled this order ({reason}); payment refunded in full.")
         _notify_printify_cancel_customer(env, order)
-        _notify_discord(f":warning: Printify cancelled {order.name} ({reason}); full refund issued.")
+        _notify_discord(
+            f":warning: Printify cancelled {order.name} ({reason}); full refund issued.", channel="shipping"
+        )
     else:
         order.message_post(body=f"Printify cancelled this order ({reason}); refund FAILED, needs manual action.")
-        _notify_discord(f":rotating_light: Printify cancelled {order.name} ({reason}); refund FAILED, refund by hand.")
+        _notify_discord(
+            f":rotating_light: Printify cancelled {order.name} ({reason}); refund FAILED, refund by hand.",
+            channel="shipping",
+        )
     return "canceled"
 
 
@@ -6283,7 +6309,8 @@ def _handle_session_completed(env, session):
         _notify_customer_apology(env, order, names, refunded)
         _notify_discord(
             f":warning: Oversold order {order.name}: {names} — "
-            f"refund {'issued' if refunded else 'FAILED, needs manual action'}."
+            f"refund {'issued' if refunded else 'FAILED, needs manual action'}.",
+            channel="shipping",
         )
         return "refunded_oversell" if refunded else "oversell_refund_failed"
 
@@ -6311,6 +6338,7 @@ def _handle_session_completed(env, session):
     # both fulfilment types, deposit or full. Pickup orders get no label but must
     # still notify (Josh). Both are best-effort and must never fail the webhook.
     _notify_new_order(env, order, has_preorder)
+    _notify_sales_order(env, order)
     _notify_merchant_email(env, order, has_preorder)
     # Printify merch is printed and shipped by Printify with no human step
     # (GOL-3314 §6): queue the paid order for the 5-minute push cron. Best-effort
@@ -6510,14 +6538,37 @@ def _notify_customer_apology(env, order, product_names, refunded):
     )
 
 
-def _notify_discord(message):
+# Topic channels (Josh 2026-10-30): sales = leads, back-in-stock requests and
+# notable paid orders; shipping = carrier, Printify and oversell problems. Each
+# falls back to the orders webhook, then ops, so an unset topic webhook leaves
+# the alert where it landed before instead of dropping it.
+DISCORD_CHANNEL_ENV = {
+    "sales": "DISCORD_SALES_WEBHOOK_URL",
+    "shipping": "DISCORD_SHIPPING_WEBHOOK_URL",
+}
+
+
+def _discord_webhook_url(channel=None):
+    """Webhook for ``channel`` (a DISCORD_CHANNEL_ENV key, or None for the
+    orders channel), falling back to DISCORD_ORDERS_WEBHOOK_URL and then
+    DISCORD_OPS_WEBHOOK_URL. "" when none is set."""
+    env_name = DISCORD_CHANNEL_ENV.get(channel)
+    return (
+        (os.environ.get(env_name, "") if env_name else "")
+        or os.environ.get("DISCORD_ORDERS_WEBHOOK_URL", "")
+        or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+    )
+
+
+def _notify_discord(message, channel=None):
     """Best-effort order-ops ping. Order/pickup summaries go to their own
     channel (DISCORD_ORDERS_WEBHOOK_URL — Josh 2026-09-03), separate from the
-    bot-logs/observability channel CI posts to. Falls back to
-    DISCORD_OPS_WEBHOOK_URL so a missing orders webhook surfaces alerts in the
-    ops channel (visibly misrouted) instead of dropping them silently; both
-    unset, or a failed POST, never breaks webhook processing."""
-    url = os.environ.get("DISCORD_ORDERS_WEBHOOK_URL", "") or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+    bot-logs/observability channel CI posts to; ``channel`` routes sales and
+    shipping alerts to their topic channels (see ``_discord_webhook_url``).
+    Falls back to DISCORD_OPS_WEBHOOK_URL so a missing orders webhook surfaces
+    alerts in the ops channel (visibly misrouted) instead of dropping them
+    silently; all unset, or a failed POST, never breaks webhook processing."""
+    url = _discord_webhook_url(channel)
     if not url:
         return
     try:
@@ -6635,6 +6686,35 @@ def _notify_new_order(env, order, is_deposit):
         _notify_discord(message)
     except Exception:  # noqa: BLE001 — ops alert is best-effort
         _logger.warning("New-order Discord alert failed for %s", order.name, exc_info=True)
+
+
+def _notify_sales_order(env, order):
+    """Best-effort sales-channel note for a notable paid order (Josh 2026-10-30):
+    total at or above the large-order threshold, a promo code redeemed, or the
+    planting consult added. Silent for an ordinary order; never breaks webhook
+    processing."""
+    try:
+        threshold_param = env["ir.config_parameter"].sudo().get_param("grove_headless.sales_large_order_threshold", "")
+        try:
+            threshold = float(threshold_param) if threshold_param else SALES_LARGE_ORDER_THRESHOLD
+        except ValueError:
+            threshold = SALES_LARGE_ORDER_THRESHOLD
+        reward_lines = order.order_line.filtered(lambda ln: ln.reward_id and not ln.display_type)
+        codes = promo_codes_from_line_names(reward_lines.mapped("name"))
+        message = format_sales_order_note(
+            order_ref=order.name,
+            brand=order.company_id.name or None,
+            total=order.amount_total,
+            currency=order.currency_id.name or "USD",
+            large_threshold=threshold,
+            promo_codes=codes,
+            promo_discount=-sum(reward_lines.mapped("price_subtotal")) if codes else 0.0,
+            consult=bool(order.grove_consult_requested),
+        )
+        if message:
+            _notify_discord(message, channel="sales")
+    except Exception:  # noqa: BLE001 — sales note is best-effort
+        _logger.warning("Sales Discord note failed for %s", order.name, exc_info=True)
 
 
 def _notify_merchant_email(env, order, is_deposit):

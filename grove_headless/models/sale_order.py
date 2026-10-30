@@ -349,7 +349,10 @@ class SaleOrder(models.Model):
             self.sudo().write(vals)
             self.message_post(body=f"Printify push attempt {attempts} failed: {exc}")
             if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
-                _notify_discord(f":rotating_light: Printify push FAILED on {self.name} after {attempts} tries: {exc}")
+                _notify_discord(
+                    f":rotating_light: Printify push FAILED on {self.name} after {attempts} tries: {exc}",
+                    channel="shipping",
+                )
             return False
 
     def _printify_record_push_crash(self, exc):
@@ -368,7 +371,10 @@ class SaleOrder(models.Model):
         }
         self.sudo().write(vals)
         if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
-            _notify_discord(f":rotating_light: Printify push CRASHED on {self.name} after {attempts} tries: {exc}")
+            _notify_discord(
+                f":rotating_light: Printify push CRASHED on {self.name} after {attempts} tries: {exc}",
+                channel="shipping",
+            )
 
     @api.model
     def _cron_printify_push(self):
@@ -1626,7 +1632,8 @@ class SaleOrder(models.Model):
                 order.grove_carrier_poll_stopped = True
                 _notify_discord(
                     f"Tracking poll stopped for {order.name}: 30 days since the label was bought with no "
-                    f"delivery scan. Please check the shipment manually."
+                    f"delivery scan. Please check the shipment manually.",
+                    channel="shipping",
                 )
                 continue
 
@@ -1656,7 +1663,8 @@ class SaleOrder(models.Model):
                         paused.add(carrier_key)
                         _notify_discord(
                             f"Carrier tracking paused: {carrier_key} auth failed 3 times this run. "
-                            f"Check {carrier_key}_CLIENT_ID / {carrier_key}_CLIENT_SECRET."
+                            f"Check {carrier_key}_CLIENT_ID / {carrier_key}_CLIENT_SECRET.",
+                            channel="shipping",
                         )
                     continue
                 except Exception:  # noqa: BLE001 — one bad call never stops the sweep
@@ -1672,7 +1680,8 @@ class SaleOrder(models.Model):
                 order.grove_carrier_exception_noted = True
                 _notify_discord(
                     f"Shipment exception on {order.name}: a carrier reported a delivery problem "
-                    f"(tracking {order.grove_tracking_numbers or ''}). Please review."
+                    f"(tracking {order.grove_tracking_numbers or ''}). Please review.",
+                    channel="shipping",
                 )
 
             new_status = carrier_tracking.least_advanced_status(statuses)
@@ -1721,7 +1730,7 @@ class SaleOrder(models.Model):
         today = fields.Datetime.now().date().isoformat()
         if param.get_param(self._CARRIER_HEALTH_ALERT_PARAM) == today:
             return
-        _notify_discord("\n".join(problems))
+        _notify_discord("\n".join(problems), channel="shipping")
         param.set_param(self._CARRIER_HEALTH_ALERT_PARAM, today)
 
 

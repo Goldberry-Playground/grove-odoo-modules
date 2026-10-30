@@ -21,8 +21,9 @@ When the Grove support chatbot hands a conversation to a human operator,
    message in it, `mt_note` included, and the email that picked the partner is
    unverified (2026-10-28 leak). The operator uses the native partner form for
    anything deeper (it already lists sale orders) — no new order endpoints.
-4. **Discord ping.** A best-effort ops ping on chat start via the existing
-   `DISCORD_OPS_WEBHOOK_URL` (mirrors `grove_headless` `_notify_discord`).
+4. **Discord ping.** A best-effort ping on chat start via
+   `DISCORD_SUPPORT_WEBHOOK_URL`, falling back to `DISCORD_OPS_WEBHOOK_URL`
+   (mirrors `grove_headless` `_notify_discord`).
 
 ## Non-goals (ratified)
 
