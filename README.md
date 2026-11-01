@@ -55,7 +55,11 @@ Each React website sends an `X-Grove-Tenant` header. The `grove_headless` module
 
 | Module | Version | Purpose | Status |
 |--------|---------|---------|--------|
-| `grove_headless` | 19.0.1.5.0 | REST API + multi-tenant routing + nursery potting-batch workflow + shipping zone engine | Active |
+| `grove_headless` | 19.0.1.93.0 | REST API + multi-tenant routing + nursery potting-batch workflow + shipping zone engine | Active |
+| `grove_support` | 19.0.1.2.0 | Livechat glue: partner match, `crm.lead` per chat, recent-orders internal note, Discord ping (GOL-2022) | Active |
+| `web_dark_mode` | 19.0.1.0.0 | Vendored OCA `web_dark_mode`: dark mode for the Odoo backend (AGPL-3) | Vendored |
+
+Versions are the `version` key in each module's `__manifest__.py`.
 
 ### grove_headless
 
@@ -482,7 +486,9 @@ curl -s 'http://localhost:8069/grove/api/v1/shipping/options?zip=28801&state=NC&
 
 `ships_now` is `true` only when today falls inside a valid ship window for the destination USDA zone. `next_wave` is `null` for potted-tier requests. `defer_to` is an ISO date string (or `null`) indicating the earliest eligible ship date. `per_tree_rate` is `null` when the destination state is outside the 31 green states (compliance gate).
 
-### Shipping Webhook (Shippo tracking updates)
+### Shipping Webhook (Shippo tracking updates) — RETIRED
+
+> **Retired.** Shippo is no longer used. Pirate Ship is the only label and money channel, and tracking moves to the carrier-tracking poll (`models/carrier_tracking.py`). Do not register this endpoint with Shippo or set `GROVE_SHIPPO_WEBHOOK_TOKEN` on a new server. The route is still in `controllers/main.py` until it is deleted under the Pirate Ship fulfilment spec (`docs/superpowers/specs/2026-09-09-pirateship-fulfillment-design.md`, "Retire Shippo"). The reference below is kept for history.
 
 ```
 POST /grove/api/v1/shipping/webhook
