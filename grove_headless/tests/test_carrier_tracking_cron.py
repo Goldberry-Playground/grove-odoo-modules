@@ -296,6 +296,16 @@ class TestCarrierTrackingCron(GroveTaxFixtureMixin, TransactionCase):
         weekly2 = [c for c in discord2.call_args_list if "Weekly muted-carrier summary" in c[0][0]]
         self.assertEqual(weekly2, [])
 
+    def test_weekly_muted_summary_routes_to_shipping_channel(self):
+        # The weekly muted-carrier summary must land in the shipping ops channel,
+        # like every other carrier alert in this cron — not the default channel.
+        self._mute("USPS")
+        self._order(carriers="USPS", tracking="9400111899223")
+        discord, _notify = self._run({"UPS": None, "USPS": None})
+        weekly = [c for c in discord.call_args_list if "Weekly muted-carrier summary" in c[0][0]]
+        self.assertEqual(len(weekly), 1)
+        self.assertEqual(weekly[0].kwargs.get("channel"), "shipping")
+
     def test_unmuted_carrier_still_gets_daily_note(self):
         # With the mute cleared, the same USPS gap trips the daily note again —
         # proving the mute param is what suppresses it, nothing else.

@@ -1792,7 +1792,7 @@ class SaleOrder(models.Model):
             f"Carrier {carrier_key} is muted (no tracking): {waiting} in-flight order(s) untracked."
             for carrier_key, waiting in sorted(muted_untracked.items())
         ]
-        _notify_discord("\n".join(["Weekly muted-carrier summary (GOL-3681):", *lines]))
+        _notify_discord("\n".join(["Weekly muted-carrier summary (GOL-3681):", *lines]), channel="shipping")
         param.set_param(self._CARRIER_MUTED_SUMMARY_PARAM, week)
 
 
