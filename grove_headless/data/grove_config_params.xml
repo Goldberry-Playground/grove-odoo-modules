@@ -114,4 +114,18 @@
         <field name="value">10</field>
     </record>
 
+    <!-- Carriers muted from the daily carrier-health ops note (GOL-3681,
+         UPS-only launch). Comma list of carrier keys. Seed = USPS because its
+         Tracking v3 keys can't be minted yet (USPS COP sign-in is stuck in a
+         redirect loop for Josh's account), so a daily "tracking OFF for USPS"
+         ping would be pure noise. A muted carrier is reported once a WEEK
+         instead, so its untracked backlog never goes unseen. noupdate="1" so an
+         operator can clear it in Settings / Technical / System Parameters — the
+         moment USPS creds go live — without a deploy, and the daily note
+         switches back on for USPS automatically. -->
+    <record id="carrier_poll_muted_param" model="ir.config_parameter">
+        <field name="key">grove_headless.carrier_poll_muted</field>
+        <field name="value">USPS</field>
+    </record>
+
 </odoo>
