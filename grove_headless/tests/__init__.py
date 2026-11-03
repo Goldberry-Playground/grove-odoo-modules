@@ -56,6 +56,7 @@ from . import (
     test_printify_push,  # noqa: F401
     test_printify_sync_map,  # noqa: F401
     test_printify_webhook,  # noqa: F401
+    test_product_list_queries,  # noqa: F401
     test_product_slug,  # noqa: F401
     test_promotions,  # noqa: F401
     test_publish_event,  # noqa: F401

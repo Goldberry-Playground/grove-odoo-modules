@@ -400,20 +400,29 @@ def _image_url(model, record, size):
     return f"/web/image/{model}/{record.id}/{size}" if record[size] else None
 
 
+def _serialize_products(products, fields):
+    """Read a product recordset into plain dicts safe for JSON, in ONE batched read.
+
+    ``read()`` only fetches for the records it is called on, so calling it per
+    card skips the page's prefetch and costs a query (plus, for an image field,
+    a filestore read) per product. The list endpoint reads the whole page here.
+    """
+    records = products.read(fields)
+    for record in records:
+        # Replace many2one tuples with {id, name} objects
+        for key, value in record.items():
+            if isinstance(value, (list, tuple)) and len(value) == 2 and isinstance(value[0], int):
+                record[key] = {"id": value[0], "name": value[1]}
+            # bytes (image) -> skip in JSON, use dedicated image URL instead
+            if isinstance(value, bytes):
+                record[key] = None
+    return records
+
+
 def _serialize_product(product, fields):
-    """Read a product recordset into a plain dict safe for JSON."""
-    vals = product.read(fields)
-    if not vals:
-        return None
-    record = vals[0]
-    # Replace many2one tuples with {id, name} objects
-    for key, value in record.items():
-        if isinstance(value, (list, tuple)) and len(value) == 2 and isinstance(value[0], int):
-            record[key] = {"id": value[0], "name": value[1]}
-        # bytes (image) -> skip in JSON, use dedicated image URL instead
-        if isinstance(value, bytes):
-            record[key] = None
-    return record
+    """Read a single product into a plain dict safe for JSON."""
+    records = _serialize_products(product, fields)
+    return records[0] if records else None
 
 
 def _normalize_seo(data):
@@ -1180,12 +1189,26 @@ class GroveHeadlessAPI(http.Controller):
         # page's variants in one `_bom_find` and slice it per card below.
         page_phantom_boms = _phantom_kit_boms(products.product_variant_ids)
 
+        # One read for the whole page, not one per card. bin_size makes
+        # image_128 come back as its size ("1.2 Kb") from ir.attachment, never
+        # the bytes: the card only needs to know whether an image exists. The
+        # per-card read loaded and base64-encoded every thumbnail (~300 KB each,
+        # 7.9 MB for the 26-card nursery grid) only to drop it: ~196 ms of the
+        # request on prod vs ~9 ms batched (odoo-products-latency-warning,
+        # 2026-11-03). The serializer nulls the size like it nulled the bytes,
+        # so take presence from the cache that read just filled (no query).
+        sized = products.with_context(bin_size=True)
+        rows = {row["id"]: row for row in _serialize_products(sized, PRODUCT_LIST_FIELDS)}
+        has_image = {p.id: bool(p.image_128) for p in sized}
+
         items = []
         for product in products:
-            data = _serialize_product(product, PRODUCT_LIST_FIELDS)
+            data = rows.get(product.id)
             if data:
                 _normalize_seo(data)
-                data["image_url"] = _image_url("product.template", product, "image_128")
+                data["image_url"] = (
+                    f"/web/image/product.template/{product.id}/image_128" if has_image[product.id] else None
+                )
                 data["slug"] = data.pop("grove_slug", "") or ""
                 data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
                 if has_stock_field:
