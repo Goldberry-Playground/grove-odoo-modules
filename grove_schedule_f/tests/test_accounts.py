@@ -1,3 +1,4 @@
+from odoo import Command
 from odoo.addons.grove_schedule_f import schedule_f_lines
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
@@ -88,6 +89,47 @@ class TestAccounts(TransactionCase):
         )
         self.assertEqual(sale.default_account_id, company._grove_account("4020"))
         self.assertEqual(purchase.default_account_id, company._grove_account("6320"))
+
+    def test_product_template_account_keeps_catch_all_active(self):
+        company = self._company(generic_coa=True)
+        expenses = (
+            self.env["account.account"]
+            .with_company(company)
+            .search([("company_ids", "in", company.id), ("name", "=", "Expenses")], limit=1)
+        )
+        self.assertTrue(expenses)
+        template = self.env["product.template"].with_company(company).create({"name": "Hand-sold hoe"})
+        template.property_account_expense_id = expenses
+        result = company.grove_schedule_f_setup()
+        self.assertTrue(expenses.active)
+        self.assertNotIn(expenses.code, result["deprecated"])
+        self.assertEqual(template.with_company(company).property_account_expense_id, expenses)
+
+    def test_fiscal_position_mapping_keeps_catch_all_active(self):
+        company = self._company(generic_coa=True)
+        sales = (
+            self.env["account.account"]
+            .with_company(company)
+            .search([("company_ids", "in", company.id), ("name", "=", "Product Sales")], limit=1)
+        )
+        self.assertTrue(sales)
+        self.env["account.fiscal.position"].with_company(company).create(
+            {
+                "name": "Wholesale",
+                "company_id": company.id,
+                "account_ids": [
+                    Command.create({"account_src_id": sales.id, "account_dest_id": sales.id}),
+                ],
+            }
+        )
+        company.grove_schedule_f_setup()
+        self.assertTrue(sales.active)
+
+    def test_company_default_accounts_repointed(self):
+        company = self._company(generic_coa=True)
+        company.grove_schedule_f_setup()
+        self.assertEqual(company.income_account_id, company._grove_account("4020"))
+        self.assertEqual(company.expense_account_id, company._grove_account("6320"))
 
     def test_product_category_defaults_repointed_and_refinements_kept(self):
         company = self._company(generic_coa=True)

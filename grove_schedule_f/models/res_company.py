@@ -52,10 +52,16 @@ class ResCompany(models.Model):
         return tag
 
     def _grove_protected_account_ids(self):
-        """Accounts that must not be archived: journal defaults and company properties."""
+        """Accounts that must not be archived because something live still points at them.
+
+        Journal defaults and suspense accounts, payment-method outstanding accounts, company properties, product
+        category and product template income/expense accounts, and fiscal-position account mappings.
+        """
         self.ensure_one()
         journals = self.env["account.journal"].search([("company_id", "=", self.id)])
         accounts = journals.default_account_id | journals.suspense_account_id
+        method_lines = journals.inbound_payment_method_line_ids | journals.outbound_payment_method_line_ids
+        accounts |= method_lines.payment_account_id
         for fname in (
             "account_journal_suspense_account_id",
             "account_journal_payment_debit_account_id",
@@ -67,12 +73,34 @@ class ResCompany(models.Model):
             "account_journal_early_pay_discount_loss_account_id",
             "default_cash_difference_income_account_id",
             "default_cash_difference_expense_account_id",
+            "income_account_id",
+            "expense_account_id",
         ):
             if fname in self._fields:
                 accounts |= self[fname]
         for category in self.env["product.category"].with_company(self).search([]):
             accounts |= category.property_account_income_categ_id | category.property_account_expense_categ_id
+        templates = self.env["product.template"].with_company(self).with_context(active_test=False).search([])
+        accounts |= templates.property_account_income_id | templates.property_account_expense_id
+        mappings = self.env["account.fiscal.position.account"].search([("position_id.company_id", "=", self.id)])
+        accounts |= mappings.account_src_id | mappings.account_dest_id
         return set(accounts.ids)
+
+    def _grove_repoint_company_defaults(self):
+        """Point the company's default income/expense accounts at 4020/6320 unless already a Schedule F account.
+
+        Chart templates set them to the generic catch-alls, which would otherwise keep those accounts protected.
+        Returns the number of fields changed.
+        """
+        self.ensure_one()
+        mapped_codes = {spec["code"] for spec in schedule_f_lines.ACCOUNTS}
+        vals = {}
+        for fname, code in (("income_account_id", SALE_JOURNAL_ACCOUNT), ("expense_account_id", PURCHASE_JOURNAL_ACCOUNT)):
+            if fname in self._fields and self[fname].code not in mapped_codes:
+                vals[fname] = self._grove_account(code).id
+        if vals:
+            self.write(vals)
+        return len(vals)
 
     def _grove_repoint_categories(self):
         """Point product-category income/expense defaults at 4020/6320 unless already a Schedule F account.
@@ -152,6 +180,7 @@ class ResCompany(models.Model):
                 {"default_account_id": self._grove_account(code).id}
             )
 
+        self._grove_repoint_company_defaults()
         categories_repointed = self._grove_repoint_categories()
 
         protected = self._grove_protected_account_ids()
