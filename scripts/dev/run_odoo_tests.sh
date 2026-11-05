@@ -79,25 +79,29 @@ docker run -d --name "$OD" --network "$NET" "${MOUNTS[@]}" \
 
 # Wait up to 20 minutes for Odoo to exit (OCA dependency install is slow).
 for _ in $(seq 1 240); do
-  docker ps -q --filter "name=$OD" --filter status=running | grep -q . || break
+  [ -n "$(docker ps -q --filter "name=$OD" --filter status=running)" ] || break
   sleep 5
 done
 
-status=$(docker inspect "$OD" --format '{{.State.ExitCode}}')
-logs=$(docker logs "$OD" 2>&1)
 fail=0
 reason=""
+# A still-running container reports ExitCode 0, so detect the timeout first.
+if [ -n "$(docker ps -q --filter "name=$OD" --filter status=running)" ]; then
+  fail=1; reason="timed out waiting for Odoo to finish"
+fi
+status=$(docker inspect "$OD" --format '{{.State.ExitCode}}')
+logs=$(docker logs "$OD" 2>&1)
 
 if [ "$status" != "0" ]; then
   fail=1; reason="Odoo exited with status $status"
 fi
-if printf '%s\n' "$logs" | grep -qiE "tests won't run|database not initialized"; then
+if grep -qiE "tests won't run|database not initialized" <<<"$logs"; then
   fail=1; reason="Odoo reported it would not run tests"
 fi
-if printf '%s\n' "$logs" | grep -qE "^[^ ]+ [^ ]+ [0-9]+ (ERROR|CRITICAL) |(^|[^A-Za-z])(FAIL|ERROR): test_"; then
+if grep -qE "^[^ ]+ [^ ]+ [0-9]+ (ERROR|CRITICAL) |(^|[^A-Za-z])(FAIL|ERROR): test_" <<<"$logs"; then
   fail=1; reason="ERROR/FAIL lines in the Odoo log"
 fi
-if ! printf '%s\n' "$logs" | grep -qE "odoo\.addons\.${MODULE}\.tests\."; then
+if ! grep -qE "odoo\.addons\.${MODULE}\.tests\." <<<"$logs"; then
   if [ "$ALLOW_EMPTY" = "1" ]; then
     echo "NOTE: 0 tests ran for $MODULE (allowed by --allow-empty)"
   else
