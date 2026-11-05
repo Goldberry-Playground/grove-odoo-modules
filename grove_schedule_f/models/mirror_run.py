@@ -1,7 +1,7 @@
 import calendar
 
 from odoo import Command, api, fields, models
-from odoo.exceptions import UserError
+from odoo.exceptions import AccessError, UserError
 
 INTERCOMPANY_ACCOUNT = "1350"
 MIRROR_SOURCES = ("bank", "document")
@@ -56,6 +56,19 @@ class MirrorRun(models.Model):
         rounded = {code: round(value, 2) for code, value in totals.items()}
         return {code: value for code, value in rounded.items() if value}
 
+    @api.model
+    def _grove_check_access(self, source_company, target_company):
+        allowed = self.env.user.company_ids
+        if source_company not in allowed or target_company not in allowed:
+            raise AccessError("You need access to both the source and the target company to run a mirror.")
+
+    def _grove_validate_accounts(self, collect):
+        """Fail with a clear message, before anything is created, if an account is missing on either side."""
+        for company in (self.source_company_id, self.target_company_id):
+            for code in [*collect, INTERCOMPANY_ACCOUNT]:
+                company._grove_account(code)  # raises UserError naming the code and the company
+            self._grove_mirror_journal(company)
+
     def _grove_nursery_analytic(self):
         self.ensure_one()
         account = self.env["account.analytic.account"].search(
@@ -71,7 +84,11 @@ class MirrorRun(models.Model):
         return account
 
     def _grove_mirror_journal(self, company):
-        journal = self.env["account.journal"].search([("company_id", "=", company.id), ("code", "=", "MIRR")], limit=1)
+        journal = (
+            self.env["account.journal"]
+            .with_company(company)
+            .search([("company_id", "=", company.id), ("code", "=", "MIRR")], limit=1)
+        )
         if not journal:
             raise UserError(f"Run Schedule F setup for {company.name}: it has no MIRR journal.")
         return journal
@@ -124,6 +141,7 @@ class MirrorRun(models.Model):
         summary = [{"code": code, "amount": collect[code]} for code in sorted(collect)]
         vals = {"state": "posted", "summary": summary, "is_stale": False}
         if collect:
+            self._grove_validate_accounts(collect)
             last = self.month.replace(day=calendar.monthrange(self.month.year, self.month.month)[1])
             ref = f"MIRROR {self.month:%Y-%m} nursery"
             analytic = self._grove_nursery_analytic()
@@ -142,6 +160,7 @@ class MirrorRun(models.Model):
 
     @api.model
     def grove_run_month(self, month, source_company, target_company):
+        self._grove_check_access(source_company, target_company)
         month = fields.Date.to_date(month).replace(day=1)
         self._grove_check_unique(month, source_company)
         run = self.create(
@@ -154,15 +173,17 @@ class MirrorRun(models.Model):
         for run in self:
             if run.state != "draft":
                 raise UserError("Only a draft mirror can be run.")
+            self._grove_check_access(run.source_company_id, run.target_company_id)
             run.month = run.month.replace(day=1)
             self._grove_check_unique(run.month, run.source_company_id, exclude=run)
             run._grove_execute()
 
     def action_reverse(self):
         for run in self:
-            moves = (run.source_move_id | run.target_move_id).filtered(lambda m: m.state == "posted")
-            for move in moves:
-                move._reverse_moves(cancel=True)
+            if run.state != "posted":
+                raise UserError("Only a posted mirror can be reversed.")
+            for move in (run.source_move_id | run.target_move_id).filtered(lambda m: not m.reversal_move_ids):
+                move.with_company(move.company_id)._reverse_moves(cancel=True)
             run.state = "reversed"
 
     def action_check(self):

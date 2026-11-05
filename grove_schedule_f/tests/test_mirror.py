@@ -1,7 +1,7 @@
 from datetime import date
 
 from odoo import Command
-from odoo.exceptions import UserError
+from odoo.exceptions import AccessError, UserError
 from odoo.tests import TransactionCase, tagged
 
 
@@ -38,7 +38,10 @@ class TestMirror(TransactionCase):
         cls.Run = cls.env["grove.mirror.run"]
 
     def _post_bank_entry(self, code, tag, amount, day=10, month=3):
+        """Positive amount is a payment out; negative is a refund in."""
         company = self.farm_co
+        out = amount >= 0
+        amount = abs(amount)
         move = (
             self.env["account.move"]
             .with_company(company)
@@ -51,13 +54,19 @@ class TestMirror(TransactionCase):
                         Command.create(
                             {
                                 "account_id": company._grove_account(code).id,
-                                "debit": amount,
+                                "debit": amount if out else 0.0,
+                                "credit": 0.0 if out else amount,
                                 "name": "expense",
                                 "analytic_distribution": {str(tag.id): 100},
                             }
                         ),
                         Command.create(
-                            {"account_id": self.bank.default_account_id.id, "credit": amount, "name": "bank"}
+                            {
+                                "account_id": self.bank.default_account_id.id,
+                                "debit": 0.0 if out else amount,
+                                "credit": amount if out else 0.0,
+                                "name": "bank",
+                            }
                         ),
                     ],
                 }
@@ -169,3 +178,100 @@ class TestMirror(TransactionCase):
         self._post_bank_entry("6280", self.nursery_tag, 30.0, day=5, month=4)
         self.assertEqual(self.Run._grove_collect(date(2026, 3, 1), self.farm_co), {})
         self.assertEqual(self.Run._grove_collect(date(2026, 4, 1), self.farm_co), {"6280": 30.0})
+
+    def _by_code(self, move, company):
+        return {ln.account_id.with_company(company).code: ln for ln in move.line_ids}
+
+    def _accountant(self, companies):
+        return self.env["res.users"].create(
+            {
+                "name": "Mirror Accountant",
+                "login": f"mirror_acct_{len(companies)}",
+                "company_id": companies[0].id,
+                "company_ids": [Command.set(companies.ids)],
+                "group_ids": [Command.set([self.env.ref("account.group_account_user").id])],
+            }
+        )
+
+    def test_per_code_lines_journal_date_and_analytic(self):
+        self._seed_march()
+        run = self._run()
+        source = self._by_code(run.source_move_id, self.farm_co)
+        target = self._by_code(run.target_move_id, self.nursery_co)
+        self.assertEqual((source["6260"].credit, source["6260"].debit), (40.0, 0.0))
+        self.assertEqual((source["6280"].credit, source["6280"].debit), (125.0, 0.0))
+        self.assertEqual((target["6260"].debit, target["6260"].credit), (40.0, 0.0))
+        self.assertEqual((target["6280"].debit, target["6280"].credit), (125.0, 0.0))
+        self.assertEqual((target["1350"].credit, target["1350"].debit), (165.0, 0.0))
+        for code in ("6260", "6280"):
+            self.assertEqual(source[code].analytic_distribution, {str(self.nursery_tag.id): 100})
+            self.assertFalse(target[code].analytic_distribution)
+        self.assertEqual(run.target_move_id.date, date(2026, 3, 31))
+        self.assertEqual(run.target_move_id.journal_id.company_id, self.nursery_co)
+        self.assertEqual(run.target_move_id.journal_id.code, "MIRR")
+        self.env.flush_all()
+        rows = self.env["grove.schedulef.cashline"].search(
+            [("company_id", "=", self.nursery_co.id), ("source", "=", "mirror")]
+        )
+        self.assertTrue(rows)
+        self.assertFalse(any(rows.mapped("enterprise")))
+
+    def test_negative_balance_flips_sides(self):
+        self._post_bank_entry("6280", self.nursery_tag, 100.0, day=3)
+        self._post_bank_entry("6260", self.nursery_tag, -20.0, day=4)
+        run = self._run()
+        self.assertEqual(run.summary, [{"code": "6260", "amount": -20.0}, {"code": "6280", "amount": 100.0}])
+        source = self._by_code(run.source_move_id, self.farm_co)
+        target = self._by_code(run.target_move_id, self.nursery_co)
+        self.assertEqual((source["6260"].debit, source["6260"].credit), (20.0, 0.0))
+        self.assertEqual((source["6280"].credit, source["6280"].debit), (100.0, 0.0))
+        self.assertEqual((source["1350"].debit, source["1350"].credit), (80.0, 0.0))
+        self.assertEqual((target["6260"].credit, target["6260"].debit), (20.0, 0.0))
+        self.assertEqual((target["6280"].debit, target["6280"].credit), (100.0, 0.0))
+        self.assertEqual((target["1350"].credit, target["1350"].debit), (80.0, 0.0))
+
+    def test_check_stays_false_after_unrelated_farm_line(self):
+        self._seed_march()
+        run = self._run()
+        self._post_bank_entry("6280", self.farm_tag, 9.0, day=26)
+        run.action_check()
+        self.assertFalse(run.is_stale)
+
+    def test_double_reverse_raises_and_adds_no_second_reversal(self):
+        self._seed_march()
+        run = self._run()
+        run.action_reverse()
+        with self.assertRaisesRegex(UserError, "posted"):
+            run.action_reverse()
+        self.assertEqual(len(run.source_move_id.reversal_move_ids), 1)
+        self.assertEqual(len(run.target_move_id.reversal_move_ids), 1)
+        draft = self.Run.create(
+            {"month": date(2026, 5, 1), "source_company_id": self.farm_co.id, "target_company_id": self.nursery_co.id}
+        )
+        with self.assertRaises(UserError):
+            draft.action_reverse()
+
+    def test_missing_nursery_account_raises_clear_error(self):
+        self._seed_march()
+        self.nursery_co._grove_account("6260").active = False
+        with self.assertRaisesRegex(UserError, "6260.*Mirror Nursery"):
+            self._run()
+
+    def test_accountant_on_both_companies_runs_and_reverses(self):
+        self._seed_march()
+        user = self._accountant(self.farm_co | self.nursery_co)
+        Run = self.Run.with_user(user).with_company(self.farm_co)
+        run = Run.grove_run_month(date(2026, 3, 1), self.farm_co, self.nursery_co)
+        self.assertEqual(run.target_move_id.company_id, self.nursery_co)
+        self.assertEqual(run.target_move_id.journal_id.company_id, self.nursery_co)
+        self.assertEqual(run.source_move_id.company_id, self.farm_co)
+        run.action_reverse()
+        self.assertEqual(run.source_move_id.reversal_move_ids.company_id, self.farm_co)
+        self.assertEqual(run.target_move_id.reversal_move_ids.company_id, self.nursery_co)
+
+    def test_accountant_on_farm_only_is_denied(self):
+        self._seed_march()
+        user = self._accountant(self.farm_co)
+        Run = self.Run.with_user(user).with_company(self.farm_co)
+        with self.assertRaises(AccessError):
+            Run.grove_run_month(date(2026, 3, 1), self.farm_co, self.nursery_co)
