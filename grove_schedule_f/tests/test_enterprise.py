@@ -145,12 +145,18 @@ class TestEnterprise(TransactionCase):
         bill.action_post()
         return bill
 
+    # One bill per test: a bill refused mid-create leaves pending recomputes that a later create in the same test
+    # would trip over, so each case gets a clean transaction.
     def test_flagged_bill_journal_requires_an_enterprise(self):
         with self.assertRaisesRegex(ValidationError, "pick an enterprise"):
             self._bill("6280")
+
+    def test_flagged_bill_journal_default_account_is_not_exempt(self):
         # the purchase journal's own default account (6320) is an expense line, not an exempt liquidity line
         with self.assertRaisesRegex(ValidationError, "pick an enterprise"):
             self._bill("6320")
+
+    def test_flagged_bill_with_enterprise_posts_and_stores_it(self):
         bill = self._bill("6280", {self.nursery.id: 100})
         self.assertEqual(bill.state, "posted")
         line = bill.invoice_line_ids
