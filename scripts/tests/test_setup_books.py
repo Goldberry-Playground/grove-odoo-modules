@@ -12,6 +12,14 @@ _spec.loader.exec_module(mod)
 READ_METHODS = {"search", "read", "search_read", "search_count", "fields_get"}
 
 
+def company_read(args, shared_bank, chart="generic_coa", parent=False):
+    """Fake res.company read: the preflight asks for chart_template, the shared-bank step for its flag."""
+    ids, fields = args[0], args[1]
+    if "chart_template" in fields:
+        return [{"id": cid, "name": f"c{cid}", "chart_template": chart, "parent_id": parent} for cid in ids]
+    return [{"grove_owns_shared_bank": shared_bank}]
+
+
 class TestJournalSpecs(unittest.TestCase):
     def test_farm_journals_include_shared_bank_flag_and_owner_paid(self):
         by_code = {j["code"]: j for j in mod.journal_specs("farm")}
@@ -46,6 +54,17 @@ class TestJournalSpecs(unittest.TestCase):
     def test_unknown_company_key_raises(self):
         with self.assertRaises(KeyError):
             mod.journal_specs("woodworking")
+
+
+class TestResetPatternTooBroad(unittest.TestCase):
+    def test_anchor_and_wildcard_only_patterns_are_too_broad(self):
+        for pattern in ("", "  ", ".*", ".+", "^", "$", "^$", "^.*$", "^.+$", ".?", "^*$"):
+            self.assertTrue(mod.reset_pattern_too_broad(pattern), repr(pattern))
+        self.assertTrue(mod.reset_pattern_too_broad(None))
+
+    def test_patterns_with_a_literal_pass(self):
+        for pattern in ("^TEST-", "zz-test", "^T$", "M"):
+            self.assertFalse(mod.reset_pattern_too_broad(pattern), pattern)
 
 
 class TestCategoryMapping(unittest.TestCase):
@@ -103,7 +122,7 @@ class TestDryRunWritesNothing(unittest.TestCase):
             if model == "ir.model.data":
                 return [{"res_id": 99}]
             if model == "res.company" and method == "read":
-                return [{"grove_owns_shared_bank": False}]
+                return company_read(args, False)
             if method == "search":
                 return []
             if method in ("search_read", "read"):
@@ -121,7 +140,7 @@ class TestDryRunWritesNothing(unittest.TestCase):
         self.assertEqual(writes, [])
         self.assertTrue(seen)
 
-    def _harness(self, moves, journals=None):
+    def _harness(self, moves, journals=None, chart="generic_coa", parent=False):
         seen = []
 
         def fake_call(models, uid, model, method, args, kwargs=None):
@@ -131,7 +150,7 @@ class TestDryRunWritesNothing(unittest.TestCase):
             if model == "account.move" and method == "search_read":
                 return moves
             if model == "res.company" and method == "read":
-                return [{"grove_owns_shared_bank": True}]
+                return company_read(args, True, chart, parent)
             if model == "account.journal" and method == "search":
                 return journals if journals is not None else [1]
             if model == "ir.model.data":
@@ -171,6 +190,34 @@ class TestDryRunWritesNothing(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self._run(fake, ["--reset-test-entries", "--reset-ref-pattern", ".*"])
         self.assertNotIn("button_draft", [meth for _, meth, _ in seen])
+
+    def test_anchor_or_wildcard_only_patterns_refused(self):
+        moves = [{"id": 1, "name": "M1", "ref": "", "company_id": [1, "f"]}]
+        for pattern in ("^", "$", "^$", "^.*$", ".?", "^.+$"):
+            seen, fake = self._harness(moves)
+            with self.assertRaises(SystemExit, msg=pattern):
+                self._run(fake, ["--reset-test-entries", "--reset-ref-pattern", pattern])
+            self.assertNotIn("button_draft", [meth for _, meth, _ in seen], pattern)
+
+    def test_missing_nursery_chart_aborts_before_any_write(self):
+        for chart, parent in ((False, False), ("", False), ("generic_coa", [1, "Goldberry Grove Farm"])):
+            seen, fake = self._harness([], chart=chart, parent=parent)
+            with self.assertRaises(SystemExit):
+                self._run(fake, [])
+            writes = [(m, meth) for m, meth, _ in seen if meth not in READ_METHODS]
+            self.assertEqual(writes, [], (chart, parent))
+            self.assertNotIn("account.move", [m for m, _, _ in seen])
+
+    def test_real_run_calls_setup_twice_per_company(self):
+        seen, fake = self._harness([])
+        self._run(fake, [])
+        setups = [k["context"]["allowed_company_ids"] for m, meth, k in seen if meth == "grove_schedule_f_setup"]
+        self.assertEqual(setups, [[1], [3], [1], [3]])
+        calls = [(m, meth) for m, meth, _ in seen]
+        setup_at = [i for i, call in enumerate(calls) if call[1] == "grove_schedule_f_setup"]
+        journal_at = [i for i, call in enumerate(calls) if call == ("account.journal", "search")]
+        self.assertLess(setup_at[1], journal_at[0])  # first pass before the journals
+        self.assertGreater(setup_at[2], journal_at[-1])  # second pass after every journal is ensured
 
     def test_reset_requires_pattern(self):
         args = mod.parse_args(["--dry-run", "--reset-test-entries"])

@@ -7,16 +7,18 @@ Companies are looked up by name (never by id):
   (George George George Woodworking is never touched.)
 
 Order of operations:
-  1. authenticate, resolve the two companies
+  1. authenticate, resolve the two companies, preflight: the nursery must have a chart of accounts
+     (chart_template set) and must not be a branch (parent_id empty)
   2. --reset-test-entries: list posted moves; with --reset-ref-pattern, draft + delete matches
   3. farm grove_owns_shared_bank = True
   4. grove_schedule_f_setup() on farm, then nursery (accounts, tags, MIRR journal)
   5. journals per company (idempotent by code + company)
-  6. product-category income/expense defaults (ir.default) and per-category income account
-  7. repoint enabled nursery Stripe payment providers to the nursery STRP journal
-  8. "Grove Agents" user (no password; mint the API key in the UI)
-  9. grove_schedule_f.review_threshold is left alone
- 10. print the verification table
+  6. grove_schedule_f_setup() again on both, so journals created in step 5 get the 4020/6320 defaults
+  7. product-category income/expense defaults (ir.default) and per-category income account
+  8. repoint enabled nursery Stripe payment providers to the nursery STRP journal
+  9. "Grove Agents" user (no password; mint the API key in the UI)
+ 10. grove_schedule_f.review_threshold is left alone
+ 11. print the verification table
 
 Every write goes through write_or_plan(); --dry-run prints the plan and only reads.
 
@@ -106,6 +108,19 @@ def category_income_account(category_name: str) -> str:
     if any(w in name for w in MERCH_WORDS):
         return MERCH_INCOME_CODE
     return DEFAULT_INCOME_CODE
+
+
+def reset_pattern_too_broad(pattern: str | None) -> bool:
+    """True when a --reset-ref-pattern matches (nearly) everything or nothing specific.
+
+    Rejects empty, `.*`, `.+`, and any pattern that is only anchors and wildcards: after stripping `^` and `$`
+    the rest must hold at least one character other than `.`, `*`, `+` and `?`.
+    """
+    pat = (pattern or "").strip()
+    if pat in ("", ".*", ".+"):
+        return True
+    remainder = pat.replace("^", "").replace("$", "")
+    return not any(ch not in ".*+?" for ch in remainder)
 
 
 def _m2o_id(value):
@@ -200,6 +215,29 @@ def resolve_companies(models, uid) -> dict:
     return out
 
 
+def preflight_companies(models, uid, companies):
+    """Fail before any write unless the nursery has a chart of accounts and is not a branch company."""
+    print("\n== Preflight ==")
+    rows = call(
+        models, uid, "res.company", "read", [list(companies.values()), ["name", "chart_template", "parent_id"]]
+    )
+    by_id = {row.get("id"): row for row in rows or []}
+    for key, cid in companies.items():
+        row = by_id.get(cid, {})
+        print(f"  {key}: chart_template={row.get('chart_template')!r} parent_id={row.get('parent_id')!r}")
+    nursery = by_id.get(companies["nursery"], {})
+    if not nursery.get("chart_template"):
+        fail(
+            f"{COMPANY_NAMES['nursery']} has no chart of accounts (chart_template is empty); "
+            "install one in Accounting settings first"
+        )
+    if nursery.get("parent_id"):
+        fail(
+            f"{COMPANY_NAMES['nursery']} is a branch of {nursery['parent_id']!r} (parent_id is set); "
+            "it must be its own company"
+        )
+
+
 def reset_test_entries(models, uid, args, companies):
     print("\n== Posted moves in farm and nursery ==")
     moves = call(
@@ -222,7 +260,7 @@ def reset_test_entries(models, uid, args, companies):
     pat = (args.reset_ref_pattern or "").strip()
     count = sum(1 for m in moves if is_match(m))
     print(f"  {count} posted move(s) match --reset-ref-pattern {pat!r}")
-    if pat in ("", ".*", ".+") or count > MAX_RESET_MATCHES:
+    if reset_pattern_too_broad(pat) or count > MAX_RESET_MATCHES:
         fail(f"--reset-ref-pattern {pat!r} is too broad (matches {count}; max {MAX_RESET_MATCHES}); aborting")
     for m in moves:
         if not is_match(m):
@@ -271,10 +309,10 @@ def ensure_shared_bank_flag(models, uid, args, farm_id):
     )
 
 
-def run_schedule_f_setup(models, uid, args, companies):
+def run_schedule_f_setup(models, uid, args, companies, when=""):
     for key in ("farm", "nursery"):
         cid = companies[key]
-        print(f"  grove_schedule_f_setup on {key} (id={cid})")
+        print(f"  grove_schedule_f_setup on {key} (id={cid}){when}")
         result = write_or_plan(
             models,
             uid,
@@ -539,6 +577,7 @@ def run(models, uid, args):
     if dry:
         print(f"*** DRY RUN {READ_ONLY_HINT} ***")
     companies = resolve_companies(models, uid)
+    preflight_companies(models, uid, companies)
     reset_test_entries(models, uid, args, companies)
     print("\n== Shared bank flag ==")
     ensure_shared_bank_flag(models, uid, args, companies["farm"])
@@ -548,6 +587,8 @@ def run(models, uid, args):
     for key in ("farm", "nursery"):
         print(f"\n== Journals ({key}) ==")
         journals[key] = ensure_journals(models, uid, args, key, companies[key])
+    print("\n== grove_schedule_f_setup again (defaults for the new journals) ==")
+    run_schedule_f_setup(models, uid, args, companies, when=" after journals")
     for key in ("farm", "nursery"):
         print(f"\n== Category defaults ({key}) ==")
         set_category_defaults(models, uid, args, key, companies[key])

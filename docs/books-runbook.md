@@ -12,13 +12,27 @@ All scripts read `ODOO_URL`, `ODOO_DB`, `ODOO_USER` and `ODOO_PASSWORD` from the
 
 ## 2. The 2026 backfill
 
-Run in this order. Dry-run first. Josh runs these from his own terminal.
+Run in this order. Josh runs these from his own terminal.
+
+1. Install the module first. git-sync picks up the merged branch; then confirm in Apps that `grove_schedule_f` is installed (not just listed). The setup script needs the module's accounts, journal flags and the Grove Agents group.
+2. Dry-run the bootstrap (step below).
+3. Run it for real only when the dry-run output looks right.
 
 Check the plan for the bootstrap without writing anything:
 
 ```bash
 python3 scripts/setup_books.py --dry-run
 ```
+
+Before continuing, the dry-run output must show:
+
+- the preflight line for the nursery with a `chart_template` value and `parent_id=False` (the script stops otherwise);
+- 7 farm journals in the verification table, including `BNK1`;
+- 0 nursery journals (they are created by the real run);
+- the payment provider 24 (nursery Stripe) currently pointing at the farm bank journal, which the real run repoints to the nursery `STRP` journal once it exists;
+- the 2 posted test moves in the posted-moves list.
+
+If any of these differ, stop and find out why before the real run. The real run calls `grove_schedule_f_setup` on both companies twice: once before it creates the journals and again after, so the new nursery sale and purchase journals get the 4020 and 6320 defaults.
 
 Run the bootstrap. The reset flags draft and delete the posted test moves whose name or ref matches the pattern. This deletes posted moves and cannot be undone. The pattern is a case-insensitive regular expression matched against the move name or ref across both companies, so anchor it with `^`, for example `^TEST-`. At most 10 matches are allowed. Fill in the pattern:
 
