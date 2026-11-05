@@ -99,6 +99,7 @@ collect_ignore_glob = [
     "grove_headless/tests/test_printify_push.py",
     "grove_headless/tests/test_printify_webhook.py",
     "grove_headless/tests/test_printify_exclusions.py",
+    "grove_schedule_f/tests/test_accounts.py",
     # Later grove_schedule_f tasks add their grove_schedule_f/tests/test_*.py
-    # Odoo-runtime globs here (none yet).
+    # Odoo-runtime globs here.
 ]

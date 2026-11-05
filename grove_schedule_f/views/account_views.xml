@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_account_form_grove_schedule_f" model="ir.ui.view">
+        <field name="name">account.account.form.grove.schedule.f</field>
+        <field name="model">account.account</field>
+        <field name="inherit_id" ref="account.view_account_form"/>
+        <field name="arch" type="xml">
+            <field name="account_type" position="after">
+                <field name="grove_schedule_f_line"/>
+            </field>
+        </field>
+    </record>
+
+    <record id="view_account_list_grove_schedule_f" model="ir.ui.view">
+        <field name="name">account.account.list.grove.schedule.f</field>
+        <field name="model">account.account</field>
+        <field name="inherit_id" ref="account.view_account_list"/>
+        <field name="arch" type="xml">
+            <field name="account_type" position="after">
+                <field name="grove_schedule_f_line" optional="show"/>
+            </field>
+        </field>
+    </record>
+
+    <record id="view_account_search_grove_schedule_f" model="ir.ui.view">
+        <field name="name">account.account.search.grove.schedule.f</field>
+        <field name="model">account.account</field>
+        <field name="inherit_id" ref="account.view_account_search"/>
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <filter string="Schedule F line" name="group_by_grove_schedule_f_line"
+                        context="{'group_by': 'grove_schedule_f_line'}"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>

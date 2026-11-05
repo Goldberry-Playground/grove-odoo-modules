@@ -12,7 +12,7 @@
         "account_reconcile_oca",
         "account_statement_import_sheet_file",
     ],
-    "data": [],
+    "data": ["views/account_views.xml"],
     "installable": True,
     "application": False,
     "auto_install": False,
