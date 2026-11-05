@@ -110,7 +110,7 @@ Run these before January payments are entered.
 3. Uncategorized bank lines. Export it and clear it, or list what remains.
 4. Asset register. Export the OCA asset register with the year's depreciation.
 5. Intercompany balance. Read the 1350 Intercompany balance in each company. The two should offset; give the CPA the one net figure to classify (loan, contribution, or offset against rent).
-6. CPA question list: how to classify the 1350 net; which Schedule F line the farm's rent income belongs on (the books use 4080, line 8); depreciation method and section 179 for each asset; the taxable portion of any line with an a/b split; whether the nursery's Square-era monthly summaries are acceptable support; how to treat owner-paid receipts (account 2900) and owner draws (3100).
+6. CPA question list: how to classify the 1350 net; which Schedule F line the farm's rent income belongs on (the books use 4080, line 8); depreciation method and section 179 for each asset; the taxable portion of any line with an a/b split; whether the nursery's Square-era monthly summaries are acceptable support; how to treat owner-paid receipts (account 2900) and owner draws (3100); does rent settled through the intercompany account count as a cash-basis payment?
 
 ## Rules the module enforces
 

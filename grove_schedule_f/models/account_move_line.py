@@ -78,7 +78,7 @@ class AccountMoveLine(models.Model):
             if len(entries) != 1 or abs(entries[0][1] - 100.0) > 0.01 or entries[0][0].lower() not in ENTERPRISE_VALUES:
                 raise ValidationError(
                     f"Line {line.name or line.account_id.display_name}: "
-                    "pick an enterprise (Farm, Nursery or Personal) before posting."
+                    "pick an enterprise (Farm, Nursery or Personal) before it can be saved."
                 )
             is_personal = entries[0][0].lower() == "personal"
             is_draw = line.account_id.with_company(line.company_id).code == OWNER_DRAW_CODE
