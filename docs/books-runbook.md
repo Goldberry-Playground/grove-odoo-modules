@@ -9,7 +9,6 @@ All scripts read `ODOO_URL`, `ODOO_DB`, `ODOO_USER` and `ODOO_PASSWORD` from the
 1. Stripe feed for the nursery. Open the nursery company's `STRP` journal, set its bank feed to the online statement provider `account_statement_import_online_stripe`, and paste a read-only Stripe key. Use a restricted key with read access only.
 2. API key for the Grove Agents user. `setup_books.py` creates `agents@goldberrygrove.farm` without a password. Open that user in Settings > Users, and create an API key for it from the Account Security tab. Store the key in the AgenticOS Infra item in 1Password. Do not paste it anywhere else.
 3. Bind the key into Penny's MCP configuration in Paperclip as an env binding on the Penny agent. Read the agent's current env first, merge the new binding into it, and write the merged result back. Never replace the whole env, because a PATCH shallow-merges and drops what you leave out.
-4. Set `DISCORD_FINANCE_WEBHOOK_URL` on the odoo service environment so the close summary can be posted. Take the URL from the finance channel's webhook settings.
 
 ## 2. The 2026 backfill
 
@@ -21,10 +20,14 @@ Check the plan for the bootstrap without writing anything:
 python3 scripts/setup_books.py --dry-run
 ```
 
-Run the bootstrap. The reset flags remove the two test entries; the pattern may match at most 10 moves. Replace the pattern with the real test reference text:
+Run the bootstrap. The reset flags draft and delete the posted test moves whose name or ref matches the pattern. This deletes posted moves and cannot be undone. The pattern is a case-insensitive substring match across both companies, so use an anchored pattern such as `^TEST-` and first read the list of matches printed by the `--dry-run` above. Fill in the pattern (at most 10 matches are allowed):
 
 ```bash
-python3 scripts/setup_books.py --reset-test-entries --reset-ref-pattern "TEST"
+export RESET_PATTERN=""
+```
+
+```bash
+python3 scripts/setup_books.py --reset-test-entries --reset-ref-pattern "$RESET_PATTERN"
 ```
 
 Seed the reconcile models (suggestions only, nothing auto-posts):
@@ -54,22 +57,26 @@ python3 scripts/import_square_summary.py square_months.csv
 Book the annual rent. Josh decides the amount:
 
 ```bash
-python3 scripts/book_rent.py --period 2026 --amount 1200.00
+export RENT_AMOUNT=""
 ```
 
-The amount above is a placeholder. Each script also takes `--dry-run`. Every script is safe to run again; they skip what already exists.
+```bash
+python3 scripts/book_rent.py --period 2026 --amount "$RENT_AMOUNT"
+```
+
+Each script also takes `--dry-run`. Every script is safe to run again; they skip what already exists.
 
 Then run the month loop below, one month at a time, January through October.
 
 ## 3. The month loop
 
-Penny's side, in short (details in `docs/penny-month-close.md`): for each unreconciled line on the shared bank, she applies the matching reconcile model or proposes an account and enterprise, flags anything uncertain, and never accepts anything. She posts the close summary to the finance channel.
+Penny's side, in short (details in `docs/penny-month-close.md`): for each unreconciled line on the shared bank, she applies the matching reconcile model or proposes an account and enterprise, flags anything uncertain, and never accepts anything. She leaves the close summary as a chatter note on the farm "Shared bank (2026)" journal, and reports the mirror as pending for Josh.
 
 Josh's side:
 
 1. Open Accounting > Schedule F > Bank lines to review.
 2. For each line, click Accept or Reject. Accept validates the proposed account and enterprise and then reconciles.
-3. Open Accounting > Schedule F > Month mirrors and run the mirror for the month.
+3. Open Accounting > Schedule F > Month mirrors and run the mirror for the month. Josh runs the mirror; Penny's access is read-only on it.
 4. If you retag an older month after its mirror ran, open that month's mirror and click Check. A stale mirror is flagged; reverse and re-run it.
 
 ## 4. Year-end package

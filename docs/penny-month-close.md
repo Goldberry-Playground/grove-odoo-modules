@@ -14,7 +14,8 @@ Penny works through the Odoo MCP as the Grove Agents user. That user can read th
 
 `search_records` on `account.bank.statement.line`:
 
-- domain: `[["is_reconciled", "=", false], ["journal_id.code", "=", "BNK1"], ["date", ">=", "<first day>"], ["date", "<=", "<last day>"]]`
+- domain: `[["is_reconciled", "=", false], ["journal_id.code", "=", "BNK1"], ["date", ">=", "2026-MM-01"], ["date", "<=", "2026-MM-DD"]]`
+- substitute the first and last day of the month being closed, as YYYY-MM-DD
 - fields: `date`, `payment_ref`, `partner_name`, `amount`, `journal_id`, `grove_proposal_state`
 
 Keep the count as "imported" for the month's lines.
@@ -51,19 +52,13 @@ Josh opens Accounting > Schedule F > Bank lines to review and accepts or rejects
 
 Then count with `aggregate_records` on `account.bank.statement.line` grouped by `grove_proposal_state` for the month: accepted, rejected, and still open (lines with `is_reconciled` false).
 
-## Step 5. Run the mirror
+## Step 5. Mirror
 
-Both companies (Goldberry Grove Farm as source, At The Grove Nursery as target) must be in the user's allowed companies.
-
-`call_model_method` on `grove.mirror.run`, method `grove_run_month`, with arguments the month (first day, YYYY-MM-01), the source company and the target company. Read the new run's `summary` for the mirror total (the sum of the `amount` values).
-
-For any older month Josh has retagged, `call_model_method` on `grove.mirror.run` with method `action_check` on that run's id, then read `is_stale`. Report any month that is stale.
-
-Known limit: the Grove Agents user has read-only access to `grove.mirror.run`, and `grove_run_month` expects company records rather than plain ids. If the call is refused with an access or attribute error, do not retry and do not try another user. Write "mirror pending, Josh to run it from Month mirrors" in the summary and leave the mirror total and stale check blank.
+Do not call `grove_run_month` or `action_check`. Your access to `grove.mirror.run` is read-only. Report in the summary: "mirror pending, Josh to run it from Schedule F > Month mirrors". Josh also clicks Check on older months he has retagged.
 
 ## Step 6. Post the close summary
 
-Post to the finance webhook (`DISCORD_FINANCE_WEBHOOK_URL`) one message with:
+Use `post_message` on `account.journal` (the farm "Shared bank (2026)" journal, code BNK1) with one plain-text note containing:
 
 - month
 - lines imported
@@ -71,7 +66,6 @@ Post to the finance webhook (`DISCORD_FINANCE_WEBHOOK_URL`) one message with:
 - accepted
 - rejected
 - still open
-- mirror total
-- any stale older month found by `action_check`
+- mirror: pending, Josh to run it from Schedule F > Month mirrors
 
-Plain text, no account numbers beyond the codes. Never include a key or the webhook URL.
+Never include a key.

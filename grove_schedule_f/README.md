@@ -4,7 +4,7 @@ Schedule F books for the farm and nursery on Odoo 19. The module creates a Sched
 
 ## Account map
 
-Generated from `schedule_f_lines.py` by a one-off script. If you edit the lines file, update this table by hand.
+Generated from `schedule_f_lines.py`. If you edit the lines file, update this table by hand.
 
 | Code | Name | Schedule F line | Kind |
 |---|---|---|---|
@@ -68,7 +68,7 @@ No line number from the harknett map was found to be wrong.
 
 - Accounts are archived, not deprecated. Odoo 19 has no `deprecated` flag, so the generic "Product Sales" and "Expenses" accounts are archived (unless a journal or company property still uses them).
 - The Enterprise analytic plan is shared by name across companies (Odoo 19 plans carry no company). The Farm, Nursery and Personal analytic accounts exist per company.
-- Chatter notes that Penny or the accept and reject buttons leave land on the journal entry of the statement line (the line's move), not on the statement line itself.
+- Penny's proposal notes and the Accept and Reject buttons act on the statement line's journal entry, not on the statement line itself.
 
 ## Where to find it
 
