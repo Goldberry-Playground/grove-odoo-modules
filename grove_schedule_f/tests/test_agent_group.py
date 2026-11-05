@@ -159,17 +159,17 @@ class TestAgentGroup(TransactionCase):
         payment.action_post()
         inv_line = invoice.line_ids.filtered(lambda ln: ln.account_id == receivable)
         pay_line = payment.line_ids.filtered(lambda ln: ln.account_id == receivable)
-        with self.assertRaises(AccessError):
+        with self.assertRaisesRegex(AccessError, "Grove Agents cannot reconcile journal items"):
             self._agent(inv_line | pay_line).reconcile()
-        with self.assertRaises(AccessError):
+        with self.assertRaisesRegex(AccessError, "Grove Agents cannot reconcile payments"):
             self._agent(invoice).js_assign_outstanding_line(pay_line.id)
         self.assertFalse(inv_line.reconciled)
         (inv_line | pay_line).reconcile()
         partial = inv_line.matched_credit_ids
         self.assertTrue(partial)
-        with self.assertRaises(AccessError):
+        with self.assertRaisesRegex(AccessError, "Grove Agents cannot unreconcile journal items"):
             self._agent(inv_line).remove_move_reconcile()
-        with self.assertRaises(AccessError):
+        with self.assertRaisesRegex(AccessError, "Grove Agents cannot unreconcile payments"):
             self._agent(invoice).js_remove_outstanding_partial(partial.id)
         self.assertTrue(inv_line.reconciled)
         self.assertEqual(inv_line.matched_credit_ids, partial)

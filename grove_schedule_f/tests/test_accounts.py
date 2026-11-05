@@ -135,9 +135,39 @@ class TestAccounts(TransactionCase):
         company = self._company(generic_coa=True)
         company.grove_schedule_f_setup()
         Category = self.env["product.category"].with_company(company)
+        Account = self.env["account.account"].with_company(company)
+        legacy_income = Account.create(
+            {
+                "code": "4999",
+                "name": "Legacy sales",
+                "account_type": "income",
+                "company_ids": [Command.link(company.id)],
+            }
+        )
+        legacy_expense = Account.create(
+            {
+                "code": "6999",
+                "name": "Legacy costs",
+                "account_type": "expense",
+                "company_ids": [Command.link(company.id)],
+            }
+        )
         refined = Category.create({"name": "Refined"})
         generic = Category.create({"name": "Generic"})
-        refined.property_account_expense_categ_id = company._grove_account("6280")
+        # Setup repoints the company defaults, so unset categories already fall back to 4020/6320; store
+        # non-Schedule-F accounts explicitly to exercise the category repoint.
+        generic.write(
+            {
+                "property_account_income_categ_id": legacy_income.id,
+                "property_account_expense_categ_id": legacy_expense.id,
+            }
+        )
+        refined.write(
+            {
+                "property_account_income_categ_id": legacy_income.id,
+                "property_account_expense_categ_id": company._grove_account("6280").id,
+            }
+        )
         result = company.grove_schedule_f_setup()
         self.assertEqual(result["categories_repointed"], 2)  # Generic (both) and Refined (income only)
         for category in Category.search([]):

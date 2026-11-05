@@ -108,6 +108,7 @@ class AccountMoveLine(models.Model):
 
     def remove_move_reconcile(self):
         # Odoo calls this on every line unlink; only an actual unreconcile is refused.
-        if _grove_is_agent(self.env) and (self.matched_debit_ids or self.matched_credit_ids):
+        # sudo: agents cannot read account.partial.reconcile, and the check must not fail on ACLs instead of here
+        if _grove_is_agent(self.env) and (self.sudo().matched_debit_ids or self.sudo().matched_credit_ids):
             raise AccessError(self.env._("Grove Agents cannot unreconcile journal items."))
         return super().remove_move_reconcile()
