@@ -43,6 +43,8 @@ class AccountBankStatementLine(models.Model):
         if _grove_is_agent(self.env):
             if set(vals) - AGENT_WRITABLE_STATEMENT_FIELDS:
                 raise AccessError(self.env._("Grove Agents can only write proposal fields."))
+            if PROPOSAL_FIELDS & set(vals) and "accepted" in self.mapped("grove_proposal_state"):
+                raise AccessError(self.env._("Proposal already accepted."))
             if vals.get("grove_proposal_state", "proposed") != "proposed":
                 raise AccessError(self.env._("Grove Agents can only mark a proposal as proposed."))
         if PROPOSAL_FIELDS & set(vals) and "grove_proposal_state" not in vals:

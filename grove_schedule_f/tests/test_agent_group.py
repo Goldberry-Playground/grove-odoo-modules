@@ -145,6 +145,65 @@ class TestAgentGroup(TransactionCase):
         lines = Line.create([{**vals, "move_id": draft.id}, {**credit, "move_id": draft.id}])
         self.assertEqual(lines.move_id, draft)
 
+    def test_agent_cannot_arm_auto_post(self):
+        today = fields.Date.today()
+        vals = {
+            "move_type": "entry",
+            "journal_id": self.misc.id,
+            "date": today,
+            "auto_post": "at_date",
+            "line_ids": [
+                Command.create({"account_id": self.acc_6280.id, "debit": 5.0, "name": "d"}),
+                Command.create({"account_id": self.company._grove_account("1350").id, "credit": 5.0, "name": "c"}),
+            ],
+        }
+        move = self.env["account.move"].with_user(self.agent).with_company(self.company).create(vals)
+        self.assertEqual(move.auto_post, "no")
+        for key, value in (("auto_post", "at_date"), ("auto_post_until", today)):
+            with self.assertRaises(AccessError):
+                self._agent(move).write({key: value})
+        self.assertEqual(move.auto_post, "no")
+
+    def test_agent_line_context_default_and_reassignment_bypasses(self):
+        draft = self._entry(post=False)
+        posted = self._entry(post=True)
+        Line = self.env["account.move.line"].with_user(self.agent).with_company(self.company)
+        vals = {"account_id": self.acc_6280.id, "debit": 1.0, "name": "x"}
+        with self.assertRaises(AccessError):
+            Line.with_context(default_move_id=posted.id).create(vals)
+        with self.assertRaises(AccessError):
+            self._agent(draft.line_ids[0]).write({"move_id": posted.id})
+        self.assertEqual(draft.line_ids[0].move_id, draft)
+
+    def test_agent_cannot_use_context_default_trigger(self):
+        Model = self.env["account.reconcile.model"].with_user(self.agent).with_company(self.company)
+        with self.assertRaises(AccessError):
+            Model.with_context(default_trigger="auto_reconcile").create({"name": "ctx auto"})
+
+    def test_agent_cannot_edit_or_delete_auto_model_lines(self):
+        Model = self.env["account.reconcile.model"].with_company(self.company)
+        line_vals = [
+            Command.create({"account_id": self.acc_6280.id, "amount_type": "percentage", "amount_string": "100"})
+        ]
+        auto = Model.create({"name": "owner auto", "trigger": "auto_reconcile", "line_ids": line_vals})
+        manual = Model.create({"name": "owner manual", "line_ids": line_vals})
+        other = self.company._grove_account("1350")
+        with self.assertRaises(AccessError):
+            self._agent(auto.line_ids).write({"account_id": other.id})
+        with self.assertRaises(AccessError):
+            self._agent(auto).write({"name": "renamed"})
+        with self.assertRaises(AccessError):
+            self._agent(auto.line_ids).unlink()
+        with self.assertRaises(AccessError):
+            self._agent(auto).unlink()
+        self._agent(manual.line_ids).write({"account_id": other.id})
+        self.assertEqual(manual.line_ids.account_id, other)
+
+    def test_agent_cannot_rewrite_an_accepted_proposal(self):
+        self.line.grove_proposal_state = "accepted"
+        with self.assertRaisesRegex(AccessError, "already accepted"):
+            self._agent(self.line).write({"grove_proposal_note": "again"})
+
     def test_agent_models_stay_manual(self):
         Model = self.env["account.reconcile.model"].with_user(self.agent).with_company(self.company)
         with self.assertRaises(AccessError):
