@@ -203,6 +203,9 @@ class TestAgentGroup(TransactionCase):
         self.line.grove_proposal_state = "accepted"
         with self.assertRaisesRegex(AccessError, "already accepted"):
             self._agent(self.line).write({"grove_proposal_note": "again"})
+        with self.assertRaisesRegex(AccessError, "already accepted"):
+            self._agent(self.line).write({"grove_proposal_state": "proposed"})
+        self.assertEqual(self.line.grove_proposal_state, "accepted")
 
     def test_agent_models_stay_manual(self):
         Model = self.env["account.reconcile.model"].with_user(self.agent).with_company(self.company)
