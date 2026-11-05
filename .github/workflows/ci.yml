@@ -152,7 +152,7 @@ jobs:
         # livechat setup). They were never in this path, so they have been
         # passing-by-not-running since they were added — a seed-script
         # regression could ship green (GOL-2463).
-        run: python3 -m pytest grove_headless/tests/ scripts/rate_check/tests/ scripts/tests/ -v
+        run: python3 -m pytest grove_headless/tests/ scripts/rate_check/tests/ scripts/tests/ grove_schedule_f/tests/ -v
 
   validate-tenant-config:
     name: Validate Tenant Slug Map
@@ -284,6 +284,13 @@ jobs:
         with:
           path: grove-odoo-modules
 
+      - name: Clone OCA addons for grove_schedule_f
+        run: |
+          for repo in account-reconcile bank-statement-import account-financial-tools \
+                      account-financial-reporting reporting-engine server-ux mis-builder; do
+            git clone --depth 1 --branch 19.0 "https://github.com/OCA/${repo}.git" "oca/${repo}"
+          done
+
       # --test-enable runs every Odoo test tagged at_install / post_install
       # during this init. --test-tags scopes execution to grove_headless
       # only (core Odoo's suite is enormous and irrelevant). log-level=info
@@ -299,16 +306,17 @@ jobs:
           docker run -d --name odoo \
             --network host \
             -v "$PWD/grove-odoo-modules:/mnt/extra-addons" \
+            -v "$PWD/oca:/mnt/oca" \
             -e HOST=localhost \
             -e USER=odoo \
             -e PASSWORD=odoo \
             odoo:19 \
-            -- --addons-path=/mnt/extra-addons,/usr/lib/python3/dist-packages/odoo/addons \
+            -- --addons-path=/mnt/extra-addons,/mnt/oca/account-reconcile,/mnt/oca/bank-statement-import,/mnt/oca/account-financial-tools,/mnt/oca/account-financial-reporting,/mnt/oca/reporting-engine,/mnt/oca/server-ux,/mnt/oca/mis-builder,/usr/lib/python3/dist-packages/odoo/addons \
                --database=odoo \
                --without-demo=all \
-               --init=grove_headless,grove_support \
+               --init=grove_headless,grove_support,grove_schedule_f \
                --test-enable \
-               --test-tags='/grove_headless,/grove_support' \
+               --test-tags='/grove_headless,/grove_support,/grove_schedule_f' \
                --stop-after-init \
                --log-level=info
           # Tests can take longer than install — give it 5 minutes.
