@@ -1,4 +1,4 @@
-from odoo import Command, models
+from odoo import Command, fields, models
 from odoo.addons.grove_schedule_f import schedule_f_lines
 from odoo.exceptions import UserError
 
@@ -9,6 +9,25 @@ PURCHASE_JOURNAL_ACCOUNT = "6320"
 
 class ResCompany(models.Model):
     _inherit = "res.company"
+
+    grove_owns_shared_bank = fields.Boolean(string="Owns the shared bank", default=False)
+
+    def _grove_ensure_enterprise_plan(self):
+        """Find or create the 'Enterprise' analytic plan and this company's Farm/Nursery/Personal accounts.
+
+        Odoo 19 analytic plans carry no company, so the plan is shared by name; the accounts are per company.
+        """
+        self.ensure_one()
+        Plan = self.env["account.analytic.plan"]
+        plan = Plan.search([("name", "=", "Enterprise")], limit=1)
+        if not plan:
+            plan = Plan.with_company(self).create({"name": "Enterprise", "default_applicability": "optional"})
+        Account = self.env["account.analytic.account"].with_context(active_test=False)
+        existing = set(Account.search([("plan_id", "=", plan.id), ("company_id", "=", self.id)]).mapped("name"))
+        for name in ("Farm", "Nursery", "Personal"):
+            if name not in existing:
+                self.env["account.analytic.account"].create({"name": name, "plan_id": plan.id, "company_id": self.id})
+        return plan
 
     def _grove_account(self, code):
         """Return this company's account with the given code or raise UserError."""
@@ -77,7 +96,8 @@ class ResCompany(models.Model):
     def grove_schedule_f_setup(self):
         """Create the Schedule F accounts and tags for this company (idempotent).
 
-        Returns a dict with accounts_created, accounts_existing, tags_created, deprecated, categories_repointed.
+        Returns a dict with accounts_created, accounts_existing, tags_created, deprecated, categories_repointed,
+        plan_created.
         """
         self.ensure_one()
         Account = self.env["account.account"].with_company(self)
@@ -119,7 +139,12 @@ class ResCompany(models.Model):
             [("company_ids", "in", self.id), ("name", "in", list(CATCH_ALL_NAMES)), ("active", "=", True)]
         ).filtered(lambda a: a.id not in protected)
         catch_alls.write({"active": False})  # Odoo 19 has no `deprecated`; archiving is its equivalent
+        plan_created = False
+        if self.grove_owns_shared_bank:
+            plan_created = not self.env["account.analytic.plan"].search_count([("name", "=", "Enterprise")])
+            self._grove_ensure_enterprise_plan()
         return {
+            "plan_created": plan_created,
             "accounts_created": created,
             "accounts_existing": existing,
             "tags_created": len(created_tags),

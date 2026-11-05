@@ -33,4 +33,16 @@
             </xpath>
         </field>
     </record>
+
+    <record id="view_account_journal_form_grove_schedule_f" model="ir.ui.view">
+        <field name="name">account.journal.form.grove.schedule.f</field>
+        <field name="model">account.journal</field>
+        <field name="inherit_id" ref="account.view_account_journal_form"/>
+        <field name="arch" type="xml">
+            <field name="type" position="after">
+                <field name="grove_enterprise_required"/>
+                <field name="grove_is_mirror"/>
+            </field>
+        </field>
+    </record>
 </odoo>

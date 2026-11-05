@@ -3,4 +3,7 @@
 # EVERY Odoo-native (TransactionCase/HttpCase) test module MUST be listed here
 # or Odoo silently never runs it — a green CI check does NOT mean the suite ran
 # (grove-odoo native-test-discovery gotcha; GOL-1936/GOL-1941).
-from . import test_accounts  # noqa: F401
+from . import (
+    test_accounts,  # noqa: F401
+    test_enterprise,  # noqa: F401
+)
