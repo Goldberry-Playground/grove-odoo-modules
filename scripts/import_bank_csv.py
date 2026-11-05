@@ -8,8 +8,11 @@ mapping's transaction id, so re-importing the same file creates no duplicate lin
 (the OCA importer skips lines whose unique_import_id already exists on the journal).
 
 The id is the bank's own id column when `--id-col` is given and the row has a value,
-otherwise sha1(date|amount|description|row index) with the row's 0-based position in
-the original file, so the same file always yields the same ids.
+otherwise sha1(date|amount|description|occurrence), where occurrence counts the rows of
+the file with the same date, amount and description (first 0, second 1, ...), in file
+order. The row's position in the file is not part of the id, so a second export over an
+overlapping date range yields the same ids for the shared rows, and two identical rows
+on one day still get distinct ids.
 
 Every write goes through write_or_plan(); --dry-run prints the plan and only reads.
 
@@ -50,24 +53,43 @@ def _as_cols(cols) -> list[str]:
     return [cols] if isinstance(cols, str) else [c for c in cols if c]
 
 
-def unique_import_id(row: dict, index: int, id_col: str | None, date_col=None, amount_col=None, desc_col=None) -> str:
-    """The bank's id when present, else sha1(date|amount|description|index).
+def _row_key(row: dict, date_col=None, amount_col=None, desc_col=None) -> list[str]:
+    """[date, amount, description] of a row; with no column names the row's values stand in."""
+    if date_col or amount_col or desc_col:
+        date = (row.get(date_col) or "") if date_col else ""
+        amount = "/".join(row.get(c) or "" for c in _as_cols(amount_col))
+        desc = (row.get(desc_col) or "") if desc_col else ""
+        return [date, amount, desc]
+    return ["/".join(str(v) for v in row.values()), "", ""]
 
-    amount_col may be one column or several (debit/credit). With no column names the
-    row's values stand in for date/amount/description.
+
+def unique_import_id(
+    row: dict, occurrence: int, id_col: str | None, date_col=None, amount_col=None, desc_col=None
+) -> str:
+    """The bank's id when present, else sha1(date|amount|description|occurrence).
+
+    occurrence is the row's number among the file's rows with the same date, amount and
+    description (0 for the first). amount_col may be one column or several (debit/credit).
+    With no column names the row's values stand in for date/amount/description.
     """
     if id_col:
         bank_id = (row.get(id_col) or "").strip()
         if bank_id:
             return bank_id
-    if date_col or amount_col or desc_col:
-        date = (row.get(date_col) or "") if date_col else ""
-        amount = "/".join(row.get(c) or "" for c in _as_cols(amount_col))
-        desc = (row.get(desc_col) or "") if desc_col else ""
-        parts = [date, amount, desc, str(index)]
-    else:
-        parts = ["/".join(str(v) for v in row.values()), "", "", str(index)]
+    parts = [*_row_key(row, date_col, amount_col, desc_col), str(occurrence)]
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
+
+
+def assign_import_ids(rows: list[dict], id_col: str | None, date_col=None, amount_col=None, desc_col=None) -> list:
+    """unique_import_id for every row, numbering identical (date, amount, description) rows in file order."""
+    seen: dict[tuple, int] = {}
+    out = []
+    for row in rows:
+        key = tuple(_row_key(row, date_col, amount_col, desc_col))
+        occurrence = seen.get(key, 0)
+        seen[key] = occurrence + 1
+        out.append(unique_import_id(row, occurrence, id_col, date_col, amount_col, desc_col))
+    return out
 
 
 def month_key(row: dict, date_col: str, date_fmt: str, position: int | None = None) -> str:
@@ -240,8 +262,8 @@ def run(models, uid, args):
 
     fieldnames, rows = read_rows(args.csv_file)
     amount_cols = [args.amount_col] if args.amount_col else [args.debit_col, args.credit_col]
-    for i, row in enumerate(rows):
-        row[ID_COLUMN] = unique_import_id(row, i, args.id_col, args.date_col, amount_cols, args.desc_col)
+    for row, import_id in zip(rows, assign_import_ids(rows, args.id_col, args.date_col, amount_cols, args.desc_col)):
+        row[ID_COLUMN] = import_id
     try:
         by_month = split_by_month(rows, args.date_col, args.date_fmt)
     except ValueError as exc:

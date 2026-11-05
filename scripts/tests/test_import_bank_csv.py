@@ -55,6 +55,38 @@ class TestUniqueImportId(unittest.TestCase):
         self.assertEqual(len(got), 40)
         self.assertNotEqual(got, "")
 
+    def _ids(self, rows):
+        return mod.assign_import_ids(rows, None, "Date", ["Amount"], "Description")
+
+    def test_overlapping_exports_share_ids(self):
+        def day(d, desc="SHOP", amount="-1.00"):
+            return {"Date": f"03/{d:02d}/2026", "Amount": amount, "Description": desc}
+
+        file_a = [day(d) for d in range(1, 11)] + [day(7, "TWIN")]
+        file_b = [day(d) for d in range(5, 16)] + [day(7, "TWIN")]
+        ids_a = {(r["Date"], r["Description"]): i for r, i in zip(file_a, self._ids(file_a))}
+        ids_b = {(r["Date"], r["Description"]): i for r, i in zip(file_b, self._ids(file_b))}
+        shared = set(ids_a) & set(ids_b)
+        self.assertEqual(len(shared), 7)  # days 5-10 plus the TWIN row
+        for key in shared:
+            self.assertEqual(ids_a[key], ids_b[key], key)
+
+    def test_identical_rows_on_one_day_get_distinct_ids_in_both_files(self):
+        twin = {"Date": "03/07/2026", "Amount": "-4.00", "Description": "COFFEE"}
+        other = {"Date": "03/06/2026", "Amount": "-9.00", "Description": "FEED"}
+        file_a = [dict(twin), dict(twin)]
+        file_b = [dict(other), dict(twin), {"Date": "03/08/2026", "Amount": "-1", "Description": "X"}, dict(twin)]
+        ids_a = self._ids(file_a)
+        ids_b = self._ids(file_b)
+        self.assertNotEqual(ids_a[0], ids_a[1])
+        self.assertEqual(ids_a, [ids_b[1], ids_b[3]])
+
+    def test_bank_id_wins_over_occurrence_hash(self):
+        rows = [dict(ROW), dict(ROW, Id="")]
+        ids = mod.assign_import_ids(rows, "Id", "Date", ["Amount"], "Description")
+        self.assertEqual(ids[0], "TX123")
+        self.assertEqual(len(ids[1]), 40)
+
     def test_hash_uses_date_amount_description_index(self):
         a = mod.unique_import_id(ROW, 1, None, date_col="Date", amount_col="Amount", desc_col="Description")
         b = mod.unique_import_id(
