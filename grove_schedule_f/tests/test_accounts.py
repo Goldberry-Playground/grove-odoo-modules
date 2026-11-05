@@ -61,3 +61,45 @@ class TestAccounts(TransactionCase):
         result = company.grove_schedule_f_setup()
         self.assertTrue(all(catch_alls.mapped(lambda a: not a.active)))
         self.assertEqual(sorted(result["deprecated"]), sorted(catch_alls.mapped("code")))
+
+    def test_protected_catch_all_stays_active(self):
+        company = self._company(generic_coa=True)
+        expenses = (
+            self.env["account.account"]
+            .with_company(company)
+            .search([("company_ids", "in", company.id), ("name", "=", "Expenses")], limit=1)
+        )
+        general = self.env["account.journal"].create(
+            {
+                "name": "Keep Expenses",
+                "code": "KEEP",
+                "type": "general",
+                "company_id": company.id,
+                "default_account_id": expenses.id,
+            }
+        )
+        result = company.grove_schedule_f_setup()
+        self.assertTrue(expenses.active)
+        self.assertEqual(general.default_account_id, expenses)
+        self.assertNotIn(expenses.code, result["deprecated"])
+        sale = self.env["account.journal"].search([("company_id", "=", company.id), ("type", "=", "sale")], limit=1)
+        purchase = self.env["account.journal"].search(
+            [("company_id", "=", company.id), ("type", "=", "purchase")], limit=1
+        )
+        self.assertEqual(sale.default_account_id, company._grove_account("4020"))
+        self.assertEqual(purchase.default_account_id, company._grove_account("6320"))
+
+    def test_product_category_defaults_repointed_and_refinements_kept(self):
+        company = self._company(generic_coa=True)
+        company.grove_schedule_f_setup()
+        Category = self.env["product.category"].with_company(company)
+        refined = Category.create({"name": "Refined"})
+        generic = Category.create({"name": "Generic"})
+        refined.property_account_expense_categ_id = company._grove_account("6280")
+        result = company.grove_schedule_f_setup()
+        self.assertEqual(result["categories_repointed"], 2)  # Generic (both) and Refined (income only)
+        for category in Category.search([]):
+            self.assertEqual(category.property_account_income_categ_id, company._grove_account("4020"))
+        self.assertEqual(generic.property_account_expense_categ_id, company._grove_account("6320"))
+        self.assertEqual(refined.property_account_expense_categ_id, company._grove_account("6280"))
+        self.assertEqual(company.grove_schedule_f_setup()["categories_repointed"], 0)

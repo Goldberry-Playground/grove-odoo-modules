@@ -42,15 +42,42 @@ class ResCompany(models.Model):
             "account_journal_payment_debit_account_id",
             "account_journal_payment_credit_account_id",
             "transfer_account_id",
+            "income_currency_exchange_account_id",
+            "expense_currency_exchange_account_id",
+            "account_journal_early_pay_discount_gain_account_id",
+            "account_journal_early_pay_discount_loss_account_id",
+            "default_cash_difference_income_account_id",
+            "default_cash_difference_expense_account_id",
         ):
             if fname in self._fields:
                 accounts |= self[fname]
+        for category in self.env["product.category"].with_company(self).search([]):
+            accounts |= category.property_account_income_categ_id | category.property_account_expense_categ_id
         return set(accounts.ids)
+
+    def _grove_repoint_categories(self):
+        """Point product-category income/expense defaults at 4020/6320 unless already a Schedule F account.
+
+        Returns the number of categories changed.
+        """
+        self.ensure_one()
+        mapped_codes = {spec["code"] for spec in schedule_f_lines.ACCOUNTS}
+        targets = {
+            "property_account_income_categ_id": self._grove_account(SALE_JOURNAL_ACCOUNT),
+            "property_account_expense_categ_id": self._grove_account(PURCHASE_JOURNAL_ACCOUNT),
+        }
+        changed = 0
+        for category in self.env["product.category"].with_company(self).search([]):
+            vals = {fname: target.id for fname, target in targets.items() if category[fname].code not in mapped_codes}
+            if vals:
+                category.write(vals)
+                changed += 1
+        return changed
 
     def grove_schedule_f_setup(self):
         """Create the Schedule F accounts and tags for this company (idempotent).
 
-        Returns a dict with accounts_created, accounts_existing, tags_created, deprecated.
+        Returns a dict with accounts_created, accounts_existing, tags_created, deprecated, categories_repointed.
         """
         self.ensure_one()
         Account = self.env["account.account"].with_company(self)
@@ -85,6 +112,8 @@ class ResCompany(models.Model):
                 {"default_account_id": self._grove_account(code).id}
             )
 
+        categories_repointed = self._grove_repoint_categories()
+
         protected = self._grove_protected_account_ids()
         catch_alls = Account.search(
             [("company_ids", "in", self.id), ("name", "in", list(CATCH_ALL_NAMES)), ("active", "=", True)]
@@ -95,4 +124,5 @@ class ResCompany(models.Model):
             "accounts_existing": existing,
             "tags_created": len(created_tags),
             "deprecated": sorted(catch_alls.mapped("code")),
+            "categories_repointed": categories_repointed,
         }
