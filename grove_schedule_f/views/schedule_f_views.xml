@@ -68,6 +68,8 @@
         <field name="name">Unpaid at year end</field>
         <field name="res_model">account.move</field>
         <field name="view_mode">list,form</field>
+        <field name="context">{"search_default_invoice_date": 1}</field>
+        <field name="help">Set the invoice-date period to the tax year to see what was still unpaid at year end.</field>
         <field name="domain">[("state", "=", "posted"), ("move_type", "in", ["in_invoice", "in_refund", "out_invoice", "out_refund"]), ("payment_state", "not in", ["paid", "reversed"]), ("amount_residual", "!=", 0)]</field>
     </record>
 

@@ -15,6 +15,7 @@
     "data": [
         "security/groups.xml",
         "security/ir.model.access.csv",
+        "security/record_rules.xml",
         "data/config_parameter.xml",
         "views/account_views.xml",
         "views/statement_line_views.xml",

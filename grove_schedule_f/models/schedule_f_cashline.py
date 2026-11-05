@@ -60,6 +60,7 @@ class ScheduleFCashLine(models.Model):
                     JOIN account_journal j ON j.id = m.journal_id
                     JOIN account_account a ON a.id = l.account_id
                     WHERE {_LINE_FILTER} AND j.grove_is_mirror IS TRUE AND j.type NOT IN ('bank', 'cash')
+                      AND m.move_type = 'entry'
 
                     UNION ALL
 
@@ -81,6 +82,8 @@ class ScheduleFCashLine(models.Model):
                     JOIN account_move pm ON pm.id = ol.move_id
                     WHERE {_LINE_FILTER}
                       AND m.move_type IN ('in_invoice', 'in_refund', 'out_invoice', 'out_refund')
+                      -- credit-note offsets carry no cash; only payment partials do
+                      AND pm.move_type NOT IN ('in_invoice', 'in_refund', 'out_invoice', 'out_refund')
                 ) u
             )
             """

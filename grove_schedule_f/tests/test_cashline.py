@@ -179,3 +179,30 @@ class TestCashline(TransactionCase):
         line_6240 = self.a6240.grove_schedule_f_line
         self.assertAlmostEqual(totals[line_4020], 150.0)
         self.assertAlmostEqual(totals[line_6240], 400.0)
+
+    def test_credit_note_offset_emits_no_rows_and_payment_carries_cash(self):
+        bill = self._doc("in_invoice", self.a6240, 1000.0, "2026-12-10")
+        credit = self._doc("in_refund", self.a6240, 300.0, "2027-01-15")
+        (bill.line_ids + credit.line_ids).filtered(
+            lambda ln: ln.account_id.account_type == "liability_payable"
+        ).reconcile()
+        self._pay(bill, 700.0, "2026-12-20")
+        rows = self._rows(move_id=bill.id)
+        self.assertEqual([(r.cash_date.isoformat(), r.amount) for r in rows], [("2026-12-20", 700.0)])
+        self.assertFalse(self._rows(move_id=credit.id))
+
+    def test_rows_hidden_from_other_company_users(self):
+        other = self.env["res.company"].create({"name": "Other Cashline Co"})
+        user = self.env["res.users"].create(
+            {
+                "name": "Other Co User",
+                "login": "grove_cashline_other",
+                "company_id": other.id,
+                "company_ids": [Command.set([other.id])],
+                "group_ids": [Command.set([self.env.ref("account.group_account_readonly").id])],
+            }
+        )
+        bill = self._doc("in_invoice", self.a6240, 100.0, "2026-05-01")
+        self._pay(bill, 100.0, "2026-05-02")
+        self.assertTrue(self._rows(move_id=bill.id))
+        self.assertFalse(self.env["grove.schedulef.cashline"].with_user(user).search([("move_id", "=", bill.id)]))

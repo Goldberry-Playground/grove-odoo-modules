@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="rule_schedule_f_cashline_company" model="ir.rule">
+        <field name="name">Schedule F cash line: multi-company</field>
+        <field name="model_id" ref="model_grove_schedulef_cashline"/>
+        <field name="global" eval="True"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
+</odoo>
