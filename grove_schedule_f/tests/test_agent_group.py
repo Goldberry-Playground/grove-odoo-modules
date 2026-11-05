@@ -107,6 +107,73 @@ class TestAgentGroup(TransactionCase):
             self._agent(self.line).reconcile_bank_line()
         self.assertEqual(draft.state, "draft")
 
+    def test_agent_cannot_reconcile_or_unreconcile_journal_items(self):
+        invoice = (
+            self.env["account.move"]
+            .with_company(self.company)
+            .create(
+                {
+                    "move_type": "out_invoice",
+                    "partner_id": self.partner.id,
+                    "invoice_line_ids": [
+                        Command.create(
+                            {
+                                "name": "Chestnut seedling",
+                                "quantity": 1,
+                                "price_unit": 40.0,
+                                "account_id": self.company._grove_account("4020").id,
+                                "tax_ids": [Command.clear()],
+                            }
+                        )
+                    ],
+                }
+            )
+        )
+        invoice.action_post()
+        receivable = invoice.line_ids.account_id.filtered(lambda a: a.account_type == "asset_receivable")
+        self.assertEqual(len(receivable), 1)
+        payment = (
+            self.env["account.move"]
+            .with_company(self.company)
+            .create(
+                {
+                    "move_type": "entry",
+                    "journal_id": self.misc.id,
+                    "date": fields.Date.today(),
+                    "line_ids": [
+                        Command.create(
+                            {"account_id": self.company._grove_account("1350").id, "debit": 40.0, "name": "pay"}
+                        ),
+                        Command.create(
+                            {
+                                "account_id": receivable.id,
+                                "partner_id": self.partner.id,
+                                "credit": 40.0,
+                                "name": "pay",
+                            }
+                        ),
+                    ],
+                }
+            )
+        )
+        payment.action_post()
+        inv_line = invoice.line_ids.filtered(lambda ln: ln.account_id == receivable)
+        pay_line = payment.line_ids.filtered(lambda ln: ln.account_id == receivable)
+        with self.assertRaises(AccessError):
+            self._agent(inv_line | pay_line).reconcile()
+        with self.assertRaises(AccessError):
+            self._agent(invoice).js_assign_outstanding_line(pay_line.id)
+        self.assertFalse(inv_line.reconciled)
+        (inv_line | pay_line).reconcile()
+        partial = inv_line.matched_credit_ids
+        self.assertTrue(partial)
+        with self.assertRaises(AccessError):
+            self._agent(inv_line).remove_move_reconcile()
+        with self.assertRaises(AccessError):
+            self._agent(invoice).js_remove_outstanding_partial(partial.id)
+        self.assertTrue(inv_line.reconciled)
+        self.assertEqual(inv_line.matched_credit_ids, partial)
+
     def test_agent_can_create_a_draft_bill(self):
         bill = (
             self.env["account.move"]

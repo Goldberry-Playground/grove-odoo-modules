@@ -100,3 +100,14 @@ class AccountMoveLine(models.Model):
             if (target | self.move_id)._grove_agent_locked():
                 raise AccessError(self.env._("Grove Agents cannot change posted entries."))
         return super().write(vals)
+
+    def reconcile(self):
+        if self and _grove_is_agent(self.env):
+            raise AccessError(self.env._("Grove Agents cannot reconcile journal items."))
+        return super().reconcile()
+
+    def remove_move_reconcile(self):
+        # Odoo calls this on every line unlink; only an actual unreconcile is refused.
+        if _grove_is_agent(self.env) and (self.matched_debit_ids or self.matched_credit_ids):
+            raise AccessError(self.env._("Grove Agents cannot unreconcile journal items."))
+        return super().remove_move_reconcile()

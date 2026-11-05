@@ -30,3 +30,13 @@ class AccountMove(models.Model):
         if _grove_is_agent(self.env):
             raise AccessError(self.env._("Grove Agents cannot post entries."))
         return super().action_post()
+
+    def js_assign_outstanding_line(self, line_id):
+        if _grove_is_agent(self.env):
+            raise AccessError(self.env._("Grove Agents cannot reconcile payments."))
+        return super().js_assign_outstanding_line(line_id)
+
+    def js_remove_outstanding_partial(self, partial_id):
+        if _grove_is_agent(self.env):
+            raise AccessError(self.env._("Grove Agents cannot unreconcile payments."))
+        return super().js_remove_outstanding_partial(partial_id)
