@@ -112,6 +112,57 @@ class TestDryRunWritesNothing(unittest.TestCase):
         self.assertEqual(writes, [])
         self.assertTrue(seen)
 
+    def _harness(self, moves, journals=None):
+        seen = []
+
+        def fake_call(models, uid, model, method, args, kwargs=None):
+            seen.append((model, method, kwargs))
+            if model == "res.company" and method == "search":
+                return [{"Goldberry Grove Farm": 1, "At The Grove Nursery": 3}[args[0][0][2]]]
+            if model == "account.move" and method == "search_read":
+                return moves
+            if model == "res.company" and method == "read":
+                return [{"grove_owns_shared_bank": True}]
+            if model == "account.journal" and method == "search":
+                return journals if journals is not None else [1]
+            if model == "ir.model.data":
+                return [{"res_id": 99}]
+            return [] if method in ("search", "search_read", "read") else None
+
+        return seen, fake_call
+
+    def _run(self, fake_call, argv):
+        orig = mod.call
+        mod.call = fake_call
+        try:
+            mod.run(object(), 1, mod.parse_args(argv))
+        finally:
+            mod.call = orig
+
+    def test_reset_unlink_carries_force_delete(self):
+        moves = [{"id": 5, "name": "INV/1", "ref": "zz-test", "company_id": [1, "f"]}]
+        seen, fake = self._harness(moves)
+        self._run(fake, ["--reset-test-entries", "--reset-ref-pattern", "zz-test"])
+        unlinks = [k for m, meth, k in seen if meth == "unlink"]
+        self.assertEqual(len(unlinks), 1)
+        self.assertTrue(unlinks[0]["context"]["force_delete"])
+        self.assertIn("button_draft", [meth for _, meth, _ in seen])
+
+    def test_missing_bnk1_aborts_real_run_without_create(self):
+        seen, fake = self._harness([], journals=[])
+        with self.assertRaises(SystemExit):
+            self._run(fake, [])
+        self.assertNotIn("create", [meth for _, meth, _ in seen])
+
+    def test_broad_reset_pattern_refused(self):
+        moves = [{"id": i, "name": f"M{i}", "ref": "", "company_id": [1, "f"]} for i in range(11)]
+        seen, fake = self._harness(moves)
+        with self.assertRaises(SystemExit):
+            self._run(fake, ["--reset-test-entries", "--reset-ref-pattern", "M"])
+        with self.assertRaises(SystemExit):
+            self._run(fake, ["--reset-test-entries", "--reset-ref-pattern", ".*"])
+        self.assertNotIn("button_draft", [meth for _, meth, _ in seen])
+
     def test_reset_requires_pattern(self):
         args = mod.parse_args(["--dry-run", "--reset-test-entries"])
         with self.assertRaises(SystemExit):

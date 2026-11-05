@@ -74,6 +74,7 @@ _JOURNAL_SPECS = {
     ],
 }
 
+MAX_RESET_MATCHES = 10
 READ_ONLY_HINT = "(dry-run: no writes)"
 
 
@@ -196,27 +197,47 @@ def reset_test_entries(models, uid, args, companies):
         {"fields": ["name", "ref", "company_id"], "context": {"allowed_company_ids": list(companies.values())}},
     )
     pattern = re.compile(args.reset_ref_pattern, re.I) if args.reset_ref_pattern else None
+
+    def is_match(m):
+        return bool(pattern and (pattern.search(m.get("name") or "") or pattern.search(m.get("ref") or "")))
+
     for m in moves:
-        matched = bool(pattern and (pattern.search(m.get("name") or "") or pattern.search(m.get("ref") or "")))
         print(f"  posted move id={m['id']} name={m.get('name')!r} ref={m.get('ref')!r} company={m['company_id']}")
-        if not (args.reset_test_entries and matched):
+    if not args.reset_test_entries:
+        return
+    pat = (args.reset_ref_pattern or "").strip()
+    count = sum(1 for m in moves if is_match(m))
+    print(f"  {count} posted move(s) match --reset-ref-pattern {pat!r}")
+    if pat in ("", ".*", ".+") or count > MAX_RESET_MATCHES:
+        fail(f"--reset-ref-pattern {pat!r} is too broad (matches {count}; max {MAX_RESET_MATCHES}); aborting")
+    for m in moves:
+        if not is_match(m):
             continue
-        cid = _m2o_id(m["company_id"])
-        c = ctx(cid)
+        c = ctx(_m2o_id(m["company_id"]))
         print(f"  RESET move id={m['id']}: button_draft then unlink")
-        write_or_plan(
-            models,
-            uid,
-            args.dry_run,
-            "account.move",
-            "button_draft",
-            [[m["id"]]],
-            {"context": c},
-            f"button_draft move {m['id']}",
-        )
-        write_or_plan(
-            models, uid, args.dry_run, "account.move", "unlink", [[m["id"]]], {"context": c}, f"unlink move {m['id']}"
-        )
+        try:
+            write_or_plan(
+                models,
+                uid,
+                args.dry_run,
+                "account.move",
+                "button_draft",
+                [[m["id"]]],
+                {"context": c},
+                f"button_draft move {m['id']}",
+            )
+            write_or_plan(
+                models,
+                uid,
+                args.dry_run,
+                "account.move",
+                "unlink",
+                [[m["id"]]],
+                {"context": {**c, "force_delete": True}},
+                f"unlink move {m['id']}",
+            )
+        except xmlrpc.client.Fault as exc:
+            print(f"  FAILED reset of move id={m['id']}: {exc.faultString[:200]!r}", file=sys.stderr)
 
 
 def ensure_shared_bank_flag(models, uid, args, farm_id):
@@ -280,7 +301,10 @@ def ensure_journals(models, uid, args, key, company_id):
             out[code] = jid
             continue
         if spec.get("existing"):
-            print(f"  WARN expected existing journal {code} not found for company {company_id}; creating")
+            if not args.dry_run:
+                fail(f"Expected existing journal {code} not found for company {company_id}; not creating a duplicate")
+            print(f"  WARN expected existing journal {code} not found for company {company_id} (real run would abort)")
+            continue
         vals = {"name": spec["name"], "code": code, "type": spec["type"], "company_id": company_id, **flags}
         acct_code = spec.get("default_account_code")
         if acct_code:
