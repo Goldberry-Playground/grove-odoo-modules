@@ -15,13 +15,22 @@ READ_METHODS = {"search", "read", "search_read", "search_count", "fields_get"}
 class TestJournalSpecs(unittest.TestCase):
     def test_farm_journals_include_shared_bank_flag_and_owner_paid(self):
         by_code = {j["code"]: j for j in mod.journal_specs("farm")}
-        self.assertEqual(set(by_code), {"BNK1", "STRP", "OWNR"})
+        self.assertEqual(set(by_code), {"BNK1", "BILL", "STRP", "OWNR"})
         self.assertEqual(by_code["BNK1"]["name"], "Shared bank (2026)")
         self.assertTrue(by_code["BNK1"]["grove_enterprise_required"])
         self.assertEqual(by_code["STRP"]["name"], "Stripe (farm)")
         self.assertEqual(by_code["STRP"]["type"], "bank")
         self.assertEqual(by_code["OWNR"]["type"], "bank")
         self.assertEqual(by_code["OWNR"]["default_account_code"], "2900")
+
+    def test_farm_bills_and_owner_paid_require_an_enterprise(self):
+        by_code = {j["code"]: j for j in mod.journal_specs("farm")}
+        for code in ("BNK1", "BILL", "OWNR"):
+            self.assertTrue(by_code[code].get("grove_enterprise_required"), code)
+        self.assertFalse(by_code["STRP"].get("grove_enterprise_required"))
+        self.assertEqual(by_code["BILL"]["type"], "purchase")
+        self.assertTrue(by_code["BILL"]["existing"])
+        self.assertTrue(by_code["BILL"]["keep_name"])
 
     def test_nursery_journals_cover_every_channel(self):
         specs = {j["code"]: j for j in mod.journal_specs("nursery")}

@@ -25,6 +25,17 @@ class TestEnterprise(TransactionCase):
         cls.misc = Journal.create(
             {"name": "Plain Misc", "code": "GPLM", "type": "general", "company_id": cls.company.id}
         )
+        cls.bills = Journal.create(
+            {
+                "name": "Flagged Bills",
+                "code": "GFBL",
+                "type": "purchase",
+                "company_id": cls.company.id,
+                "default_account_id": cls.company._grove_account("6320").id,
+                "grove_enterprise_required": True,
+            }
+        )
+        cls.vendor = cls.env["res.partner"].create({"name": "Fence Supply"})
         plan = cls.env["account.analytic.plan"].search([("name", "=", "Enterprise")])
         by_name = {a.name: a for a in plan.account_ids.filtered(lambda a: a.company_id == cls.company)}
         cls.farm, cls.nursery, cls.personal = by_name["Farm"], by_name["Nursery"], by_name["Personal"]
@@ -112,6 +123,42 @@ class TestEnterprise(TransactionCase):
         )
         with self.assertRaisesRegex(ValidationError, "pick an enterprise"):
             self._post_entry(self.bank, "6280", {other.id: 100})
+
+    def _bill(self, account_code, distribution=None):
+        line = {"name": "Fencing staples", "quantity": 1, "price_unit": 10.0}
+        line["account_id"] = self.company._grove_account(account_code).id
+        if distribution:
+            line["analytic_distribution"] = {str(k): v for k, v in distribution.items()}
+        bill = (
+            self.env["account.move"]
+            .with_company(self.company)
+            .create(
+                {
+                    "move_type": "in_invoice",
+                    "journal_id": self.bills.id,
+                    "partner_id": self.vendor.id,
+                    "invoice_date": fields.Date.today(),
+                    "invoice_line_ids": [Command.create(line)],
+                }
+            )
+        )
+        bill.action_post()
+        return bill
+
+    def test_flagged_bill_journal_requires_an_enterprise(self):
+        with self.assertRaisesRegex(ValidationError, "pick an enterprise"):
+            self._bill("6280")
+        # the purchase journal's own default account (6320) is an expense line, not an exempt liquidity line
+        with self.assertRaisesRegex(ValidationError, "pick an enterprise"):
+            self._bill("6320")
+        bill = self._bill("6280", {self.nursery.id: 100})
+        self.assertEqual(bill.state, "posted")
+        line = bill.invoice_line_ids
+        self.assertEqual(line.account_id.code, "6280")
+        self.assertEqual(line.grove_enterprise, "nursery")
+        payable = bill.line_ids.filtered(lambda ln: ln.account_id.account_type == "liability_payable")
+        self.assertTrue(payable)
+        self.assertFalse(payable.grove_enterprise)
 
     def test_payment_outstanding_account_is_exempt(self):
         outstanding = (

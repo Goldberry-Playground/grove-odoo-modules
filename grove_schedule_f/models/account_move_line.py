@@ -51,7 +51,11 @@ class AccountMoveLine(models.Model):
         if self.move_id.origin_payment_id:
             return True  # payment entries: liquidity, outstanding and partner lines are never enterprise-tagged
         journal, company = self.journal_id, self.company_id
-        exempt = journal.default_account_id | journal.suspense_account_id
+        exempt = journal.suspense_account_id
+        if journal.type in ("bank", "cash"):
+            # A bank or cash journal's default account is its liquidity side; a sale or purchase journal's default
+            # is the income or expense account itself, which must carry an enterprise.
+            exempt |= journal.default_account_id
         method_lines = journal.inbound_payment_method_line_ids | journal.outbound_payment_method_line_ids
         exempt |= method_lines.payment_account_id
         for fname in (

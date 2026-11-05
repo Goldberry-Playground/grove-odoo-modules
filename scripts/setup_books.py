@@ -60,8 +60,22 @@ _JOURNAL_SPECS = {
             "grove_enterprise_required": True,
             "existing": True,
         },
+        {
+            "code": "BILL",
+            "name": "Vendor Bills",
+            "type": "purchase",
+            "grove_enterprise_required": True,
+            "existing": True,
+            "keep_name": True,
+        },
         {"code": "STRP", "name": "Stripe (farm)", "type": "bank"},
-        {"code": "OWNR", "name": "Owner paid", "type": "bank", "default_account_code": "2900"},
+        {
+            "code": "OWNR",
+            "name": "Owner paid",
+            "type": "bank",
+            "default_account_code": "2900",
+            "grove_enterprise_required": True,
+        },
     ],
     "nursery": [
         {"code": "INV", "name": "Customer Invoices", "type": "sale"},
@@ -287,7 +301,7 @@ def ensure_journals(models, uid, args, key, company_id):
             cur = call(models, uid, "account.journal", "read", [[jid], ["name", *flags]])
             cur = cur[0] if cur else {}
             vals = {}
-            if spec.get("existing"):
+            if spec.get("existing") and not spec.get("keep_name"):
                 if cur.get("name") != spec["name"]:
                     vals["name"] = spec["name"]
             vals.update({k: v for k, v in flags.items() if cur.get(k) != v})

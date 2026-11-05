@@ -101,6 +101,7 @@ Run these before January payments are entered.
 ## Rules the module enforces
 
 - Every counterpart on the shared bank journal carries exactly one enterprise (Farm, Nursery or Personal) at 100%.
+- Bills and owner-paid receipts in the farm need an enterprise too: the farm's Vendor Bills (BILL) and Owner paid (OWNR) journals carry the same rule, so nursery spending on a farm bill is tagged Nursery and mirrored.
 - Personal posts only to 3100 Owner draw.
 - Agents can only propose. They cannot post, reconcile, auto-reconcile, edit auto-reconcile models, delete any reconcile model, or touch an entry armed for auto-post.
 - Accept validates the proposed account and enterprise before it reconciles.
