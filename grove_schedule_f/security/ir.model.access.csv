@@ -10,3 +10,7 @@ access_grove_agent_account_reconcile_model_line,grove agent account_reconcile_mo
 access_grove_agent_account_analytic_account,grove agent account_analytic_account,analytic.model_account_analytic_account,group_grove_agent,1,0,0,0
 access_grove_agent_account_analytic_plan,grove agent account_analytic_plan,analytic.model_account_analytic_plan,group_grove_agent,1,0,0,0
 access_grove_agent_res_partner,grove agent res_partner,base.model_res_partner,group_grove_agent,1,0,0,0
+access_grove_cashline_readonly,grove cashline readonly,model_grove_schedulef_cashline,account.group_account_readonly,1,0,0,0
+access_grove_cashline_invoice,grove cashline invoice,model_grove_schedulef_cashline,account.group_account_invoice,1,0,0,0
+access_grove_cashline_user,grove cashline user,model_grove_schedulef_cashline,account.group_account_user,1,0,0,0
+access_grove_cashline_agent,grove cashline agent,model_grove_schedulef_cashline,group_grove_agent,1,0,0,0

@@ -18,6 +18,7 @@
         "data/config_parameter.xml",
         "views/account_views.xml",
         "views/statement_line_views.xml",
+        "views/schedule_f_views.xml",
         "views/menus.xml",
     ],
     "installable": True,

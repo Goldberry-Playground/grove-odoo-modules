@@ -6,6 +6,7 @@
 from . import (
     test_accounts,  # noqa: F401
     test_agent_group,  # noqa: F401
+    test_cashline,  # noqa: F401
     test_enterprise,  # noqa: F401
     test_proposals,  # noqa: F401
 )
