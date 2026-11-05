@@ -12,7 +12,11 @@
         "account_reconcile_oca",
         "account_statement_import_sheet_file",
     ],
-    "data": ["views/account_views.xml"],
+    "data": [
+        "security/groups.xml",
+        "security/ir.model.access.csv",
+        "views/account_views.xml",
+    ],
     "installable": True,
     "application": False,
     "auto_install": False,
