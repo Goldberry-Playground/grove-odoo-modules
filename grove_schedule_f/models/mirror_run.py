@@ -183,7 +183,10 @@ class MirrorRun(models.Model):
             if run.state != "posted":
                 raise UserError("Only a posted mirror can be reversed.")
             for move in (run.source_move_id | run.target_move_id).filtered(lambda m: not m.reversal_move_ids):
-                move.with_company(move.company_id)._reverse_moves(cancel=True)
+                # account.move.date is copy=False and would default to today: keep the reversal in the mirrored month.
+                move.with_company(move.company_id)._reverse_moves(
+                    default_values_list=[{"date": move.date, "ref": f"Reversal of {move.ref}"}], cancel=True
+                )
             run.state = "reversed"
 
     def action_check(self):

@@ -150,10 +150,17 @@ class TestMirror(TransactionCase):
         run = self._run()
         run.action_reverse()
         self.assertEqual(run.state, "reversed")
+        for move in run.source_move_id | run.target_move_id:
+            reversal = move.reversal_move_ids
+            self.assertEqual(len(reversal), 1)
+            self.assertEqual(reversal.date, date(2026, 3, 31))
+            self.assertEqual(reversal.ref, "Reversal of MIRROR 2026-03 nursery")
         self.assertEqual(self._farm_cash_total("28", "nursery", 2026), 125.0)
+        self.assertEqual(self._nursery_cash_total("28", 2026), 0.0)
         again = self._run()
         self.assertEqual(again.state, "posted")
         self.assertEqual(self._farm_cash_total("28", "nursery", 2026), 0.0)
+        self.assertEqual(self._nursery_cash_total("28", 2026), 125.0)  # one mirror, not two
 
     def test_retag_after_run_marks_stale(self):
         self._seed_march()
