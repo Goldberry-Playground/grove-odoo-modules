@@ -175,6 +175,17 @@ class TestAgentGroup(TransactionCase):
             self._agent(draft.line_ids[0]).write({"move_id": posted.id})
         self.assertEqual(draft.line_ids[0].move_id, draft)
 
+    def test_agent_cannot_touch_owner_auto_post_armed_draft(self):
+        armed = self._entry(post=False)
+        armed.auto_post = "at_date"
+        with self.assertRaises(AccessError):
+            self._agent(armed).write({"ref": "x"})
+        with self.assertRaises(AccessError):
+            self._agent(armed.line_ids[0]).write({"name": "y"})
+        vals = {"account_id": self.acc_6280.id, "debit": 1.0, "name": "x", "move_id": armed.id}
+        with self.assertRaises(AccessError):
+            self.env["account.move.line"].with_user(self.agent).with_company(self.company).create(vals)
+
     def test_agent_cannot_use_context_default_trigger(self):
         Model = self.env["account.reconcile.model"].with_user(self.agent).with_company(self.company)
         with self.assertRaises(AccessError):

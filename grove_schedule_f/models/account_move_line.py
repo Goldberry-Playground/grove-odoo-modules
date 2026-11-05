@@ -86,13 +86,13 @@ class AccountMoveLine(models.Model):
         if _grove_is_agent(self.env):
             default_move_id = self.env.context.get("default_move_id")
             move_ids = {vals.get("move_id", default_move_id) for vals in vals_list} - {False, None}
-            if any(move.state == "posted" for move in self.env["account.move"].browse(move_ids)):
+            if self.env["account.move"].browse(move_ids)._grove_agent_locked():
                 raise AccessError(self.env._("Grove Agents cannot change posted entries."))
         return super().create(vals_list)
 
     def write(self, vals):
         if _grove_is_agent(self.env):
             target = self.env["account.move"].browse([vals["move_id"]]) if vals.get("move_id") else self.move_id
-            if any(move.state == "posted" for move in target | self.move_id):
+            if (target | self.move_id)._grove_agent_locked():
                 raise AccessError(self.env._("Grove Agents cannot change posted entries."))
         return super().write(vals)

@@ -9,6 +9,10 @@ AGENT_BLOCKED_MOVE_FIELDS = ("state", "auto_post", "auto_post_until")
 class AccountMove(models.Model):
     _inherit = "account.move"
 
+    def _grove_agent_locked(self) -> bool:
+        """True when any record is posted or armed for the auto-post cron (agents must not touch either)."""
+        return any(move.state == "posted" or move.auto_post != "no" for move in self)
+
     @api.model_create_multi
     def create(self, vals_list):
         if _grove_is_agent(self.env):
@@ -18,7 +22,7 @@ class AccountMove(models.Model):
 
     def write(self, vals):
         if _grove_is_agent(self.env):
-            if any(key in vals for key in AGENT_BLOCKED_MOVE_FIELDS) or any(m.state == "posted" for m in self):
+            if any(key in vals for key in AGENT_BLOCKED_MOVE_FIELDS) or self._grove_agent_locked():
                 raise AccessError(self.env._("Grove Agents cannot change posted entries or post entries."))
         return super().write(vals)
 
