@@ -120,4 +120,4 @@ Run these before January payments are entered.
 - Agents can only propose. They cannot post, reconcile, auto-reconcile, edit auto-reconcile models, delete any reconcile model, or touch an entry armed for auto-post.
 - Accept validates the proposed account and enterprise before it reconciles.
 - Credit-note offsets are not cash events.
-- The mirror moves only expenses, and only what the cash view shows for the month.
+- The mirror moves only expenses, and only what the cash view shows for the month. Nursery-tagged income on the farm is not mirrored; the mirror shows its total as Skipped income so you can book it in the nursery.

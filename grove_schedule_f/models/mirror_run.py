@@ -22,6 +22,12 @@ class MirrorRun(models.Model):
     source_move_id = fields.Many2one("account.move", readonly=True, copy=False)
     target_move_id = fields.Many2one("account.move", readonly=True, copy=False)
     summary = fields.Json(readonly=True, copy=False)
+    skipped_income = fields.Float(
+        readonly=True,
+        copy=False,
+        help="Nursery-tagged income on the source company in this month. The mirror moves expenses only; "
+        "book nursery income in the nursery directly.",
+    )
     is_stale = fields.Boolean(readonly=True, copy=False)
 
     @api.depends("month", "source_company_id", "target_company_id")
@@ -31,12 +37,12 @@ class MirrorRun(models.Model):
             run.name = f"{month} {run.source_company_id.name or ''} to {run.target_company_id.name or ''}"
 
     @api.model
-    def _grove_collect(self, month, source_company):
-        """Return {account code: debit-positive balance} of the month's nursery-tagged cash rows."""
+    def _grove_rows(self, month, source_company):
+        """The month's nursery-tagged bank and document cash rows of the source company."""
         first = fields.Date.to_date(month).replace(day=1)
         last = first.replace(day=calendar.monthrange(first.year, first.month)[1])
         self.env.flush_all()  # the cash view is raw SQL: pending move-line writes must reach the database
-        rows = (
+        return (
             self.env["grove.schedulef.cashline"]
             .sudo()
             .search(
@@ -49,12 +55,25 @@ class MirrorRun(models.Model):
                 ]
             )
         )
+
+    @api.model
+    def _grove_collect(self, month, source_company):
+        """Return {account code: debit-positive balance} of the month's nursery-tagged expense cash rows.
+
+        Income rows are not mirrored (see _grove_skipped_income).
+        """
         totals = {}
-        for row in rows:
+        for row in self._grove_rows(month, source_company).filtered(lambda r: r.kind == "expense"):
             code = row.account_id.with_company(source_company).code
-            totals[code] = totals.get(code, 0.0) + (row.amount if row.kind == "expense" else -row.amount)
+            totals[code] = totals.get(code, 0.0) + row.amount
         rounded = {code: round(value, 2) for code, value in totals.items()}
         return {code: value for code, value in rounded.items() if value}
+
+    @api.model
+    def _grove_skipped_income(self, month, source_company):
+        """Sum of the month's nursery-tagged income cash rows on the source company (not mirrored)."""
+        rows = self._grove_rows(month, source_company).filtered(lambda r: r.kind == "income")
+        return round(sum(rows.mapped("amount")), 2)
 
     @api.model
     def _grove_check_access(self, source_company, target_company):
@@ -139,7 +158,12 @@ class MirrorRun(models.Model):
         self.ensure_one()
         collect = self._grove_collect(self.month, self.source_company_id)
         summary = [{"code": code, "amount": collect[code]} for code in sorted(collect)]
-        vals = {"state": "posted", "summary": summary, "is_stale": False}
+        vals = {
+            "state": "posted",
+            "summary": summary,
+            "is_stale": False,
+            "skipped_income": self._grove_skipped_income(self.month, self.source_company_id),
+        }
         if collect:
             self._grove_validate_accounts(collect)
             last = self.month.replace(day=calendar.monthrange(self.month.year, self.month.month)[1])

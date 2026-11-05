@@ -181,6 +181,22 @@ class TestMirror(TransactionCase):
         self.assertFalse(run.source_move_id)
         self.assertFalse(run.target_move_id)
 
+    def test_nursery_tagged_income_is_skipped_and_counted(self):
+        self._post_bank_entry("6280", self.nursery_tag, 100.0, day=3)
+        self._post_bank_entry("4020", self.nursery_tag, -60.0, day=9)  # credit 4020: money in
+        self.assertEqual(self.Run._grove_collect(date(2026, 3, 1), self.farm_co), {"6280": 100.0})
+        run = self._run()
+        self.assertEqual(run.summary, [{"code": "6280", "amount": 100.0}])
+        self.assertEqual(run.skipped_income, 60.0)
+        codes = {ln.account_id.with_company(self.farm_co).code for ln in run.source_move_id.line_ids}
+        self.assertNotIn("4020", codes)
+        self.assertEqual(self._cash_total(self.farm_co, "2", 2026, "nursery"), 60.0)
+        self.assertEqual(self._nursery_cash_total("2", 2026), 0.0)
+
+    def test_skipped_income_is_zero_without_income(self):
+        self._seed_march()
+        self.assertEqual(self._run().skipped_income, 0.0)
+
     def test_other_month_lines_are_ignored(self):
         self._post_bank_entry("6280", self.nursery_tag, 30.0, day=5, month=4)
         self.assertEqual(self.Run._grove_collect(date(2026, 3, 1), self.farm_co), {})

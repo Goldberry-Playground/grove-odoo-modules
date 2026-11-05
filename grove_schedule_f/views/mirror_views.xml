@@ -17,11 +17,16 @@
                     <div class="alert alert-warning" role="alert" invisible="not is_stale">
                         Nursery-tagged lines changed since this mirror ran. Reverse it and run the month again.
                     </div>
+                    <div class="alert alert-info" role="status" invisible="not skipped_income">
+                        Nursery-tagged income on the source company was not mirrored. The mirror moves expenses only;
+                        book that income in the nursery.
+                    </div>
                     <group>
                         <group>
                             <field name="name"/>
                             <field name="month" readonly="state != 'draft'"/>
                             <field name="is_stale"/>
+                            <field name="skipped_income"/>
                         </group>
                         <group>
                             <field name="source_company_id" readonly="state != 'draft'"/>
@@ -47,6 +52,7 @@
                 <field name="month"/>
                 <field name="state"/>
                 <field name="is_stale"/>
+                <field name="skipped_income" optional="show"/>
             </list>
         </field>
     </record>
