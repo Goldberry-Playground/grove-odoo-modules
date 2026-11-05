@@ -78,7 +78,7 @@ Then run the month loop below, one month at a time, January through October.
 
 ## 3. The month loop
 
-Penny's side, in short (details in `docs/penny-month-close.md`): for each unreconciled line on the shared bank, she applies the matching reconcile model or proposes an account and enterprise, flags anything uncertain, and never accepts anything. She leaves the close summary as a chatter note on the farm "Shared bank (2026)" journal, and reports the mirror as pending for Josh.
+Penny's side, in short (details in `docs/penny-month-close.md`): for each unreconciled line on the shared bank, she applies the matching reconcile model or proposes an account and enterprise, flags anything uncertain, and never accepts anything. She writes the close summary as one close note per month (Accounting > Schedule F > Close notes), and reports the mirror as pending for Josh. She can create and read close notes but cannot change or delete them; Josh can correct one.
 
 Josh's side:
 

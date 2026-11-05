@@ -72,4 +72,4 @@ No line number from the harknett map was found to be wrong.
 
 ## Where to find it
 
-Accounting > Schedule F, with these menus: Schedule F by line, Bank lines to review, Unpaid at year end, Uncategorized bank lines, Month mirrors.
+Accounting > Schedule F, with these menus: Schedule F by line, Bank lines to review, Unpaid at year end, Uncategorized bank lines, Month mirrors, Close notes.

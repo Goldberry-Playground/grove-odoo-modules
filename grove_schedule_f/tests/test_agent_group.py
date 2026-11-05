@@ -174,6 +174,32 @@ class TestAgentGroup(TransactionCase):
         self.assertTrue(inv_line.reconciled)
         self.assertEqual(inv_line.matched_credit_ids, partial)
 
+    def test_agent_writes_a_close_note_and_owner_reads_it(self):
+        Note = self.env["grove.close.note"].with_user(self.agent).with_company(self.company)
+        note = Note.create({"month": "2026-03-01", "summary": "month 2026-03, imported 12, proposed 12"})
+        self.assertEqual(note.company_id, self.company)
+        self.assertEqual(note.create_uid, self.agent)
+        self.assertEqual(note.name, "2026-03 Agent Co")
+        with self.assertRaises(AccessError):
+            note.unlink()
+        with self.assertRaises(AccessError):
+            note.write({"summary": "rewritten"})
+        owner = self.env["res.users"].create(
+            {
+                "name": "Close Owner",
+                "login": "grove_close_owner",
+                "company_id": self.company.id,
+                "company_ids": [Command.set([self.company.id])],
+                "group_ids": [Command.set([self.env.ref("account.group_account_manager").id])],
+            }
+        )
+        seen = self.env["grove.close.note"].with_user(owner).with_company(self.company).search([("id", "=", note.id)])
+        self.assertEqual(seen.summary, "month 2026-03, imported 12, proposed 12")
+        seen.write({"summary": "corrected by owner"})
+        self.assertEqual(note.summary, "corrected by owner")
+        with self.assertRaises(AccessError):
+            seen.unlink()
+
     def test_agent_can_create_a_draft_bill(self):
         bill = (
             self.env["account.move"]

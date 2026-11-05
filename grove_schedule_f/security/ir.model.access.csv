@@ -17,3 +17,7 @@ access_grove_cashline_agent,grove cashline agent,model_grove_schedulef_cashline,
 access_grove_mirror_run_user,grove mirror run user,model_grove_mirror_run,account.group_account_user,1,1,1,0
 access_grove_mirror_run_readonly,grove mirror run readonly,model_grove_mirror_run,account.group_account_readonly,1,0,0,0
 access_grove_mirror_run_agent,grove mirror run agent,model_grove_mirror_run,group_grove_agent,1,0,0,0
+access_grove_close_note_agent,grove close note agent,model_grove_close_note,group_grove_agent,1,0,1,0
+access_grove_close_note_user,grove close note user,model_grove_close_note,account.group_account_user,1,0,0,0
+access_grove_close_note_readonly,grove close note readonly,model_grove_close_note,account.group_account_readonly,1,0,0,0
+access_grove_close_note_manager,grove close note manager,model_grove_close_note,account.group_account_manager,1,1,0,0

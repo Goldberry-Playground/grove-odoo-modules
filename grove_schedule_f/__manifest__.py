@@ -21,6 +21,7 @@
         "views/statement_line_views.xml",
         "views/schedule_f_views.xml",
         "views/mirror_views.xml",
+        "views/close_note_views.xml",
         "views/menus.xml",
     ],
     "installable": True,

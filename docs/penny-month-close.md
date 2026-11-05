@@ -56,16 +56,21 @@ Then count with `aggregate_records` on `account.bank.statement.line` grouped by 
 
 Do not call `grove_run_month` or `action_check`. Your access to `grove.mirror.run` is read-only. Report in the summary: "mirror pending, Josh to run it from Schedule F > Month mirrors". Josh also clicks Check on older months he has retagged.
 
-## Step 6. Post the close summary
+## Step 6. Write the close note
 
-Use `post_message` on `account.journal` (the farm "Shared bank (2026)" journal, code BNK1) with one plain-text note containing:
+Use `create_record` on `grove.close.note`, one record per month and company:
 
-- month
-- lines imported
-- proposed
-- accepted
-- rejected
-- still open
-- mirror: pending, Josh to run it from Schedule F > Month mirrors
+- `month`: the first day of the month being closed, as YYYY-MM-01
+- `company_id`: the farm company (Goldberry Grove Farm)
+- `summary`: one plain-text note containing:
+  - month
+  - lines imported
+  - proposed
+  - accepted
+  - rejected
+  - still open
+  - mirror: pending, Josh to run it from Schedule F > Month mirrors
+
+Your access to close notes is create and read only. You cannot change or delete one after it is written, so check the counts before you create it. If a month already has a note, do not create a second one; tell Josh instead. The notes are listed under Accounting > Schedule F > Close notes.
 
 Never include a key.

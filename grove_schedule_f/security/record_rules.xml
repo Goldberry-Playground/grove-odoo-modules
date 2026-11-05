@@ -26,4 +26,10 @@
         <field name="perm_unlink" eval="True"/>
         <field name="domain_force">[('source_company_id', 'in', company_ids)]</field>
     </record>
+    <record id="rule_close_note_company" model="ir.rule">
+        <field name="name">Month close note: multi-company</field>
+        <field name="model_id" ref="model_grove_close_note"/>
+        <field name="global" eval="True"/>
+        <field name="domain_force">[('company_id', 'in', company_ids)]</field>
+    </record>
 </odoo>
