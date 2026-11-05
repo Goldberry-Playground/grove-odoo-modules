@@ -92,12 +92,21 @@ MODEL_SPECS: list[dict] = [
     },
 ]
 
-NATURE = {"in": "amount_received", "out": "amount_paid", None: "both"}
+DIRECTION_TEXT = {"in": "money in", "out": "money out"}
+
+# Odoo 19 account.reconcile.model / .line fields this seed may emit (no rule_type, no match_nature).
+RECONCILE_MODEL_FIELDS = frozenset({"name", "company_id", "trigger", "match_label", "match_label_param", "line_ids"})
+RECONCILE_MODEL_LINE_FIELDS = frozenset(
+    {"account_id", "label", "amount_type", "amount_string", "analytic_distribution"}
+)
 
 
 # ------------------------------------------------------------------- pure
 def model_name(spec: dict) -> str:
-    return f"{spec['name']} {spec['name_suffix']}" if spec.get("name_suffix") else spec["name"]
+    name = spec["name"]
+    if spec.get("amount"):
+        name = f"{name}, {DIRECTION_TEXT[spec['amount']]}"
+    return f"{name} {spec['name_suffix']}" if spec.get("name_suffix") else name
 
 
 def model_vals(spec: dict, company_accounts: dict, enterprise_ids: dict) -> dict:
@@ -110,17 +119,15 @@ def model_vals(spec: dict, company_accounts: dict, enterprise_ids: dict) -> dict
         "account_id": company_accounts[spec["account_code"]],
         "amount_type": "percentage",
         "amount_string": "100",
-        "label": spec["note"],
+        "label": f"{DIRECTION_TEXT[spec['amount']]}: {spec['note']}" if spec.get("amount") else spec["note"],
     }
     if spec.get("enterprise"):
         line["analytic_distribution"] = {str(enterprise_ids[spec["enterprise"]]): 100}
     return {
         "name": model_name(spec),
-        "rule_type": "writeoff_suggestion",
         "trigger": spec["trigger"],
         "match_label": spec["match_label"],
         "match_label_param": spec["match_label_param"],
-        "match_nature": NATURE[spec.get("amount")],
         "company_id": company_accounts["company_id"],
         "line_ids": [(0, 0, line)],
     }

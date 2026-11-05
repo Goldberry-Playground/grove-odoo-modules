@@ -38,12 +38,10 @@ class TestModelSpecs(unittest.TestCase):
     def test_model_vals_stripe_has_suffix_label_and_enterprise(self):
         spec = next(s for s in mod.MODEL_SPECS if s["name"] == "Stripe payout (nursery)")
         vals = mod.model_vals(spec, ACCOUNTS, ENTERPRISES)
-        self.assertEqual(vals["name"], "Stripe payout (nursery) (check amount against both Stripe journals)")
-        self.assertEqual(vals["rule_type"], "writeoff_suggestion")
+        self.assertEqual(vals["name"], "Stripe payout (nursery), money in (check amount against both Stripe journals)")
         self.assertEqual(vals["trigger"], "manual")
         self.assertEqual(vals["match_label"], "contains")
         self.assertEqual(vals["match_label_param"], "STRIPE")
-        self.assertEqual(vals["match_nature"], "amount_received")
         self.assertEqual(vals["company_id"], 7)
         line = vals["line_ids"][0][2]
         self.assertEqual(vals["line_ids"][0][:2], (0, 0))
@@ -56,15 +54,25 @@ class TestModelSpecs(unittest.TestCase):
     def test_owner_draw_is_amount_paid_to_personal(self):
         spec = next(s for s in mod.MODEL_SPECS if s["name"] == "Owner draw")
         vals = mod.model_vals(spec, ACCOUNTS, ENTERPRISES)
-        self.assertEqual(vals["match_nature"], "amount_paid")
+        self.assertEqual(vals["name"], "Owner draw, money out")
+        self.assertTrue(vals["line_ids"][0][2]["label"].startswith("money out"))
         self.assertEqual(vals["line_ids"][0][2]["account_id"], 22)
         self.assertEqual(vals["line_ids"][0][2]["analytic_distribution"], {"102": 100})
 
     def test_no_enterprise_means_no_distribution_and_both_nature(self):
         spec = next(s for s in mod.MODEL_SPECS if s["name"] == "Square transfer to bank")
         vals = mod.model_vals(spec, ACCOUNTS, ENTERPRISES)
-        self.assertEqual(vals["match_nature"], "both")
+        self.assertEqual(vals["name"], "Square transfer to bank")
         self.assertNotIn("analytic_distribution", vals["line_ids"][0][2])
+
+    def test_emitted_keys_are_odoo19_fields(self):
+        for spec in mod.MODEL_SPECS:
+            vals = mod.model_vals(spec, {"company_id": 7, "1350": 11, "3100": 22}, ENTERPRISES)
+            self.assertLessEqual(set(vals), mod.RECONCILE_MODEL_FIELDS)
+            self.assertNotIn("rule_type", vals)
+            self.assertNotIn("match_nature", vals)
+            for _, _, line in vals["line_ids"]:
+                self.assertLessEqual(set(line), mod.RECONCILE_MODEL_LINE_FIELDS)
 
 
 if __name__ == "__main__":
