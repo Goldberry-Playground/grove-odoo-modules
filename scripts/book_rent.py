@@ -12,7 +12,7 @@ Idempotent by ref per company. The amount comes from Josh; the script refuses 0.
 
 Usage:
     ODOO_URL=... ODOO_DB=... ODOO_USER=... ODOO_PASSWORD=... \\
-        python3 book_rent.py --period 2026 --amount 1200.00 [--dry-run]
+        python3 book_rent.py --period 2026 --amount "$RENT_AMOUNT" [--dry-run]
 """
 
 from __future__ import annotations

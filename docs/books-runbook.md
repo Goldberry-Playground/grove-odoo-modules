@@ -20,11 +20,19 @@ Check the plan for the bootstrap without writing anything:
 python3 scripts/setup_books.py --dry-run
 ```
 
-Run the bootstrap. The reset flags draft and delete the posted test moves whose name or ref matches the pattern. This deletes posted moves and cannot be undone. The pattern is a case-insensitive substring match across both companies, so use an anchored pattern such as `^TEST-` and first read the list of matches printed by the `--dry-run` above. Fill in the pattern (at most 10 matches are allowed):
+Run the bootstrap. The reset flags draft and delete the posted test moves whose name or ref matches the pattern. This deletes posted moves and cannot be undone. The pattern is a case-insensitive regular expression matched against the move name or ref across both companies, so anchor it with `^`, for example `^TEST-`. At most 10 matches are allowed. Fill in the pattern:
 
 ```bash
 export RESET_PATTERN=""
 ```
+
+Preview first. This prints the posted moves and the match count without changing anything:
+
+```bash
+python3 scripts/setup_books.py --dry-run --reset-test-entries --reset-ref-pattern "$RESET_PATTERN"
+```
+
+When the matches are exactly the test entries, run it for real:
 
 ```bash
 python3 scripts/setup_books.py --reset-test-entries --reset-ref-pattern "$RESET_PATTERN"
