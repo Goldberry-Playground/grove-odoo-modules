@@ -15,7 +15,10 @@
     "data": [
         "security/groups.xml",
         "security/ir.model.access.csv",
+        "data/config_parameter.xml",
         "views/account_views.xml",
+        "views/statement_line_views.xml",
+        "views/menus.xml",
     ],
     "installable": True,
     "application": False,

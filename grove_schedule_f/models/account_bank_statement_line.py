@@ -1,5 +1,5 @@
-from odoo import fields, models
-from odoo.exceptions import AccessError
+from odoo import api, fields, models
+from odoo.exceptions import AccessError, UserError
 
 AGENT_GROUP = "grove_schedule_f.group_grove_agent"
 PROPOSAL_FIELDS = frozenset(
@@ -11,6 +11,7 @@ PROPOSAL_FIELDS = frozenset(
         "grove_proposal_uncertain",
     }
 )
+REVIEW_THRESHOLD_PARAM = "grove_schedule_f.review_threshold"
 AGENT_WRITABLE_STATEMENT_FIELDS = frozenset(PROPOSAL_FIELDS | {"grove_proposal_state", "message_main_attachment_id"})
 
 
@@ -39,6 +40,49 @@ class AccountBankStatementLine(models.Model):
         copy=False,
     )
 
+    grove_needs_review = fields.Boolean(
+        string="Needs Review",
+        compute="_compute_grove_needs_review",
+        search="_search_grove_needs_review",
+    )
+
+    @api.model
+    def _grove_review_threshold(self):
+        raw = self.env["ir.config_parameter"].sudo().get_param(REVIEW_THRESHOLD_PARAM, "500")
+        try:
+            return float(raw)
+        except (TypeError, ValueError):
+            return 500.0
+
+    @api.depends("is_reconciled", "grove_proposal_uncertain", "grove_proposed_model_id", "amount")
+    def _compute_grove_needs_review(self):
+        threshold = self._grove_review_threshold()
+        for line in self:
+            line.grove_needs_review = not line.is_reconciled and bool(
+                line.grove_proposal_uncertain or not line.grove_proposed_model_id or abs(line.amount) >= threshold
+            )
+
+    @api.model
+    def _search_grove_needs_review(self, operator, value):
+        if operator not in ("=", "!="):
+            raise UserError(self.env._("Unsupported operator for Needs Review."))
+        threshold = self._grove_review_threshold()
+        domain = [
+            "&",
+            ("is_reconciled", "=", False),
+            "|",
+            "|",
+            ("grove_proposal_uncertain", "=", True),
+            ("grove_proposed_model_id", "=", False),
+            "|",
+            ("amount", ">=", threshold),
+            ("amount", "<=", -threshold),
+        ]
+        wanted = bool(value) == (operator == "=")
+        if wanted:
+            return domain
+        return ["!", *domain]
+
     def write(self, vals):
         if _grove_is_agent(self.env):
             if set(vals) - AGENT_WRITABLE_STATEMENT_FIELDS:
@@ -64,3 +108,43 @@ class AccountBankStatementLine(models.Model):
         if _grove_is_agent(self.env):
             raise AccessError(self.env._("Grove Agents cannot reconcile bank lines."))
         return super().reconcile_bank_line()
+
+    def action_grove_accept_proposal(self):
+        self.ensure_one()
+        if _grove_is_agent(self.env):
+            raise AccessError(self.env._("Grove Agents cannot accept proposals."))
+        account = self.grove_proposed_account_id
+        enterprise = self.grove_proposed_enterprise_id
+        if self.grove_proposal_state != "proposed" or not account:
+            raise UserError(self.env._("There is no proposal to accept on this line."))
+        if self.journal_id.grove_enterprise_required and not enterprise:
+            raise UserError(self.env._("Pick an enterprise before accepting."))
+        info = self._default_reconcile_data()
+        suspense = [entry for entry in info["data"] if entry["kind"] == "suspense"]
+        if len(suspense) != 1:
+            raise UserError(self.env._("This line has no open amount to reconcile."))
+        entry = suspense[0]
+        entry["account_id"] = [account.id, account.display_name]
+        entry["kind"] = "other"
+        if enterprise:
+            entry["analytic_distribution"] = {str(enterprise.id): 100}
+        info["can_reconcile"] = True
+        self.reconcile_data_info = info
+        self.reconcile_bank_line()
+        self.grove_proposal_state = "accepted"
+        self.move_id.message_post(
+            body=self.env._(
+                "Accepted: %(account)s / %(enterprise)s",
+                account=account.display_name,
+                enterprise=enterprise.name or self.env._("no enterprise"),
+            )
+        )
+        return True
+
+    def action_grove_reject_proposal(self):
+        self.ensure_one()
+        if _grove_is_agent(self.env):
+            raise AccessError(self.env._("Grove Agents cannot reject proposals."))
+        self.grove_proposal_state = "rejected"
+        self.move_id.message_post(body=self.env._("Proposal rejected."))
+        return True

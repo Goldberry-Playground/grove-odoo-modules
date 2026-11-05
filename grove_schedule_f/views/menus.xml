@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <menuitem id="menu_grove_schedule_f_root" name="Schedule F" parent="account.menu_finance" sequence="60"/>
+    <menuitem id="menu_grove_bank_lines_to_review" name="Bank lines to review"
+              parent="menu_grove_schedule_f_root" action="action_bank_lines_to_review" sequence="10"/>
+</odoo>
