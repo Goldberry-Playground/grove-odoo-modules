@@ -2,7 +2,10 @@ from odoo import api, fields, models
 from odoo.exceptions import ValidationError
 
 ENTERPRISE_PLAN_NAME = "Enterprise"
-ENTERPRISE_EXEMPT_ACCOUNT_TYPES = frozenset({"asset_cash", "liability_credit_card"})
+ENTERPRISE_EXEMPT_ACCOUNT_TYPES = frozenset(
+    {"asset_cash", "liability_credit_card", "asset_receivable", "liability_payable"}
+)
+ENTERPRISE_VALUES = frozenset({"farm", "nursery", "personal"})
 OWNER_DRAW_CODE = "3100"
 
 
@@ -16,10 +19,10 @@ class AccountMoveLine(models.Model):
         store=True,
     )
 
-    def _grove_enterprise_shares(self):
-        """Return {selection value: summed percentage} for this line's Enterprise-plan analytic accounts."""
+    def _grove_enterprise_entries(self):
+        """Return [(analytic account name, percentage)] for this line's Enterprise-plan analytic accounts."""
         self.ensure_one()
-        shares = {}
+        entries = []
         distribution = self.analytic_distribution or {}
         ids = {int(i) for key in distribution for i in str(key).split(",") if i}
         accounts = {a.id: a for a in self.env["account.analytic.account"].sudo().browse(ids).exists()}
@@ -27,23 +30,28 @@ class AccountMoveLine(models.Model):
             for raw in str(key).split(","):
                 account = accounts.get(int(raw)) if raw else None
                 if account and account.plan_id.name == ENTERPRISE_PLAN_NAME:
-                    value = account.name.lower()
-                    shares[value] = shares.get(value, 0.0) + pct
-        return shares
+                    entries.append((account.name, pct))
+        return entries
 
     @api.depends("analytic_distribution")
     def _compute_grove_enterprise(self):
-        allowed = {"farm", "nursery", "personal"}
         for line in self:
-            shares = {k: v for k, v in line._grove_enterprise_shares().items() if k in allowed}
+            shares = {}
+            for name, pct in line._grove_enterprise_entries():
+                if name.lower() in ENTERPRISE_VALUES:
+                    shares[name.lower()] = shares.get(name.lower(), 0.0) + pct
             line.grove_enterprise = max(shares, key=shares.get) if shares else False
 
     def _grove_enterprise_exempt(self):
         self.ensure_one()
         if self.account_id.account_type in ENTERPRISE_EXEMPT_ACCOUNT_TYPES:
             return True
+        if self.move_id.origin_payment_id:
+            return True  # payment entries: liquidity, outstanding and partner lines are never enterprise-tagged
         journal, company = self.journal_id, self.company_id
         exempt = journal.default_account_id | journal.suspense_account_id
+        method_lines = journal.inbound_payment_method_line_ids | journal.outbound_payment_method_line_ids
+        exempt |= method_lines.payment_account_id
         for fname in (
             "account_journal_payment_debit_account_id",
             "account_journal_payment_credit_account_id",
@@ -60,13 +68,13 @@ class AccountMoveLine(models.Model):
                 continue
             if line.display_type not in ("product", False) or line._grove_enterprise_exempt():
                 continue
-            shares = line._grove_enterprise_shares()
-            if abs(sum(shares.values()) - 100.0) > 0.01:
+            entries = line._grove_enterprise_entries()
+            if len(entries) != 1 or abs(entries[0][1] - 100.0) > 0.01 or entries[0][0].lower() not in ENTERPRISE_VALUES:
                 raise ValidationError(
                     f"Line {line.name or line.account_id.display_name}: "
                     "pick an enterprise (Farm, Nursery or Personal) before posting."
                 )
-            is_personal = line.grove_enterprise == "personal"
-            is_draw = line.account_id.code == OWNER_DRAW_CODE
+            is_personal = entries[0][0].lower() == "personal"
+            is_draw = line.account_id.with_company(line.company_id).code == OWNER_DRAW_CODE
             if is_personal != is_draw:
                 raise ValidationError("Personal spending posts only to 3100 Owner draw.")

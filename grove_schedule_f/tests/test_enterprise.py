@@ -101,3 +101,70 @@ class TestEnterprise(TransactionCase):
     def test_unflagged_journal_is_untouched(self):
         move = self._post_entry(self.misc, "6280", None)
         self.assertEqual(move.state, "posted")
+
+    def test_partial_personal_split_is_rejected(self):
+        with self.assertRaisesRegex(ValidationError, "pick an enterprise"):
+            self._post_entry(self.bank, "6280", {self.personal.id: 40, self.farm.id: 60})
+
+    def test_unknown_enterprise_account_is_rejected(self):
+        other = self.env["account.analytic.account"].create(
+            {"name": "Other", "plan_id": self.farm.plan_id.id, "company_id": self.company.id}
+        )
+        with self.assertRaisesRegex(ValidationError, "pick an enterprise"):
+            self._post_entry(self.bank, "6280", {other.id: 100})
+
+    def test_payment_outstanding_account_is_exempt(self):
+        outstanding = (
+            self.env["account.account"]
+            .with_company(self.company)
+            .create(
+                {
+                    "name": "Outstanding Receipts",
+                    "code": "199901",
+                    "account_type": "asset_current",
+                    "company_ids": [Command.link(self.company.id)],
+                }
+            )
+        )
+        method_line = self.bank.inbound_payment_method_line_ids[:1]
+        method_line.payment_account_id = outstanding
+        partner = self.env["res.partner"].create({"name": "Payer"})
+        payment = (
+            self.env["account.payment"]
+            .with_company(self.company)
+            .create(
+                {
+                    "payment_type": "inbound",
+                    "partner_type": "customer",
+                    "partner_id": partner.id,
+                    "amount": 10.0,
+                    "journal_id": self.bank.id,
+                    "payment_method_line_id": method_line.id,
+                }
+            )
+        )
+        payment.action_post()
+        self.assertEqual(payment.state, "in_process")
+
+    def test_receivable_counterpart_is_exempt(self):
+        receivable = self.env["account.account"].search(
+            [("company_ids", "in", self.company.id), ("account_type", "=", "asset_receivable")], limit=1
+        )
+        self.assertTrue(receivable)
+        move = (
+            self.env["account.move"]
+            .with_company(self.company)
+            .create(
+                {
+                    "move_type": "entry",
+                    "journal_id": self.bank.id,
+                    "date": fields.Date.today(),
+                    "line_ids": [
+                        Command.create({"account_id": receivable.id, "credit": 10.0, "name": "settle"}),
+                        Command.create({"account_id": self.bank.default_account_id.id, "debit": 10.0, "name": "bank"}),
+                    ],
+                }
+            )
+        )
+        move.action_post()
+        self.assertEqual(move.state, "posted")
