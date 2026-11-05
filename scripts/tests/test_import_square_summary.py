@@ -51,7 +51,6 @@ class TestSummaryEntry(unittest.TestCase):
             with self.assertRaises(ValueError, msg=bad):
                 mod.parse_rows(["month,gross,fees", "2026-01,10,1", bad])
 
-
     def test_parse_rows_rejects_non_finite_amounts(self):
         for bad in ("2026-01,nan,1", "2026-01,inf,1", "2026-01,10,nan", "2026-01,-inf,0", "2026-01,Infinity,1"):
             with self.assertRaises(ValueError, msg=bad):

@@ -95,7 +95,8 @@ class ResCompany(models.Model):
         self.ensure_one()
         mapped_codes = {spec["code"] for spec in schedule_f_lines.ACCOUNTS}
         vals = {}
-        for fname, code in (("income_account_id", SALE_JOURNAL_ACCOUNT), ("expense_account_id", PURCHASE_JOURNAL_ACCOUNT)):
+        targets = (("income_account_id", SALE_JOURNAL_ACCOUNT), ("expense_account_id", PURCHASE_JOURNAL_ACCOUNT))
+        for fname, code in targets:
             if fname in self._fields and self[fname].code not in mapped_codes:
                 vals[fname] = self._grove_account(code).id
         if vals:

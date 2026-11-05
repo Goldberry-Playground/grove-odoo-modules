@@ -218,9 +218,7 @@ def resolve_companies(models, uid) -> dict:
 def preflight_companies(models, uid, companies):
     """Fail before any write unless the nursery has a chart of accounts and is not a branch company."""
     print("\n== Preflight ==")
-    rows = call(
-        models, uid, "res.company", "read", [list(companies.values()), ["name", "chart_template", "parent_id"]]
-    )
+    rows = call(models, uid, "res.company", "read", [list(companies.values()), ["name", "chart_template", "parent_id"]])
     by_id = {row.get("id"): row for row in rows or []}
     for key, cid in companies.items():
         row = by_id.get(cid, {})
