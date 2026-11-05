@@ -93,11 +93,31 @@ class ResCompany(models.Model):
                 changed += 1
         return changed
 
+    def _grove_ensure_mirror_journal(self):
+        """Find or create this company's intercompany mirror journal (code MIRR). Returns True when created."""
+        self.ensure_one()
+        Journal = self.env["account.journal"]
+        journal = Journal.search([("company_id", "=", self.id), ("code", "=", "MIRR")], limit=1)
+        if journal:
+            if not journal.grove_is_mirror:
+                journal.grove_is_mirror = True
+            return False
+        Journal.with_company(self).create(
+            {
+                "name": "Intercompany mirror",
+                "code": "MIRR",
+                "type": "general",
+                "company_id": self.id,
+                "grove_is_mirror": True,
+            }
+        )
+        return True
+
     def grove_schedule_f_setup(self):
         """Create the Schedule F accounts and tags for this company (idempotent).
 
         Returns a dict with accounts_created, accounts_existing, tags_created, deprecated, categories_repointed,
-        plan_created.
+        plan_created, mirror_journal_created.
         """
         self.ensure_one()
         Account = self.env["account.account"].with_company(self)
@@ -143,7 +163,9 @@ class ResCompany(models.Model):
         if self.grove_owns_shared_bank:
             plan_created = not self.env["account.analytic.plan"].search_count([("name", "=", "Enterprise")])
             self._grove_ensure_enterprise_plan()
+        mirror_journal_created = self._grove_ensure_mirror_journal()
         return {
+            "mirror_journal_created": mirror_journal_created,
             "plan_created": plan_created,
             "accounts_created": created,
             "accounts_existing": existing,

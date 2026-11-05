@@ -9,4 +9,6 @@
               parent="menu_grove_schedule_f_root" action="action_unpaid_at_year_end" sequence="20"/>
     <menuitem id="menu_grove_uncategorized_bank_lines" name="Uncategorized bank lines"
               parent="menu_grove_schedule_f_root" action="action_uncategorized_bank_lines" sequence="30"/>
+    <menuitem id="menu_grove_month_mirrors" name="Month mirrors"
+              parent="menu_grove_schedule_f_root" action="action_grove_mirror_run" sequence="40"/>
 </odoo>

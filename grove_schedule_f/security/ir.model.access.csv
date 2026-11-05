@@ -14,3 +14,6 @@ access_grove_cashline_readonly,grove cashline readonly,model_grove_schedulef_cas
 access_grove_cashline_invoice,grove cashline invoice,model_grove_schedulef_cashline,account.group_account_invoice,1,0,0,0
 access_grove_cashline_user,grove cashline user,model_grove_schedulef_cashline,account.group_account_user,1,0,0,0
 access_grove_cashline_agent,grove cashline agent,model_grove_schedulef_cashline,group_grove_agent,1,0,0,0
+access_grove_mirror_run_user,grove mirror run user,model_grove_mirror_run,account.group_account_user,1,1,1,0
+access_grove_mirror_run_readonly,grove mirror run readonly,model_grove_mirror_run,account.group_account_readonly,1,0,0,0
+access_grove_mirror_run_agent,grove mirror run agent,model_grove_mirror_run,group_grove_agent,1,0,0,0

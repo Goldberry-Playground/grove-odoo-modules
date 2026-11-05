@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <record id="view_grove_mirror_run_form" model="ir.ui.view">
+        <field name="name">grove.mirror.run.form</field>
+        <field name="model">grove.mirror.run</field>
+        <field name="arch" type="xml">
+            <form string="Month mirror">
+                <header>
+                    <button name="action_run" type="object" string="Run" class="btn-primary"
+                            invisible="state != 'draft'"/>
+                    <button name="action_check" type="object" string="Check" invisible="state != 'posted'"/>
+                    <button name="action_reverse" type="object" string="Reverse" invisible="state != 'posted'"
+                            confirm="Reverse both mirror entries?"/>
+                    <field name="state" widget="statusbar" statusbar_visible="draft,posted,reversed"/>
+                </header>
+                <sheet>
+                    <div class="alert alert-warning" role="alert" invisible="not is_stale">
+                        Nursery-tagged lines changed since this mirror ran. Reverse it and run the month again.
+                    </div>
+                    <group>
+                        <group>
+                            <field name="name"/>
+                            <field name="month" readonly="state != 'draft'"/>
+                            <field name="is_stale"/>
+                        </group>
+                        <group>
+                            <field name="source_company_id" readonly="state != 'draft'"/>
+                            <field name="target_company_id" readonly="state != 'draft'"/>
+                            <field name="source_move_id"/>
+                            <field name="target_move_id"/>
+                        </group>
+                    </group>
+                    <group string="Summary">
+                        <field name="summary" widget="json" nolabel="1"/>
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="view_grove_mirror_run_list" model="ir.ui.view">
+        <field name="name">grove.mirror.run.list</field>
+        <field name="model">grove.mirror.run</field>
+        <field name="arch" type="xml">
+            <list string="Month mirrors">
+                <field name="name"/>
+                <field name="month"/>
+                <field name="state"/>
+                <field name="is_stale"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_grove_mirror_run" model="ir.actions.act_window">
+        <field name="name">Month mirrors</field>
+        <field name="res_model">grove.mirror.run</field>
+        <field name="view_mode">list,form</field>
+    </record>
+</odoo>
