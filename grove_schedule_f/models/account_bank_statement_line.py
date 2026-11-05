@@ -12,6 +12,20 @@ PROPOSAL_FIELDS = frozenset(
     }
 )
 REVIEW_THRESHOLD_PARAM = "grove_schedule_f.review_threshold"
+ALLOWED_PROPOSAL_ACCOUNT_TYPES = frozenset(
+    {
+        "income",
+        "income_other",
+        "expense",
+        "expense_direct_cost",
+        "expense_depreciation",
+        "equity",
+        "asset_current",
+        "asset_fixed",
+        "liability_current",
+        "liability_credit_card",
+    }
+)
 AGENT_WRITABLE_STATEMENT_FIELDS = frozenset(PROPOSAL_FIELDS | {"grove_proposal_state", "message_main_attachment_id"})
 
 
@@ -23,12 +37,15 @@ def _grove_is_agent(env) -> bool:
 class AccountBankStatementLine(models.Model):
     _inherit = "account.bank.statement.line"
 
-    grove_proposed_account_id = fields.Many2one("account.account", string="Proposed Account", copy=False)
+    grove_proposed_account_id = fields.Many2one(
+        "account.account", string="Proposed Account", copy=False, check_company=True
+    )
     grove_proposed_enterprise_id = fields.Many2one(
         "account.analytic.account",
         string="Proposed Enterprise",
         domain="[('plan_id.name', '=', 'Enterprise')]",
         copy=False,
+        check_company=True,
     )
     grove_proposed_model_id = fields.Many2one("account.reconcile.model", string="Proposed Model", copy=False)
     grove_proposal_note = fields.Text(string="Proposal Note", copy=False)
@@ -119,6 +136,15 @@ class AccountBankStatementLine(models.Model):
             raise UserError(self.env._("There is no proposal to accept on this line."))
         if self.journal_id.grove_enterprise_required and not enterprise:
             raise UserError(self.env._("Pick an enterprise before accepting."))
+        journal = self.journal_id
+        if (
+            self.company_id not in account.company_ids
+            or account.account_type not in ALLOWED_PROPOSAL_ACCOUNT_TYPES
+            or account in (journal.suspense_account_id, journal.default_account_id)
+        ):
+            raise UserError(self.env._("Proposed account is not usable for this line."))
+        if enterprise and (enterprise.plan_id.name != "Enterprise" or enterprise.company_id != self.company_id):
+            raise UserError(self.env._("Proposed enterprise is not usable for this line."))
         info = self._default_reconcile_data()
         suspense = [entry for entry in info["data"] if entry["kind"] == "suspense"]
         if len(suspense) != 1:
@@ -145,6 +171,8 @@ class AccountBankStatementLine(models.Model):
         self.ensure_one()
         if _grove_is_agent(self.env):
             raise AccessError(self.env._("Grove Agents cannot reject proposals."))
+        if self.grove_proposal_state != "proposed":
+            raise UserError(self.env._("There is no proposal to reject on this line."))
         self.grove_proposal_state = "rejected"
         self.move_id.message_post(body=self.env._("Proposal rejected."))
         return True

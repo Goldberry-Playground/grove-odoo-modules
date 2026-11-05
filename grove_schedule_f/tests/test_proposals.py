@@ -121,3 +121,46 @@ class TestProposals(TransactionCase):
         self.assertNotIn(small, Line.search([("grove_needs_review", "=", True)]))
         self.assertIn(small, Line.search([("grove_needs_review", "=", False)]))
         self.assertNotIn(big, Line.search([("grove_needs_review", "=", False)]))
+
+    def _proposed(self, **vals):
+        line = self._import_line(amount=-7.0, label="VALIDATE")
+        line.write({"grove_proposed_account_id": self.a6280.id, "grove_proposed_enterprise_id": self.farm.id})
+        if vals:
+            line.write(vals)
+        return line
+
+    def test_accept_rejects_account_of_another_company(self):
+        other = self.env["res.company"].create({"name": "Other Co", "country_id": self.env.ref("base.us").id})
+        self.env["account.chart.template"].try_loading("generic_coa", other, install_demo=False)
+        foreign = self.env["account.account"].with_company(other).search([("company_ids", "in", other.id)], limit=1)
+        line = self._proposed()
+        with self.assertRaises(UserError):
+            line.write({"grove_proposed_account_id": foreign.id})
+            line.action_grove_accept_proposal()
+        self.assertFalse(line.is_reconciled)
+
+    def test_accept_rejects_receivable_account(self):
+        receivable = self.env["account.account"].search(
+            [("company_ids", "in", self.company.id), ("account_type", "=", "asset_receivable")], limit=1
+        )
+        line = self._proposed(grove_proposed_account_id=receivable.id)
+        with self.assertRaisesRegex(UserError, "Proposed account is not usable"):
+            line.action_grove_accept_proposal()
+        self.assertFalse(line.is_reconciled)
+
+    def test_accept_rejects_non_enterprise_analytic_account(self):
+        plan = self.env["account.analytic.plan"].create({"name": "Other Plan"})
+        stray = self.env["account.analytic.account"].create(
+            {"name": "Stray", "plan_id": plan.id, "company_id": self.company.id}
+        )
+        line = self._proposed(grove_proposed_enterprise_id=stray.id)
+        with self.assertRaisesRegex(UserError, "Proposed enterprise is not usable"):
+            line.action_grove_accept_proposal()
+        self.assertFalse(line.is_reconciled)
+
+    def test_reject_on_accepted_line_raises(self):
+        line = self._proposed()
+        line.action_grove_accept_proposal()
+        with self.assertRaises(UserError):
+            line.action_grove_reject_proposal()
+        self.assertEqual(line.grove_proposal_state, "accepted")
