@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import calendar
 import csv
 import hashlib
 import os
@@ -69,15 +70,29 @@ def unique_import_id(row: dict, index: int, id_col: str | None, date_col=None, a
     return hashlib.sha1("|".join(parts).encode("utf-8")).hexdigest()
 
 
-def month_key(row: dict, date_col: str, date_fmt: str) -> str:
-    return datetime.strptime(row[date_col].strip(), date_fmt).strftime("%Y-%m")
+def month_key(row: dict, date_col: str, date_fmt: str, position: int | None = None) -> str:
+    """YYYY-MM of the row's date; ValueError naming the row when blank or unparsable."""
+    where = f"row {position + 2} (file line)" if position is not None else "row"
+    text = (row.get(date_col) or "").strip()
+    if not text:
+        raise ValueError(f"{where}: blank date in column '{date_col}'")
+    try:
+        return datetime.strptime(text, date_fmt).strftime("%Y-%m")
+    except ValueError:
+        raise ValueError(f"{where}: date '{text}' does not match {date_fmt}") from None
+
+
+def ids_domain(ids: list[str]) -> list:
+    """OR-chain of `like` clauses: the importer rewrites stored ids ('{id}-{ts}', then '{acct}-{journal}-...')."""
+    clauses = [("unique_import_id", "like", i) for i in ids]
+    return ["|"] * (len(clauses) - 1) + clauses
 
 
 def split_by_month(rows: list[dict], date_col: str, date_fmt: str) -> dict[str, list[dict]]:
     """Group rows by YYYY-MM, preserving file order inside each month."""
     out: dict[str, list[dict]] = {}
-    for row in rows:
-        out.setdefault(month_key(row, date_col, date_fmt), []).append(row)
+    for position, row in enumerate(rows):
+        out.setdefault(month_key(row, date_col, date_fmt, position), []).append(row)
     return out
 
 
@@ -182,15 +197,26 @@ def month_file(fieldnames: list[str], rows: list[dict], directory: str, month: s
     return path
 
 
-def count_lines(models, uid, company_id, journal_id, ids):
-    if not ids:
+def month_bounds(month: str) -> tuple[str, str]:
+    year, mon = (int(p) for p in month.split("-"))
+    return f"{month}-01", f"{month}-{calendar.monthrange(year, mon)[1]:02d}"
+
+
+def count_lines(models, uid, company_id, journal_id, ids, month=None):
+    """Lines matching the month's ids (by like), or all journal lines dated in the month when ids is None."""
+    if ids is None:
+        start, end = month_bounds(month)
+        domain = [("journal_id", "=", journal_id), ("date", ">=", start), ("date", "<=", end)]
+    elif not ids:
         return 0
+    else:
+        domain = [("journal_id", "=", journal_id)] + ids_domain(ids)
     return call(
         models,
         uid,
         "account.bank.statement.line",
         "search_count",
-        [[("journal_id", "=", journal_id), ("unique_import_id", "in", ids)]],
+        [domain],
         {"context": {"allowed_company_ids": [company_id]}},
     )
 
@@ -216,7 +242,10 @@ def run(models, uid, args):
     amount_cols = [args.amount_col] if args.amount_col else [args.debit_col, args.credit_col]
     for i, row in enumerate(rows):
         row[ID_COLUMN] = unique_import_id(row, i, args.id_col, args.date_col, amount_cols, args.desc_col)
-    by_month = split_by_month(rows, args.date_col, args.date_fmt)
+    try:
+        by_month = split_by_month(rows, args.date_col, args.date_fmt)
+    except ValueError as exc:
+        fail(str(exc))
     months = select_months(sorted(by_month), args.from_month, args.to_month)
     print(f"{len(rows)} rows, {len(by_month)} months in file; importing {len(months)}")
 
@@ -234,16 +263,15 @@ def run(models, uid, args):
         for month in months:
             month_rows = by_month[month]
             ids = [r[ID_COLUMN] for r in month_rows]
-            if args.dry_run:
-                print(f"  PLAN {month}: {len(month_rows)} rows")
-                continue
             before = count_lines(models, uid, company_id, journal_id, ids)
+            range_before = count_lines(models, uid, company_id, journal_id, None, month)
             path = month_file(fieldnames, month_rows, tmp, month)
             with open(path, "rb") as fh:
                 payload = base64.b64encode(fh.read()).decode("ascii")
-            wizard = call(
+            wizard = write_or_plan(
                 models,
                 uid,
+                args.dry_run,
                 "account.statement.import",
                 "create",
                 [
@@ -254,15 +282,28 @@ def run(models, uid, args):
                     }
                 ],
                 {"context": import_ctx},
+                label=f"{month}: import {len(month_rows)} rows",
             )
+            if wizard is None:
+                continue
             try:
-                call(models, uid, "account.statement.import", "import_file_button", [[wizard]], {"context": import_ctx})
+                write_or_plan(
+                    models,
+                    uid,
+                    args.dry_run,
+                    "account.statement.import",
+                    "import_file_button",
+                    [[wizard]],
+                    {"context": import_ctx},
+                )
             except xmlrpc.client.Fault as exc:
                 # OCA refuses a file whose transactions are all already imported: nothing new, not a failure.
                 if "already imported" not in str(exc.faultString):
                     raise
             after = count_lines(models, uid, company_id, journal_id, ids)
+            range_after = count_lines(models, uid, company_id, journal_id, None, month)
             print(f"{month}: {after} lines ({after - before} new)")
+            print(f"  cross-check: journal lines dated in {month}: {range_before} -> {range_after}")
 
 
 def parse_args(argv=None):

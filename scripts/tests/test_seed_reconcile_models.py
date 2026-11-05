@@ -10,7 +10,7 @@ mod = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(mod)
 
 KNOWN_CODES = {"1350", "3100"}
-ACCOUNTS = {"company_id": 7, "1350": 11, "3100": 22}
+ACCOUNTS = {"company_id": 7, "1350": 11, "3100": 22, "journal:STRP": 31, "journal:SQR": 32}
 ENTERPRISES = {"nursery": 101, "personal": 102}
 
 
@@ -65,9 +65,17 @@ class TestModelSpecs(unittest.TestCase):
         self.assertEqual(vals["name"], "Square transfer to bank")
         self.assertNotIn("analytic_distribution", vals["line_ids"][0][2])
 
+    def test_nursery_models_are_journal_scoped_and_farm_models_are_not(self):
+        by_name = {s["name"]: mod.model_vals(s, ACCOUNTS, ENTERPRISES) for s in mod.MODEL_SPECS}
+        self.assertEqual(by_name["Stripe payout to shared bank"]["match_journal_ids"], [(6, 0, [31])])
+        self.assertEqual(by_name["Square transfer to bank"]["match_journal_ids"], [(6, 0, [32])])
+        for spec in mod.MODEL_SPECS:
+            if spec["company"] == "farm":
+                self.assertNotIn("match_journal_ids", mod.model_vals(spec, ACCOUNTS, ENTERPRISES))
+
     def test_emitted_keys_are_odoo19_fields(self):
         for spec in mod.MODEL_SPECS:
-            vals = mod.model_vals(spec, {"company_id": 7, "1350": 11, "3100": 22}, ENTERPRISES)
+            vals = mod.model_vals(spec, ACCOUNTS, ENTERPRISES)
             self.assertLessEqual(set(vals), mod.RECONCILE_MODEL_FIELDS)
             self.assertNotIn("rule_type", vals)
             self.assertNotIn("match_nature", vals)

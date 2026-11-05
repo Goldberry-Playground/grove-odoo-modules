@@ -79,6 +79,7 @@ MODEL_SPECS: list[dict] = [
         "match_label_param": "payout",
         "trigger": "manual",
         "account_code": "1350",
+        "journal_code": "STRP",
         "note": "Stripe payout that landed in the farm's shared bank; due to the farm via intercompany",
     },
     {
@@ -88,6 +89,7 @@ MODEL_SPECS: list[dict] = [
         "match_label_param": "transfer",
         "trigger": "manual",
         "account_code": "1350",
+        "journal_code": "SQR",
         "note": "Square transfer that landed in the farm's shared bank; due to the farm via intercompany",
     },
 ]
@@ -95,7 +97,9 @@ MODEL_SPECS: list[dict] = [
 DIRECTION_TEXT = {"in": "money in", "out": "money out"}
 
 # Odoo 19 account.reconcile.model / .line fields this seed may emit (no rule_type, no match_nature).
-RECONCILE_MODEL_FIELDS = frozenset({"name", "company_id", "trigger", "match_label", "match_label_param", "line_ids"})
+RECONCILE_MODEL_FIELDS = frozenset(
+    {"name", "company_id", "trigger", "match_label", "match_label_param", "line_ids", "match_journal_ids"}
+)
 RECONCILE_MODEL_LINE_FIELDS = frozenset(
     {"account_id", "label", "amount_type", "amount_string", "analytic_distribution"}
 )
@@ -112,7 +116,8 @@ def model_name(spec: dict) -> str:
 def model_vals(spec: dict, company_accounts: dict, enterprise_ids: dict) -> dict:
     """account.reconcile.model create vals.
 
-    company_accounts maps account code -> account id, plus "company_id" -> the company id.
+    company_accounts maps account code -> account id, "journal:CODE" -> journal id
+    (journal-scoped specs), plus "company_id" -> the company id.
     enterprise_ids maps "nursery"/"personal" -> analytic account id.
     """
     line = {
@@ -123,7 +128,11 @@ def model_vals(spec: dict, company_accounts: dict, enterprise_ids: dict) -> dict
     }
     if spec.get("enterprise"):
         line["analytic_distribution"] = {str(enterprise_ids[spec["enterprise"]]): 100}
+    extra = {}
+    if spec.get("journal_code"):
+        extra["match_journal_ids"] = [(6, 0, [company_accounts[f"journal:{spec['journal_code']}"]])]
     return {
+        **extra,
         "name": model_name(spec),
         "trigger": spec["trigger"],
         "match_label": spec["match_label"],
@@ -216,6 +225,17 @@ def seed_company(models, uid, args, key, specs):
         if not account:
             fail(f"account {code} not found in {COMPANY_NAMES[key]} (run setup_books.py first)")
         accounts[code] = account
+    for code in sorted({s["journal_code"] for s in specs if s.get("journal_code")}):
+        journal = find_one(
+            models,
+            uid,
+            "account.journal",
+            [("code", "=", code), ("company_id", "=", company_id)],
+            context=ctx(company_id),
+        )
+        if not journal:
+            fail(f"journal {code} not found in {COMPANY_NAMES[key]} (run setup_books.py first)")
+        accounts[f"journal:{code}"] = journal
     enterprises = enterprise_ids_for(models, uid, company_id)
     for spec in specs:
         if spec.get("enterprise") and spec["enterprise"] not in enterprises:

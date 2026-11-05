@@ -105,5 +105,22 @@ class TestMonthSelection(unittest.TestCase):
         self.assertEqual(mod.select_months(months, None, None), months)
 
 
+class TestDomainAndDates(unittest.TestCase):
+    def test_ids_domain_is_or_chain_of_like(self):
+        dom = mod.ids_domain(["a", "b", "c"])
+        self.assertEqual(dom[:2], ["|", "|"])
+        self.assertEqual(dom[2:], [("unique_import_id", "like", i) for i in "abc"])
+        self.assertEqual(mod.ids_domain(["a"]), [("unique_import_id", "like", "a")])
+
+    def test_blank_or_bad_date_names_the_row(self):
+        with self.assertRaisesRegex(ValueError, "row 3"):
+            mod.split_by_month([{"Date": "03/05/2026"}, {"Date": " "}], "Date", "%m/%d/%Y")
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            mod.split_by_month([{"Date": "2026-03-05"}], "Date", "%m/%d/%Y")
+
+    def test_month_bounds(self):
+        self.assertEqual(mod.month_bounds("2028-02"), ("2028-02-01", "2028-02-29"))
+
+
 if __name__ == "__main__":
     unittest.main()

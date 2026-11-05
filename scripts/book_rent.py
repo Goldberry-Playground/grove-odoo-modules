@@ -155,6 +155,18 @@ def company_id_by_name(models, uid, name):
     return cid
 
 
+def ensure_posted(models, uid, args, company_id, move_id, label):
+    """Post a move found in draft (e.g. a previous run died before action_post)."""
+    state = call(models, uid, "account.move", "read", [[move_id], ["state"]], {"context": ctx(company_id)})[0]["state"]
+    if state == "draft":
+        print(f"  POST draft {label}")
+        write_or_plan(
+            models, uid, args.dry_run, "account.move", "action_post", [[move_id]], {"context": ctx(company_id)}
+        )
+    else:
+        print(f"  SKIP {label} - already {state}")
+
+
 # ------------------------------------------------------------------ steps
 def existing_move(models, uid, company_id, ref, move_type):
     return find_one(
@@ -281,7 +293,7 @@ def book_side(models, uid, args, company_id, doc, settlement, partners, kind):
     """Ensure one company's document + settlement exist, are posted, and reconciled."""
     doc_id = existing_move(models, uid, company_id, doc["ref"], doc["move_type"])
     if doc_id:
-        print(f"  SKIP {doc['ref']} ({doc['move_type']}) - already exists")
+        ensure_posted(models, uid, args, company_id, doc_id, f"{doc['ref']} ({doc['move_type']})")
     else:
         doc_id = create_and_post(
             models,
@@ -293,7 +305,7 @@ def book_side(models, uid, args, company_id, doc, settlement, partners, kind):
         )
     settle_id = existing_move(models, uid, company_id, settlement["ref"], "entry")
     if settle_id:
-        print(f"  SKIP {settlement['ref']} - already exists")
+        ensure_posted(models, uid, args, company_id, settle_id, settlement["ref"])
     elif doc_id:
         vals = resolve_settlement(models, uid, company_id, settlement, partners, doc_id, kind)
         settle_id = create_and_post(models, uid, args, company_id, vals, settlement["ref"])

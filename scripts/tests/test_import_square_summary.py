@@ -46,6 +46,11 @@ class TestSummaryEntry(unittest.TestCase):
         rows = mod.parse_rows(["month,gross,fees", "2026-01,1234.50,36.20", '2026-02,"$1,000.00",29.50'])
         self.assertEqual(rows, [("2026-01", 1234.50, 36.20), ("2026-02", 1000.0, 29.5)])
 
+    def test_parse_rows_validates_every_row(self):
+        for bad in ("2026-13,10,1", "2026-01,abc,1", "2026-01,10,11", "April,10,1", "2026-01,-5,1"):
+            with self.assertRaises(ValueError, msg=bad):
+                mod.parse_rows(["month,gross,fees", "2026-01,10,1", bad])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ import csv
 import os
 import sys
 import xmlrpc.client
+from datetime import datetime
 
 ODOO_URL = os.getenv("ODOO_URL", "http://localhost:8069")
 ODOO_DB = os.getenv("ODOO_DB", "Goldberry")
@@ -37,7 +38,18 @@ def _money(text) -> float:
 
 def parse_rows(lines) -> list[tuple[str, float, float]]:
     """Parse month,gross,fees rows (header required) into (month, gross, fees)."""
-    return [(r["month"].strip(), _money(r["gross"]), _money(r["fees"])) for r in csv.DictReader(lines)]
+    out = []
+    for n, r in enumerate(csv.DictReader(lines), start=2):
+        try:
+            month = (r["month"] or "").strip()
+            datetime.strptime(month, "%Y-%m")
+            gross, fees = _money(r["gross"]), _money(r["fees"])
+        except (KeyError, TypeError, ValueError, AttributeError):
+            raise ValueError(f"row {n}: expected month YYYY-MM and numeric gross/fees, got {dict(r)}") from None
+        if gross < 0 or fees < 0 or fees > gross:
+            raise ValueError(f"row {n} ({month}): need 0 <= fees <= gross, got gross={gross} fees={fees}")
+        out.append((month, gross, fees))
+    return out
 
 
 def summary_entry(month: str, gross: float, fees: float, journal_default_account_code_lookup=None) -> dict:
@@ -125,14 +137,27 @@ def company_id_by_name(models, uid, name):
     return cid
 
 
+def ensure_posted(models, uid, args, company_id, move_id, label):
+    """Post a move found in draft (e.g. a previous run died before action_post)."""
+    state = call(models, uid, "account.move", "read", [[move_id], ["state"]], {"context": ctx(company_id)})[0]["state"]
+    if state == "draft":
+        print(f"  POST draft {label}")
+        write_or_plan(
+            models, uid, args.dry_run, "account.move", "action_post", [[move_id]], {"context": ctx(company_id)}
+        )
+    else:
+        print(f"  SKIP {label} - already {state}")
+
+
 # ------------------------------------------------------------------ steps
 def book_month(models, uid, args, company_id, month, gross, fees):
     entry = summary_entry(month, gross, fees)
     context = ctx(company_id)
-    if find_one(
+    existing = find_one(
         models, uid, "account.move", [("ref", "=", entry["ref"]), ("company_id", "=", company_id)], context=context
-    ):
-        print(f"  SKIP {entry['ref']} - already exists")
+    )
+    if existing:
+        ensure_posted(models, uid, args, company_id, existing, entry["ref"])
         return
     journal_id = find_one(
         models, uid, "account.journal", [("code", "=", "SQR"), ("company_id", "=", company_id)], context=context
@@ -178,7 +203,10 @@ def run(models, uid, args):
         print("*** DRY RUN (dry-run: no writes) ***")
     company_id = company_id_by_name(models, uid, COMPANY_NAMES["nursery"])
     with open(args.csv_file, newline="", encoding="utf-8-sig") as fh:
-        rows = parse_rows(fh)
+        try:
+            rows = parse_rows(fh)
+        except ValueError as exc:
+            fail(str(exc))
     print(f"{len(rows)} months")
     for month, gross, fees in rows:
         book_month(models, uid, args, company_id, month, gross, fees)
