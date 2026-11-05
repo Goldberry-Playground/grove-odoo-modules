@@ -8,6 +8,7 @@ from . import (
     test_agent_group,  # noqa: F401
     test_cashline,  # noqa: F401
     test_enterprise,  # noqa: F401
+    test_import_dedupe,  # noqa: F401
     test_mirror,  # noqa: F401
     test_proposals,  # noqa: F401
 )
