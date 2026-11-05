@@ -52,5 +52,16 @@ class TestSummaryEntry(unittest.TestCase):
                 mod.parse_rows(["month,gross,fees", "2026-01,10,1", bad])
 
 
+    def test_parse_rows_rejects_non_finite_amounts(self):
+        for bad in ("2026-01,nan,1", "2026-01,inf,1", "2026-01,10,nan", "2026-01,-inf,0", "2026-01,Infinity,1"):
+            with self.assertRaises(ValueError, msg=bad):
+                mod.parse_rows(["month,gross,fees", bad])
+
+    def test_parse_rows_canonicalizes_the_month(self):
+        rows = mod.parse_rows(["month,gross,fees", "2026-1,10,1", " 2026-02 ,10,1"])
+        self.assertEqual([r[0] for r in rows], ["2026-01", "2026-02"])
+        self.assertEqual(mod.summary_entry(*rows[0])["ref"], "SQUARE 2026-01")
+
+
 if __name__ == "__main__":
     unittest.main()

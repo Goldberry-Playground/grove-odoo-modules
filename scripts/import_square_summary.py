@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import csv
+import math
 import os
 import sys
 import xmlrpc.client
@@ -37,15 +38,17 @@ def _money(text) -> float:
 
 
 def parse_rows(lines) -> list[tuple[str, float, float]]:
-    """Parse month,gross,fees rows (header required) into (month, gross, fees)."""
+    """Parse month,gross,fees rows (header required) into (month, gross, fees); month comes back as YYYY-MM."""
     out = []
     for n, r in enumerate(csv.DictReader(lines), start=2):
         try:
-            month = (r["month"] or "").strip()
-            datetime.strptime(month, "%Y-%m")
+            # canonical YYYY-MM ("2026-1" -> "2026-01") so the "SQUARE YYYY-MM" ref stays stable across runs
+            month = datetime.strptime((r["month"] or "").strip(), "%Y-%m").strftime("%Y-%m")
             gross, fees = _money(r["gross"]), _money(r["fees"])
+            if not (math.isfinite(gross) and math.isfinite(fees)):
+                raise ValueError("non-finite amount")
         except (KeyError, TypeError, ValueError, AttributeError):
-            raise ValueError(f"row {n}: expected month YYYY-MM and numeric gross/fees, got {dict(r)}") from None
+            raise ValueError(f"row {n}: expected month YYYY-MM and finite numeric gross/fees, got {dict(r)}") from None
         if gross < 0 or fees < 0 or fees > gross:
             raise ValueError(f"row {n} ({month}): need 0 <= fees <= gross, got gross={gross} fees={fees}")
         out.append((month, gross, fees))
