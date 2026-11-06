@@ -99,11 +99,11 @@ class TestPlannerRoles(GroveTaxFixtureMixin, TransactionCase):
     def test_stratum_mapping(self):
         cases = {
             "canopy": "overstory",
-            "understory": "understory",
-            "shrub": "understory",
-            "vine": "understory",
-            "ground": "understory",
-            "fungal": "mushroom",
+            "understory": "midstory",
+            "shrub": "shrub",
+            "vine": "ground",
+            "ground": "ground",
+            "fungal": "ground",
         }
         for layer, stratum in cases.items():
             tmpl = self._plant(grove_layer=layer)
@@ -118,7 +118,9 @@ class TestPlannerRoles(GroveTaxFixtureMixin, TransactionCase):
         tmpl = self._plant(grove_layer="canopy")
         self.assertEqual(tmpl.grove_planner_stratum, "overstory")
         tmpl.grove_layer = "fungal"
-        self.assertEqual(tmpl.grove_planner_stratum, "mushroom")
+        self.assertEqual(tmpl.grove_planner_stratum, "ground")
+        tmpl.grove_layer = "shrub"
+        self.assertEqual(tmpl.grove_planner_stratum, "shrub")
 
     # ── grove_planner_ready now also requires role + succession ───────────
     def test_ready_requires_role(self):
@@ -206,7 +208,7 @@ class TestPlannerRoles(GroveTaxFixtureMixin, TransactionCase):
         row = _serialize_planner_plant(tmpl, {}, has_stock_field=False)
         self.assertEqual(row["role"], "companion")
         self.assertEqual(row["succession"], "fast")
-        self.assertEqual(row["stratum"], "mushroom")
+        self.assertEqual(row["stratum"], "ground")
         self.assertIs(row["living_mulch"], True)
         self.assertEqual(row["substrate"], "oak logs")
         self.assertIs(row["flagged"], True)
