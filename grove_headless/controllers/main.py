@@ -235,6 +235,22 @@ def _json_response(data, status=200, headers=None):
     )
 
 
+def _wants_html(httprequest):
+    """True when the caller is a browser that prefers HTML over JSON.
+
+    A mail client doing an RFC 8058 one-click POST (or any programmatic caller)
+    sends no ``Accept`` header or ``*/*`` and keeps getting JSON; a human who
+    clicks a newsletter link opens it in a browser, whose ``Accept`` lists
+    ``text/html``, and is served a rendered page instead (GOL-3808).
+    """
+    return "text/html" in (httprequest.headers.get("Accept") or "")
+
+
+def _html_response(markup_body, status=200):
+    """Return a minimal HTML page response (``markup_body`` is trusted markup)."""
+    return Response(markup_body, status=status, content_type="text/html; charset=utf-8")
+
+
 # Each tenant sandbox (nursery/ggg/goldberry) signs its Stripe webhook events
 # with a DIFFERENT endpoint secret, yet all tenants POST to the single
 # /grove/api/v1/stripe/webhook URL. So verification must try EVERY configured
@@ -2930,19 +2946,31 @@ class GroveHeadlessAPI(http.Controller):
         requires the POST to succeed) and never reveals whether the contact
         exists for a bad one.
 
-        A GET on the same URI (older clients open the ``List-Unsubscribe`` URI
-        in a browser instead of doing one-click) is non-destructive by HTTP
-        contract: it returns the preference state so the storefront can render a
-        confirm screen rather than silently unsubscribing on a link preview.
+        A GET on the same URI (older clients, and every human who clicks the
+        link in the email body, open it in a browser rather than doing a
+        machine one-click POST) is non-destructive by HTTP contract. A browser
+        (``Accept: text/html``) is served a minimal confirm page — the email,
+        the current list state, and a button that POSTs back here to actually
+        unsubscribe (GOL-3808); a programmatic client without ``text/html`` gets
+        the JSON preference state as before.
         """
+        wants_html = _wants_html(request.httprequest)
         contact = _newsletter_contact_from_token(request.env, kwargs.get("c"), kwargs.get("t"))
         if contact is None:
+            if wants_html:
+                return _html_response(
+                    _newsletter_error_page("This unsubscribe link is invalid or has expired."), status=400
+                )
             return _json_response({"error": "invalid or expired link"}, status=400)
         if request.httprequest.method == "GET":
+            if wants_html:
+                return _html_response(_newsletter_unsubscribe_page(request.env, contact))
             return _json_response(_newsletter_preferences_state(request.env, contact))
         contact.sudo().subscription_ids.write({"opt_out": True})
         if contact.email_normalized:
             request.env["mail.blacklist"].sudo()._add(contact.email_normalized)
+        if wants_html:
+            return _html_response(_newsletter_unsubscribed_page(request.env, contact))
         return _json_response({"ok": True, "unsubscribed": True})
 
     @http.route(
@@ -2961,29 +2989,59 @@ class GroveHeadlessAPI(http.Controller):
              return the same shape. Unsubscribing from every list also blacklists
              the email; re-subscribing to any list lifts the blacklist (the
              recipient is asking for mail again).
+
+        A browser (``Accept: text/html``) is served a self-contained HTML page
+        instead of JSON (GOL-3808): GET renders a per-list checkbox form that
+        POSTs back here as ``application/x-www-form-urlencoded``; the JSON body
+        shape above is still honoured for programmatic callers.
         """
+        wants_html = _wants_html(request.httprequest)
         if request.httprequest.method == "GET":
             contact = _newsletter_contact_from_token(request.env, kwargs.get("c"), kwargs.get("t"))
             if contact is None:
+                if wants_html:
+                    return _html_response(
+                        _newsletter_error_page("This preferences link is invalid or has expired."), status=400
+                    )
                 return _json_response({"error": "invalid or expired link"}, status=400)
+            if wants_html:
+                return _html_response(_newsletter_preferences_page(request.env, contact))
             return _json_response(_newsletter_preferences_state(request.env, contact))
 
-        try:
-            payload = json.loads(request.httprequest.data or "{}")
-        except json.JSONDecodeError:
-            return _json_response({"error": "Invalid JSON body"}, status=400)
-        if not isinstance(payload, dict):
-            return _json_response({"error": "Invalid JSON body"}, status=400)
-        contact = _newsletter_contact_from_token(request.env, payload.get("c"), payload.get("t"))
+        # POST: an HTML form submits url-encoded fields (parsed into kwargs by
+        # Odoo); a programmatic caller sends a JSON body we read off the request.
+        is_form = not (request.httprequest.content_type or "").startswith("application/json")
+        if is_form:
+            raw_id, token = kwargs.get("c"), kwargs.get("t")
+            shown = [k for k in (kwargs.get("keys") or "").split(",") if k in NEWSLETTER_LIST_KEYS]
+            # An unchecked checkbox is simply absent from the submission, so the
+            # hidden ``keys`` field tells us the full universe of lists on the
+            # form and we read each one's presence as its desired state.
+            desired = {key: bool(kwargs.get(f"list_{key}")) for key in shown}
+        else:
+            try:
+                payload = json.loads(request.httprequest.data or "{}")
+            except json.JSONDecodeError:
+                return _json_response({"error": "Invalid JSON body"}, status=400)
+            if not isinstance(payload, dict):
+                return _json_response({"error": "Invalid JSON body"}, status=400)
+            raw_id, token, desired = payload.get("c"), payload.get("t"), payload.get("lists")
+
+        contact = _newsletter_contact_from_token(request.env, raw_id, token)
         if contact is None:
+            if wants_html:
+                return _html_response(
+                    _newsletter_error_page("This preferences link is invalid or has expired."), status=400
+                )
             return _json_response({"error": "invalid or expired link"}, status=400)
-        desired = payload.get("lists")
         if not isinstance(desired, dict):
             return _json_response({"error": "lists must be an object of {key: bool}"}, status=400)
         for key in desired:
             if key not in NEWSLETTER_LIST_KEYS:
                 return _json_response({"error": f"unknown list key: {key!r}"}, status=400)
         _apply_newsletter_preferences(request.env, contact, desired)
+        if wants_html:
+            return _html_response(_newsletter_preferences_page(request.env, contact, saved=True))
         return _json_response(_newsletter_preferences_state(request.env, contact))
 
     # ── Capture: CRM leads + back-in-stock (2026-10-15 hotfix) ───────────
@@ -3374,6 +3432,123 @@ def _apply_newsletter_preferences(env, contact, desired):
             env["mail.blacklist"].sudo()._remove(normalized)
         else:
             env["mail.blacklist"].sudo()._add(normalized)
+
+
+# ── Newsletter: self-contained browser pages for the token-gated links ────────
+# A human who clicks the "unsubscribe" / "manage your preferences" link in the
+# welcome email lands here in a browser. These render a minimal, self-contained
+# HTML page (no storefront route, no external assets) so the visible link in the
+# email actually works without JS (GOL-3808). All dynamic values are escaped via
+# ``Markup.format``; the static CSS is pre-wrapped in ``Markup`` because it
+# contains ``{ }`` that would otherwise be read as format fields.
+_NEWSLETTER_PAGE_CSS = Markup(
+    "body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;"
+    "background:#f6f5f0;color:#2b2b2b;margin:0;padding:1.5rem;line-height:1.5}"
+    ".card{max-width:32rem;margin:2rem auto;background:#fff;border-radius:12px;"
+    "padding:1.75rem 2rem;box-shadow:0 1px 4px rgba(0,0,0,.08)}"
+    "h1{font-size:1.25rem;margin:0 0 1rem}"
+    "ul{list-style:none;padding:0;margin:1rem 0}li{padding:.35rem 0}"
+    "button{background:#3d5a3d;color:#fff;border:0;border-radius:8px;"
+    "padding:.6rem 1.1rem;font-size:1rem;cursor:pointer;margin-top:.5rem}"
+    "a{color:#3d5a3d}.muted{color:#777;font-size:.85rem}"
+)
+
+
+def _newsletter_page(title, inner):
+    """Wrap page ``inner`` (trusted markup) in a minimal HTML document."""
+    return (
+        Markup(
+            '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<meta name="robots" content="noindex"><title>'
+        )
+        + Markup(html.escape(title))
+        + Markup("</title><style>")
+        + _NEWSLETTER_PAGE_CSS
+        + Markup('</style></head><body><div class="card">')
+        + inner
+        + Markup("</div></body></html>")
+    )
+
+
+def _newsletter_error_page(message):
+    inner = Markup("<h1>Link problem</h1><p>{msg}</p>").format(msg=message)
+    return _newsletter_page("Link problem", inner)
+
+
+def _newsletter_unsubscribe_page(env, contact):
+    """GET page for the unsubscribe link: show state + a POST-back button."""
+    state = _newsletter_preferences_state(env, contact)
+    rows = Markup("").join(
+        Markup("<li>{mark} {name}</li>").format(
+            mark="✓" if row["subscribed"] else "—",
+            name=row["name"],
+        )
+        for row in state["lists"]
+    )
+    prefs_link = "/grove/api/v1/newsletter/preferences?c={c}&t={t}".format(
+        c=contact.id, t=_newsletter_token(env, contact.id)
+    )
+    inner = (
+        Markup("<h1>Unsubscribe</h1>")
+        + Markup("<p>Managing email for <strong>{email}</strong>.</p>").format(email=state["email"])
+        + Markup("<p>You're currently subscribed to:</p><ul>")
+        + rows
+        + Markup("</ul>")
+        + Markup('<form method="post" action="/grove/api/v1/newsletter/unsubscribe">')
+        + Markup('<input type="hidden" name="c" value="{c}">').format(c=str(contact.id))
+        + Markup('<input type="hidden" name="t" value="{t}">').format(t=_newsletter_token(env, contact.id))
+        + Markup('<button type="submit">Unsubscribe from everything</button></form>')
+        + Markup('<p class="muted">Prefer to keep some lists? <a href="{url}">Manage your preferences</a>.</p>').format(
+            url=prefs_link
+        )
+    )
+    return _newsletter_page("Unsubscribe", inner)
+
+
+def _newsletter_unsubscribed_page(env, contact):
+    """Confirmation page shown after the unsubscribe button POSTs back."""
+    prefs_link = "/grove/api/v1/newsletter/preferences?c={c}&t={t}".format(
+        c=contact.id, t=_newsletter_token(env, contact.id)
+    )
+    inner = (
+        Markup("<h1>You've been unsubscribed</h1>")
+        + Markup("<p><strong>{email}</strong> has been removed from all of our email.</p>").format(
+            email=contact.email or ""
+        )
+        + Markup(
+            '<p class="muted">Changed your mind? <a href="{url}">Manage your preferences</a> to resubscribe.</p>'
+        ).format(url=prefs_link)
+    )
+    return _newsletter_page("Unsubscribed", inner)
+
+
+def _newsletter_preferences_page(env, contact, saved=False):
+    """GET/POST page for the preferences link: per-list checkbox form."""
+    state = _newsletter_preferences_state(env, contact)
+    checkboxes = Markup("").join(
+        Markup('<li><label><input type="checkbox" name="list_{key}"{checked}> {name}</label></li>').format(
+            key=row["key"],
+            checked=Markup(" checked") if row["subscribed"] else Markup(""),
+            name=row["name"],
+        )
+        for row in state["lists"]
+    )
+    keys = ",".join(row["key"] for row in state["lists"])
+    saved_banner = Markup('<p class="muted">Your preferences have been saved.</p>') if saved else Markup("")
+    inner = (
+        Markup("<h1>Email preferences</h1>")
+        + saved_banner
+        + Markup("<p>Choose which emails <strong>{email}</strong> receives:</p>").format(email=state["email"])
+        + Markup('<form method="post" action="/grove/api/v1/newsletter/preferences"><ul>')
+        + checkboxes
+        + Markup("</ul>")
+        + Markup('<input type="hidden" name="c" value="{c}">').format(c=str(contact.id))
+        + Markup('<input type="hidden" name="t" value="{t}">').format(t=_newsletter_token(env, contact.id))
+        + Markup('<input type="hidden" name="keys" value="{keys}">').format(keys=keys)
+        + Markup('<button type="submit">Save preferences</button></form>')
+    )
+    return _newsletter_page("Email preferences", inner)
 
 
 def _send_newsletter_welcome(env, company, contact, subscribed_keys):
