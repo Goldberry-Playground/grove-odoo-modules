@@ -135,10 +135,12 @@ def test_every_schedule_f_line_has_at_least_one_account():
     for line in mod.LINE_ORDER:
         assert mod.accounts_for_line(line), line
 
+
 def test_codes_are_unique_and_four_digits():
     codes = [a["code"] for a in mod.ACCOUNTS]
     assert len(codes) == len(set(codes))
     assert all(len(c) == 4 and c.isdigit() for c in codes)
+
 
 def test_income_lines_use_income_types_and_expenses_use_expense_types():
     for a in mod.ACCOUNTS:
@@ -149,9 +151,11 @@ def test_income_lines_use_income_types_and_expenses_use_expense_types():
         if a["kind"] == "balance":
             assert a["line"] is None
 
+
 def test_sort_key_orders_sub_lines():
     assert mod.sort_key("21b") == (21, "b")
     assert sorted(["24b", "8", "1a", "24a"], key=mod.sort_key) == ["1a", "8", "24a", "24b"]
+
 
 def test_specific_codes():
     assert mod.account_by_code("4020")["line"] == "2"
@@ -210,7 +214,8 @@ class TestAccounts(TransactionCase):
         self.assertEqual(second["accounts_existing"], len(schedule_f_lines.ACCOUNTS))
 
     def test_mapped_accounts_carry_line_and_tag(self):
-        company = ...; company.grove_schedule_f_setup()
+        company = ...
+        company.grove_schedule_f_setup()
         acc = company._grove_account("6280")
         self.assertEqual(acc.grove_schedule_f_line, "28")
         self.assertIn("Schedule F 28", acc.tag_ids.mapped("name"))
@@ -263,28 +268,34 @@ git commit -am "feat(grove_schedule_f): Schedule F accounts, tags and company se
 
 ```python
 def test_setup_creates_plan_with_three_accounts(self):
-    company.grove_owns_shared_bank = True; company.grove_schedule_f_setup()
-    plan = self.env["account.analytic.plan"].search([("name","=","Enterprise"),("company_id","=",company.id)])
+    company.grove_owns_shared_bank = True
+    company.grove_schedule_f_setup()
+    plan = self.env["account.analytic.plan"].search([("name", "=", "Enterprise"), ("company_id", "=", company.id)])
     self.assertEqual(sorted(plan.account_ids.mapped("name")), ["Farm", "Nursery", "Personal"])
+
 
 def test_bank_counterpart_without_enterprise_is_rejected(self):
     # bank journal with grove_enterprise_required; a misc-style entry Dr 6280 / Cr bank default account
     with self.assertRaisesRegex(ValidationError, "pick an enterprise"):
         self._post_entry(journal=bank, debit_account="6280", distribution=None)
 
+
 def test_bank_counterpart_with_enterprise_posts_and_stores_it(self):
     move = self._post_entry(journal=bank, debit_account="6280", distribution={nursery.id: 100})
     self.assertEqual(move.line_ids.filtered(lambda l: l.account_id.code == "6280").grove_enterprise, "nursery")
 
+
 def test_suspense_and_liquidity_lines_are_exempt(self):
     # a plain statement line import (bank + suspense) succeeds with no distribution
     ...
+
 
 def test_personal_must_go_to_owner_draw(self):
     with self.assertRaisesRegex(ValidationError, "3100"):
         self._post_entry(journal=bank, debit_account="6280", distribution={personal.id: 100})
     with self.assertRaisesRegex(ValidationError, "3100"):
         self._post_entry(journal=bank, debit_account="3100", distribution={farm.id: 100})
+
 
 def test_unflagged_journal_is_untouched(self):
     self._post_entry(journal=misc, debit_account="6280", distribution=None)  # no error
@@ -395,15 +406,21 @@ def test_accept_reconciles_to_proposed_account_with_enterprise(self):
     self.assertEqual(cp.grove_enterprise, "farm")
     self.assertEqual(line.grove_proposal_state, "accepted")
 
+
 def test_accept_without_proposal_raises(self): ...
 def test_agent_cannot_accept(self):
-    with self.assertRaises(AccessError): line.with_user(agent).action_grove_accept_proposal()
+    with self.assertRaises(AccessError):
+        line.with_user(agent).action_grove_accept_proposal()
+
+
 def test_reject_leaves_line_unreconciled(self): ...
 def test_needs_review_rules(self):
     # uncertain -> True; model set and amount 12 -> False; amount -600 -> True; no model -> True
     ...
+
+
 def test_needs_review_is_searchable(self):
-    self.assertIn(big_line, self.env["account.bank.statement.line"].search([("grove_needs_review","=",True)]))
+    self.assertIn(big_line, self.env["account.bank.statement.line"].search([("grove_needs_review", "=", True)]))
 ```
 
 `_import_line` creates an `account.bank.statement.line` on a bank journal with `grove_enterprise_required=True` (the statement move posts with bank + suspense, exempt).
@@ -533,10 +550,14 @@ git commit -am "feat(grove_schedule_f): month mirror of nursery-tagged expenses 
 def test_farm_journals_include_shared_bank_flag_and_owner_paid(self): ...
 def test_nursery_journals_cover_every_channel(self):
     codes = {j["code"] for j in mod.journal_specs("nursery")}
-    self.assertEqual(codes, {"INV","BILL","MISC","STRP","SQR","VENM","CSH"})
+    self.assertEqual(codes, {"INV", "BILL", "MISC", "STRP", "SQR", "VENM", "CSH"})
+
+
 def test_category_mapping(self):
     self.assertEqual(mod.category_income_account("Chestnut Trees"), "4020")
     self.assertEqual(mod.category_income_account("T-shirts"), "4010")
+
+
 def test_provider_repoint_only_touches_enabled_nursery_stripe(self): ...
 ```
 
@@ -572,6 +593,8 @@ def test_unique_import_id_prefers_bank_id_and_is_stable(self):
     self.assertEqual(mod.unique_import_id(row_with_id, 3, "id"), "TX123")
     self.assertEqual(mod.unique_import_id(row, 3, None), mod.unique_import_id(row, 3, None))
     self.assertNotEqual(mod.unique_import_id(row, 3, None), mod.unique_import_id(row, 4, None))
+
+
 def test_mapping_vals_single_amount_vs_debit_credit(self): ...
 ```
 
@@ -605,8 +628,12 @@ git commit -am "feat(scripts): monthly bank CSV backfill import with stable impo
 ```python
 def test_summary_entry_balances_and_dates_month_end(self):
     vals = mod.summary_entry("2026-04", 1234.50, 36.20)
-    debits = sum(l["debit"] for l in lines); credits = ...; self.assertAlmostEqual(debits, credits)
+    debits = sum(l["debit"] for l in lines)
+    credits = ...
+    self.assertAlmostEqual(debits, credits)
     self.assertEqual(vals["date"], "2026-04-30")
+
+
 def test_rent_documents_balance_and_settle_through_1350(self):
     d = mod.rent_documents("2026", 1200.0)
     self.assertEqual(d["farm_invoice"]["invoice_line_ids"][0][2]["account_code"], "4080")
@@ -615,9 +642,14 @@ def test_rent_documents_balance_and_settle_through_1350(self):
         lines = [l[2] for l in d[key]["line_ids"]]
         self.assertAlmostEqual(sum(l["debit"] for l in lines), sum(l["credit"] for l in lines))
         self.assertIn("1350", {l["account_code"] for l in lines})
-    with self.assertRaises(ValueError): mod.rent_documents("2026", 0)
+    with self.assertRaises(ValueError):
+        mod.rent_documents("2026", 0)
+
+
 def test_model_specs_name_real_accounts_and_stay_manual(self):
-    for spec in mod.MODEL_SPECS: self.assertEqual(spec["trigger"], "manual"); self.assertIn(spec["account_code"], KNOWN_CODES)
+    for spec in mod.MODEL_SPECS:
+        self.assertEqual(spec["trigger"], "manual")
+        self.assertIn(spec["account_code"], KNOWN_CODES)
 ```
 
 - [ ] **Step 2: Run to verify they fail**
