@@ -922,13 +922,22 @@ class ProductTemplate(models.Model):
         "Required for planner-ready when the layer is Fungal.",
     )
     grove_planner_stratum = fields.Selection(
-        [("overstory", "Overstory"), ("understory", "Understory"), ("mushroom", "Mushroom")],
+        [
+            ("overstory", "Overstory"),
+            ("midstory", "Midstory"),
+            ("shrub", "Shrub"),
+            ("ground", "Ground"),
+        ],
         string="Planner stratum",
         compute="_compute_grove_planner_stratum",
         store=True,
-        help="Derived from the Food Forest Layer by the fixed mapping in the "
-        "planner spec §A.1 (canopy→overstory; understory/shrub/vine/ground→"
-        "understory; fungal→mushroom). Computed and stored, not edited directly.",
+        help="Derived from the Food Forest Layer by the fixed mapping (Josh "
+        "2026-11-06, four layers as the planting reads top-down): canopy→"
+        "overstory; understory→midstory; shrub→shrub; ground/vine/fungal→ground. "
+        "Vines live in the ground stratum for now (the layer still records "
+        "'vine', so a vine stratum later is a one-line split). Ginseng slips, "
+        "black cohosh, ferns, wildflowers and mushroom spawn are all ground. "
+        "Computed and stored, not edited directly.",
     )
     grove_planner_flagged = fields.Boolean(
         string="Needs review (planner)",
@@ -942,11 +951,11 @@ class ProductTemplate(models.Model):
     # leaves the stratum blank.
     _GROVE_STRATUM_BY_LAYER = {
         "canopy": "overstory",
-        "understory": "understory",
-        "shrub": "understory",
-        "vine": "understory",
-        "ground": "understory",
-        "fungal": "mushroom",
+        "understory": "midstory",
+        "shrub": "shrub",
+        "vine": "ground",
+        "ground": "ground",
+        "fungal": "ground",
     }
 
     @api.depends("grove_layer")
