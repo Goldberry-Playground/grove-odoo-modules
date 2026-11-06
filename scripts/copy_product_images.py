@@ -53,6 +53,19 @@ Usage
 
     # Live: drop DRY_RUN. Arbitrary set: SKUS=APPL,PERS,ARONIA (comma-separated).
 
+    # GOL-3785: the five nursery bundle templates carry NO SKU (template
+    # default_code False, one codeless variant), so they are unreachable by
+    # SKU. Match them by template id instead — prod -> QA this time:
+    TEMPLATE_IDS=bundles \\
+    SRC_ODOO_URL=https://odoo.gatheringatthegrove.com SRC_ODOO_PASSWORD=<prod-read> \\
+    DST_ODOO_URL=https://odoo.qa.gatheringatthegrove.com DST_ODOO_PASSWORD=<qa-key> \\
+    python3 scripts/copy_product_images.py
+    # `bundles` expands to BUNDLE_TEMPLATE_IDS; any comma list of ids works
+    # (TEMPLATE_IDS=22,132). Id matching is only safe where SRC and DEST share
+    # an origin (QA was cut from prod), so each id is cross-checked by NAME on
+    # both sides and refused on mismatch; an `AAA QA E2E ` fixture is refused
+    # outright. SKUS and TEMPLATE_IDS may be combined.
+
 Exit codes: 0 ok (even with per-SKU MISSING — those are reported, not fatal),
 1 auth/config failure or an unexpected write error.
 """
@@ -83,6 +96,20 @@ COMPANY_NAME = os.getenv("GROVE_COMPANY_NAME", "At The Grove Nursery")
 
 # AAA QA E2E fixtures — never propagate these toward prod (sale_ok=True @ $42).
 BLOCKED_SKUS = {"E2E-BAREROOT-INSTOCK", "E2E-POTTED-INSTOCK"}
+# ...and by name, for the id path (the fixtures carry no stable id across envs).
+BLOCKED_NAME_PREFIX = "AAA QA E2E "
+
+# GOL-3785: the nursery bundle templates (no SKU on either side; same ids on
+# prod and QA because QA was cut from prod). These are the home-page lead-seller
+# candidates whose missing QA photo the Train #4 gate caught.
+BUNDLE_TEMPLATE_IDS: tuple[int, ...] = (
+    22,  # Chestnut Grove (5-Tree Native Bundle)
+    132,  # Mountain Mama Package (5-Tree Appalachian Mix)
+    134,  # Centennial Food Forest (100 Trees)
+    135,  # At the Grove Food Forest (50)
+    140,  # Heirloom Fruit Package (5 Trees)
+)
+TEMPLATE_IDS_BUNDLES_KEYWORD = "bundles"
 
 
 def _default_skus() -> list[str]:
@@ -137,6 +164,69 @@ def resolve_template(odoo: Odoo, sku: str, company_id: int) -> int | None:
     else:
         print(f"  AMBIGUOUS {sku}: resolves to {sorted(tids)} in [{odoo.label}] — refusing to guess")
     return None
+
+
+def parse_template_ids(raw: str) -> list[int]:
+    """``TEMPLATE_IDS`` -> ordered, de-duplicated positive ints.
+
+    ``bundles`` (case-insensitive) expands to BUNDLE_TEMPLATE_IDS and may be mixed
+    with literal ids. Anything that is not a positive integer is a config error
+    (raises ValueError) — a typo must never silently narrow the set.
+    """
+    ids: list[int] = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if part.lower() == TEMPLATE_IDS_BUNDLES_KEYWORD:
+            candidates = list(BUNDLE_TEMPLATE_IDS)
+        elif part.isdigit() and int(part) > 0:
+            candidates = [int(part)]
+        else:
+            raise ValueError(f"TEMPLATE_IDS: '{part}' is not a positive integer or '{TEMPLATE_IDS_BUNDLES_KEYWORD}'")
+        for tid in candidates:
+            if tid not in ids:
+                ids.append(tid)
+    return ids
+
+
+def same_template_name(a: str | None, b: str | None) -> bool:
+    """Name guard for id matching: equal after case-fold + whitespace collapse.
+
+    Punctuation and parentheses are kept verbatim ("Food Forest (50)" must not
+    equal "Food Forest (100)"); only casing and spacing are forgiven.
+    """
+    if not a or not b:
+        return False
+    return " ".join(a.split()).casefold() == " ".join(b.split()).casefold()
+
+
+def template_name(odoo: Odoo, tid: int, company_id: int) -> str | None:
+    rows = odoo.call(
+        "product.template",
+        "search_read",
+        [[("id", "=", tid), ("company_id", "in", [company_id, False])]],
+        {"fields": ["name"], "limit": 1},
+    )
+    return rows[0]["name"] if rows else None
+
+
+def resolve_template_by_id(src: Odoo, dst: Odoo, tid: int, src_company: int, dst_company: int) -> str | None:
+    """Accept template ``tid`` for copying only when it names the same product on
+    both sides. Returns the report label, or None (reason printed) to skip."""
+    src_name = template_name(src, tid, src_company)
+    dst_name = template_name(dst, tid, dst_company)
+    if src_name is None or dst_name is None:
+        side = src.label if src_name is None else dst.label
+        print(f"  MISSING  #{tid}: no template with that id in [{side}]")
+        return None
+    if not same_template_name(src_name, dst_name):
+        print(f"  MISMATCH #{tid}: name differs — [{src.label}] '{src_name}' vs [{dst.label}] '{dst_name}' — refusing")
+        return None
+    if src_name.startswith(BLOCKED_NAME_PREFIX):
+        print(f"  BLOCKED  #{tid}: '{src_name}' is an E2E runner fixture — never propagated")
+        return None
+    return f"#{tid} {src_name}"
 
 
 def company_id_of(odoo: Odoo) -> int:
@@ -200,21 +290,31 @@ def main() -> None:
     if not DST_PASSWORD:
         fail("DST_ODOO_PASSWORD is required")
 
+    try:
+        template_ids = parse_template_ids(os.getenv("TEMPLATE_IDS", ""))
+    except ValueError as exc:
+        fail(str(exc))
     raw = os.getenv("SKUS", "")
-    skus = [s.strip() for s in raw.split(",") if s.strip()] if raw else _default_skus()
+    # The coming-soon default set only applies when NEITHER selector is given;
+    # an explicit TEMPLATE_IDS run must not drag the eleven along with it.
+    skus = [s.strip() for s in raw.split(",") if s.strip()] if raw else ([] if template_ids else _default_skus())
     blocked = [s for s in skus if s in BLOCKED_SKUS]
     skus = [s for s in skus if s not in BLOCKED_SKUS]
     if blocked:
         print(f"Excluding blocked fixture SKUs (never propagated to prod): {blocked}")
-    if not skus:
-        fail("No SKUs to process after exclusions")
+    if not skus and not template_ids:
+        fail("No SKUs or TEMPLATE_IDS to process after exclusions")
 
     print(
         f"Copy images  SRC=[{SRC_URL}] -> DST=[{DST_URL}]  "
-        f"company={COMPANY_NAME}  {len(skus)} SKUs  "
+        f"company={COMPANY_NAME}  {len(skus)} SKUs + {len(template_ids)} template ids  "
         f"FORCE_HERO={'yes' if FORCE_HERO else 'no'}  DRY_RUN={'yes' if DRY_RUN else 'NO — LIVE'}"
     )
-    print(f"SKUs: {', '.join(skus)}\n")
+    if skus:
+        print(f"SKUs: {', '.join(skus)}")
+    if template_ids:
+        print(f"Template ids: {', '.join(str(t) for t in template_ids)}")
+    print()
 
     src = Odoo("SRC", SRC_URL, SRC_DB, SRC_USER, SRC_PASSWORD)
     dst = Odoo("DST", DST_URL, DST_DB, DST_USER, DST_PASSWORD)
@@ -224,6 +324,8 @@ def main() -> None:
 
     print("\n── Copy ──")
     n_copied = n_skipped = n_missing = 0
+    # (label, src template id, dst template id) — SKU-resolved first, then ids.
+    targets: list[tuple[str, int, int]] = []
     for sku in skus:
         src_tmpl = resolve_template(src, sku, src_company)
         dst_tmpl = resolve_template(dst, sku, dst_company)
@@ -231,8 +333,16 @@ def main() -> None:
             # resolve_template already printed the reason; count as missing and move on.
             n_missing += 1
             continue
-        lines = [copy_hero(src, dst, sku, src_tmpl, dst_tmpl, dst_ctx)]
-        lines += copy_gallery(src, dst, sku, src_tmpl, dst_tmpl, dst_ctx)
+        targets.append((sku, src_tmpl, dst_tmpl))
+    for tid in template_ids:
+        label = resolve_template_by_id(src, dst, tid, src_company, dst_company)
+        if label is None:
+            n_missing += 1
+            continue
+        targets.append((label, tid, tid))
+    for label, src_tmpl, dst_tmpl in targets:
+        lines = [copy_hero(src, dst, label, src_tmpl, dst_tmpl, dst_ctx)]
+        lines += copy_gallery(src, dst, label, src_tmpl, dst_tmpl, dst_ctx)
         for ln in lines:
             print(ln)
             tag = ln.strip().split(None, 1)[0]
