@@ -416,3 +416,140 @@ class TestNewsletterListOfRecord(HttpCase):
         self.assertEqual(self._active_list_ids(contact), {self.farm.id}, "only farm remains active")
         # Still has one active list → not blacklisted.
         self.assertFalse(self.env["mail.blacklist"].search([("email", "=", "prefs@example.com")]))
+
+    # ── GOL-3808: browser (Accept: text/html) renders a page, not JSON ──────
+
+    def test_unsubscribe_get_html_renders_page_and_does_not_unsubscribe(self):
+        """A browser GET on the unsubscribe link shows a confirm page with a
+        POST-back button and leaves the subscription untouched (a GET, and link
+        previews, must never unsubscribe)."""
+        self._subscribe({"email": "browser@example.com", "consent": True, "multibrand": True})
+        contact = self._contact("browser@example.com")
+        token = _newsletter_token(self.env, contact.id)
+
+        resp = self.url_open(
+            f"/grove/api/v1/newsletter/unsubscribe?c={contact.id}&t={token}",
+            headers={
+                "X-Odoo-Database": get_db_name(),
+                "X-Grove-Tenant": "goldberry",
+                "Accept": "text/html",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.headers["Content-Type"].startswith("text/html"))
+        self.assertIn("browser@example.com", resp.text)
+        self.assertIn("Unsubscribe from everything", resp.text)
+        self.assertIn('method="post"', resp.text)
+        # Non-destructive: still fully subscribed, not blacklisted.
+        contact.invalidate_recordset(["subscription_ids"])
+        self.assertEqual(
+            self._active_list_ids(contact),
+            {self.farm.id, self.nursery.id, self.digest.id},
+            "a browser GET must not unsubscribe anything",
+        )
+        self.assertFalse(self.env["mail.blacklist"].search([("email", "=", "browser@example.com")]))
+
+    def test_unsubscribe_get_without_accept_html_still_returns_json(self):
+        """A programmatic GET (no text/html) keeps the JSON preference state."""
+        self._subscribe({"email": "apiget@example.com", "consent": True})
+        contact = self._contact("apiget@example.com")
+        token = _newsletter_token(self.env, contact.id)
+        resp = self.url_open(
+            f"/grove/api/v1/newsletter/unsubscribe?c={contact.id}&t={token}",
+            headers={"X-Odoo-Database": get_db_name(), "X-Grove-Tenant": "goldberry"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.headers["Content-Type"].startswith("application/json"))
+        self.assertIn("lists", resp.json())
+
+    def test_unsubscribe_post_html_form_unsubscribes_and_confirms(self):
+        """The page's button POSTs back with text/html → the contact is
+        unsubscribed and blacklisted and a plain confirmation page is shown."""
+        self._subscribe({"email": "clickunsub@example.com", "consent": True, "multibrand": True})
+        contact = self._contact("clickunsub@example.com")
+        token = _newsletter_token(self.env, contact.id)
+
+        resp = self.url_open(
+            "/grove/api/v1/newsletter/unsubscribe",
+            data={"c": str(contact.id), "t": token},  # form-encoded, like the HTML button
+            headers={
+                "X-Odoo-Database": get_db_name(),
+                "X-Grove-Tenant": "goldberry",
+                "Accept": "text/html",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.headers["Content-Type"].startswith("text/html"))
+        self.assertIn("unsubscribed", resp.text.lower())
+        contact.invalidate_recordset(["subscription_ids"])
+        self.assertEqual(self._active_list_ids(contact), set(), "every list opted out")
+        self.assertTrue(
+            self.env["mail.blacklist"].search([("email", "=", "clickunsub@example.com")]),
+            "the HTML unsubscribe button blacklists the email",
+        )
+
+    def test_one_click_post_still_returns_json(self):
+        """RFC 8058 one-click POST (no text/html) keeps its JSON 200 contract."""
+        self._subscribe({"email": "oneclick@example.com", "consent": True, "multibrand": True})
+        contact = self._contact("oneclick@example.com")
+        token = _newsletter_token(self.env, contact.id)
+        resp = self.url_open(
+            f"/grove/api/v1/newsletter/unsubscribe?c={contact.id}&t={token}",
+            data=b"List-Unsubscribe=One-Click",
+            headers={"X-Odoo-Database": get_db_name(), "X-Grove-Tenant": "goldberry"},
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.headers["Content-Type"].startswith("application/json"))
+        self.assertTrue(resp.json()["unsubscribed"])
+
+    def test_preferences_get_html_renders_checkbox_form(self):
+        self._subscribe({"email": "prefshtml@example.com", "consent": True, "multibrand": True})
+        contact = self._contact("prefshtml@example.com")
+        token = _newsletter_token(self.env, contact.id)
+        resp = self.url_open(
+            f"/grove/api/v1/newsletter/preferences?c={contact.id}&t={token}",
+            headers={
+                "X-Odoo-Database": get_db_name(),
+                "X-Grove-Tenant": "goldberry",
+                "Accept": "text/html",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.headers["Content-Type"].startswith("text/html"))
+        self.assertIn('type="checkbox"', resp.text)
+        self.assertIn("prefshtml@example.com", resp.text)
+        self.assertIn('name="list_farm"', resp.text)
+
+    def test_preferences_post_html_form_applies_and_confirms(self):
+        """A form POST (url-encoded) keeps only the checked lists; omitted
+        checkboxes are read as opt-outs via the hidden ``keys`` field."""
+        self._subscribe({"email": "prefspost@example.com", "consent": True, "multibrand": True})
+        contact = self._contact("prefspost@example.com")
+        token = _newsletter_token(self.env, contact.id)
+        resp = self.url_open(
+            "/grove/api/v1/newsletter/preferences",
+            data={"c": str(contact.id), "t": token, "keys": "farm,nursery,digest", "list_farm": "on"},
+            headers={
+                "X-Odoo-Database": get_db_name(),
+                "X-Grove-Tenant": "goldberry",
+                "Accept": "text/html",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertTrue(resp.headers["Content-Type"].startswith("text/html"))
+        self.assertIn("saved", resp.text.lower())
+        contact.invalidate_recordset(["subscription_ids"])
+        self.assertEqual(self._active_list_ids(contact), {self.farm.id}, "only the checked list stays active")
+
+    def test_bad_token_html_get_shows_error_page(self):
+        resp = self.url_open(
+            "/grove/api/v1/newsletter/unsubscribe?c=999999&t=forged",
+            headers={
+                "X-Odoo-Database": get_db_name(),
+                "X-Grove-Tenant": "goldberry",
+                "Accept": "text/html",
+            },
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertTrue(resp.headers["Content-Type"].startswith("text/html"))
+        self.assertIn("invalid or has expired", resp.text)
