@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Read-only "Discord" group on the calendar event form (GOL-3830). The
+         three fields are bookkeeping for the native-events sync (phase D): they
+         are empty in phase B, so the group stays hidden until an event is
+         actually published to Discord and gets a discord_event_id. Nothing here
+         is editable; the publish switch is the existing Privacy field. -->
+    <record id="calendar_event_view_form_grove_discord" model="ir.ui.view">
+        <field name="name">calendar.event.form.grove.discord</field>
+        <field name="model">calendar.event</field>
+        <field name="inherit_id" ref="calendar.view_calendar_event_form"/>
+        <field name="arch" type="xml">
+            <xpath expr="//sheet" position="inside">
+                <group string="Discord" name="grove_discord" invisible="not discord_event_id">
+                    <field name="discord_event_id" readonly="1"/>
+                    <field name="discord_synced_at" readonly="1"/>
+                    <field name="discord_url" widget="url" readonly="1"/>
+                </group>
+            </xpath>
+        </field>
+    </record>
+</odoo>
