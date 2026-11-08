@@ -1,6 +1,6 @@
 # Odoo calendar to Discord (design)
 
-**Status:** approved in chat with Josh, 2026-11-06/07. Target: phases A, B and C on Release Train #5 (freeze Fri 2026-11-13, QA Mon 11-16, promote Wed 11-18); phases D and F on Train #6 (freeze Fri 11-27, promote Wed 12-02). Builds on the Discord webhook pattern in `grove_headless` (`controllers/main.py:_notify_discord`, `models/order_rollup.py:_discord_digest`) and `grove_support/models/discord.py`, and on the topic-channel env vars from gom#384 / odoocker#967. Board: GOL-3828 (A, Josh), GOL-3830 (B, Ada), GOL-3831 (C, Terra), GOL-3832 (D, Ada, blocked), GOL-3829 (E, Josh gate).
+**Status:** approved in chat with Josh, 2026-11-06/07. Target: phases A, B and C on Release Train #5 (freeze Fri 2026-11-13, QA Mon 11-16, promote Wed 11-18); phases D and F on Train #6 (freeze Fri 11-27, promote Wed 12-02). Builds on the Discord webhook pattern in `grove_headless` (`controllers/main.py:_notify_discord`, `models/order_rollup.py:_discord_digest`) and `grove_support/models/discord.py`, and on the topic-channel env vars from gom#384 / odoocker#967. Board: GOL-3828 (A, Josh), GOL-3830 (B, Ada), GOL-3831 (C, Terra), GOL-3832 (D, Ada, blocked), GOL-3829 (E, Josh gate), GOL-3842 (F, Ada, blocked by B).
 
 ## Decision (Josh, 2026-11-06)
 
