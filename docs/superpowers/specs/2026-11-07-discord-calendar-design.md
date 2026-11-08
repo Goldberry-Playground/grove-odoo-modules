@@ -1,6 +1,6 @@
 # Odoo calendar to Discord (design)
 
-**Status:** approved in chat with Josh, 2026-11-06/07. Target: phases A, B and C on Release Train #5 (freeze Fri 2026-11-13, QA Mon 11-16, promote Wed 11-18); phase D on Train #6 (freeze Fri 11-27, promote Wed 12-02). Builds on the Discord webhook pattern in `grove_headless` (`controllers/main.py:_notify_discord`, `models/order_rollup.py:_discord_digest`) and `grove_support/models/discord.py`, and on the topic-channel env vars from gom#384 / odoocker#967.
+**Status:** approved in chat with Josh, 2026-11-06/07. Target: phases A, B and C on Release Train #5 (freeze Fri 2026-11-13, QA Mon 11-16, promote Wed 11-18); phase D on Train #6 (freeze Fri 11-27, promote Wed 12-02). Builds on the Discord webhook pattern in `grove_headless` (`controllers/main.py:_notify_discord`, `models/order_rollup.py:_discord_digest`) and `grove_support/models/discord.py`, and on the topic-channel env vars from gom#384 / odoocker#967. Board: GOL-3828 (A, Josh), GOL-3830 (B, Ada), GOL-3831 (C, Terra), GOL-3832 (D, Ada, blocked), GOL-3829 (E, Josh gate).
 
 ## Decision (Josh, 2026-11-06)
 
@@ -17,7 +17,7 @@ Ruled in chat, do not re-open:
 
 ## Non-goals
 
-- No event sign-up, RSVP, ticketing or payment. The `event` / `website_event` modules stay uninstalled.
+- No event sign-up, RSVP, ticketing or payment. The `event` / `website_event` modules stay uninstalled. GOL-1585 (done, CMO) already ruled site-is-source-of-truth and Odoo Events with RSVP for `/visit` in spring 2027; when that lands, `event.event` can feed the same Discord publisher through the shared public-domain helper.
 - No Discord-to-Odoo direction. An event edited in Discord is overwritten by Odoo on the next sync.
 - No recurring-event rules pushed to Discord. Odoo expands recurrences into single `calendar.event` rows, and each occurrence in the window becomes its own Discord event. Discord's own `recurrence_rule` is not used.
 - No storefront events page. A `/grove/api/v1/events` feed for grove-sites is a natural follow-up and is listed under open questions, not built here.
