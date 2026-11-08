@@ -163,7 +163,7 @@ First live check after promote: Josh marks the Nov 27 co-op meeting Public in Gm
 
 ## Open questions for Josh
 
-1. Which Discord channel receives the weekly digest: a new `#events` channel, or the channel where the State of the Grove address goes?
+1. ~~Which Discord channel receives the weekly digest?~~ Answered 2026-11-07: a dedicated events channel (Discord channel id 1568803422314959018). Josh minted its webhook; it is stored as `DISCORD_EVENTS_WEBHOOK_URL` on `Grove Prod/odoocker`. The server's guild id is 1315472509319118938, which is `DISCORD_GUILD_ID` for phase D.
 2. Should the digest also go out by email to the merchant inbox, as the order rollup does, or Discord only?
 3. Should grove-sites get a public events feed (`/grove/api/v1/events`) from the same domain in a later train?
 4. Phase D: should each Discord event's description end with a link back to a page on goldberrygrove.farm, which only makes sense if question 3 is a yes?
