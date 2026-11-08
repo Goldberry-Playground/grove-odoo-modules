@@ -1,4 +1,4 @@
-"""Discord formatting for the weekly 'Coming up' calendar digest (GOL-3830).
+"""Discord formatting for the weekly 'This week at the Grove' digest (GOL-3830).
 
 Pure Python / stdlib so the digest copy unit-tests without an Odoo DB, mirroring
 the ``grove_headless/models/order_digest.py`` convention. No ``odoo`` import: the
@@ -38,6 +38,39 @@ _MONTHS = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "O
 # Discord rejects a message over 2,000 characters outright, so the digest is
 # capped. In practice a week never approaches this; the cap is a safety net.
 _DISCORD_CONTENT_LIMIT = 2000
+
+# The voice channels the digest knows about in phase B, which has no Discord bot
+# token and so cannot list the guild's channels. A Location equal to one of these
+# names renders as a voice room (🔊 <room>); any other text renders verbatim.
+# Phase D (Train #6) fetches the live channel list from the Discord API and feeds
+# it to the same ``match_room`` helper, at which point this stand-in is unused.
+# Kept in sync by hand with the server's voice rooms as Josh set them 2026-11-08.
+DEFAULT_VOICE_ROOMS = ("grove-chat", "General", "Events", "Game-time")
+
+
+def _normalize_room(name: str) -> str:
+    """Casefold a room/location for comparison: trim, drop a leading ``#``, lower."""
+    return (name or "").strip().lstrip("#").strip().lower()
+
+
+def match_room(location, channels):
+    """Return the channel from *channels* whose name matches *location*, else None.
+
+    Each entry in *channels* is either a plain name string (phase B, where the
+    digest passes :data:`DEFAULT_VOICE_ROOMS`) or a dict carrying a ``"name"`` key
+    (phase D, where the sync passes the Discord API's channel objects). The same
+    matching rule — trim, strip a leading ``#``, case-insensitive — serves both,
+    so the digest and the native-events sync agree on what counts as a room.
+    The matched entry is returned verbatim so a caller can read its ``id`` too.
+    """
+    needle = _normalize_room(location)
+    if not needle:
+        return None
+    for ch in channels:
+        name = ch if isinstance(ch, str) else (ch.get("name") or "")
+        if _normalize_room(name) == needle:
+            return ch
+    return None
 
 
 def _to_eastern(dt: datetime) -> datetime:
@@ -82,14 +115,16 @@ def _event_dates(event: dict) -> tuple[date, date, datetime | None]:
     return start_dt.date(), stop_dt.date(), start_dt
 
 
-def format_event_line(event: dict) -> str:
+def format_event_line(event: dict, voice_rooms=()) -> str:
     """One Discord bullet for *event*.
 
     - All-day, single day:  ``- **Fri Nov 13** — Young Farmers meeting``
     - Timed, single day:    ``- **Fri Nov 27, 6:30 PM** — Co-op alliance contract``
     - Multi-day (either):   ``- **Sat Nov 14 – Sun Nov 15** — Harvest weekend``
-    - Location, when the event has one, is appended after `` · ``; the
-      description is never shown (it may hold staff notes).
+    - The place is appended after `` · ``: a Location matching one of
+      *voice_rooms* renders as ``🔊 <room>``, any other text renders verbatim,
+      and a blank Location adds nothing. The description is never shown (it may
+      hold staff notes).
     """
     start_date, stop_date, start_dt = _event_dates(event)
 
@@ -107,7 +142,12 @@ def format_event_line(event: dict) -> str:
     line = f"- **{when}** — {name}"
     location = (event.get("location") or "").strip()
     if location:
-        line += f" · {location}"
+        room = match_room(location, voice_rooms)
+        if room is not None:
+            room_name = room if isinstance(room, str) else (room.get("name") or location)
+            line += f" · 🔊 {room_name}"
+        else:
+            line += f" · {location}"
     return line
 
 
@@ -115,9 +155,10 @@ def build_digest_message(
     events: list[dict],
     window_start: date,
     window_end: date,
+    voice_rooms=(),
     limit: int = _DISCORD_CONTENT_LIMIT,
 ) -> str | None:
-    """Render the full 'Coming up' message, or ``None`` for an empty week.
+    """Render the full 'This week at the Grove' message, or ``None`` for an empty week.
 
     *events* must already be ordered by start (the cron queries
     ``order="start asc"``). The message is held to *limit* characters; when the
@@ -127,8 +168,8 @@ def build_digest_message(
     if not events:
         return None
 
-    header = f"📅 **Coming up at the Grove** ({_fmt_md(window_start)} – {_fmt_md(window_end)})"
-    lines = [format_event_line(e) for e in events]
+    header = f"📅 **This week at the Grove** ({_fmt_md(window_start)} – {_fmt_md(window_end)})"
+    lines = [format_event_line(e, voice_rooms) for e in events]
 
     parts = [header]
     length = len(header)

@@ -20,6 +20,9 @@ class GroveCalendarDigestCase(TransactionCase):
         super().setUp()
         self.digest = self.env["grove.calendar.digest"]
         self.now = fields.Datetime.now()
+        # Events default their organizer to the acting user; give it the publish
+        # switch so the public events in these tests qualify for the digest.
+        self.env.user.grove_discord_publisher = True
 
     def _public_event(self):
         return self.env["calendar.event"].create(
@@ -77,5 +80,22 @@ class GroveCalendarDigestCase(TransactionCase):
                 self.digest._cron_send_weekly_digest()
         content = post.call_args.kwargs["json"]["content"]
         self.assertLessEqual(len(content), 2000)
-        self.assertIn("Coming up at the Grove", content)
+        self.assertIn("This week at the Grove", content)
         self.assertIn("Young Farmers meeting", content)
+
+    def test_voice_room_location_renders_with_speaker(self):
+        self.env["calendar.event"].create(
+            {
+                "name": "Farm Meeting",
+                "start": self.now + timedelta(days=1),
+                "stop": self.now + timedelta(days=1, hours=1),
+                "privacy": "public",
+                "location": "grove-chat",
+            }
+        )
+        env = {"DISCORD_EVENTS_WEBHOOK_URL": "https://discord.example/events"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            with mock.patch(_POST) as post:
+                self.digest._cron_send_weekly_digest()
+        content = post.call_args.kwargs["json"]["content"]
+        self.assertIn("Farm Meeting · 🔊 grove-chat", content)

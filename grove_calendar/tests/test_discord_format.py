@@ -42,9 +42,23 @@ class EventLineTests(unittest.TestCase):
 
     def test_location_appended_after_middot(self):
         line = df.format_event_line(
-            _timed("Co-op alliance contract", datetime(2026, 11, 27, 23, 30), location="Goldberry Grove Farm")
+            _timed("Meeting with Wes", datetime(2026, 11, 27, 23, 30), location="2291 Armstrong Rd, Summersville")
         )
-        self.assertEqual(line, "- **Fri Nov 27, 6:30 PM** — Co-op alliance contract · Goldberry Grove Farm")
+        self.assertEqual(line, "- **Fri Nov 27, 6:30 PM** — Meeting with Wes · 2291 Armstrong Rd, Summersville")
+
+    def test_voice_room_location_renders_with_speaker(self):
+        line = df.format_event_line(
+            _timed("Farm Meeting", datetime(2026, 11, 10, 23, 0), location="grove-chat"),
+            voice_rooms=("grove-chat", "Game-time"),
+        )
+        self.assertEqual(line, "- **Tue Nov 10, 6:00 PM** — Farm Meeting · 🔊 grove-chat")
+
+    def test_non_room_location_renders_verbatim(self):
+        line = df.format_event_line(
+            _timed("Meeting with Wes", datetime(2026, 11, 11, 14, 0), location="2291 Armstrong Rd"),
+            voice_rooms=("grove-chat",),
+        )
+        self.assertEqual(line, "- **Wed Nov 11, 9:00 AM** — Meeting with Wes · 2291 Armstrong Rd")
 
     def test_no_location_omits_middot(self):
         line = df.format_event_line(_allday("Market day", date(2026, 11, 14)))
@@ -70,23 +84,44 @@ class EventLineTests(unittest.TestCase):
         self.assertIn("(untitled)", line)
 
 
+class MatchRoomTests(unittest.TestCase):
+    ROOMS = ("grove-chat", "General", "Events", "Game-time")
+
+    def test_exact_name_matches(self):
+        self.assertEqual(df.match_room("grove-chat", self.ROOMS), "grove-chat")
+
+    def test_match_is_case_insensitive_and_strips_hash(self):
+        self.assertEqual(df.match_room("  #Grove-Chat ", self.ROOMS), "grove-chat")
+
+    def test_non_room_text_does_not_match(self):
+        self.assertIsNone(df.match_room("2291 Armstrong Rd, Summersville", self.ROOMS))
+
+    def test_blank_does_not_match(self):
+        self.assertIsNone(df.match_room("", self.ROOMS))
+        self.assertIsNone(df.match_room("   ", self.ROOMS))
+
+    def test_dict_channels_return_the_matched_object(self):
+        channels = [{"id": "42", "name": "grove-chat"}, {"id": "7", "name": "General"}]
+        self.assertEqual(df.match_room("grove-chat", channels), {"id": "42", "name": "grove-chat"})
+
+
 class DigestMessageTests(unittest.TestCase):
     def test_empty_week_returns_none(self):
         self.assertIsNone(df.build_digest_message([], WIN_START, WIN_END))
 
     def test_header_uses_month_day_window(self):
         msg = df.build_digest_message([_allday("Market day", date(2026, 11, 14))], WIN_START, WIN_END)
-        self.assertTrue(msg.startswith("📅 **Coming up at the Grove** (Nov 9 – Nov 23)\n"))
+        self.assertTrue(msg.startswith("📅 **This week at the Grove** (Nov 9 – Nov 23)\n"))
 
     def test_events_appear_in_given_order(self):
         events = [
             _allday("Young Farmers meeting", date(2026, 11, 13)),
-            _timed("Co-op alliance contract", datetime(2026, 11, 27, 23, 30), location="Goldberry Grove Farm"),
+            _timed("Farm Meeting", datetime(2026, 11, 27, 23, 30), location="grove-chat"),
         ]
-        msg = df.build_digest_message(events, WIN_START, WIN_END)
+        msg = df.build_digest_message(events, WIN_START, WIN_END, voice_rooms=("grove-chat",))
         lines = msg.splitlines()
         self.assertEqual(lines[1], "- **Fri Nov 13** — Young Farmers meeting")
-        self.assertEqual(lines[2], "- **Fri Nov 27, 6:30 PM** — Co-op alliance contract · Goldberry Grove Farm")
+        self.assertEqual(lines[2], "- **Fri Nov 27, 6:30 PM** — Farm Meeting · 🔊 grove-chat")
 
     def test_cut_at_2000_chars_with_more_note(self):
         events = [_allday(f"Event number {i} with a reasonably long title", date(2026, 11, 13)) for i in range(200)]

@@ -1,20 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <odoo>
-    <!-- Read-only "Discord" group on the calendar event form (GOL-3830). The
-         three fields are bookkeeping for the native-events sync (phase D): they
-         are empty in phase B, so the group stays hidden until an event is
-         actually published to Discord and gets a discord_event_id. Nothing here
-         is editable; the publish switch is the existing Privacy field. -->
+    <!-- "Discord" group on the calendar event form (GOL-3830). It surfaces the
+         read-only bookkeeping fields (filled by the phase-D native-events sync)
+         and, for a Public event whose organizer has not switched publishing on,
+         explains in place why it will not reach Discord. The group shows for any
+         Public event or any event already carrying a Discord id; everything here
+         is read-only — the publish controls are the existing Privacy field and
+         the organizer's per-user switch. -->
     <record id="calendar_event_view_form_grove_discord" model="ir.ui.view">
         <field name="name">calendar.event.form.grove.discord</field>
         <field name="model">calendar.event</field>
         <field name="inherit_id" ref="calendar.view_calendar_event_form"/>
         <field name="arch" type="xml">
             <xpath expr="//sheet" position="inside">
-                <group string="Discord" name="grove_discord" invisible="not discord_event_id">
-                    <field name="discord_event_id" readonly="1"/>
-                    <field name="discord_synced_at" readonly="1"/>
-                    <field name="discord_url" widget="url" readonly="1"/>
+                <group string="Discord" name="grove_discord"
+                       invisible="privacy != 'public' and not discord_event_id">
+                    <field name="organizer_publishes_to_discord" invisible="1"/>
+                    <div colspan="2" class="text-muted"
+                         invisible="organizer_publishes_to_discord or discord_event_id">
+                        Organizer does not publish to Discord.
+                    </div>
+                    <field name="discord_event_id" readonly="1" invisible="not discord_event_id"/>
+                    <field name="discord_payload_hash" readonly="1" invisible="not discord_event_id"/>
+                    <field name="discord_url" widget="url" readonly="1" invisible="not discord_url"/>
                 </group>
             </xpath>
         </field>

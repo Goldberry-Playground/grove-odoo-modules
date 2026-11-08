@@ -2,7 +2,7 @@
 
 Odoo-runtime TransactionCase (runs under the install-smoke-test, not pytest).
 Asserts the shared "which events reach Discord" domain: active + Privacy ==
-Public + not yet ended + starting within the horizon.
+Public + organizer publishes + not yet ended + starting within the horizon.
 """
 
 from datetime import timedelta
@@ -17,6 +17,9 @@ class GrovePublicDomainCase(TransactionCase):
         super().setUp()
         self.CalendarEvent = self.env["calendar.event"]
         self.now = fields.Datetime.now()
+        # Events default their organizer (user_id) to the acting user; give it the
+        # publish switch so the baseline "included" cases qualify.
+        self.env.user.grove_discord_publisher = True
 
     def _event(self, name, *, start, stop, privacy="public", active=True):
         event = self.CalendarEvent.create(
@@ -52,6 +55,17 @@ class GrovePublicDomainCase(TransactionCase):
             stop=self.now + timedelta(hours=1),
         )
         self.assertIn(event, self._matches())
+
+    def test_event_whose_organizer_does_not_publish_is_excluded(self):
+        event = self._event(
+            "Organizer off",
+            start=self.now + timedelta(days=2),
+            stop=self.now + timedelta(days=2, hours=1),
+        )
+        self.assertIn(event, self._matches())
+        # Flip the organizer's publish switch off: the same Public event drops out.
+        event.user_id.grove_discord_publisher = False
+        self.assertNotIn(event, self._matches())
 
     def test_private_event_is_excluded(self):
         event = self._event(
