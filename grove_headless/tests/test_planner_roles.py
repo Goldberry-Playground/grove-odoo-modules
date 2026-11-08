@@ -305,6 +305,37 @@ class TestBackfillPlannerRolesRules(TransactionCase):
         }
         self.assertEqual(backfill.parse_planner_roles(rec2)["grove_living_mulch"], True)
 
+    def test_parse_planner_roles_skips_zero_years(self):
+        # GOL-3836 defect 5: a template with no years value is skipped entirely, so
+        # the unpublished stubs are not seeded grove_succession = fast off a 0.
+        self.assertEqual(
+            backfill.parse_planner_roles({"name": "Stub", "grove_layer": "canopy", "grove_years_to_fruit_min": 0}), {}
+        )
+        self.assertEqual(backfill.parse_planner_roles({"name": "Stub", "grove_layer": "understory"}), {})
+        # Spawn (fungal) legitimately has no years and is still seeded off its layer.
+        self.assertEqual(
+            backfill.parse_planner_roles(
+                {"name": "Wine Cap Spawn", "grove_layer": "fungal", "grove_years_to_fruit_min": 0}
+            ),
+            {"grove_planner_role": "anchor", "grove_succession": "fast"},
+        )
+
+    def test_scope_domain_keys_on_layer_not_category(self):
+        # GOL-3836 defect 4: scope on grove_layer, never on categ_id.
+        domain = backfill._PLANT_DOMAIN
+        self.assertIn(("grove_layer", "!=", False), domain)
+        self.assertFalse(any(isinstance(t, (list, tuple)) and t and t[0] == "categ_id" for t in domain))
+
+    def test_changed_vals_skips_human_held(self):
+        # GOL-3836 defect 6: a field a human holds in provenance is never rewritten.
+        parsed = {"grove_planner_role": "companion", "grove_succession": "mid"}
+        rec = {
+            "grove_planner_role": "anchor",
+            "grove_succession": False,
+            "grove_facts_provenance": {"grove_planner_role": {"source": "human"}},
+        }
+        self.assertEqual(backfill.changed_vals(rec, parsed), {"grove_succession": "mid"})
+
     def test_changed_vals_is_idempotent(self):
         parsed = {"grove_planner_role": "companion", "grove_succession": "mid"}
         # First run: record holds unset (False) values -> everything changes.
