@@ -850,13 +850,17 @@ class SaleOrder(models.Model):
         the new label from today, and the chatter keeps the old number for the
         record. Returns False when the number is already the order's label (a
         re-import), True when it was replaced. Raises ``UserError`` on a pickup
-        order, an order with no label yet (record it instead), a bad tracking
-        number, or a number already on a different order."""
+        order, an order with no label yet (record it instead), an order past the
+        point a label can change (anything but label purchased or shipped, so an
+        old export row cannot overwrite a finished order), a bad tracking number,
+        or a number already on a different order."""
         self.ensure_one()
         if self.grove_fulfillment == "pickup":
             raise UserError(f"{self.name}: farm-pickup orders buy no shipping label.")
         if not self.grove_tracking_numbers:
             raise UserError(f"{self.name} has no label yet; record it as a new label instead.")
+        if self.grove_fulfillment_stage not in ("label_purchased", "shipped"):
+            raise UserError(f"{self.name}: its label can't be replaced at stage {self.grove_fulfillment_stage}.")
         tracking = (tracking_number or "").strip()
         if not shippo_client.is_valid_tracking(tracking):
             raise UserError(f"{self.name}: {tracking!r} is not a valid tracking number.")
