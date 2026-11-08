@@ -20,8 +20,8 @@ from odoo.addons.grove_headless.models import label_batch as label_batch_module
 from odoo.addons.grove_headless.models import sale_order as sale_order_module
 from odoo.addons.grove_headless.models.shipping_boxes import PackedBox
 from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
-from odoo.exceptions import UserError
-from odoo.tests import TransactionCase, tagged
+from odoo.exceptions import AccessError, UserError
+from odoo.tests import TransactionCase, new_test_user, tagged
 
 _T = ["1Z999AA10123456784", "1Z999AA10123456785", "1Z999AA10123456786", "9400111899223817200000"]
 
@@ -217,6 +217,33 @@ class TestPirateShipImport(GroveTaxFixtureMixin, TransactionCase):
         with self.assertRaises(UserError):
             other.action_grove_replace_label(_T[0], carrier="UPS", actual_cost=9.0)
         self.assertEqual(other.grove_tracking_numbers, _T[1])
+
+    def test_replace_allowed_on_a_shipped_order(self):
+        order = self._labelled_order(_T[0])
+        order.action_grove_mark_shipped(source="test")
+        self.assertEqual(order.grove_fulfillment_stage, "shipped")
+        self.assertTrue(order.action_grove_replace_label(_T[1], carrier="UPS", actual_cost=9.0))
+        self.assertEqual(order.grove_tracking_numbers, _T[1])
+
+    def test_old_export_row_cannot_overwrite_a_delivered_order(self):
+        order = self._labelled_order(_T[0])
+        order.action_grove_mark_shipped(source="test")
+        order.action_grove_mark_delivered(source="test")
+        self.assertEqual(order.grove_fulfillment_stage, "delivered")
+        raw = self._csv(["Order", "Tracking Number", "Carrier", "Cost"], [[order.name, _T[1], "UPS", "9.00"]])
+        result = self._import(raw)
+        self.assertEqual(order.grove_tracking_numbers, _T[0])
+        self.assertEqual(result["replaced"], [])
+        self.assertTrue(any(order.name in msg for msg in result["review"]), result["review"])
+
+    # ── Access ───────────────────────────────────────────────────────────
+    def test_own_documents_salesman_cannot_import(self):
+        order = self._order()
+        user = new_test_user(self.env, login="own_docs_only", groups="sales_team.group_sale_salesman")
+        raw = self._csv(["Order", "Tracking Number", "Carrier", "Cost"], [[order.name, _T[0], "UPS", "9.00"]])
+        with self.assertRaises(AccessError):
+            self.Batch.with_user(user).import_pirateship_file(raw, filename="export.csv", company=self.company)
+        self.assertFalse(order.grove_tracking_numbers)
 
     # ── Refunds ──────────────────────────────────────────────────────────
     def test_refunded_row_flags_order_and_stops_the_poll(self):

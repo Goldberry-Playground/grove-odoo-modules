@@ -27,7 +27,7 @@ import re
 from datetime import timedelta
 
 from odoo import api, fields, models
-from odoo.exceptions import UserError
+from odoo.exceptions import AccessError, UserError
 
 from .shipping_boxes import BOXES
 from .shipping_zones import box_rate, box_service_title
@@ -984,7 +984,11 @@ class GroveLabelBatch(models.Model):
 
         Returns ``{labelled, replaced, refunded, already, review, warnings,
         manual_review}``. Raises ``LabelBatchError`` only when the file itself
-        is unreadable or lacks the tracking/carrier/cost columns."""
+        is unreadable or lacks the tracking/carrier/cost columns, or
+        ``AccessError`` for a user limited to their own orders: the lookups run
+        as sudo so the import can place any row in the company."""
+        if not self.env.is_superuser() and not self.env.user.has_group("sales_team.group_sale_salesman_all_leads"):
+            raise AccessError("Importing a Pirate Ship export needs access to all sales orders.")
         company = company or self.env.company
         parsed = self.browse()._parse_tracking_file(raw_bytes, filename=filename)
         summary = {
