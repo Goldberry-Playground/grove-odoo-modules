@@ -1,6 +1,6 @@
 # Odoo calendar to Discord (design)
 
-**Status:** approved in chat with Josh, 2026-11-06/07. Target: phases A, B and C on Release Train #5 (freeze Fri 2026-11-13, QA Mon 11-16, promote Wed 11-18); phase D on Train #6 (freeze Fri 11-27, promote Wed 12-02). Builds on the Discord webhook pattern in `grove_headless` (`controllers/main.py:_notify_discord`, `models/order_rollup.py:_discord_digest`) and `grove_support/models/discord.py`, and on the topic-channel env vars from gom#384 / odoocker#967. Board: GOL-3828 (A, Josh), GOL-3830 (B, Ada), GOL-3831 (C, Terra), GOL-3832 (D, Ada, blocked), GOL-3829 (E, Josh gate).
+**Status:** approved in chat with Josh, 2026-11-06/07. Target: phases A, B and C on Release Train #5 (freeze Fri 2026-11-13, QA Mon 11-16, promote Wed 11-18); phases D and F on Train #6 (freeze Fri 11-27, promote Wed 12-02). Builds on the Discord webhook pattern in `grove_headless` (`controllers/main.py:_notify_discord`, `models/order_rollup.py:_discord_digest`) and `grove_support/models/discord.py`, and on the topic-channel env vars from gom#384 / odoocker#967. Board: GOL-3828 (A, Josh), GOL-3830 (B, Ada), GOL-3831 (C, Terra), GOL-3832 (D, Ada, blocked), GOL-3829 (E, Josh gate).
 
 ## Decision (Josh, 2026-11-06)
 
@@ -13,6 +13,7 @@ Ruled in chat, do not re-open:
 - **Publish rule = `privacy == 'public'`.** Odoo's Google sync maps Google's event visibility to `calendar.event.privacy`, so Josh can mark an event public from either Gmail (Visibility: Public) or Odoo (Privacy: Public). Everything else that syncs in from Gmail stays off Discord. A tag was rejected because it cannot be set from Google.
 - **Two tiers on the Discord side.** Tier 1 is a weekly digest through a webhook, no new credentials beyond a channel webhook URL. Tier 2 is native Discord Events, which need a bot token with Manage Events; Discord webhooks cannot create events.
 - **Bot token is a new credential** and Josh mints it. It joins the December rotation batch with the other Grove credentials.
+- **Three audience tiers, 2026-11-07.** Private (default) = team, in Odoo and Gmail only. Public = the Discord server. Public plus the **Website** tag = the public site feed as well. The website calendar is a tag on the one Odoo calendar, not a dedicated events account; Odoo has one calendar per user, and the tag is the cheapest way to carve out a separate public calendar. Rejected: a Workspace events account with its own Google calendar (a seat, a second OAuth pairing, one more account to mind).
 - **Times are shown in America/New_York** in every Discord post. Odoo stores UTC; the module converts for display, the same way the weekly rollup does.
 
 ## Non-goals
@@ -20,7 +21,7 @@ Ruled in chat, do not re-open:
 - No event sign-up, RSVP, ticketing or payment. The `event` / `website_event` modules stay uninstalled. GOL-1585 (done, CMO) already ruled site-is-source-of-truth and Odoo Events with RSVP for `/visit` in spring 2027; when that lands, `event.event` can feed the same Discord publisher through the shared public-domain helper.
 - No Discord-to-Odoo direction. An event edited in Discord is overwritten by Odoo on the next sync.
 - No recurring-event rules pushed to Discord. Odoo expands recurrences into single `calendar.event` rows, and each occurrence in the window becomes its own Discord event. Discord's own `recurrence_rule` is not used.
-- No storefront events page. A `/grove/api/v1/events` feed for grove-sites is a natural follow-up and is listed under open questions, not built here.
+- No storefront events page. Phase F ships the public feed; the grove-sites page that renders it stays with the spring 2027 visit-page work (GOL-1585).
 - No change to the orders, sales, support or shipping Discord channels.
 - No sync of attendees. Discord events carry name, time, location and description only.
 
@@ -139,12 +140,20 @@ Steps 3 and 4 each wrap their request in try/except and log at WARNING; one bad 
 
 A Discord webhook posts messages only. Guild scheduled events need a bot user with Manage Events, so phase D needs the token. Phase B ships without it so the weekly post exists on Train #5 either way.
 
+## Phase F: Website tag and public events feed (Ada, Train #6, blocked on phase B)
+
+- Seed a `calendar.event.type` record **Website** (xmlid `grove_calendar.tag_website`, `noupdate="1"`). Set in Odoo only; Google has no tags.
+- `calendar.event._grove_website_domain(window_days)` = `_grove_public_domain(window_days)` AND `categ_ids` contains the Website tag.
+- Public JSON route `GET /grove/api/v1/events` (`auth="public"`, `csrf=False`, `Cache-Control: public, max-age=300`): events from `_grove_website_domain(90)`, `?days=` capped at 180. Fields: `id`, `name`, `start`, `stop` (UTC ISO 8601), `allday`, `location`, `description_text` (HTML stripped), plus a top-level `tz: "America/New_York"`. Never attendees, organizer, or untagged events.
+- Calendar search view gets a "Website" filter so the tagged subset reads as its own calendar in Odoo.
+
 ## Tests
 
 - `discord_format.py`: pure tests for the digest line rules (all-day, timed, multi-day, location, 2,000-char cut, empty week returns None), stdlib only.
 - `_grove_public_domain`: public, private, archived, past and out-of-window events, inside Odoo's test runner.
 - Digest cron: `requests.post` monkeypatched; asserts URL fallback order and `allowed_mentions`.
 - Events cron: a fake Discord client recording calls; cases for create, patch after edit, no-op when unchanged, delete on archive, delete on privacy change, recreate after 404, skip when token unset, stop on 429.
+- Phase F: tagged public, tagged private and untagged public events against `_grove_website_domain`; route shape, cache header, days cap, and no leakage of untagged events.
 - No test touches `google_calendar`.
 
 ## Rollout
@@ -157,6 +166,7 @@ A Discord webhook posts messages only. Guild scheduled events need a bot user wi
 | Events channel webhook minted and stored in 1Password | Josh | Before Train #5 promote |
 | Prod `.env` written | Josh | Promote day Wed 11-18 |
 | Phase D: native events | Ada | Train #6 freeze Fri 11-27, after the bot token exists |
+| Phase F: Website tag + `/grove/api/v1/events` | Ada | Train #6 |
 | Bot created in the Discord Developer Portal, invited with Manage Events, token stored in 1Password | Josh | Before Train #6 freeze |
 
 First live check after promote: Josh marks the Nov 27 co-op meeting Public in Gmail, confirms it appears in Odoo with Privacy: Public, and the Monday 11-23 digest lists it.
@@ -165,5 +175,5 @@ First live check after promote: Josh marks the Nov 27 co-op meeting Public in Gm
 
 1. ~~Which Discord channel receives the weekly digest?~~ Answered 2026-11-07: a dedicated events channel (Discord channel id 1568803422314959018). Josh minted its webhook; it is stored as `DISCORD_EVENTS_WEBHOOK_URL` on `Grove Prod/odoocker`. The server's guild id is 1315472509319118938, which is `DISCORD_GUILD_ID` for phase D.
 2. ~~Should the digest also go out by email to the merchant inbox?~~ Answered 2026-11-07: **no**, Discord only.
-3. Should grove-sites get a public events feed (`/grove/api/v1/events`) from the same domain in a later train?
+3. ~~Should grove-sites get a public events feed?~~ Answered 2026-11-07: **yes, as a separate public calendar**, done with the Website tag (phase F). The page that shows it waits for the visit-page work.
 4. ~~Phase D: should each Discord event's description link back to goldberrygrove.farm?~~ Answered 2026-11-07: **no**.
