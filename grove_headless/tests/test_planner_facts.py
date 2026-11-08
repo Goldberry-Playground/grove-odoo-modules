@@ -263,6 +263,22 @@ class TestPlannerFacts(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(backfill.parse_pollination_min("needs three partners"), 3)
         self.assertEqual(backfill.parse_pollination_min("unknown"), 0)
 
+    def test_parse_pollination_min_partner_beats_self(self):
+        # GOL-3836 defect 2: "plant N / N or more / at least two" is a partner (2),
+        # even when a self-* mention also appears, and self-incompatible is not self-fertile.
+        self.assertEqual(backfill.parse_pollination_min("Plant 2 or more for a crop"), 2)
+        self.assertEqual(backfill.parse_pollination_min("2 or more trees required"), 2)
+        self.assertEqual(backfill.parse_pollination_min("At least two needed"), 2)
+        self.assertEqual(
+            backfill.parse_pollination_min("Self-pollination has not produced viable seed, so plant 2+"), 2
+        )
+        self.assertEqual(backfill.parse_pollination_min("Can self-pollinate, but plant 2+ trees for reliable crops"), 2)
+        self.assertEqual(backfill.parse_pollination_min("Partly self-fertile; plant 2 or more varieties"), 2)
+        self.assertEqual(backfill.parse_pollination_min("This oak is self-incompatible"), 2)
+        # A partner word that is itself negated ("no partner needed") stays self-fertile (1).
+        self.assertEqual(backfill.parse_pollination_min("Self-fertile; no partner needed"), 1)
+        self.assertEqual(backfill.parse_pollination_min("Self-pollinating, no pollinator required"), 1)
+
     def test_parse_harvest_months(self):
         self.assertEqual(backfill.parse_harvest_months("Summer"), "7,8")
         self.assertEqual(backfill.parse_harvest_months("Summer–Fall"), "8,9,10")
@@ -273,15 +289,41 @@ class TestPlannerFacts(GroveTaxFixtureMixin, TransactionCase):
         # Month numbers already in the text win over the table.
         self.assertEqual(backfill.parse_harvest_months("Sept–Nov (9,10,11)"), "9,10,11")
 
+    def test_parse_harvest_months_named(self):
+        # GOL-3836 defect 3: named months / ranges beat the coarse season table.
+        self.assertEqual(backfill.parse_harvest_months("Ripens (August to September)"), "8,9")
+        self.assertEqual(backfill.parse_harvest_months("Fruit (June to early July)"), "6,7")  # Sour Cherry
+        self.assertEqual(backfill.parse_harvest_months("Acorns drop September-October"), "9,10")  # White Oak
+        self.assertEqual(backfill.parse_harvest_months("Harvest August to October"), "8,9,10")
+        # "and" / commas list the named months as points, not a range.
+        self.assertEqual(backfill.parse_harvest_months("June and September"), "6,9")
+
     def test_parse_tolerates_wet(self):
         self.assertTrue(backfill.parse_tolerates_wet("Moist bottomland soil", "moderate"))
         self.assertTrue(backfill.parse_tolerates_wet("rich loam", "high"))  # high watering
         self.assertFalse(backfill.parse_tolerates_wet("well-drained loam", "moderate"))
 
+    def test_parse_tolerates_wet_negation(self):
+        # GOL-3836 defect 1: a negation before the wet word reads as "does not tolerate".
+        self.assertFalse(backfill.parse_tolerates_wet("Will not tolerate wet feet", "moderate"))  # Peach
+        self.assertFalse(backfill.parse_tolerates_wet("Avoid wet sites", "moderate"))  # Plum
+        self.assertFalse(backfill.parse_tolerates_wet("Avoid wet or compacted ground", "moderate"))  # Apple
+        self.assertFalse(
+            backfill.parse_tolerates_wet("Intolerant of wet or heavy clay soils", "moderate")
+        )  # Sweet Cherry
+        # A later, un-negated clause still counts.
+        self.assertTrue(backfill.parse_tolerates_wet("Prefers drainage. Thrives in moist bottomland.", "moderate"))
+
     def test_parse_tolerates_poor_soil(self):
         self.assertTrue(backfill.parse_tolerates_poor_soil("Tolerates rocky, clay ground"))
         self.assertTrue(backfill.parse_tolerates_poor_soil("drought tolerant"))
         self.assertFalse(backfill.parse_tolerates_poor_soil("rich bottomland loam"))
+
+    def test_parse_tolerates_poor_soil_negation(self):
+        # GOL-3836 defect 1: "intolerant of ... heavy clay" must not read as poor-soil-tolerant.
+        self.assertFalse(backfill.parse_tolerates_poor_soil("Intolerant of wet or heavy clay soils"))
+        # Un-negated "heavy clay" still counts.
+        self.assertTrue(backfill.parse_tolerates_poor_soil("Tolerates heavy clay"))
 
     def test_parse_tolerates_shade(self):
         self.assertTrue(backfill.parse_tolerates_shade("partial"))
@@ -316,3 +358,33 @@ class TestPlannerFacts(GroveTaxFixtureMixin, TransactionCase):
         self.assertNotIn("grove_tolerates_poor_soil", vals)
         # An all-blank row yields nothing to write (and so keeps its sign-off).
         self.assertEqual(backfill.parse_planner_facts({}), {})
+
+    def test_scope_domain_keys_on_layer_not_category(self):
+        # GOL-3836 defect 4: scope on grove_layer (so bareroot fruit trees outside
+        # the categ_plants tree are included), never on categ_id.
+        domain = backfill._PLANT_DOMAIN
+        self.assertIn(("grove_layer", "!=", False), domain)
+        self.assertIn(("type", "=", "consu"), domain)
+        self.assertIn(("grove_gate_exempt", "=", False), domain)
+        self.assertFalse(any(isinstance(t, (list, tuple)) and t and t[0] == "categ_id" for t in domain))
+
+    def test_writable_facts_skips_human_and_unchanged(self):
+        # GOL-3836 defect 6: a field a human holds in provenance is never written,
+        # and a value already equal to the parse is dropped — so a re-run is a no-op.
+        parsed = {"grove_pollination_min": 2, "grove_harvest_months": "9,10,11"}
+        human = {
+            "grove_pollination_min": 1,
+            "grove_harvest_months": "9,10",
+            "grove_facts_provenance": {"grove_pollination_min": {"source": "human"}},
+        }
+        # pollination is human-held -> skipped; harvest differs + not human -> written.
+        self.assertEqual(backfill.writable_facts(human, parsed), {"grove_harvest_months": "9,10,11"})
+        # Already at the parsed values (the 2026-11-08 hand set) -> nothing to write.
+        done = {"grove_pollination_min": 2, "grove_harvest_months": "9,10,11"}
+        self.assertEqual(backfill.writable_facts(done, parsed), {})
+        # A machine-stamped value that differs is still upgraded.
+        machine = {
+            "grove_pollination_min": 1,
+            "grove_facts_provenance": {"grove_pollination_min": {"source": "agent"}},
+        }
+        self.assertEqual(backfill.writable_facts(machine, {"grove_pollination_min": 2}), {"grove_pollination_min": 2})
