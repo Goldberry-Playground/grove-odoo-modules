@@ -76,6 +76,7 @@ collect_ignore_glob = [
     "grove_headless/tests/test_label_batch.py",
     "grove_headless/tests/test_label_reconcile.py",
     "grove_headless/tests/test_carrier_tracking_cron.py",
+    "grove_headless/tests/test_carrier_closeout.py",
     "grove_headless/tests/test_poller_lifecycle.py",
     "grove_headless/tests/test_order_rollup.py",
     "grove_headless/tests/test_listing_gate.py",

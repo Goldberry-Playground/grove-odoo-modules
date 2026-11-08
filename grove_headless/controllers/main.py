@@ -7112,6 +7112,10 @@ def _apply_delivery_status(env, order, new_status, tracking, source="shippo"):
         order.action_grove_mark_shipped(source=source)
         if new_status == "delivered":
             order.action_grove_mark_delivered(source=source)
+        # Close the order out in Odoo itself: validate the reserved delivery
+        # quantities, and lock a delivered, fully paid order. Best-effort, never
+        # raises, and skipped for statuses with no rank (exceptions).
+        order._grove_close_out_on_carrier_event(new_status)
 
     if new_status in NOTIFY_STATUSES:
         key = _shipment_notice_key(order, new_status, tracking)
