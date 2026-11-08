@@ -20,7 +20,10 @@ class CalendarRecurrence(models.Model):
         index=True,
         readonly=True,
         copy=False,
-        help="Snowflake of the Discord scheduled event for this series. Empty until the native-events sync (phase D) creates one.",
+        help=(
+            "Snowflake of the Discord scheduled event for this series. Empty "
+            "until the native-events sync (phase D) creates one."
+        ),
     )
     discord_payload_hash = fields.Char(
         string="Discord Payload Hash",
