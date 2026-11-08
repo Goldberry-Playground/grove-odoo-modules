@@ -15,6 +15,8 @@ Ruled in chat, do not re-open:
 - **Discord Events are the product, 2026-11-08.** The audience is the farm team, not a public community. They open Discord to see when their next meeting is and what is being discussed, and most meetings happen in a Discord voice room. Josh creates those Discord Events by hand today and wants to stop. The sync therefore creates what he creates by hand: one Discord Event per calendar entry.
 - **One Discord event per series, never per occurrence, 2026-11-08.** Odoo expands a recurring meeting into up to 720 rows; Discord must not. A recurring Gmail entry becomes one Discord event carrying Discord's own `recurrence_rule`. A one-off becomes a one-off.
 - **The room comes from the Location field, 2026-11-08.** A Location equal to the name of a voice channel (`grove-chat`, `General`, `Events`, `Game-time` today) makes a voice-channel event in that room. Any other text makes an in-person event showing that text. Blank means the default room, `grove-chat`. All of it is settable from Gmail.
+- **Only Josh's events, 2026-11-08.** A per-user switch on `res.users`, `grove_discord_publisher` (default off), gates everything: an event publishes only when it is Public **and** its organizer (`user_id`) has the switch on. On for Josh only at launch. Other users' events, including CRM meetings and consult bookings that name customers, stay team-only even if someone marks one Public, until Josh turns their switch on.
+- **A skipped or moved occurrence does not change the Discord series, 2026-11-08.** Discord gives applications no way to cancel or move one occurrence of a repeating event. When one occurrence of a public series is cancelled or moved in Gmail, the Discord event stays as it is and the sync posts one alert to the events channel telling people. Rejected: temporarily splitting the series into per-occurrence Discord events.
 - **Keep the Monday post, 2026-11-08.** Even with the Events tab, a Monday "here is the week" message in the events channel is wanted as the conversation anchor.
 - **Bot token is a new credential** and Josh minted it (bot user `GroveCal`, 2026-11-08). It joins the December rotation batch with the other Grove credentials.
 - **Times are shown in America/New_York** in every Discord post. Odoo stores UTC; the module converts for display, the same way the weekly rollup does.
@@ -62,8 +64,9 @@ A `calendar.event` is published when all of these hold:
 
 - `active = True`
 - `privacy = 'public'`
+- `user_id.grove_discord_publisher = True` (the organizer's switch, section 5)
 - `stop` is in the future
-- `start` is inside the window (14 days for the digest, `GROVE_EVENTS_WINDOW_DAYS` for native events)
+- `start` is inside the window (the coming Monday to Sunday for the digest, `GROVE_EVENTS_WINDOW_DAYS` for native events)
 
 A helper `calendar.event._grove_public_domain(window_days)` returns that domain so the digest, the events cron and tests share one definition.
 
@@ -71,7 +74,7 @@ A helper `calendar.event._grove_public_domain(window_days)` returns that domain 
 
 `grove.calendar.digest` (AbstractModel, no table) with `_cron_send_weekly_digest()`, scheduled by `data/calendar_digest_cron.xml` on **Monday 12:00 UTC** (07:00 or 08:00 Eastern). Monday 08:00 UTC is what the order rollup uses, but that lands at 03:00 Eastern and the post would sit unread for hours.
 
-Format, Discord markdown, one message, cut at 2,000 characters. The digest lists occurrences, so a weekly meeting appears once per week it falls in:
+Covers the seven days from that Monday through Sunday. Format, Discord markdown, one message, cut at 2,000 characters. The digest lists occurrences, so each weekly meeting appears once:
 
 ```
 📅 **This week at the Grove** (Nov 9 – Nov 15)
@@ -99,6 +102,10 @@ The same three fields on both `calendar.event` (one-off events and fallback occu
 | `discord_url` | Char, computed | `https://discord.com/events/{guild}/{discord_event_id}`; shown on the form as a link when set. |
 
 The event form gets a collapsed "Discord" group showing those fields, or the series' values when the event belongs to a recurrence. Nothing is editable there; the publish switch is the existing Privacy field.
+
+### 5. Who may publish
+
+`res.users.grove_discord_publisher` (Boolean, default False, shown under the user's Preferences for admins only). `_grove_public_domain` includes `("user_id.grove_discord_publisher", "=", True)`, so the digest, the events cron and the phase F feed all respect it. Josh turns it on for his own user after the Train #5 promote (rollout table); nothing is seeded, because user records have no stable xmlid on prod. The Discord group on the event form shows "Organizer does not publish to Discord" when the switch is off, so a Public event that stays off Discord is explained in place.
 
 ## Phase C: odoocker plumbing (Terra, Train #5)
 
@@ -194,7 +201,18 @@ Today's public calendar, as Josh set it on 2026-11-08:
 
 Steps 3 and 4 wrap each request in try/except and log at WARNING; one bad unit never stops the run.
 
-### 7. Why not a webhook, restated
+### 7. Skipped or moved occurrences
+
+Discord's repeating event cannot carry exceptions, and the series stays as one Discord event (ruled 2026-11-08). The sync detects exceptions and tells people instead:
+
+- An **exception** is an expected occurrence of a public series, inside the next `GROVE_EVENTS_WINDOW_DAYS`, that is missing from Odoo (cancelled in Gmail: the row is archived or gone) or whose `start` differs from the rule's date and time (moved in Gmail; Odoo keeps the row linked to the recurrence).
+- Expected occurrences come from the Odoo recurrence rule applied to the representative's start time, not from Discord.
+- For each new exception the run posts one message to `DISCORD_EVENTS_WEBHOOK_URL`, for example `⚠️ Farm Meeting on Tue Nov 17 is cancelled. The Discord event still shows it.` or `⚠️ Farm Meeting moves from Tue Nov 17, 6:00 PM to Wed Nov 18, 6:00 PM for that week only.` Same `allowed_mentions` stance as the digest.
+- Each exception is alerted once. `calendar.recurrence.discord_alerted_exceptions` (Char, JSON list of ISO dates of the original occurrences already announced) is the dedupe; entries older than today are pruned on each run.
+- A cancelled occurrence that is later restored, or a moved one moved back, posts a second message saying so, then its date is removed from the list.
+- The Monday digest already reflects the truth for that week, because it lists actual occurrence rows.
+
+### 8. Why not a webhook, restated
 
 A Discord webhook posts messages only. Guild scheduled events need a bot user, so phase D needs the token. Phase B ships without it so the weekly post exists on Train #5 either way.
 
@@ -211,6 +229,8 @@ A Discord webhook posts messages only. Guild scheduled events need a bot user, s
 - `_grove_public_domain`: public, private, unset, archived, past and out-of-window events, inside Odoo's test runner.
 - Digest cron: `requests.post` monkeypatched; asserts URL fallback order and `allowed_mentions`.
 - Recurrence mapping: one test per row of the section 3 table, plus each fallback trigger, plus the "no future occurrence left" deletion.
+- Publisher switch: the same public event with the organizer's switch on and off, for the digest, the events cron and the phase F feed.
+- Exceptions: cancelled occurrence alerts once, moved occurrence alerts once with both times, restored occurrence alerts the reversal, pruning of past dates, no alert for a series whose rows all match the rule.
 - Events cron with a fake Discord client recording calls: create one-off, create series with rule, patch after a name change, no-op when only `write_date` changed, DST re-anchor patches start and rule start, delete on archive, delete on privacy change, hand-made event without marker untouched, recreate after 404, skip when token unset, skip when default room missing, stop on 429, fallback rolls to the next occurrence after the current one ends.
 - Phase F: tagged public, tagged private and untagged public events against `_grove_website_domain`; route shape, cache header, days cap, and no leakage of untagged events.
 - No test touches `google_calendar`.
@@ -224,6 +244,7 @@ A Discord webhook posts messages only. Guild scheduled events need a bot user, s
 | Phase B: `grove_calendar` module + digest | Ada | Train #5 freeze Fri 11-13 |
 | Phase C: compose passthrough prod + QA, module lists | Terra | Train #5 |
 | Prod `.env` written | Josh | Promote day Wed 11-18 |
+| Turn on "publishes to Discord" on Josh's user | Josh | Promote day Wed 11-18 |
 | Phase D: native events, one per series | Ada | Train #6 freeze Fri 11-27 |
 | Phase F: Website tag + `/grove/api/v1/events` | Ada | Train #6 |
 | Delete the hand-made Farm Meeting event in Discord once the synced Grove Team Meeting appears beside it | Josh | after Train #6 promote |
@@ -238,3 +259,6 @@ First live check after Train #5 promote: the Monday 11-23 digest lists the Tuesd
 4. ~~Phase D: should each Discord event's description link back to goldberrygrove.farm?~~ Answered 2026-11-07: **no**.
 5. ~~One Discord event per occurrence, or per series?~~ Answered 2026-11-08: **per series**, using Discord's recurrence rule.
 6. ~~Is the Monday post still wanted once native events exist?~~ Answered 2026-11-08: **yes**.
+7. ~~Whose events can reach Discord?~~ Answered 2026-11-08: **only Josh's for now**, via the per-user switch; he can turn it on for others later. Only what he marks Public goes.
+8. ~~Skipped or moved occurrence of a series?~~ Answered 2026-11-08: **keep the Discord series as is and alert people** in the events channel.
+9. Digest span: settled by the author as the coming Monday through Sunday (seven days), matching the "This week" heading.
