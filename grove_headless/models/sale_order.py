@@ -837,6 +837,66 @@ class SaleOrder(models.Model):
         )
         return True
 
+    def action_grove_replace_label(
+        self, tracking_number, carrier=None, actual_cost=None, service=None, source="hand_label"
+    ):
+        """Swap the order's label for a new one: a reprint, or a re-buy after the
+        first label was refunded in Pirate Ship.
+
+        Pirate Ship refunds and reprints never reach Odoo on their own, so without
+        this the order kept the dead tracking number and the carrier poll watched a
+        label that would never move. The fulfilment stage and delivery status are
+        left alone (the parcel's progress is whatever it is); the poll restarts on
+        the new label from today, and the chatter keeps the old number for the
+        record. Returns False when the number is already the order's label (a
+        re-import), True when it was replaced. Raises ``UserError`` on a pickup
+        order, an order with no label yet (record it instead), a bad tracking
+        number, or a number already on a different order."""
+        self.ensure_one()
+        if self.grove_fulfillment == "pickup":
+            raise UserError(f"{self.name}: farm-pickup orders buy no shipping label.")
+        if not self.grove_tracking_numbers:
+            raise UserError(f"{self.name} has no label yet; record it as a new label instead.")
+        tracking = (tracking_number or "").strip()
+        if not shippo_client.is_valid_tracking(tracking):
+            raise UserError(f"{self.name}: {tracking!r} is not a valid tracking number.")
+        current = (self.grove_tracking_numbers or "").split()
+        if current == [tracking]:
+            return False
+        other = (
+            self.sudo()
+            .search([("id", "!=", self.id), ("grove_tracking_numbers", "ilike", tracking)])
+            .filtered(lambda o: tracking in (o.grove_tracking_numbers or "").split())
+        )
+        if other:
+            raise UserError(f"{self.name}: {tracking} is already the label on {other[0].name}.")
+        carrier_key = self._grove_infer_carrier(tracking, fallback=carrier)
+        if not carrier_key:
+            raise UserError(f"{self.name}: could not determine the carrier for {tracking!r}; pick UPS or USPS.")
+        vals = {
+            "grove_tracking_numbers": tracking,
+            "grove_shipping_carriers": carrier_key,
+            "grove_shipping_services": service or ("ups_ground" if carrier_key == "UPS" else "usps_ground_advantage"),
+            "grove_label_urls": "",
+            "grove_label_purchased_at": fields.Datetime.now(),
+            "grove_carrier_poll_stopped": False,
+            "grove_carrier_exception_noted": False,
+        }
+        if actual_cost is not None:
+            try:
+                cost = round(float(actual_cost), 2)
+            except (TypeError, ValueError):
+                raise UserError(f"{self.name}: actual shipping cost {actual_cost!r} is not a number.")
+            if cost < 0:
+                raise UserError(f"{self.name}: actual shipping cost cannot be negative.")
+            vals["grove_actual_shipping_cost"] = cost
+        old = ", ".join(current)
+        self.write(vals)
+        self.message_post(
+            body=f"Label replaced ({source}): {old} → {tracking} ({carrier_key}). The old label is no longer tracked."
+        )
+        return True
+
     def action_grove_record_historical_label(
         self, tracking_number, carrier=None, actual_cost=0.0, service=None, label_date=None, delivered=True
     ):

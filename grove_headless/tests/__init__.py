@@ -40,6 +40,7 @@ from . import (
     test_order_digest,  # noqa: F401
     test_order_rollup,  # noqa: F401
     test_pickup_settlement,  # noqa: F401
+    test_pirateship_import,  # noqa: F401
     test_planner_catalog,  # noqa: F401
     test_planner_facts,  # noqa: F401
     test_plant_compliance,  # noqa: F401
