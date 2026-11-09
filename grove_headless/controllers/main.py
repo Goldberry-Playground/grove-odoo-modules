@@ -15,7 +15,7 @@ import psycopg2
 import requests
 from markupsafe import Markup
 from odoo import fields, http, tools
-from odoo.exceptions import UserError
+from odoo.exceptions import AccessError, UserError
 from odoo.http import Response, request
 
 from ..hooks import _get_company_wv_state_tax
@@ -236,6 +236,21 @@ def _json_response(data, status=200, headers=None):
         content_type="application/json",
         headers=headers,
     )
+
+
+def _operator_denied():
+    """Answer 403 unless the logged-in caller may run order actions, else None.
+
+    ``auth="bearer"`` accepts any valid login, and the order routes then work under
+    ``sudo()``, where the check inside the model always passes. So each route calls
+    this first, on the caller's own rights. Runs before any lookup, so a refused
+    caller can't learn which orders exist."""
+    try:
+        request.env["sale.order"]._grove_require_order_operator()
+    except AccessError:
+        _logger.warning("Order route refused for user id %s on %s", request.env.uid, request.httprequest.path)
+        return _json_response({"error": "Not allowed to change this order."}, status=403)
+    return None
 
 
 def _wants_html(httprequest):
@@ -1896,6 +1911,10 @@ class GroveHeadlessAPI(http.Controller):
         A resubmit with the same number changes nothing; a different number
         replaces the label and charges nothing more.
         """
+        denied = _operator_denied()
+        if denied:
+            return denied
+
         try:
             payload = json.loads(request.httprequest.data or "{}")
         except json.JSONDecodeError:
@@ -2006,6 +2025,10 @@ class GroveHeadlessAPI(http.Controller):
         Returns ``{newly_collected, settlement, grove_fulfillment_stage,
         grove_checkout_status}``.
         """
+        denied = _operator_denied()
+        if denied:
+            return denied
+
         try:
             payload = json.loads(request.httprequest.data or "{}")
         except json.JSONDecodeError:
@@ -2092,6 +2115,10 @@ class GroveHeadlessAPI(http.Controller):
         Body (optional): ``{"wave_ref": "<label>", "actor": "<operator id>"}`` —
         ``wave_ref`` is stamped into the chatter, ``actor`` is not used here (the
         wave note carries the audit trail)."""
+        denied = _operator_denied()
+        if denied:
+            return denied
+
         try:
             payload = json.loads(request.httprequest.data or "{}")
         except json.JSONDecodeError:
@@ -2188,6 +2215,10 @@ class GroveHeadlessAPI(http.Controller):
         200 with ``{rows: 0, batch_id: null, message}`` when nothing is eligible
         — the runner exits "nothing to ship" rather than uploading an empty
         spreadsheet. 409 when the zone's build window is not open."""
+        denied = _operator_denied()
+        if denied:
+            return denied
+
         try:
             payload = json.loads(request.httprequest.data or "{}")
         except (json.JSONDecodeError, UnicodeDecodeError):
@@ -2236,6 +2267,10 @@ class GroveHeadlessAPI(http.Controller):
         offending refs and writes nothing. Idempotent re-import: an order already
         tracked is skipped, never re-written. A batch from another tenant is 404.
         """
+        denied = _operator_denied()
+        if denied:
+            return denied
+
         company = request.website.company_id
         batch = (
             request.env["grove.label.batch"]

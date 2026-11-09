@@ -2,10 +2,11 @@
 
 Each route runs one order action for an operator and answers ``{"card": ...}``
 built by the same helper as the alert post, so the bridge re-renders from what
-Odoo says. Bearer auth and company scoping match ``order_mark_shipped``; the
-action runs under ``sudo()`` as the service user, which passes the operator guard
-(``_grove_require_order_operator``). The bridge checks DISCORD_ORDER_OPERATOR_IDS
-before forwarding, and sends the Discord user it checked as ``actor``.
+Odoo says. Bearer auth and company scoping match ``order_mark_shipped``. Bearer
+auth accepts any valid login, so each route first checks the caller with
+``_operator_denied``; the action then runs under ``sudo()``. The bridge checks
+DISCORD_ORDER_OPERATOR_IDS before forwarding, and sends the Discord user it
+checked as ``actor``.
 
 A ``UserError`` or ``ValueError`` is a 422 carrying its message, which the bridge
 shows to the operator as written. Nothing else escapes as a traceback.
@@ -23,7 +24,7 @@ from odoo.exceptions import AccessError, UserError
 from odoo.http import request
 
 from ..models.order_lanes import parse_hold_date
-from .main import ORDER_CARD_TZ, _json_response, _safe_order_card
+from .main import ORDER_CARD_TZ, _json_response, _operator_denied, _safe_order_card
 
 _logger = logging.getLogger(__name__)
 
@@ -33,6 +34,10 @@ class OrderOpsController(http.Controller):
         """Parse the body, find the website company's order, run ``action(order,
         payload, actor)`` and answer with the card, plus any keys ``action`` returns
         in a dict. ``action`` may raise."""
+        denied = _operator_denied()
+        if denied:
+            return denied
+
         try:
             payload = json.loads(request.httprequest.data or "{}")
         except json.JSONDecodeError:
@@ -164,6 +169,10 @@ class OrderOpsController(http.Controller):
         the zone's ship start); its ``error`` is shown to the operator as written.
         Not wrapped in a savepoint: each order is committed as it ships, since its
         customer email cannot be recalled. Safe to repeat."""
+        denied = _operator_denied()
+        if denied:
+            return denied
+
         try:
             payload = json.loads(request.httprequest.data or "{}")
         except json.JSONDecodeError:

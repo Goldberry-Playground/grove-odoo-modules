@@ -46,6 +46,7 @@ from . import (
     test_order_label_refunded_move,  # noqa: F401
     test_order_lanes,  # noqa: F401
     test_order_ops_api,  # noqa: F401
+    test_order_route_access,  # noqa: F401
     test_order_ops_views,  # noqa: F401
     test_order_rollup,  # noqa: F401
     test_pickup_settlement,  # noqa: F401
