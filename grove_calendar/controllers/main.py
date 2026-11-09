@@ -12,9 +12,20 @@ renders this stays with the spring 2027 visit-page work (GOL-1585).
 """
 
 import json
+import re
 
-from odoo import http, tools
+from lxml import etree, html as lxml_html
+
+from odoo import http
 from odoo.http import Response, request
+
+# ``html2plaintext`` wraps <b>/<strong>/<em>/<h*> text in Markdown-style * and /
+# markers, which would leak into this public JSON feed. We want clean prose, so
+# we take the element's raw text content instead. Block tags are turned into
+# spaces first so adjacent paragraphs don't glue their words together.
+_BLOCK_BOUNDARY_RE = re.compile(
+    r"<br\s*/?>|</(?:p|div|li|tr|h[1-6]|blockquote)\s*>", re.IGNORECASE
+)
 
 # Matches the planner catalog feed (GOL-3379): cache at the edge for 5 minutes.
 EVENTS_FEED_CACHE_CONTROL = "public, max-age=300"
@@ -50,10 +61,19 @@ def _utc_iso(value):
 
 
 def _description_text(markup):
-    """Flatten the event's HTML description to plain text, or ''."""
+    """Flatten the event's HTML description to clean plain text, or ''.
+
+    Unlike ``html2plaintext`` this leaves no Markdown-style emphasis markers, so
+    bold/italic/heading text reaches the site as plain prose.
+    """
     if not markup:
         return ""
-    return tools.html2plaintext(markup).strip()
+    spaced = _BLOCK_BOUNDARY_RE.sub(" ", str(markup))
+    try:
+        text = lxml_html.fromstring(spaced).text_content()
+    except (etree.ParserError, etree.XMLSyntaxError, ValueError):
+        text = spaced
+    return " ".join(text.split())
 
 
 def _serialize_event(event):
