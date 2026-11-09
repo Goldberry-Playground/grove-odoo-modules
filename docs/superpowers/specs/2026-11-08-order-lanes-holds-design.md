@@ -117,7 +117,7 @@ A daily cron at 8am Eastern checks each zone's spring `ship_start`, using the me
 
 Only zones with orders post. Each alert sends once per zone and year, recorded in a small new model. If the cron missed a day, it catches up on the next run. Spring `order_by` is 7 days before `ship_start`, so the 5-day count is close to final. Moved orders can still change it.
 
-**Late orders:** from the day-of alert through `ship_end`, a daily post lists any spring orders in that zone not yet in a batch: "Zone 6: 2 spring orders still need a batch." A released hold or a moved order lands here, so it can't sit silently.
+**Late orders:** from the day-of alert through `ship_end`, a daily post lists any spring orders in that zone not yet in a batch: "Zone 6: 2 spring orders still need a batch." A released hold or a moved order lands here, so it can't sit silently. The same post names orders in a built batch whose labels were never imported ("batch built, labels not imported") and orders labelled but not marked shipped ("14 labelled, press Mark all").
 
 ### 7. Orders open at launch
 

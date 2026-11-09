@@ -153,6 +153,7 @@ def build_order_card_payload(
     suggested_hold=None,
     label_cost=None,
     hold=None,
+    shipped=False,
 ):
     """Reshape the shared order-alert ``context`` (the controller's
     ``_order_alert_context``) into the JSON body the Discord bridge's
@@ -167,7 +168,8 @@ def build_order_card_payload(
 
     The lane, zone, wave, suggested hold date (ISO), label cost (number) and hold
     (``{until, reason, setBy}``) arrive as keyword arguments, already read off the
-    order by the caller; ``None`` means the order has none.
+    order by the caller; ``None`` means the order has none. ``shipped`` says the
+    box has left, so the card offers no actions.
     """
     return {
         "orderId": order_id,
@@ -188,6 +190,7 @@ def build_order_card_payload(
         "suggestedHold": suggested_hold,
         "labelCost": label_cost,
         "hold": hold,
+        "shipped": shipped,
     }
 
 

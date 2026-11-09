@@ -185,6 +185,8 @@ class GroveLabelBatch(models.Model):
     tracking_import = fields.Binary(copy=False, attachment=True)
     tracking_import_filename = fields.Char(copy=False)
     notes = fields.Text(copy=False)
+    # The "labels recorded" notice (the one with Mark all) did not reach Discord.
+    labels_notice_pending = fields.Boolean(readonly=True, copy=False)
     unacked_flagged_count = fields.Integer(
         compute="_compute_unacked_flagged",
         help="Rows flagged as likely-already-shipped (old) that have NOT been acknowledged. "
@@ -754,6 +756,7 @@ class GroveLabelBatch(models.Model):
         result = self._reconcile_rows(parsed, strict=True)
         if result["moved_to_purchased"]:
             self._announce_labels_recorded(result["labels"])
+        self._refresh_flagged_cards_after_commit(self.company_id)
         return result
 
     def _reconcile_rows(self, parsed, strict=True):
@@ -907,6 +910,7 @@ class GroveLabelBatch(models.Model):
                     "grove_label_urls": "\n".join([""] * len(tracking)),  # labels print from Pirate Ship
                     "grove_actual_shipping_cost": actual,
                     "grove_delivery_status": "label_purchased",
+                    "grove_card_needs_refresh": True,
                 }
             )
             for line, cost, carrier_key, service_token, row, _via in entries:
@@ -986,26 +990,47 @@ class GroveLabelBatch(models.Model):
             "labels": sum(len(entries) for _order, entries in orders_to_write),
         }
 
-    def _announce_labels_recorded(self, labels):
-        """Tell the order channel the zone's labels are in, with the Mark all
-        shipped button. Only zone batches post. Called after an import has
-        finished all its rows, and never raises: a failed post must not touch the
-        import (the labels are already recorded)."""
+    def _post_labels_notice(self, labels):
+        """Post "labels recorded" with the Mark all button. Returns ``"ok"``,
+        ``"unmapped"`` or ``"failed"``; only a zone batch with labels has anything to
+        say, and one without counts as ``"ok"``. Never raises."""
         self.ensure_one()
         if not self.zone or labels <= 0:
-            return
+            return "ok"
         noun = "label" if labels == 1 else "labels"
         text = f"Zone {self.zone}: {labels} {noun} recorded"
         buttons = [{"label": "Mark all shipped", "style": 3, "customId": f"ord:markall:{self.id}"}]
         try:
-            posted = self.env["sale.order"]._grove_post_notice(
+            return self.env["sale.order"]._grove_post_notice_status(
                 self.company_id, f"Zone {self.zone} labels", [text], buttons
             )
-            if not posted:
-                # A later import never re-posts, so say loudly that this one is missing.
-                _logger.error("Labels-recorded post for %s (id %s) was not delivered", self.name, self.id)
         except Exception:  # noqa: BLE001 — an announcement is best-effort
             _logger.warning("Labels-recorded post failed for batch %s", self.id, exc_info=True)
+            return "failed"
+
+    def _announce_labels_recorded(self, labels):
+        """Tell the order channel the zone's labels are in, with the Mark all
+        shipped button. Called after an import has finished all its rows, and never
+        raises: a failed post must not touch the import (the labels are already
+        recorded), so it is marked for the hourly job to send again."""
+        self.ensure_one()
+        status = self._post_labels_notice(labels)
+        if status == "failed":
+            # A later import never re-posts; only the retry will.
+            _logger.error("Labels-recorded post for %s (id %s) was not delivered", self.name, self.id)
+            self.labels_notice_pending = True
+
+    @api.model
+    def _refresh_flagged_cards_after_commit(self, company):
+        """Queue the card edits for orders an import just changed. The import's
+        own transaction charges cards, so the Discord calls wait for its commit."""
+        orders = (
+            self.env["sale.order"]
+            .sudo()
+            .search([("company_id", "=", company.id), ("grove_card_needs_refresh", "=", True)])
+        )
+        if orders:
+            orders._grove_refresh_cards_after_commit()
 
     def _zone_ship_start(self, today):
         """First ship day of this batch's zone, in the spring window the batch was
@@ -1259,11 +1284,13 @@ class GroveLabelBatch(models.Model):
                             source="Pirate Ship import",
                         ):
                             summary["replaced"].append(f"{order.name}: {old} → {row['tracking']}")
+                            order.grove_card_needs_refresh = True
                     else:
                         order.action_grove_record_hand_label(
                             row["tracking"], carrier=carrier_key, actual_cost=cost, service=service_token
                         )
                         summary["labelled"].append(order.name)
+                        order.grove_card_needs_refresh = True
                     if via_email:
                         summary["manual_review"].append(order.name)
                         order.message_post(
@@ -1361,6 +1388,7 @@ class GroveLabelBatch(models.Model):
         # Last of all, so a failed import never announces labels.
         for batch, labels in announce:
             batch._announce_labels_recorded(labels)
+        self._refresh_flagged_cards_after_commit(company)
         return summary
 
     # ── UI actions (manual path — always available, spec §B1) ───────────────

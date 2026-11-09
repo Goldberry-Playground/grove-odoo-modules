@@ -90,7 +90,7 @@ class TestZoneAlerts(GroveTaxFixtureMixin, TransactionCase):
 
     def test_orders_that_are_out_the_door_do_not_count(self):
         self._orders(2)
-        self._orders(1, grove_tracking_numbers="1Z999")
+        self._orders(1, grove_tracking_numbers="1Z999")  # labelled, still here: press Mark all
         cancelled = self._orders(1)
         cancelled.sudo().write({"state": "cancel"})
         shipped = self._orders(1)
@@ -98,8 +98,24 @@ class TestZoneAlerts(GroveTaxFixtureMixin, TransactionCase):
         self._orders(1, zone="7")  # another zone, never counted toward zone 6
         self.assertEqual(
             [t for t in self._texts(self._run(START)) if t.startswith("Zone 6")],
-            ["Zone 6 spring shipping starts today: 2 orders ready to batch."],
+            ["Zone 6 spring shipping starts today: 2 orders ready to batch, 1 labelled, press Mark all."],
         )
+
+    def test_day_of_with_only_labelled_orders_says_to_press_mark_all(self):
+        self._orders(14, grove_tracking_numbers="1Z999")
+        self.assertEqual(
+            self._texts(self._run(START)), ["Zone 6 spring shipping starts today: 14 labelled, press Mark all."]
+        )
+
+    def test_labelled_orders_on_hold_are_not_counted(self):
+        self._orders(1, held=1, grove_tracking_numbers="1Z999")
+        self._run(START).assert_not_called()
+
+    def test_labelled_orders_stay_out_of_the_five_day_warning(self):
+        self._orders(2, grove_tracking_numbers="1Z999")
+        self._run(T5).assert_not_called()
+        self._orders(1)
+        self.assertEqual(self._texts(self._run(T5)), ["Zone 6 spring shipping starts in 5 days: 1 order, 0 on hold."])
 
     def test_draft_spring_orders_are_not_counted_and_do_not_alert(self):
         self._orders(1, state="draft")

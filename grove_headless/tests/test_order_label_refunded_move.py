@@ -52,6 +52,13 @@ class TestOrderLabelRefundedMove(GroveTaxFixtureMixin, TransactionCase):
 
     # Label refunded
 
+    def test_refund_lets_the_next_label_be_tracked(self):
+        order = self._labelled()
+        order.sudo().write({"grove_carrier_poll_stopped": True, "grove_carrier_exception_noted": True})
+        order.action_grove_label_refunded("Wes")
+        self.assertFalse(order.grove_carrier_poll_stopped)
+        self.assertFalse(order.grove_carrier_exception_noted)
+
     def test_refund_clears_label_keeps_history(self):
         order = self._labelled()
         self.assertEqual(order.grove_fulfillment_stage, "label_purchased")

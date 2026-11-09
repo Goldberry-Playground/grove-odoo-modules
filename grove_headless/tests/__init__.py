@@ -39,6 +39,7 @@ from . import (
     test_mark_shipped_tracking,  # noqa: F401
     test_migration_relink_xmlids,  # noqa: F401
     test_newsletter_subscribe,  # noqa: F401
+    test_order_card_refresh,  # noqa: F401
     test_order_digest,  # noqa: F401
     test_order_hold_nudge,  # noqa: F401
     test_order_holds,  # noqa: F401

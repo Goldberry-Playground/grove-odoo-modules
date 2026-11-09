@@ -31,7 +31,8 @@ _logger = logging.getLogger(__name__)
 class OrderOpsController(http.Controller):
     def _run_order_action(self, order_id, action):
         """Parse the body, find the website company's order, run ``action(order,
-        payload, actor)`` and answer with the card. ``action`` may raise."""
+        payload, actor)`` and answer with the card, plus any keys ``action`` returns
+        in a dict. ``action`` may raise."""
         try:
             payload = json.loads(request.httprequest.data or "{}")
         except json.JSONDecodeError:
@@ -58,7 +59,7 @@ class OrderOpsController(http.Controller):
             # A savepoint, so an unexpected failure leaves nothing half-written
             # (the error response below is a normal return and would commit).
             with request.env.cr.savepoint():
-                action(order, payload, actor.strip())
+                result = action(order, payload, actor.strip())
         except AccessError:
             # Before UserError: AccessError is a subclass of it.
             _logger.warning("Order action refused for order %s", order_id, exc_info=True)
@@ -68,7 +69,8 @@ class OrderOpsController(http.Controller):
         except Exception:  # noqa: BLE001 — never leak a traceback body to the bridge
             _logger.exception("Order action failed for order %s", order_id)
             return _json_response({"error": "Something went wrong. Nothing was confirmed; try again."}, status=500)
-        return _json_response({"card": _safe_order_card(order)})
+        extra = result if isinstance(result, dict) else {}
+        return _json_response({"card": _safe_order_card(order), **extra})
 
     @http.route(
         "/grove/api/v1/orders/<int:order_id>/hold",
@@ -139,7 +141,12 @@ class OrderOpsController(http.Controller):
         csrf=False,
     )
     def order_label_refunded(self, order_id, **_kwargs):
-        return self._run_order_action(order_id, lambda order, _payload, actor: order.action_grove_label_refunded(actor))
+        def refund(order, _payload, actor):
+            boxes = len((order.grove_tracking_numbers or "").split())
+            order.action_grove_label_refunded(actor)
+            return {"boxes_cleared": boxes}
+
+        return self._run_order_action(order_id, refund)
 
     @http.route(
         "/grove/api/v1/label-batches/<int:batch_id>/mark-shipped",

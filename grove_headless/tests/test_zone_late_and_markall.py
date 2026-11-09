@@ -23,7 +23,6 @@ from odoo.tests.common import HttpCase, get_db_name
 from psycopg2 import errors
 
 POST_STATUS = "odoo.addons.grove_headless.models.sale_order_ops.SaleOrder._grove_post_notice_status"
-POST = "odoo.addons.grove_headless.models.sale_order_ops.SaleOrder._grove_post_notice"
 ZONE_6_ZIP = "26651"
 START = date(2027, 4, 5)
 BEFORE_START = date(2027, 4, 4)
@@ -151,13 +150,8 @@ class TestLateOrders(_Fixture, TransactionCase):
 
     def test_late_post_lists_unbatched_spring_orders(self):
         late = self._late(2)
-        batch = self.Batch.create(
-            {"name": "LB-LATE-1", "company_id": self.company.id, "zone": "6", "state": "exported"}
-        )
         # None of these still needs a batch.
-        self._late(1, grove_label_batch_id=batch.id)
         self._late(1, grove_hold_until=date(2027, 4, 20))
-        self._late(1, grove_tracking_numbers=_T[0])
         self._late(1, grove_fulfillment_stage="shipped")
         self._order(state="draft")
         self._late(1, grove_ship_wave="fall")
@@ -175,6 +169,55 @@ class TestLateOrders(_Fixture, TransactionCase):
         self.assertEqual(buttons, [])
         alert = self._alerts().filtered(lambda a: a.zone == "6")
         self.assertEqual((alert.year, alert.kind), (2027, "late:2027-04-05"))
+
+    def _zone_six_lines(self, day=START):
+        post = self._run(day)
+        zone_six = [c.args[2] for c in post.call_args_list if c.args[2][0].startswith("Zone 6")]
+        return zone_six[0] if zone_six else []
+
+    def test_labelled_orders_are_named_with_mark_all_from_ship_start(self):
+        labelled = self._late(2, grove_tracking_numbers=_T[0])
+        lines = self._zone_six_lines()
+        self.assertEqual(lines[0], "Zone 6: 2 labelled, press Mark all.")
+        for order in labelled:
+            self.assertIn(order.name, lines[1])
+
+    def test_labelled_orders_are_quiet_before_ship_start_and_after_ship_end(self):
+        self._late(1, grove_tracking_numbers=_T[0])
+        self.assertEqual(self._zone_six_lines(BEFORE_START), [])
+        self.assertEqual(self._zone_six_lines(END + timedelta(days=1)), [])
+
+    def test_held_or_shipped_labelled_orders_are_not_named(self):
+        self._late(1, grove_tracking_numbers=_T[0], grove_hold_until=date(2027, 4, 20))
+        self._late(1, grove_tracking_numbers=_T[1], grove_fulfillment_stage="shipped")
+        self.assertEqual(self._zone_six_lines(), [])
+
+    def test_orders_in_an_unimported_batch_are_named_as_such(self):
+        built = self._late(2)
+        batch = self._build()["batch"]
+        self.assertEqual(built.grove_label_batch_id, batch)
+        lines = self._zone_six_lines()
+        self.assertEqual(lines[0], "Zone 6: 2 spring orders, batch built, labels not imported.")
+        for order in built:
+            self.assertIn(order.name, lines[1])
+
+    def test_all_three_kinds_share_one_post_a_day(self):
+        batch = self.Batch.create(
+            {"name": "LB-LATE-1", "company_id": self.company.id, "zone": "6", "state": "exported"}
+        )
+        self._late(1)
+        self._late(1, grove_label_batch_id=batch.id)
+        self._late(1, grove_tracking_numbers=_T[0])
+        lines = self._zone_six_lines()
+        self.assertEqual(
+            [line for line in lines if not line.startswith("Orders:")],
+            [
+                "Zone 6: 1 spring order still needs a batch.",
+                "Zone 6: 1 spring order, batch built, labels not imported.",
+                "Zone 6: 1 labelled, press Mark all.",
+            ],
+        )
+        self.assertEqual(len(self._alerts().filtered(lambda a: a.zone == "6")), 1)
 
     def test_late_post_is_once_per_day_and_repeats_the_next_day(self):
         self._late(1)
@@ -252,7 +295,7 @@ class TestLabelsRecordedPost(_Fixture, TransactionCase):
             orders |= self._order()
         batch = self._build()["batch"]
 
-        with patch(POST, return_value=True) as post:
+        with patch(POST_STATUS, return_value="ok") as post:
             self._import(orders)
 
         self.assertEqual(batch.state, "purchased")
@@ -267,7 +310,7 @@ class TestLabelsRecordedPost(_Fixture, TransactionCase):
         batch = self._build()["batch"]
         with (
             patch.object(type(self.env["sale.order"]), "_grove_settle_at_ship", return_value="already_settled"),
-            patch(POST, return_value=True) as post,
+            patch(POST_STATUS, return_value="ok") as post,
         ):
             batch.import_tracking(self._csv(self._rows(order)), filename="track.csv")
         self.assertEqual(post.call_args.args[2], ["Zone 6: 1 label recorded"])
@@ -275,7 +318,7 @@ class TestLabelsRecordedPost(_Fixture, TransactionCase):
     def test_a_later_import_into_a_purchased_batch_does_not_post_again(self):
         first, second = self._order(), self._order()
         self._build()
-        with patch(POST, return_value=True) as post:
+        with patch(POST_STATUS, return_value="ok") as post:
             self._import(first)
             self._import(second, start=1)
         self.assertEqual(post.call_count, 1)
@@ -284,7 +327,7 @@ class TestLabelsRecordedPost(_Fixture, TransactionCase):
         order = self._order()
         batch = self._build()["batch"]
         order.sudo().write({"grove_hold_until": date(2027, 5, 1)})
-        with patch(POST, return_value=True) as post:
+        with patch(POST_STATUS, return_value="ok") as post:
             self._import(order)
         self.assertEqual(batch.state, "exported")
         post.assert_not_called()
@@ -293,14 +336,14 @@ class TestLabelsRecordedPost(_Fixture, TransactionCase):
         order = self._order()
         batch = self._build()["batch"]
         raw = self._csv([[f"{order.name}/1", "bad", "UPS", "9.10"]])
-        with patch(POST, return_value=True) as post, self.assertRaises(label_batch_module.LabelBatchError):
+        with patch(POST_STATUS, return_value="ok") as post, self.assertRaises(label_batch_module.LabelBatchError):
             batch.import_tracking(raw, filename="track.csv")
         post.assert_not_called()
 
     def test_failed_post_does_not_affect_the_import(self):
         order = self._order()
         batch = self._build()["batch"]
-        with patch(POST, side_effect=RuntimeError("bridge down")):
+        with patch(POST_STATUS, side_effect=RuntimeError("bridge down")):
             result = self._import(order)
         self.assertEqual(result["labelled"], [order.name])
         self.assertEqual(batch.state, "purchased")
@@ -308,7 +351,7 @@ class TestLabelsRecordedPost(_Fixture, TransactionCase):
 
     def test_batch_with_no_zone_posts_nothing(self):
         legacy = self.Batch.create({"name": "LB-LEGACY", "company_id": self.company.id})
-        with patch(POST, return_value=True) as post:
+        with patch(POST_STATUS, return_value="ok") as post:
             legacy._announce_labels_recorded(5)
         post.assert_not_called()
 
@@ -445,7 +488,7 @@ class TestMarkAllShipped(_Fixture, TransactionCase):
     def test_failed_labels_post_is_logged_as_an_error_naming_the_batch(self):
         order = self._order()
         batch = self._build()["batch"]
-        with patch(POST, return_value=False), self.assertLogs(label_batch_module._logger, "ERROR") as logs:
+        with patch(POST_STATUS, return_value="failed"), self.assertLogs(label_batch_module._logger, "ERROR") as logs:
             self._import(order)
         self.assertTrue(any(batch.name in line for line in logs.output), logs.output)
 

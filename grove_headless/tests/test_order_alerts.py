@@ -159,6 +159,14 @@ class OrderCardPayloadTests(unittest.TestCase):
             "tracking": None,
         }
 
+    def test_shipped_defaults_to_false_and_is_passed_through(self):
+        ctx = self._ctx()
+        self.assertIs(
+            oa.build_order_card_payload(order_id=1, company_id=1, is_deposit=False, context=ctx)["shipped"], False
+        )
+        shipped = oa.build_order_card_payload(order_id=1, company_id=1, is_deposit=False, context=ctx, shipped=True)
+        self.assertIs(shipped["shipped"], True)
+
     def test_reshapes_context_into_bridge_body(self):
         p = oa.build_order_card_payload(order_id=42, company_id=1, is_deposit=False, context=self._ctx())
         self.assertEqual(p["orderId"], 42)

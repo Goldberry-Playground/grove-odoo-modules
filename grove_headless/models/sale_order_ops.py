@@ -11,7 +11,7 @@ from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import requests
-from odoo import api, fields, models
+from odoo import SUPERUSER_ID, api, fields, models
 from odoo.exceptions import AccessError, UserError
 from odoo.tools import config
 
@@ -34,6 +34,8 @@ _NUDGE_FROM_HOUR = 8
 _NUDGE_MAX_FAILURES = 3
 # The late-orders post names this many orders, then says how many more.
 _LATE_NAMES_SHOWN = 20
+# A card edit can wait out one Discord rate limit inside the bridge.
+_CARD_EDIT_TIMEOUT = 15
 
 # Stages where a hold is meaningless: the order is already out the door or finished.
 # (label_purchased is deliberately allowed: a bought label can still be held.)
@@ -81,6 +83,11 @@ class SaleOrder(models.Model):
     # Stamped once the launch repost has put the new-style card in Discord for this
     # order, so a second run (or a resume after a failure) never double-posts.
     grove_card_reposted = fields.Boolean(readonly=True, copy=False)
+    # The Discord message holding this order's card, so it can be edited in place.
+    grove_card_message_id = fields.Char(readonly=True, copy=False)
+    # A label import changed this order: its card still needs editing. Set in the
+    # import's transaction, cleared when the edit lands, retried by the hourly job.
+    grove_card_needs_refresh = fields.Boolean(readonly=True, copy=False)
 
     @api.depends("grove_fulfillment", "grove_is_printify", "grove_ship_wave")
     def _compute_grove_lane(self):
@@ -211,6 +218,9 @@ class SaleOrder(models.Model):
                 "grove_label_purchased_at": False,
                 "grove_label_batch_id": False,
                 "grove_delivery_status": False,
+                # So the next label is tracked and earns its delivered email.
+                "grove_carrier_poll_stopped": False,
+                "grove_carrier_exception_noted": False,
             }
         )
         return True
@@ -391,10 +401,6 @@ class SaleOrder(models.Model):
             _logger.warning("Order notice POST failed", exc_info=True)
         return "failed"
 
-    def _grove_post_notice(self, company, title, lines, buttons):
-        """True only when the bridge accepted the notice. Never raises."""
-        return self._grove_post_notice_status(company, title, lines, buttons) == "ok"
-
     def _grove_hold_nudge_notice(self):
         """Title, lines and buttons for one due hold."""
         self.ensure_one()
@@ -486,9 +492,16 @@ class SaleOrder(models.Model):
 
     @api.model
     def _cron_grove_order_ops(self, now=None):
-        """The hourly job: hold nudges, spring zone warnings, then the late-orders
-        post. A failure in one never stops the next."""
-        for name in ("_cron_grove_order_nudges", "_cron_grove_zone_alerts", "_cron_grove_late_orders"):
+        """The hourly job: hold nudges, spring zone warnings, the late-orders post,
+        then retries of labels-recorded notices and card edits that failed. A
+        failure in one never stops the next."""
+        for name in (
+            "_cron_grove_order_nudges",
+            "_cron_grove_zone_alerts",
+            "_cron_grove_late_orders",
+            "_cron_grove_labels_notices",
+            "_cron_grove_card_refresh",
+        ):
             try:
                 getattr(self, name)(now=now)
             except Exception:  # noqa: BLE001 — the next step must still run
@@ -497,9 +510,10 @@ class SaleOrder(models.Model):
                     self.env.cr.rollback()
 
     @api.model
-    def _grove_zone_alert_text(self, kind, zone, today, ship_start, total, held):
+    def _grove_zone_alert_text(self, kind, zone, today, ship_start, total, held, labelled=0):
         """The one-line warning for a zone, with the true number of days when a
-        missed run is catching up."""
+        missed run is catching up. From the start day on it also counts the orders
+        labelled but not marked shipped, and says what to do about them."""
 
         def n(count, noun):
             return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
@@ -511,7 +525,12 @@ class SaleOrder(models.Model):
             when = "starts today"
         else:
             when = f"started {n((today - ship_start).days, 'day')} ago"
-        return f"Zone {zone} spring shipping {when}: {n(total - held, 'order')} ready to batch."
+        parts = []
+        if total - held:
+            parts.append(f"{n(total - held, 'order')} ready to batch")
+        if labelled:
+            parts.append(f"{labelled} labelled, press Mark all")
+        return f"Zone {zone} spring shipping {when}: {', '.join(parts)}."
 
     @api.model
     def _cron_grove_zone_alerts(self, now=None):
@@ -536,15 +555,17 @@ class SaleOrder(models.Model):
             [
                 ("grove_lane", "=", "spring"),
                 ("grove_usda_zone", "!=", False),
-                ("grove_tracking_numbers", "=", False),
                 ("state", "in", ["sale", "done"]),
-                ("grove_fulfillment_stage", "not in", ["shipped", "delivered", "collected"]),
+                ("grove_fulfillment_stage", "not in", ["shipped", "delivered", "collected", "cancelled"]),
             ]
         )
-        # (company, zone) -> [orders not yet out the door, of which on hold]
+        # (company, zone) -> [orders with no label, of which on hold, labelled and free to ship]
         counts = {}
         for order in orders:
-            entry = counts.setdefault((order.company_id.id, order.grove_usda_zone), [0, 0])
+            entry = counts.setdefault((order.company_id.id, order.grove_usda_zone), [0, 0, 0])
+            if (order.grove_tracking_numbers or "").strip():
+                entry[2] += 0 if order.grove_hold_until else 1
+                continue
             entry[0] += 1
             entry[1] += 1 if order.grove_hold_until else 0
 
@@ -552,7 +573,7 @@ class SaleOrder(models.Model):
         in_test = bool(config["test_enable"])
         failures = 0
         unmapped = set()
-        for (company_id, zone), (total, held) in sorted(counts.items()):
+        for (company_id, zone), (total, held, labelled) in sorted(counts.items()):
             if company_id in unmapped:
                 continue
             company = companies.browse(company_id)
@@ -562,14 +583,15 @@ class SaleOrder(models.Model):
                 kind = zone_alert_kind(today, ship_start, ship_end)
                 if not kind:
                     continue
-                # Day-of counts orders ready to batch, so a zone whose orders are all
-                # on hold has nothing to say yet.
-                if kind == "day_of" and total - held <= 0:
+                # The 5-day warning counts orders still needing a label. Day-of counts
+                # those ready to batch and those to mark shipped, so a zone whose
+                # orders are all on hold has nothing to say yet.
+                if not (total if kind == "t5" else total - held + labelled):
                     continue
                 key = [("company_id", "=", company_id), ("zone", "=", zone), ("year", "=", ship_start.year)]
                 if Alert.search_count([*key, ("kind", "=", kind)]):
                     continue
-                text = self._grove_zone_alert_text(kind, zone, today, ship_start, total, held)
+                text = self._grove_zone_alert_text(kind, zone, today, ship_start, total, held, labelled)
                 status = self._grove_post_notice_status(company, f"Zone {zone} spring shipping", [text], [])
                 if status == "ok":
                     failures = 0
@@ -596,9 +618,8 @@ class SaleOrder(models.Model):
 
     @api.model
     def _grove_late_orders(self, companies):
-        """Confirmed spring-lane orders that still need a batch: no tracking, not
-        on hold, not finished, and not linked to an open or exported batch. An
-        order that re-entered from a purchased batch with no label counts."""
+        """Confirmed spring-lane orders that have not left: not on hold and not
+        finished. ``_grove_late_kind`` says what each one is waiting for."""
         return (
             self.sudo()
             .with_context(allowed_company_ids=companies.ids)
@@ -606,20 +627,27 @@ class SaleOrder(models.Model):
                 [
                     ("grove_lane", "=", "spring"),
                     ("state", "in", ["sale", "done"]),
-                    ("grove_tracking_numbers", "in", [False, ""]),
                     ("grove_hold_until", "=", False),
                     ("grove_fulfillment_stage", "not in", ["shipped", "delivered", "collected", "cancelled"]),
-                    "|",
-                    ("grove_label_batch_id", "=", False),
-                    ("grove_label_batch_id.state", "not in", ["open", "exported"]),
                 ]
             )
         )
 
+    def _grove_late_kind(self):
+        """What a late spring order is waiting for: ``labelled`` (press Mark all),
+        ``built`` (a batch is open or exported but its labels are not imported) or
+        ``batch`` (it needs one; an order back from a purchased batch with no
+        label counts)."""
+        self.ensure_one()
+        if (self.grove_tracking_numbers or "").strip():
+            return "labelled"
+        return "built" if self.grove_label_batch_id.state in ("open", "exported") else "batch"
+
     @api.model
     def _cron_grove_late_orders(self, now=None):
         """Hourly: from 8am New York on, once per New York day, name the spring
-        orders still waiting for a batch.
+        orders that have not left: those still needing a batch, those in a batch
+        whose labels were never imported, and those labelled but not marked shipped.
 
         One post per company and zone from the zone's ship start through its ship
         end ("Zone 6: 2 spring orders still need a batch."), recorded as
@@ -651,32 +679,40 @@ class SaleOrder(models.Model):
                 return None
             return lead_open + timedelta(days=SPRING_BUILD_LEAD_DAYS), ship_end
 
-        # What to post: (company id, zone key, headline, order names, window year).
+        # What to post: (company id, zone key, [(headline, order names)], window year).
         posts = []
         by_zone = {}
         no_zone = {}
         for order in orders:
+            kind = order._grove_late_kind()
             if order.grove_usda_zone:
-                by_zone.setdefault((order.company_id.id, order.grove_usda_zone), []).append(order.name)
-            else:
+                by_zone.setdefault((order.company_id.id, order.grove_usda_zone), {}).setdefault(kind, []).append(
+                    order.name
+                )
+            elif kind == "batch":
                 no_zone.setdefault(order.company_id.id, []).append(order.name)
-        for (company_id, zone), names in sorted(by_zone.items()):
+        for (company_id, zone), kinds in sorted(by_zone.items()):
             span = window(zone)
             if span and span[0] <= today <= span[1]:
-                posts.append((company_id, zone, self._grove_late_text(zone, names), names, span[0].year))
+                sections = [
+                    (self._grove_late_text(zone, kinds[kind], kind), kinds[kind])
+                    for kind in ("batch", "built", "labelled")
+                    if kind in kinds
+                ]
+                posts.append((company_id, zone, sections, span[0].year))
         if no_zone:
             # The zone is the thing that is missing, so any open spring window counts.
             open_windows = [w for w in (window(z) for z in dict(USDA_ZONE_SELECTION)) if w and w[0] <= today <= w[1]]
             if open_windows:
                 for company_id, names in sorted(no_zone.items()):
-                    posts.append((company_id, "none", self._grove_late_text(None, names), names, today.year))
+                    posts.append((company_id, "none", [(self._grove_late_text(None, names), names)], today.year))
 
         Alert = self.env["grove.zone.alert"].sudo()
         kind = f"late:{today.isoformat()}"
         in_test = bool(config["test_enable"])
         failures = 0
         unmapped = set()
-        for company_id, zone, headline, names, year in posts:
+        for company_id, zone, sections, year in posts:
             if company_id in unmapped:
                 continue
             company = companies.browse(company_id)
@@ -685,11 +721,14 @@ class SaleOrder(models.Model):
                     [("company_id", "=", company_id), ("zone", "=", zone), ("year", "=", year), ("kind", "=", kind)]
                 ):
                     continue
-                shown = ", ".join(names[:_LATE_NAMES_SHOWN])
-                if len(names) > _LATE_NAMES_SHOWN:
-                    shown += f" and {len(names) - _LATE_NAMES_SHOWN} more"
+                lines = []
+                for headline, names in sections:
+                    shown = ", ".join(names[:_LATE_NAMES_SHOWN])
+                    if len(names) > _LATE_NAMES_SHOWN:
+                        shown += f" and {len(names) - _LATE_NAMES_SHOWN} more"
+                    lines += [headline, f"Orders: {shown}"]
                 title = f"Zone {zone} late orders" if zone != "none" else "Spring orders with no zone"
-                status = self._grove_post_notice_status(company, title, [headline, f"Orders: {shown}"], [])
+                status = self._grove_post_notice_status(company, title, lines, [])
                 if status == "ok":
                     failures = 0
                     Alert.create({"company_id": company_id, "zone": zone, "year": year, "kind": kind})
@@ -714,10 +753,15 @@ class SaleOrder(models.Model):
                 break
 
     @api.model
-    def _grove_late_text(self, zone, names):
-        """Headline for the late-orders post. ``zone`` None means the orders have none."""
+    def _grove_late_text(self, zone, names, kind="batch"):
+        """One headline for the late-orders post. ``zone`` None means the orders
+        have none; ``kind`` is what they are waiting for (``_grove_late_kind``)."""
         count = len(names)
         noun = "spring order" if count == 1 else "spring orders"
+        if kind == "labelled":
+            return f"Zone {zone}: {count} labelled, press Mark all."
+        if kind == "built":
+            return f"Zone {zone}: {count} {noun}, batch built, labels not imported."
         if zone is None:
             verb = "has" if count == 1 else "have"
             return (
@@ -726,6 +770,124 @@ class SaleOrder(models.Model):
             )
         verb = "needs" if count == 1 else "need"
         return f"Zone {zone}: {count} {noun} still {verb} a batch."
+
+    @api.model
+    def _cron_grove_labels_notices(self, now=None):
+        """Hourly: send again any "labels recorded" notice that failed. Each batch
+        is committed once its notice is delivered, since a post cannot be undone;
+        a company with no order channel counts as cleared, and the run stops after
+        a few failures in a row. ``now`` is unused (the hourly job passes it)."""
+        batches = self.env["grove.label.batch"].sudo().search([("labels_notice_pending", "=", True)])
+        in_test = bool(config["test_enable"])
+        failures = 0
+        for batch in batches:
+            try:
+                status = batch._post_labels_notice(len(batch.line_ids.filtered("tracking_number")))
+                if status == "failed":
+                    failures += 1
+                else:
+                    failures = 0
+                    batch.write({"labels_notice_pending": False})
+                    if not in_test:
+                        self.env.cr.commit()
+            except Exception:  # noqa: BLE001 — keep retrying the other batches
+                _logger.exception("Labels-recorded retry failed for batch %s", batch.id)
+                failures += 1
+            if failures >= _NUDGE_MAX_FAILURES:
+                _logger.error("Labels-recorded retries stopped after %s consecutive failures", failures)
+                break
+
+    def _grove_edit_card_status(self):
+        """Ask the bridge to redraw this order's Discord card from its current
+        state. Returns ``"ok"``, ``"gone"`` (Discord no longer has the message),
+        ``"unmapped"`` (the company has no order channel) or ``"failed"`` (anything
+        else, worth retrying). Never raises."""
+        self.ensure_one()
+        from ..controllers import main as controllers
+
+        try:
+            secret = os.environ.get("ORDER_ALERT_SECRET", "")
+            base = os.environ.get("DISCORD_BRIDGE_BASE_URL", "").rstrip("/")
+            if not secret or not base:
+                _logger.warning("Card for %s not refreshed: the Discord bridge is not configured", self.name)
+                return "failed"
+            with self.env.cr.savepoint():
+                card = controllers._order_card_payload(self.with_context(tz=controllers.ORDER_CARD_TZ))
+            resp = requests.post(
+                f"{base}/orders/alert/edit",
+                json={**card, "messageId": self.grove_card_message_id},
+                headers={"X-Order-Alert-Secret": secret},
+                timeout=_CARD_EDIT_TIMEOUT,
+            )
+        except Exception:  # noqa: BLE001 — a card edit is best-effort and is retried
+            _logger.warning("Card refresh failed for %s", self.name, exc_info=True)
+            return "failed"
+        if resp.status_code == 200:
+            return "ok"
+        if resp.status_code == 410:
+            return "gone"
+        if resp.status_code == 422:
+            return "unmapped"
+        _logger.warning("Card refresh for %s returned %s", self.name, resp.status_code)
+        return "failed"
+
+    def _grove_refresh_cards(self):
+        """Edit each flagged order's card and clear its flag. An order with no
+        stored message id, a card Discord has lost, or a company with no channel
+        cannot be helped by a retry, so those are logged and cleared too. Commits
+        per order and stops after a few failures in a row, leaving the rest flagged
+        for the hourly job. Must not run in a transaction that charges a card."""
+        in_test = bool(config["test_enable"])
+        failures = 0
+        for order in self:
+            try:
+                if order.grove_card_message_id:
+                    status = order._grove_edit_card_status()
+                else:
+                    status = "no_card"
+                    _logger.warning("%s has no Discord card on record to refresh; a repost gives it one", order.name)
+                if status == "failed":
+                    failures += 1
+                else:
+                    failures = 0
+                    if status == "gone":
+                        _logger.warning("Discord no longer has the card for %s; stopped refreshing it", order.name)
+                    elif status == "unmapped":
+                        _logger.error("Card for %s not refreshed: its company has no order channel", order.name)
+                    order.write({"grove_card_needs_refresh": False})
+                    if not in_test:
+                        self.env.cr.commit()
+            except Exception:  # noqa: BLE001 — keep refreshing the other cards
+                _logger.exception("Card refresh failed for order %s", order.id)
+                failures += 1
+            if failures >= _NUDGE_MAX_FAILURES:
+                _logger.error("Card refresh stopped after %s consecutive failures; will retry next run", failures)
+                break
+
+    def _grove_refresh_cards_after_commit(self):
+        """Edit these orders' cards once the current transaction has committed, on
+        a cursor of their own, so the Discord calls sit outside whatever charged
+        them. A failure leaves the flags for the hourly job."""
+        order_ids = self.ids
+        registry = self.env.registry
+
+        def refresh():
+            try:
+                with registry.cursor() as cr:
+                    api.Environment(cr, SUPERUSER_ID, {})["sale.order"].browse(order_ids)._grove_refresh_cards()
+            except Exception:  # noqa: BLE001 — the import is committed; the hourly job retries
+                _logger.exception("Card refresh after import failed")
+
+        self.env.cr.postcommit.add(refresh)
+
+    @api.model
+    def _cron_grove_card_refresh(self, now=None):
+        """Hourly: retry card edits that have not landed. ``now`` is unused (the
+        hourly job passes it)."""
+        companies = self.env["res.company"].sudo().search([])
+        self.sudo().with_context(allowed_company_ids=companies.ids).search(
+            [("grove_card_needs_refresh", "=", True)]
+        )._grove_refresh_cards()
 
     @api.model
     def _grove_repost_open_order_cards(self):

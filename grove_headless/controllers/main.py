@@ -6852,16 +6852,15 @@ def _notify_discord(message, channel=None):
 def _order_alert_context(order):
     """Primitive values the pure alert formatters need, read off the order once
     (GOL-1933). Kept together so the Discord ping and the merchant email describe
-    the same order identically. Carrier is read defensively so the alert lights
-    up automatically once GOL-1906 persists it — no field reference that would
-    break on origin/main where it does not yet exist."""
+    the same order identically. Carrier names each carrier once, in box order."""
     lines = [
         (line.product_id.display_name, line.product_uom_qty)
         for line in order.order_line
         if not line.display_type and line.product_id and line.product_id.product_tmpl_id.type != "service"
     ]
     tracking = (order.grove_tracking_numbers or "").strip().replace("\n", ", ") or None
-    carrier = getattr(order, "grove_carrier", False) or None
+    carriers = [name.strip() for name in (order.grove_shipping_carriers or "").splitlines() if name.strip()]
+    carrier = ", ".join(dict.fromkeys(carriers)) or None
     return {
         "order_ref": order.name,
         "customer": order.partner_id.name,
@@ -6929,6 +6928,7 @@ def _order_card_payload(order, is_deposit=None, context=None):
         suggested_hold=suggested,
         label_cost=order.grove_actual_shipping_cost if order.grove_actual_shipping_cost else None,
         hold=hold,
+        shipped=order.grove_fulfillment_stage in ("shipped", "delivered"),
     )
 
 
@@ -6939,12 +6939,28 @@ ORDER_CARD_TZ = "America/New_York"
 def _safe_order_card(order):
     """The card for a response sent after an action already succeeded. If building
     it fails, log it and return None: the action's result stands, so the caller
-    answers success with ``card: null`` and never reports a failure."""
+    answers success with ``card: null`` and never reports a failure. The savepoint
+    keeps a database error here from aborting the transaction that holds the
+    action."""
     try:
-        return _order_card_payload(order.with_context(tz=ORDER_CARD_TZ))
+        with order.env.cr.savepoint():
+            return _order_card_payload(order.with_context(tz=ORDER_CARD_TZ))
     except Exception:  # noqa: BLE001 — the action already succeeded; never fail the reply
         _logger.exception("Order card build failed for %s", order.name)
         return None
+
+
+def _store_card_message_id(order, response):
+    """Keep the Discord message id the bridge answered with, so the card can be
+    edited in place later. The post already happened, so a problem here is logged
+    and never reported as a failed post."""
+    try:
+        message_id = response.json().get("message_id")
+        if isinstance(message_id, str) and message_id.isdigit():
+            with order.env.cr.savepoint():
+                order.sudo().write({"grove_card_message_id": message_id})
+    except Exception:  # noqa: BLE001 — the card is posted; only a later edit is lost
+        _logger.warning("Could not store the Discord card id for %s", order.name, exc_info=True)
 
 
 def _post_order_alert_card(order, context, is_deposit):
@@ -6975,6 +6991,7 @@ def _post_order_alert_card(order, context, is_deposit):
         _logger.warning("Order-card bridge POST failed for %s", order.name, exc_info=True)
         return False
     if resp.status_code == 200:
+        _store_card_message_id(order, resp)
         return True
     # 422 (no channel mapped for this company_id yet), 401, or 5xx: log it and
     # let the caller fall back to the plain ping so staff still get *some* alert.

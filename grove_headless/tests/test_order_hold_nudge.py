@@ -156,19 +156,18 @@ class TestOrderHoldNudge(GroveTaxFixtureMixin, TransactionCase):
         mod = "odoo.addons.grove_headless.models.sale_order_ops"
         with patch.dict("os.environ", {"ORDER_ALERT_SECRET": "s", "DISCORD_BRIDGE_BASE_URL": "http://bridge"}):
             with patch(f"{mod}.requests.post", side_effect=OSError("down")):
-                self.assertFalse(order._grove_post_notice(order.company_id, "t", ["l"], []))
+                self.assertEqual(order._grove_post_notice_status(order.company_id, "t", ["l"], []), "failed")
             with patch(f"{mod}.requests.post") as ok:
                 ok.return_value.status_code = 200
-                self.assertTrue(order._grove_post_notice(order.company_id, "t", ["l"], []))
+                self.assertEqual(order._grove_post_notice_status(order.company_id, "t", ["l"], []), "ok")
                 self.assertEqual(ok.call_args.args[0], "http://bridge/orders/notice")
                 self.assertEqual(ok.call_args.kwargs["json"]["companyId"], order.company_id.id)
                 self.assertEqual(ok.call_args.kwargs["headers"], {"X-Order-Alert-Secret": "s"})
             with patch(f"{mod}.requests.post") as bad:
                 bad.return_value.status_code = 422
-                self.assertFalse(order._grove_post_notice(order.company_id, "t", ["l"], []))
                 self.assertEqual(order._grove_post_notice_status(order.company_id, "t", ["l"], []), "unmapped")
         with patch.dict("os.environ", {"ORDER_ALERT_SECRET": "", "DISCORD_BRIDGE_BASE_URL": ""}):
-            self.assertFalse(order._grove_post_notice(order.company_id, "t", ["l"], []))
+            self.assertEqual(order._grove_post_notice_status(order.company_id, "t", ["l"], []), "failed")
 
     def test_earlier_stamps_survive_a_later_failure(self):
         orders = [self._held_order() for _ in range(2)]

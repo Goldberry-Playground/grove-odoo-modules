@@ -160,6 +160,14 @@ class TestOrderOpsApi(GroveTaxFixtureMixin, HttpCase):
         self.assertIsNone(card["labelCost"])
         self.assertFalse(order.grove_tracking_numbers)
 
+    def test_label_refunded_route_says_how_many_boxes_were_cleared(self):
+        order = self._order()
+        order.action_grove_record_hand_label(UPS, actual_cost=9.0)
+        order.sudo().write({"grove_tracking_numbers": f"{UPS}\n1Z999AA10123456791"})
+        response = self._post(order, "label-refunded", {"actor": "wes"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json()["boxes_cleared"], 2)
+
     def test_label_refunded_without_label_is_422(self):
         order = self._order()
         self.assertEqual(self._post(order, "label-refunded", {"actor": "wes"}).status_code, 422)
