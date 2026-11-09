@@ -39,6 +39,26 @@ class CalendarRecurrence(models.Model):
         compute="_compute_discord_url",
         help="Link to the Discord scheduled event for this series, when one exists.",
     )
+    discord_alerted_exceptions = fields.Char(
+        string="Discord Alerted Exceptions",
+        readonly=True,
+        copy=False,
+        help=(
+            "JSON list of ISO dates of this series' original occurrences already "
+            "announced as skipped/moved in the events channel (phase D, spec D.7). "
+            "The dedupe for one-alert-per-exception; past dates are pruned each run."
+        ),
+    )
+    discord_fallback_warned = fields.Char(
+        string="Discord Fallback Warned On",
+        readonly=True,
+        copy=False,
+        help=(
+            "ISO date of the last ops warning that this series repeats in a way "
+            "Discord cannot express (phase D, spec D.3). Dedupes the warning to "
+            "once per series per day."
+        ),
+    )
 
     @api.depends("discord_event_id")
     def _compute_discord_url(self):
@@ -50,3 +70,12 @@ class CalendarRecurrence(models.Model):
                 recurrence.discord_url = f"https://discord.com/events/{guild}/{recurrence.discord_event_id}"
             else:
                 recurrence.discord_url = False
+
+    def unlink(self):
+        """Delete the series' Discord event at once, so a removed series does not
+        linger for up to 15 minutes before the sweep (spec D.6 step 5)."""
+        discord = self.env["grove.calendar.discord"]
+        for recurrence in self:
+            if recurrence.discord_event_id:
+                discord._delete_discord_event(recurrence.discord_event_id)
+        return super().unlink()

@@ -56,6 +56,17 @@ class CalendarEvent(models.Model):
             else:
                 event.discord_url = False
 
+    def unlink(self):
+        """Delete a one-off/fallback's Discord event at once on removal, so a
+        deleted meeting does not wait for the 15-minute sweep (spec D.6 step 5).
+        Series events are handled on ``calendar.recurrence``; here only rows that
+        themselves carry a ``discord_event_id`` are forwarded."""
+        discord = self.env["grove.calendar.discord"]
+        for event in self:
+            if event.discord_event_id:
+                discord._delete_discord_event(event.discord_event_id)
+        return super().unlink()
+
     @api.model
     def _grove_public_domain(self, window_days):
         """Domain selecting the public events that may reach Discord.

@@ -120,4 +120,6 @@ collect_ignore_glob = [
     # install-smoke-test, not pytest. The pure formatter test stays collected.
     "grove_calendar/tests/test_grove_public_domain.py",
     "grove_calendar/tests/test_digest_cron.py",
+    "grove_calendar/tests/test_discord_events_cron.py",
+    "grove_calendar/tests/test_discord_exceptions.py",
 ]
