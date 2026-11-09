@@ -17,7 +17,13 @@ from odoo.tools import config
 
 from .order_lanes import clean_tracking, lane_for, suggest_hold_date, zone_alert_kind
 from .shipping_boxes import dormancy_window
-from .shipping_calendar import SPRING_BUILD_LEAD_DAYS, merge_calendar_override, preorder_waves, spring_build_window
+from .shipping_calendar import (
+    SPRING_BUILD_LEAD_DAYS,
+    USDA_ZONE_SELECTION,
+    merge_calendar_override,
+    preorder_waves,
+    spring_build_window,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -26,6 +32,8 @@ _NUDGE_TZ = ZoneInfo("America/New_York")
 _NUDGE_FROM_HOUR = 8
 # A dead bridge should cost a few timeouts, not one per order.
 _NUDGE_MAX_FAILURES = 3
+# The late-orders post names this many orders, then says how many more.
+_LATE_NAMES_SHOWN = 20
 
 # Stages where a hold is meaningless: the order is already out the door or finished.
 # (label_purchased is deliberately allowed: a bought label can still be held.)
@@ -452,9 +460,9 @@ class SaleOrder(models.Model):
 
     @api.model
     def _cron_grove_order_ops(self, now=None):
-        """The hourly job: hold nudges, then spring zone warnings. A failure in
-        the first never stops the second."""
-        for name in ("_cron_grove_order_nudges", "_cron_grove_zone_alerts"):
+        """The hourly job: hold nudges, spring zone warnings, then the late-orders
+        post. A failure in one never stops the next."""
+        for name in ("_cron_grove_order_nudges", "_cron_grove_zone_alerts", "_cron_grove_late_orders"):
             try:
                 getattr(self, name)(now=now)
             except Exception:  # noqa: BLE001 — the next step must still run
@@ -559,3 +567,136 @@ class SaleOrder(models.Model):
             if failures >= _NUDGE_MAX_FAILURES:
                 _logger.error("Zone alerts stopped after %s consecutive failures; will retry next run", failures)
                 break
+
+    @api.model
+    def _grove_late_orders(self, companies):
+        """Confirmed spring-lane orders that still need a batch: no tracking, not
+        on hold, not finished, and not linked to an open or exported batch. An
+        order that re-entered from a purchased batch with no label counts."""
+        return (
+            self.sudo()
+            .with_context(allowed_company_ids=companies.ids)
+            .search(
+                [
+                    ("grove_lane", "=", "spring"),
+                    ("state", "in", ["sale", "done"]),
+                    ("grove_tracking_numbers", "in", [False, ""]),
+                    ("grove_hold_until", "=", False),
+                    ("grove_fulfillment_stage", "not in", ["shipped", "delivered", "collected", "cancelled"]),
+                    "|",
+                    ("grove_label_batch_id", "=", False),
+                    ("grove_label_batch_id.state", "not in", ["open", "exported"]),
+                ]
+            )
+        )
+
+    @api.model
+    def _cron_grove_late_orders(self, now=None):
+        """Hourly: from 8am New York on, once per New York day, name the spring
+        orders still waiting for a batch.
+
+        One post per company and zone from the zone's ship start through its ship
+        end ("Zone 6: 2 spring orders still need a batch."), recorded as
+        ``late:YYYY-MM-DD`` after the bridge accepted it. Spring orders with no
+        zone can't be in any batch, so they get one company-level post a day
+        (stored under zone ``none``) while any zone's spring window is open.
+        Zero orders posts and records nothing. Same failure handling as the zone
+        alerts. ``now`` is for tests."""
+        now = now or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        local = now.astimezone(_NUDGE_TZ)
+        if local.hour < _NUDGE_FROM_HOUR:
+            return
+        today = local.date()
+        from ..controllers.main import _parse_calendar_override
+
+        calendar = merge_calendar_override(_parse_calendar_override(self.env))
+        companies = self.env["res.company"].sudo().search([])
+        orders = self._grove_late_orders(companies)
+
+        def window(zone):
+            """(ship_start, ship_end) of the zone's window around today; None when the
+            calendar has no such zone."""
+            try:
+                lead_open, ship_end = spring_build_window(int(zone), today, calendar)
+            except (KeyError, ValueError):
+                _logger.warning("Late orders: zone %s is not in the shipping calendar", zone)
+                return None
+            return lead_open + timedelta(days=SPRING_BUILD_LEAD_DAYS), ship_end
+
+        # What to post: (company id, zone key, headline, order names, window year).
+        posts = []
+        by_zone = {}
+        no_zone = {}
+        for order in orders:
+            if order.grove_usda_zone:
+                by_zone.setdefault((order.company_id.id, order.grove_usda_zone), []).append(order.name)
+            else:
+                no_zone.setdefault(order.company_id.id, []).append(order.name)
+        for (company_id, zone), names in sorted(by_zone.items()):
+            span = window(zone)
+            if span and span[0] <= today <= span[1]:
+                posts.append((company_id, zone, self._grove_late_text(zone, names), names, span[0].year))
+        if no_zone:
+            # The zone is the thing that is missing, so any open spring window counts.
+            open_windows = [w for w in (window(z) for z in dict(USDA_ZONE_SELECTION)) if w and w[0] <= today <= w[1]]
+            if open_windows:
+                for company_id, names in sorted(no_zone.items()):
+                    posts.append((company_id, "none", self._grove_late_text(None, names), names, today.year))
+
+        Alert = self.env["grove.zone.alert"].sudo()
+        kind = f"late:{today.isoformat()}"
+        in_test = bool(config["test_enable"])
+        failures = 0
+        unmapped = set()
+        for company_id, zone, headline, names, year in posts:
+            if company_id in unmapped:
+                continue
+            company = companies.browse(company_id)
+            try:
+                if Alert.search_count(
+                    [("company_id", "=", company_id), ("zone", "=", zone), ("year", "=", year), ("kind", "=", kind)]
+                ):
+                    continue
+                shown = ", ".join(names[:_LATE_NAMES_SHOWN])
+                if len(names) > _LATE_NAMES_SHOWN:
+                    shown += f" and {len(names) - _LATE_NAMES_SHOWN} more"
+                title = f"Zone {zone} late orders" if zone != "none" else "Spring orders with no zone"
+                status = self._grove_post_notice_status(company, title, [headline, f"Orders: {shown}"], [])
+                if status == "ok":
+                    failures = 0
+                    Alert.create({"company_id": company_id, "zone": zone, "year": year, "kind": kind})
+                    # A Discord post cannot be undone, so keep its record even if a
+                    # later post fails and the run rolls back.
+                    if not in_test:
+                        self.env.cr.commit()
+                elif status == "unmapped":
+                    unmapped.add(company_id)
+                    _logger.error(
+                        "Late-order posts skipped for company %s (id %s): the bridge has no order channel for it",
+                        company.name,
+                        company_id,
+                    )
+                else:
+                    failures += 1
+            except Exception:  # noqa: BLE001 — keep posting the other zones
+                _logger.exception("Late-order post failed for company %s zone %s", company_id, zone)
+                failures += 1
+            if failures >= _NUDGE_MAX_FAILURES:
+                _logger.error("Late-order posts stopped after %s consecutive failures; will retry next run", failures)
+                break
+
+    @api.model
+    def _grove_late_text(self, zone, names):
+        """Headline for the late-orders post. ``zone`` None means the orders have none."""
+        count = len(names)
+        noun = "spring order" if count == 1 else "spring orders"
+        if zone is None:
+            verb = "has" if count == 1 else "have"
+            return (
+                f"{count} {noun} {verb} no zone, so can't be put in a batch. "
+                "The zone is unknown and needs fixing on the order."
+            )
+        verb = "needs" if count == 1 else "need"
+        return f"Zone {zone}: {count} {noun} still {verb} a batch."

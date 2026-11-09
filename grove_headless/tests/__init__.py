@@ -85,4 +85,5 @@ from . import (
     test_usda_zone_filters,  # noqa: F401
     test_wv_taxes,  # noqa: F401
     test_zone_alerts,  # noqa: F401
+    test_zone_late_and_markall,  # noqa: F401
 )

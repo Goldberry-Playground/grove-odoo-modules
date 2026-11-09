@@ -26,13 +26,20 @@ import csv
 import io
 import logging
 import re
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 from odoo import api, fields, models
 from odoo.exceptions import AccessError, UserError
+from odoo.tools import config
 
 from .shipping_boxes import BOXES
-from .shipping_calendar import USDA_ZONE_SELECTION, merge_calendar_override, spring_build_window
+from .shipping_calendar import (
+    SPRING_BUILD_LEAD_DAYS,
+    USDA_ZONE_SELECTION,
+    merge_calendar_override,
+    spring_build_window,
+)
 from .shipping_zones import box_rate, box_service_title
 
 _logger = logging.getLogger(__name__)
@@ -103,6 +110,12 @@ REFUNDED_STATUS_RE = re.compile(r"refund|void|cancel", re.IGNORECASE)
 # Magic bytes: xlsx is a zip (PK\x03\x04); legacy .xls is an OLE2 compound file.
 _XLSX_MAGIC = b"PK\x03\x04"
 _XLS_MAGIC = b"\xd0\xcf\x11\xe0"
+
+
+# The shop's day: Mark all shipped waits for the zone's start date in New York.
+_SHOP_TZ = ZoneInfo("America/New_York")
+# Stages Mark all shipped leaves alone because the box has already left.
+_SHIPPED_STAGES = ("shipped", "delivered")
 
 
 class LabelBatchError(UserError):
@@ -734,7 +747,10 @@ class GroveLabelBatch(models.Model):
         if filename:
             self.tracking_import = base64.b64encode(raw_bytes)
             self.tracking_import_filename = filename
-        return self._reconcile_rows(parsed, strict=True)
+        result = self._reconcile_rows(parsed, strict=True)
+        if result["moved_to_purchased"]:
+            self._announce_labels_recorded(result["labels"])
+        return result
 
     def _reconcile_rows(self, parsed, strict=True):
         """Match parsed export rows to this batch's lines and write the complete
@@ -852,6 +868,7 @@ class GroveLabelBatch(models.Model):
         # ── All rows valid: write. ──────────────────────────────────────────
         orders_advanced = 0
         newly_total = 0.0
+        was_purchased = self.state == "purchased"
         manual_review = []  # grove_refs reconciled via the weaker email fallback
         warnings = []  # non-fatal already-labelled notices (GOL-3083 item 3)
         prior_by_email = self._recent_labelled_by_email([o for o, _e in orders_to_write])
@@ -954,7 +971,107 @@ class GroveLabelBatch(models.Model):
             "rows": len(clean),
             "manual_review": sorted(manual_review),
             "warnings": warnings,
+            # For the caller to announce once it has finished the whole import.
+            "moved_to_purchased": bool(orders_advanced and not was_purchased),
+            "labels": sum(len(entries) for _order, entries in orders_to_write),
         }
+
+    def _announce_labels_recorded(self, labels):
+        """Tell the order channel the zone's labels are in, with the Mark all
+        shipped button. Only zone batches post. Called after an import has
+        finished all its rows, and never raises: a failed post must not touch the
+        import (the labels are already recorded)."""
+        self.ensure_one()
+        if not self.zone or labels <= 0:
+            return
+        noun = "label" if labels == 1 else "labels"
+        text = f"Zone {self.zone}: {labels} {noun} recorded"
+        buttons = [{"label": "Mark all shipped", "style": 3, "customId": f"ord:markall:{self.id}"}]
+        try:
+            self.env["sale.order"]._grove_post_notice(self.company_id, f"Zone {self.zone} labels", [text], buttons)
+        except Exception:  # noqa: BLE001 — an announcement is best-effort
+            _logger.warning("Labels-recorded post failed for batch %s", self.id, exc_info=True)
+
+    def _zone_ship_start(self, today):
+        """First ship day of this batch's zone, in the spring window the batch was
+        built in. Judged from the build date, not today, so a batch imported after
+        the window closed is not pushed to next year's start."""
+        self.ensure_one()
+        from ..controllers.main import _parse_calendar_override
+
+        built = self.create_date.replace(tzinfo=timezone.utc).astimezone(_SHOP_TZ).date() if self.create_date else today
+        calendar = merge_calendar_override(_parse_calendar_override(self.env))
+        lead_open, _ship_end = spring_build_window(int(self.zone), built, calendar)
+        return lead_open + timedelta(days=SPRING_BUILD_LEAD_DAYS)
+
+    def _grove_mark_batch_shipped(self, actor, now=None):
+        """Mark every labelled order in this zone batch shipped, from the zone's
+        ship start (New York date). Returns ``{"shipped", "already", "skipped"}``
+        where ``skipped`` is a list of ``{"order", "reason"}``.
+
+        Each shipment emails the customer and cannot be taken back, so every order
+        runs in its own savepoint and is committed as soon as it succeeds: one
+        order failing never undoes or stops the others, and the failure goes in
+        ``skipped`` with a generic reason (the detail is logged). Orders already
+        shipped count as ``already``; a repeat run therefore charges and emails
+        nothing again. Raises ``UserError`` (a refusal, nothing changed) for a
+        batch with no zone, one not yet purchased, or a day before the zone's
+        ship start. ``now`` (UTC) is for tests."""
+        self.ensure_one()
+        from ..controllers.main import _operator_mark_shipped
+
+        if not self.zone:
+            raise UserError(f"{self.name} has no zone, so it can't be marked shipped from here.")
+        if self.state != "purchased":
+            raise UserError(f"{self.name} has no recorded labels yet. Import its labels first.")
+        now = now or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        today = now.astimezone(_SHOP_TZ).date()
+        ship_start = self._zone_ship_start(today)
+        if today < ship_start:
+            raise UserError(
+                f"Zone {self.zone} spring shipping starts {ship_start:%B} {ship_start.day}, {ship_start.year}. "
+                f"Today is {today:%B} {today.day}, {today.year}, so nothing was marked shipped."
+            )
+
+        in_test = bool(config["test_enable"])
+        shipped = already = 0
+        skipped = []
+        for order in sorted(self.line_ids.order_id, key=lambda o: o.name):
+            stage = order.grove_fulfillment_stage
+            if stage in _SHIPPED_STAGES:
+                already += 1
+                continue
+            if order.grove_hold_until:
+                until = order.grove_hold_until
+                reason = f"on hold until {until:%b} {until.day}"
+            elif not (order.grove_tracking_numbers or "").strip():
+                reason = "no label recorded"
+            elif stage != "label_purchased":
+                reason = f"status is {order._grove_stage_label()}, not label purchased"
+            else:
+                reason = None
+            if reason:
+                skipped.append({"order": order.name, "reason": reason})
+                continue
+            try:
+                with self.env.cr.savepoint():
+                    result = _operator_mark_shipped(self.env, order, actor=actor, source="discord")
+                if result["newly_shipped"]:
+                    shipped += 1
+                    # The email is out and cannot be recalled: keep this order's
+                    # ship even if a later one fails.
+                    if not in_test:
+                        self.env.cr.commit()
+                elif order.grove_fulfillment_stage in _SHIPPED_STAGES:
+                    already += 1  # shipped by someone else between the check and the lock
+                else:
+                    skipped.append({"order": order.name, "reason": "could not be marked shipped yet"})
+            except Exception:  # noqa: BLE001 — one failure must not stop the others
+                _logger.exception("Mark all shipped failed for order %s in %s", order.id, self.name)
+                skipped.append({"order": order.name, "reason": "could not be marked shipped; check it in Odoo"})
+        return {"shipped": shipped, "already": already, "skipped": skipped}
 
     @api.model
     def _on_hold_reason(self, order):
@@ -1152,6 +1269,7 @@ class GroveLabelBatch(models.Model):
                 if email:
                     batches_by_email[email] = batches_by_email.get(email, self.browse()) | batch
         rows_by_batch, loose_rows, refund_rows = {}, [], []
+        announce = []  # (batch, label count) for batches this import moved to purchased
         for row in parsed:
             if REFUNDED_STATUS_RE.search(row.get("status") or ""):
                 refund_rows.append(row)
@@ -1182,6 +1300,8 @@ class GroveLabelBatch(models.Model):
             summary["warnings"].extend(result["warnings"])
             summary["manual_review"].extend(result["manual_review"])
             summary["already"] += result["skipped_already_tracked"]
+            if result["moved_to_purchased"]:
+                announce.append((batch, result["labels"]))
             if filename:
                 batch.write({"tracking_import": base64.b64encode(raw_bytes), "tracking_import_filename": filename})
         self._import_loose_rows(loose_rows, company, summary)
@@ -1189,6 +1309,9 @@ class GroveLabelBatch(models.Model):
         # on the replacement instead of flagging a label that was just swapped.
         for row in refund_rows:
             self._flag_refunded_row(row, company, summary)
+        # Last of all, so a failed import never announces labels.
+        for batch, labels in announce:
+            batch._announce_labels_recorded(labels)
         return summary
 
     # ── UI actions (manual path — always available, spec §B1) ───────────────

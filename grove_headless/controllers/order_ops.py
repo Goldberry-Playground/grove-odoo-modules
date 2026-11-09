@@ -9,6 +9,10 @@ before forwarding, and sends the Discord user it checked as ``actor``.
 
 A ``UserError`` or ``ValueError`` is a 422 carrying its message, which the bridge
 shows to the operator as written. Nothing else escapes as a traceback.
+
+``label-batches/<id>/mark-shipped`` is the one route that answers 409 for a refusal
+(a `UserError`, nothing changed) and commits each order as it ships, because every
+shipment emails the customer and cannot be recalled.
 """
 
 import json
@@ -136,3 +140,56 @@ class OrderOpsController(http.Controller):
     )
     def order_label_refunded(self, order_id, **_kwargs):
         return self._run_order_action(order_id, lambda order, _payload, actor: order.action_grove_label_refunded(actor))
+
+    @http.route(
+        "/grove/api/v1/label-batches/<int:batch_id>/mark-shipped",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def label_batch_mark_shipped(self, batch_id, **_kwargs):
+        """Mark every labelled order in a zone batch shipped. Body ``{"actor"}``.
+
+        Answers ``{"shipped", "already", "skipped": [{"order", "reason"}]}``. A 409
+        is a refusal with nothing changed (no zone, labels not imported, or before
+        the zone's ship start); its ``error`` is shown to the operator as written.
+        Not wrapped in a savepoint: each order is committed as it ships, since its
+        customer email cannot be recalled. Safe to repeat."""
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
+            payload = {}
+
+        current_company = request.website.company_id
+        batch = (
+            request.env["grove.label.batch"]
+            .sudo()
+            .with_company(current_company)
+            .search([("id", "=", batch_id), ("company_id", "=", current_company.id)], limit=1)
+        )
+        if not batch:
+            return _json_response({"error": "Batch not found"}, status=404)
+
+        actor = payload.get("actor")
+        if not isinstance(actor, str) or not actor.strip():
+            return _json_response({"error": "actor is required"}, status=422)
+
+        try:
+            result = batch._grove_mark_batch_shipped(actor.strip())
+        except AccessError:
+            # Before UserError: AccessError is a subclass of it.
+            _logger.warning("Mark all shipped refused for batch %s", batch_id, exc_info=True)
+            return _json_response({"error": "Not allowed to change these orders."}, status=403)
+        except UserError as exc:
+            return _json_response({"error": str(exc)}, status=409)
+        except Exception:  # noqa: BLE001 — never leak a traceback body to the bridge
+            _logger.exception("Mark all shipped failed for batch %s", batch_id)
+            return _json_response(
+                {"error": "Something went wrong. Some orders may have shipped; check the orders before retrying."},
+                status=500,
+            )
+        return _json_response(result)
