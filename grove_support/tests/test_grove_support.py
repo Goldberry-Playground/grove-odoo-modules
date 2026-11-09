@@ -370,9 +370,23 @@ class GroveSupportCase(TransactionCase):
     # ── Job 4: Discord chat-start ping ───────────────────────────────────
 
     def test_chat_start_pings_discord_for_livechat(self):
+        self.env["ir.config_parameter"].sudo().set_param("web.base.url", "https://odoo.example.test")
         with patch.object(gs_channel, "notify_discord") as mock_notify:
             self._make_channel()
         mock_notify.assert_called_once()
+        # The ping names its sender (shared ops webhook across prod/QA/copies).
+        self.assertEqual(mock_notify.call_args.kwargs.get("env_tag"), "[odoo.example.test]")
+
+    def test_notify_discord_prefixes_env_tag(self):
+        from odoo.addons.grove_support.models import discord as gs_discord
+
+        with (
+            patch.dict("os.environ", {"DISCORD_OPS_WEBHOOK_URL": "https://d/ops"}, clear=True),
+            patch.object(gs_discord.requests, "post") as post,
+        ):
+            gs_discord.notify_discord("hello", env_tag="[odoo.example.test]")
+        self.assertEqual(post.call_args[1]["json"]["content"], "[odoo.example.test] hello")
+        self.assertEqual(post.call_args[1]["json"]["allowed_mentions"], {"parse": []})
 
     def test_chat_start_prefers_support_webhook_over_ops(self):
         from odoo.addons.grove_support.models import discord as gs_discord

@@ -21,6 +21,7 @@ from . import (
     test_consult_line,  # noqa: F401
     test_content_draft_request,  # noqa: F401
     test_detail_serialization,  # noqa: F401
+    test_discord_env_tag,  # noqa: F401  Discord posts name their sending instance
     test_effective_shipping_tier,  # noqa: F401
     test_enrich_job,  # noqa: F401
     test_enrich_status,  # noqa: F401
