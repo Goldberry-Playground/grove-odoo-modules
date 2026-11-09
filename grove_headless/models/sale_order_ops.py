@@ -191,6 +191,9 @@ class SaleOrder(models.Model):
                 tracking, carrier=_TYPED_LABEL_CARRIER, actual_cost=cost, source=f"{source}, by {who}"
             )
         else:
+            other = self._grove_other_order_with_tracking(tracking)
+            if other:
+                raise UserError(f"{tracking} is already the label on {other.name}. Check the number and try again.")
             self.action_grove_record_hand_label(tracking, carrier=_TYPED_LABEL_CARRIER, actual_cost=cost)
             self.message_post(body=f"{who} recorded label {tracking} ({self.grove_shipping_carriers}) at ${cost:.2f}.")
 

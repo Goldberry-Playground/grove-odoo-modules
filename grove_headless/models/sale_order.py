@@ -837,6 +837,17 @@ class SaleOrder(models.Model):
         )
         return True
 
+    def _grove_other_order_with_tracking(self, tracking):
+        """The first other order carrying exactly this tracking number, or an empty
+        recordset. Matched per number, so a number that merely contains this one
+        does not count."""
+        self.ensure_one()
+        return (
+            self.sudo()
+            .search([("id", "!=", self.id), ("grove_tracking_numbers", "ilike", tracking)])
+            .filtered(lambda o: tracking in (o.grove_tracking_numbers or "").split())[:1]
+        )
+
     def action_grove_replace_label(
         self, tracking_number, carrier=None, actual_cost=None, service=None, source="hand_label"
     ):
@@ -867,13 +878,9 @@ class SaleOrder(models.Model):
         current = (self.grove_tracking_numbers or "").split()
         if current == [tracking]:
             return False
-        other = (
-            self.sudo()
-            .search([("id", "!=", self.id), ("grove_tracking_numbers", "ilike", tracking)])
-            .filtered(lambda o: tracking in (o.grove_tracking_numbers or "").split())
-        )
+        other = self._grove_other_order_with_tracking(tracking)
         if other:
-            raise UserError(f"{self.name}: {tracking} is already the label on {other[0].name}.")
+            raise UserError(f"{self.name}: {tracking} is already the label on {other.name}.")
         carrier_key = self._grove_infer_carrier(tracking, fallback=carrier)
         if not carrier_key:
             raise UserError(f"{self.name}: could not determine the carrier for {tracking!r}; pick UPS or USPS.")

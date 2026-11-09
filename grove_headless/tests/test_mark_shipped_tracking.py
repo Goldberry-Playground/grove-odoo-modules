@@ -292,6 +292,27 @@ class TestMarkShippedTracking(GroveTaxFixtureMixin, HttpCase):
         self.assertIn("Zone 6", response.json()["error"])
         self.assertNothingHappened(order, "deposit_paid")
 
+    def test_number_already_on_another_order_refused(self):
+        other = self._labelled_order()
+        order = self._deposit_order()
+        response = self._ship(order)
+        self.assertEqual(response.status_code, 409, response.text)
+        self.assertIn(other.name, response.json()["error"])
+        self.assertIn(UPS, response.json()["error"])
+        # The wave assignment that preceded the refusal is rolled back with it.
+        self.assertNothingHappened(order, "deposit_paid")
+        self.assertFalse(order.grove_actual_shipping_cost)
+        self.assertNotIn("Preorder assigned to wave", self._chatter(order))
+        self.assertEqual(other.grove_tracking_numbers, UPS)
+        self.assertEqual(other.grove_fulfillment_stage, "label_purchased")
+
+    def test_number_that_only_contains_another_is_not_a_duplicate(self):
+        self._labelled_order(tracking=f"{UPS}99")
+        order = self._order()
+        response = self._ship(order)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(order.grove_tracking_numbers, UPS)
+
     def test_pickup_order_refused(self):
         order = self._order(grove_fulfillment="pickup")
         response = self._ship(order)
