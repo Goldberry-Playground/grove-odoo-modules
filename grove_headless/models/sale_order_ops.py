@@ -239,7 +239,26 @@ class SaleOrder(models.Model):
         old = self.grove_ship_wave or "no wave"
         self.sudo().write({"grove_ship_wave": wave})
         self.message_post(body=f"{actor} moved this order from {old} to {wave}.")
+        if wave == "fall":
+            self._grove_release_from_unbought_batch()
         return True
+
+    def _grove_release_from_unbought_batch(self):
+        """Take an order that has left the spring lane out of its open or exported
+        batch. Its row stays on the batch so an import of the old CSV finds it and
+        refuses it (``_reconcile_rows``) instead of charging it; a fresh CSV or a
+        rebuild leaves it out."""
+        batch = self.grove_label_batch_id
+        if batch.state not in ("open", "exported"):
+            return
+        self.sudo().write({"grove_label_batch_id": False})
+        batch.sudo().write({"order_ids": [(3, self.id)]})
+        bought = (
+            " If its label was already bought from that export, refund it in Pirate Ship."
+            if batch.state == "exported"
+            else ""
+        )
+        self.message_post(body=f"Order released from {batch.name}: it left the spring lane.{bought}")
 
     def _grove_needs_wave_for_ship(self):
         return self.grove_fulfillment_stage == "deposit_paid" and self.grove_ship_wave == "fall"
@@ -252,8 +271,12 @@ class SaleOrder(models.Model):
     def _grove_refuse_mark_shipped(self, tracking):
         """Raise ``UserError`` when this order cannot be marked shipped with this
         number. The message is shown to the operator as written. An order already
-        out the door skips the hold and spring checks, so a retry stays a no-op."""
+        out the door skips the hold and spring checks, so a retry stays a no-op.
+        A cancelled order is refused first: Odoo's own cancel leaves the Grove stage
+        alone, so the stage checks below would let it charge and email."""
         stage = self.grove_fulfillment_stage
+        if self.state == "cancel" or stage == "cancelled":
+            raise UserError(f"{self.name} is cancelled, so it can't be marked shipped.")
         current = (self.grove_tracking_numbers or "").split()
         if stage in _ALREADY_SHIPPED_STAGES and not current:
             raise UserError(

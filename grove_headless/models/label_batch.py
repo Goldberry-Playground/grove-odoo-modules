@@ -485,6 +485,9 @@ class GroveLabelBatch(models.Model):
         writer = csv.writer(buf)
         writer.writerow(CSV_COLUMNS)
         for line in self.line_ids.sorted(key=lambda ln: (ln.order_id.name or "", ln.box_index)):
+            # Moved out of the spring lane after the build: no label should be bought.
+            if self.zone and line.order_id.grove_lane != "spring":
+                continue
             # Already-labelled guard (GOL-3083): an aged, unacknowledged row is
             # likely already shipped by hand — never silently export it. It stays
             # visible (flagged) on the batch until the operator confirms it is not
@@ -847,8 +850,14 @@ class GroveLabelBatch(models.Model):
                 # tracked orders).
                 skipped_already += len(entries)
                 continue
+            if order.state == "cancel" or order.grove_fulfillment_stage == "cancelled":
+                errors.append(self._cancelled_reason(order))
+                continue
             if order.grove_hold_until:
                 errors.append(self._on_hold_reason(order))
+                continue
+            if self.zone and order.grove_lane != "spring":
+                errors.append(self._left_spring_reason(order))
                 continue
             stage = order.grove_fulfillment_stage
             if stage not in ("awaiting_label", "wave_assigned"):
@@ -1046,7 +1055,9 @@ class GroveLabelBatch(models.Model):
         skipped = []
         for order in sorted(self.line_ids.order_id, key=lambda o: o.name):
             stage = order.grove_fulfillment_stage
-            if order.grove_label_batch_id != self:
+            if order.state == "cancel" or stage == "cancelled":
+                reason = "cancelled"
+            elif order.grove_label_batch_id != self:
                 # Moved on to a newer batch (its label and box belong to that one).
                 newer = order.grove_label_batch_id
                 reason = f"now in {newer.name}" if newer else "no longer in this batch"
@@ -1094,6 +1105,20 @@ class GroveLabelBatch(models.Model):
         """Why an import did not record a label on a held order: the customer
         asked to wait, so neither the label nor the balance goes through."""
         return f"{order.name}: on hold until {order.grove_hold_until.isoformat()}; release the hold and re-import"
+
+    @api.model
+    def _cancelled_reason(self, order):
+        """Why an import did not record a label on a cancelled order."""
+        return f"{order.name}: cancelled; no label recorded and nothing charged"
+
+    @api.model
+    def _left_spring_reason(self, order):
+        """Why an import did not record a label on an order moved out of spring
+        after its batch was built."""
+        return (
+            f"{order.name}: moved out of the spring lane after this batch was built; "
+            "nothing charged. If this label was bought, refund it in Pirate Ship"
+        )
 
     @api.model
     def _is_valid_tracking(self, value):
@@ -1202,8 +1227,16 @@ class GroveLabelBatch(models.Model):
             if not order:
                 summary["review"].append(f"{who} ({row['tracking']}): {problem}")
                 continue
+            if order.state == "cancel":
+                summary["review"].append(self._cancelled_reason(order))
+                continue
             if order.grove_hold_until:
                 summary["review"].append(self._on_hold_reason(order))
+                continue
+            # A Grove Ref only comes from a batch CSV, and a fall order is in no
+            # batch: this row is from a CSV built before the order moved.
+            if row.get("ref") and order.grove_ship_wave == "fall":
+                summary["review"].append(self._left_spring_reason(order))
                 continue
             by_order.setdefault(order, []).append((row, carrier_key, service_token, cost, via_email))
         for order, entries in by_order.items():

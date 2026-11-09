@@ -19,7 +19,7 @@ tests/__init__.py AND conftest.py's collect_ignore_glob.
 """
 
 import json
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from unittest import mock
 
 from odoo import fields
@@ -504,6 +504,65 @@ class TestMarkShippedTracking(GroveTaxFixtureMixin, HttpCase):
         self.settle.assert_not_called()
         self.notify.assert_not_called()
         self.assertEqual(labelled.grove_fulfillment_stage, "label_purchased")
+
+    def test_cancelled_order_is_refused_with_no_charge_and_no_email(self):
+        """Odoo's own cancel leaves the Grove stage alone, so the stage check alone
+        would charge and email a cancelled order."""
+        order = self._labelled_order()
+        order.sudo().write({"state": "cancel"})
+        self.assertEqual(order.grove_fulfillment_stage, "label_purchased")
+        response = self._ship(order)
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("cancelled", response.json()["error"])
+        self.settle.assert_not_called()
+        self.notify.assert_not_called()
+        self.assertEqual(order.grove_fulfillment_stage, "label_purchased")
+
+    def test_cancelled_order_with_nothing_recorded_gets_no_label_either(self):
+        order = self._order()
+        order.sudo().write({"state": "cancel"})
+        response = self._ship(order)
+        self.assertEqual(response.status_code, 409)
+        self.assertFalse(order.grove_tracking_numbers)
+        self.settle.assert_not_called()
+
+    def test_server_action_refuses_a_held_order_up_front(self):
+        """No back door for holds: every order is checked before any ships."""
+        labelled = self._labelled_order()
+        held = self._labelled_order(tracking=UPS_2)
+        held.sudo().write({"grove_hold_until": date(2027, 4, 20), "grove_hold_reason": "Away"})
+        with self.assertRaises(UserError) as caught:
+            self._run_server_action(labelled | held)
+        self.assertIn(held.name, str(caught.exception))
+        self.assertIn("on hold", str(caught.exception))
+        self.assertNotIn(labelled.name, str(caught.exception))
+        self.settle.assert_not_called()
+        self.notify.assert_not_called()
+        self.assertEqual(labelled.grove_fulfillment_stage, "label_purchased")
+
+    def test_server_action_refuses_a_cancelled_order_up_front(self):
+        cancelled = self._labelled_order()
+        cancelled.sudo().write({"state": "cancel"})
+        with self.assertRaises(UserError) as caught:
+            self._run_server_action(cancelled)
+        self.assertIn(cancelled.name, str(caught.exception))
+        self.settle.assert_not_called()
+        self.notify.assert_not_called()
+
+    def test_server_action_held_order_already_shipped_does_not_block_the_others(self):
+        labelled = self._labelled_order()
+        shipped = self._labelled_order(tracking=UPS_2)
+        shipped.action_grove_mark_shipped(operator="josh")
+        shipped.sudo().write({"grove_hold_until": date(2027, 4, 20), "grove_hold_reason": "Away"})
+        self._run_server_action(labelled | shipped)
+        self.assertEqual(labelled.grove_fulfillment_stage, "shipped")
+
+    def test_server_action_does_not_block_a_spring_order_before_its_start(self):
+        """Early individual spring shipping stays allowed from Odoo."""
+        spring = self._labelled_order(grove_ship_wave="spring")
+        self.assertEqual(spring.grove_lane, "spring")
+        self._run_server_action(spring)
+        self.assertEqual(spring.grove_fulfillment_stage, "shipped")
 
     def test_server_action_refuses_up_front_when_compliance_is_missing(self):
         """The compliance gate also raises from the loop, so it is checked first too."""

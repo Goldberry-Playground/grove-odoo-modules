@@ -489,6 +489,150 @@ class TestMarkAllShipped(_Fixture, TransactionCase):
 
 
 @tagged("post_install", "-at_install")
+@tagged("post_install", "-at_install")
+class TestCancelledAndMovedOrders(_Fixture, TransactionCase):
+    """A cancelled or moved order must never be charged or emailed from a batch."""
+
+    def setUp(self):
+        super().setUp()
+        self._setup_fixture()
+
+    @contextmanager
+    def _money_spies(self):
+        """Yields (settle, email), the two things that cannot be undone."""
+        with (
+            patch.object(
+                type(self.env["sale.order"]), "_grove_settle_at_ship", return_value="already_settled"
+            ) as settle,
+            patch.object(grove_main, "_apply_delivery_status") as email,
+        ):
+            yield settle, email
+
+    def _import_rows(self, rows):
+        return self.Batch.import_pirateship_file(self._csv(rows), filename="export.csv", company=self.company)
+
+    def test_markall_skips_a_cancelled_order(self):
+        batch, orders = self._purchased_batch(2)
+        fresh, cancelled = orders
+        cancelled.sudo().write({"state": "cancel"})
+        with self._money_spies() as (settle, email):
+            result = batch._grove_mark_batch_shipped("Wes", now=_at(START))
+        self.assertEqual(result["shipped"], 1)
+        self.assertEqual(result["skipped"], [{"order": cancelled.name, "reason": "cancelled"}])
+        self.assertEqual(settle.call_count, 1)
+        self.assertEqual(email.call_count, 1)
+        self.assertEqual(fresh.grove_fulfillment_stage, "shipped")
+        self.assertEqual(cancelled.grove_fulfillment_stage, "label_purchased")
+
+    def test_tolerant_import_refuses_a_cancelled_row(self):
+        kept, cancelled = self._order(), self._order()
+        self._build()
+        cancelled.sudo().write({"state": "cancel"})
+        with self._money_spies() as (settle, email):
+            summary = self._import_rows(self._rows(kept | cancelled))
+        self.assertEqual(summary["labelled"], [kept.name])
+        self.assertTrue(any(cancelled.name in r and "cancelled" in r for r in summary["review"]), summary["review"])
+        self.assertFalse(cancelled.grove_tracking_numbers)
+        self.assertEqual(settle.call_count, 1, "only the live order settles")
+        email.assert_not_called()
+
+    def test_strict_import_rejects_a_file_with_a_cancelled_row(self):
+        kept, cancelled = self._order(), self._order()
+        batch = self._build()["batch"]
+        cancelled.sudo().write({"state": "cancel"})
+        with self._money_spies() as (settle, email), self.assertRaises(label_batch_module.LabelBatchError) as caught:
+            batch.import_tracking(self._csv(self._rows(kept | cancelled)), filename="export.csv")
+        self.assertIn(cancelled.name, str(caught.exception))
+        settle.assert_not_called()
+        email.assert_not_called()
+
+    def test_loose_row_for_a_cancelled_order_goes_to_review(self):
+        order = self._order(checkout="paid", wave=False)
+        order.sudo().write({"state": "cancel"})
+        summary = self._import_rows([[f"{order.name}/1", _T[0], "UPS", "9.10"]])
+        self.assertEqual(summary["labelled"], [])
+        self.assertTrue(any(order.name in r and "cancelled" in r for r in summary["review"]), summary["review"])
+        self.assertFalse(order.grove_tracking_numbers)
+
+    def _batched(self):
+        moved, stays = self._order(), self._order()
+        batch = self._build()["batch"]
+        self.assertEqual(batch.state, "exported")
+        return batch, moved, stays
+
+    def test_move_to_fall_releases_the_order_from_an_exported_batch(self):
+        batch, moved, stays = self._batched()
+        self.assertTrue(moved.action_grove_move_wave("fall", "Wes"))
+        self.assertFalse(moved.grove_label_batch_id)
+        self.assertNotIn(moved, batch.order_ids)
+        self.assertEqual(stays.grove_label_batch_id, batch)
+        self.assertIn(batch.name, " ".join(moved.message_ids.mapped("body")))
+
+    def test_move_to_fall_leaves_a_purchased_batch_alone(self):
+        batch, orders = self._purchased_batch(1)
+        orders.sudo().write({"grove_tracking_numbers": False})
+        orders.action_grove_move_wave("fall", "Wes")
+        self.assertEqual(orders.grove_label_batch_id, batch)
+
+    def test_moved_order_drops_out_of_a_fresh_csv(self):
+        batch, moved, stays = self._batched()
+        moved.action_grove_move_wave("fall", "Wes")
+        csv_text = batch._render_csv().decode()
+        self.assertNotIn(moved.name, csv_text)
+        self.assertIn(stays.name, csv_text)
+
+    def test_tolerant_import_refuses_a_row_for_an_order_moved_out_of_spring(self):
+        _batch, moved, stays = self._batched()
+        moved.action_grove_move_wave("fall", "Wes")
+        with self._money_spies() as (settle, email):
+            summary = self._import_rows(self._rows(moved | stays))
+        self.assertEqual(summary["labelled"], [stays.name])
+        self.assertTrue(any(moved.name in r and "spring" in r for r in summary["review"]), summary["review"])
+        self.assertFalse(moved.grove_tracking_numbers)
+        self.assertEqual(settle.call_count, 1, "only the order still in spring settles")
+        email.assert_not_called()
+
+    def test_strict_import_rejects_a_row_for_an_order_moved_out_of_spring(self):
+        batch, moved, stays = self._batched()
+        moved.action_grove_move_wave("fall", "Wes")
+        with self._money_spies() as (settle, _email), self.assertRaises(label_batch_module.LabelBatchError) as caught:
+            batch.import_tracking(self._csv(self._rows(moved | stays)), filename="export.csv")
+        self.assertIn(moved.name, str(caught.exception))
+        settle.assert_not_called()
+
+    def test_old_csv_row_after_a_rebuild_goes_to_review(self):
+        """The rebuild drops the row, so it reaches the no-batch path, which must
+        refuse it the same way."""
+        _batch, moved, stays = self._batched()
+        moved.action_grove_move_wave("fall", "Wes")
+        self._build()
+        self.assertEqual(self.Batch._open_batch(self.company, "6").line_ids.order_id, stays)
+        with self._money_spies() as (settle, _email):
+            summary = self._import_rows(self._rows(moved))
+        self.assertEqual(summary["labelled"], [])
+        self.assertTrue(any(moved.name in r and "spring" in r for r in summary["review"]), summary["review"])
+        self.assertFalse(moved.grove_tracking_numbers)
+        settle.assert_not_called()
+
+    def test_zone_less_batch_still_reconciles_an_individual_order(self):
+        """Older open batches have no zone and hold individual orders."""
+        order = self._order(checkout="paid", wave=False)
+        self.assertEqual(order.grove_lane, "individual")
+        batch = self.Batch.create({"name": "LB-OLD", "company_id": self.company.id, "state": "exported"})
+        self.env["grove.label.batch.line"].create(
+            {
+                "batch_id": batch.id,
+                "grove_ref": f"{order.name}/1",
+                "order_id": order.id,
+                "box_index": 1,
+                "box_id": "p24x10x4",
+            }
+        )
+        with self._money_spies():
+            result = batch.import_tracking(self._csv(self._rows(order)), filename="export.csv")
+        self.assertEqual(result["orders_advanced"], 1)
+
+
 class TestMarkAllRoute(_Fixture, HttpCase):
     def setUp(self):
         super().setUp()

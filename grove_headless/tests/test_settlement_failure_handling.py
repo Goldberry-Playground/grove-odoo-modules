@@ -401,6 +401,24 @@ class TestSettlementFailureHandling(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_checkout_status, "settled")
         self.assertEqual(len(charges), 1)
 
+    def test_daily_retry_never_charges_a_held_order(self):
+        """A failed balance can be retried only once the hold is released."""
+        order = self._ship_order(grove_checkout_status="settlement_failed", grove_settlement_attempts=1)
+        order.write(
+            {"grove_hold_until": "2027-04-20", "grove_hold_reason": "Away", "grove_settlement_last_attempt": False}
+        )
+        self.env["ir.config_parameter"].sudo().set_param("grove_headless.settlement_max_retries", "3")
+        pi = mock.Mock(return_value={"id": "pi_held", "status": "succeeded"})
+        with self._no_stripe_tax(), mock.patch.object(stripe_gateway, "create_payment_intent", pi), self._env():
+            self.env["sale.order"]._cron_retry_settlements()
+        pi.assert_not_called()
+        self.assertEqual(order.grove_checkout_status, "settlement_failed")
+
+        order.write({"grove_hold_until": False, "grove_hold_reason": False})
+        with self._no_stripe_tax(), mock.patch.object(stripe_gateway, "create_payment_intent", pi), self._env():
+            self.env["sale.order"]._cron_retry_settlements()
+        pi.assert_called_once()
+
     def test_manual_retry_racing_cron_charges_once(self):
         """Double-fire: a manual Retry settlement and the cron both act on the same
         order. The first settles it; the second sees status==settled under the row

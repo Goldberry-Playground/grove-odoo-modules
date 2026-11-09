@@ -1060,8 +1060,15 @@ class SaleOrder(models.Model):
         ``_grove_mark_shipped_and_settle`` result per order."""
         problems = []
         for order in self:
+            # An order the shipped transition would not move stays a no-op below.
+            would_ship = order.grove_fulfillment_stage in self._GROVE_TRANSITIONS["shipped"]
             if order._grove_consult_compliance_missing():
                 problems.append(f"{order.name}: its compliance check is not recorded")
+            elif would_ship and order.state == "cancel":
+                problems.append(f"{order.name}: it is cancelled")
+            elif would_ship and order.grove_hold_until:
+                until = order.grove_hold_until
+                problems.append(f"{order.name}: on hold until {until:%b} {until.day}, {until.year}")
             elif order._grove_ship_needs_tracking():
                 problems.append(f"{order.name}: no tracking number")
         if problems:
@@ -1654,13 +1661,16 @@ class SaleOrder(models.Model):
         Settles one order per committed transaction so a crash on order N never
         rolls back the successful settlements of 1..N-1 — and the row lock inside
         ``settle_order_at_ship`` makes a cron retry safe to run concurrently with a
-        manual ``Retry settlement`` on the same order (GOL-3011)."""
+        manual ``Retry settlement`` on the same order (GOL-3011). A held order is left
+        out: a hold never charges anything by itself."""
         max_retries = int(self.env["ir.config_parameter"].sudo().get_param("grove_headless.settlement_max_retries", 3))
         stuck = self.sudo().search(
             [
                 ("grove_checkout_status", "in", ("settlement_failed", "settlement_error")),
                 ("grove_settlement_attempts", "<", max_retries),
                 ("grove_settlement_needs_customer", "=", False),
+                # A hold never charges; the retry picks the order up once released.
+                ("grove_hold_until", "=", False),
             ]
         )
         now = fields.Datetime.now()
