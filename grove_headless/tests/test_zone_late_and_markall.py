@@ -20,6 +20,7 @@ from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.exceptions import UserError
 from odoo.tests import TransactionCase, tagged
 from odoo.tests.common import HttpCase, get_db_name
+from psycopg2 import errors
 
 POST_STATUS = "odoo.addons.grove_headless.models.sale_order_ops.SaleOrder._grove_post_notice_status"
 POST = "odoo.addons.grove_headless.models.sale_order_ops.SaleOrder._grove_post_notice"
@@ -342,7 +343,7 @@ class TestMarkAllShipped(_Fixture, TransactionCase):
             self.assertEqual(self._markall(batch, START)["shipped"], 2)
         batch2, _orders2 = self._purchased_batch(1)
         with self._ship_patches():
-            # A batch built on the last day, imported after the window closed.
+            # A batch built inside the window (Apr 1), marked after the window closed.
             self.assertEqual(self._markall(batch2, END + timedelta(days=9))["shipped"], 1)
 
     def test_markall_refuses_a_batch_with_no_zone_or_no_labels(self):
@@ -392,6 +393,61 @@ class TestMarkAllShipped(_Fixture, TransactionCase):
         self.assertEqual(result["shipped"], 2)
         self.assertEqual(outcomes, ["already_settled", "already_settled"])
         self.assertEqual(set(orders.mapped("grove_checkout_status")), {"settled"})
+
+    def test_markall_skips_an_order_that_moved_to_a_newer_batch(self):
+        x, y = self._order(), self._order()
+        batch_a = self._build()["batch"]
+        self._import(x)  # y is left without a label
+        self.assertEqual(batch_a.state, "purchased")
+        self._built_on(batch_a, BUILD_DAY)
+        batch_b = self._build()["batch"]
+        self.assertNotEqual(batch_b, batch_a)
+        self.assertEqual(y.grove_label_batch_id, batch_b)
+        self._import(y, start=1)  # B is imported: y now has B's label
+        self.assertEqual(y.grove_fulfillment_stage, "label_purchased")
+
+        with self._ship_patches() as email:
+            result = self._markall(batch_a)
+
+        self.assertEqual(result["shipped"], 1)
+        self.assertEqual(result["skipped"], [{"order": y.name, "reason": f"now in {batch_b.name}"}])
+        self.assertEqual(email.call_count, 1)
+        self.assertEqual(y.grove_fulfillment_stage, "label_purchased")
+
+    def test_markall_skips_an_order_no_longer_linked_to_any_batch(self):
+        batch, orders = self._purchased_batch(2)
+        first, second = orders
+        second.sudo().write({"grove_label_batch_id": False})
+        with self._ship_patches():
+            result = self._markall(batch)
+        self.assertEqual(result["shipped"], 1)
+        self.assertEqual(result["skipped"], [{"order": second.name, "reason": "no longer in this batch"}])
+        self.assertEqual(second.grove_fulfillment_stage, "label_purchased")
+
+    def test_a_lock_failure_gets_its_own_reason(self):
+        batch, orders = self._purchased_batch(2)
+        first, second = sorted(orders, key=lambda o: o.name)
+        real = grove_main._operator_mark_shipped
+
+        def locked(env, order, **kwargs):
+            if order == first:
+                raise errors.LockNotAvailable("could not obtain lock")
+            return real(env, order, **kwargs)
+
+        with self._ship_patches(), patch.object(grove_main, "_operator_mark_shipped", side_effect=locked):
+            result = self._markall(batch)
+        self.assertEqual(result["shipped"], 1)
+        self.assertEqual(
+            result["skipped"],
+            [{"order": first.name, "reason": "was being changed by another run; check it before retrying"}],
+        )
+
+    def test_failed_labels_post_is_logged_as_an_error_naming_the_batch(self):
+        order = self._order()
+        batch = self._build()["batch"]
+        with patch(POST, return_value=False), self.assertLogs(label_batch_module._logger, "ERROR") as logs:
+            self._import(order)
+        self.assertTrue(any(batch.name in line for line in logs.output), logs.output)
 
     def test_markall_twice_is_safe(self):
         batch, orders = self._purchased_batch(3)

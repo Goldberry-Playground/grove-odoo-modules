@@ -32,6 +32,7 @@ from zoneinfo import ZoneInfo
 from odoo import api, fields, models
 from odoo.exceptions import AccessError, UserError
 from odoo.tools import config
+from psycopg2 import errors as pg_errors
 
 from .shipping_boxes import BOXES
 from .shipping_calendar import (
@@ -988,7 +989,12 @@ class GroveLabelBatch(models.Model):
         text = f"Zone {self.zone}: {labels} {noun} recorded"
         buttons = [{"label": "Mark all shipped", "style": 3, "customId": f"ord:markall:{self.id}"}]
         try:
-            self.env["sale.order"]._grove_post_notice(self.company_id, f"Zone {self.zone} labels", [text], buttons)
+            posted = self.env["sale.order"]._grove_post_notice(
+                self.company_id, f"Zone {self.zone} labels", [text], buttons
+            )
+            if not posted:
+                # A later import never re-posts, so say loudly that this one is missing.
+                _logger.error("Labels-recorded post for %s (id %s) was not delivered", self.name, self.id)
         except Exception:  # noqa: BLE001 — an announcement is best-effort
             _logger.warning("Labels-recorded post failed for batch %s", self.id, exc_info=True)
 
@@ -1040,10 +1046,14 @@ class GroveLabelBatch(models.Model):
         skipped = []
         for order in sorted(self.line_ids.order_id, key=lambda o: o.name):
             stage = order.grove_fulfillment_stage
-            if stage in _SHIPPED_STAGES:
+            if order.grove_label_batch_id != self:
+                # Moved on to a newer batch (its label and box belong to that one).
+                newer = order.grove_label_batch_id
+                reason = f"now in {newer.name}" if newer else "no longer in this batch"
+            elif stage in _SHIPPED_STAGES:
                 already += 1
                 continue
-            if order.grove_hold_until:
+            elif order.grove_hold_until:
                 until = order.grove_hold_until
                 reason = f"on hold until {until:%b} {until.day}"
             elif not (order.grove_tracking_numbers or "").strip():
@@ -1068,6 +1078,12 @@ class GroveLabelBatch(models.Model):
                     already += 1  # shipped by someone else between the check and the lock
                 else:
                     skipped.append({"order": order.name, "reason": "could not be marked shipped yet"})
+            except (pg_errors.LockNotAvailable, pg_errors.SerializationFailure, pg_errors.DeadlockDetected):
+                # Another run (a double click) holds this order; it may well have shipped it.
+                _logger.warning("Mark all shipped lost a lock on order %s in %s", order.id, self.name, exc_info=True)
+                skipped.append(
+                    {"order": order.name, "reason": "was being changed by another run; check it before retrying"}
+                )
             except Exception:  # noqa: BLE001 — one failure must not stop the others
                 _logger.exception("Mark all shipped failed for order %s in %s", order.id, self.name)
                 skipped.append({"order": order.name, "reason": "could not be marked shipped; check it in Odoo"})
