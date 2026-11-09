@@ -63,11 +63,17 @@ export class OdooClient {
   }
 
   /**
-   * POST /grove/api/v1/labels/batch → build/return the open batch.
-   * @returns {Promise<{batch_id:number,name:string,state:string,rows:number,expected_total:number,csv_url:string}>}
+   * POST /grove/api/v1/labels/batch → build/return one zone's open batch.
+   * `batch_id`, `name`, `state` and `csv_url` are null when nothing is eligible.
+   * @param {string} zone USDA zone
+   * @returns {Promise<{batch_id:number|null,name:string|null,state:string|null,zone:string,rows:number,expected_total:number,csv_url:string|null,skipped:Array,needs_confirmation:Array,message:string|null}>}
    */
-  async buildBatch() {
-    return this.#json('/grove/api/v1/labels/batch', { method: 'POST' });
+  async buildBatch(zone) {
+    return this.#json('/grove/api/v1/labels/batch', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ zone }),
+    });
   }
 
   /** Download the batch CSV (bearer-auth'd). @returns {Promise<string>} */

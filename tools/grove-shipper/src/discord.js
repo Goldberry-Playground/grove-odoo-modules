@@ -10,6 +10,7 @@
  * @param {string} [summary.batchUrl]
  * @param {string} [summary.mode]      'dry-run' | 'bought'
  * @param {string[]} [summary.problems]
+ * @param {string[]} [summary.notices] informational; does not mark the run as failed
  * @returns {Promise<boolean>} true if posted
  */
 export async function postDiscordSummary(webhookUrl, summary) {
@@ -17,7 +18,7 @@ export async function postDiscordSummary(webhookUrl, summary) {
     console.warn('[discord] DISCORD_ORDERS_WEBHOOK_URL not set — skipping summary');
     return false;
   }
-  const { batchName, rows, total, batchUrl, mode = 'dry-run', problems = [] } = summary;
+  const { batchName, rows, total, batchUrl, mode = 'dry-run', problems = [], notices = [] } = summary;
   const ok = problems.length === 0;
   const head = ok
     ? `📦 **Pirate Ship ${mode === 'bought' ? 'labels purchased' : 'dry-run'}** — ${batchName}`
@@ -27,6 +28,11 @@ export async function postDiscordSummary(webhookUrl, summary) {
     `Rows: **${rows}**  •  Total: **$${Number(total).toFixed(2)}**`,
   ];
   if (batchUrl) lines.push(`Batch: ${batchUrl}`);
+  if (notices.length) {
+    lines.push('', 'Notes:');
+    for (const n of notices.slice(0, 20)) lines.push(`• ${n}`);
+    if (notices.length > 20) lines.push(`• …and ${notices.length - 20} more`);
+  }
   if (problems.length) {
     lines.push('', 'Problems:');
     for (const p of problems.slice(0, 20)) lines.push(`• ${p}`);
