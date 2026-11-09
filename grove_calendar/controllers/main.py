@@ -14,8 +14,8 @@ renders this stays with the spring 2027 visit-page work (GOL-1585).
 import json
 import re
 
-from lxml import etree, html as lxml_html
-
+from lxml import etree
+from lxml import html as lxml_html
 from odoo import http
 from odoo.http import Response, request
 
@@ -23,9 +23,7 @@ from odoo.http import Response, request
 # markers, which would leak into this public JSON feed. We want clean prose, so
 # we take the element's raw text content instead. Block tags are turned into
 # spaces first so adjacent paragraphs don't glue their words together.
-_BLOCK_BOUNDARY_RE = re.compile(
-    r"<br\s*/?>|</(?:p|div|li|tr|h[1-6]|blockquote)\s*>", re.IGNORECASE
-)
+_BLOCK_BOUNDARY_RE = re.compile(r"<br\s*/?>|</(?:p|div|li|tr|h[1-6]|blockquote)\s*>", re.IGNORECASE)
 
 # Matches the planner catalog feed (GOL-3379): cache at the edge for 5 minutes.
 EVENTS_FEED_CACHE_CONTROL = "public, max-age=300"
