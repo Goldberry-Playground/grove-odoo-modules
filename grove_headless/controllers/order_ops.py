@@ -19,12 +19,9 @@ from odoo.exceptions import AccessError, UserError
 from odoo.http import request
 
 from ..models.order_lanes import parse_hold_date
-from .main import _json_response, _order_card_payload
+from .main import ORDER_CARD_TZ, _json_response, _safe_order_card
 
 _logger = logging.getLogger(__name__)
-
-# "Today" for typed hold dates and for the hold methods' own date checks.
-_SHOP_TZ = "America/New_York"
 
 
 class OrderOpsController(http.Controller):
@@ -43,7 +40,7 @@ class OrderOpsController(http.Controller):
             request.env["sale.order"]
             .sudo()
             .with_company(current_company)
-            .with_context(tz=_SHOP_TZ)
+            .with_context(tz=ORDER_CARD_TZ)
             .search([("id", "=", order_id), ("company_id", "=", current_company.id)], limit=1)
         )
         if not order:
@@ -54,16 +51,20 @@ class OrderOpsController(http.Controller):
             return _json_response({"error": "actor is required"}, status=422)
 
         try:
-            action(order, payload, actor.strip())
-        except (UserError, ValueError) as exc:
-            return _json_response({"error": str(exc)}, status=422)
+            # A savepoint, so an unexpected failure leaves nothing half-written
+            # (the error response below is a normal return and would commit).
+            with request.env.cr.savepoint():
+                action(order, payload, actor.strip())
         except AccessError:
+            # Before UserError: AccessError is a subclass of it.
             _logger.warning("Order action refused for order %s", order_id, exc_info=True)
             return _json_response({"error": "Not allowed to change this order."}, status=403)
+        except (UserError, ValueError) as exc:
+            return _json_response({"error": str(exc)}, status=422)
         except Exception:  # noqa: BLE001 — never leak a traceback body to the bridge
             _logger.exception("Order action failed for order %s", order_id)
             return _json_response({"error": "Something went wrong. Nothing was confirmed; try again."}, status=500)
-        return _json_response({"card": _order_card_payload(order)})
+        return _json_response({"card": _safe_order_card(order)})
 
     @http.route(
         "/grove/api/v1/orders/<int:order_id>/hold",

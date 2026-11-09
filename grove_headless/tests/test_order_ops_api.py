@@ -12,6 +12,7 @@ from unittest import mock
 
 from odoo import fields
 from odoo.addons.grove_headless.controllers import main as grove_main
+from odoo.exceptions import AccessError
 from odoo.tests.common import HttpCase, get_db_name, tagged
 
 from .common import GroveTaxFixtureMixin
@@ -242,3 +243,50 @@ class TestOrderOpsApi(GroveTaxFixtureMixin, HttpCase):
             card = grove_main._order_card_payload(order)
         self.assertIsNone(card["suggestedHold"])
         self.assertEqual(card["orderId"], order.id)
+
+    # failure handling
+
+    def test_access_error_is_403_with_generic_body(self):
+        order = self._held()
+        with mock.patch.object(
+            type(order), "action_grove_release_hold", side_effect=AccessError("secret internal detail")
+        ):
+            response = self._post(order, "hold/release", {"actor": "wes"})
+        self.assertEqual(response.status_code, 403)
+        self.assertNotIn("secret internal detail", response.text)
+        self.assertTrue(response.json()["error"])
+
+    def test_unexpected_error_is_500_generic_and_writes_nothing(self):
+        order = self._held()
+
+        def half_write(rec, actor):
+            rec.sudo().write({"grove_hold_reason": "half written"})
+            raise RuntimeError("secret boom")
+
+        with mock.patch.object(type(order), "action_grove_release_hold", half_write):
+            response = self._post(order, "hold/release", {"actor": "wes"})
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn("secret boom", response.text)
+        self.assertEqual(order.grove_hold_reason, "Wants spring")
+
+    def test_card_failure_after_action_keeps_result_and_returns_null_card(self):
+        order = self._held()
+        with mock.patch.object(grove_main, "_order_card_payload", side_effect=RuntimeError("card boom")):
+            response = self._post(order, "hold/release", {"actor": "wes"})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(response.json(), {"card": None})
+        self.assertFalse(order.grove_hold_until)
+
+    def test_mark_shipped_card_failure_keeps_shipment_and_returns_null_card(self):
+        order = self._order()
+        with (
+            mock.patch.object(grove_main, "settle_order_at_ship", return_value="settled"),
+            mock.patch.object(grove_main, "_notify_shipping_status"),
+            mock.patch.object(grove_main, "_order_card_payload", side_effect=RuntimeError("card boom")),
+        ):
+            response = self._post(order, "mark-shipped", {"actor": "wes", "tracking": UPS, "cost": "9.00"})
+        self.assertEqual(response.status_code, 200, response.text)
+        body = response.json()
+        self.assertIsNone(body["card"])
+        self.assertIn("tracking_numbers", body)
+        self.assertEqual(order.grove_fulfillment_stage, "shipped")

@@ -1968,7 +1968,7 @@ class GroveHeadlessAPI(http.Controller):
                 "settlement": result["settlement"],
                 "tracking_numbers": tracking.split("\n") if tracking else [],
                 "carriers": carriers.split("\n") if carriers else [],
-                "card": _order_card_payload(order),
+                "card": _safe_order_card(order),
             }
         )
 
@@ -6909,6 +6909,21 @@ def _order_card_payload(order, is_deposit=None, context=None):
         label_cost=order.grove_actual_shipping_cost if order.grove_actual_shipping_cost else None,
         hold=hold,
     )
+
+
+# "Today" for card dates and typed hold dates is the shop's, never UTC.
+ORDER_CARD_TZ = "America/New_York"
+
+
+def _safe_order_card(order):
+    """The card for a response sent after an action already succeeded. If building
+    it fails, log it and return None: the action's result stands, so the caller
+    answers success with ``card: null`` and never reports a failure."""
+    try:
+        return _order_card_payload(order.with_context(tz=ORDER_CARD_TZ))
+    except Exception:  # noqa: BLE001 — the action already succeeded; never fail the reply
+        _logger.exception("Order card build failed for %s", order.name)
+        return None
 
 
 def _post_order_alert_card(order, context, is_deposit):
