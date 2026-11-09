@@ -38,7 +38,7 @@ from ..models.order_alerts import (
     format_sales_order_note,
     promo_codes_from_line_names,
 )
-from ..models.order_lanes import clean_tracking, parse_label_cost
+from ..models.order_lanes import parse_label_cost, parse_tracking
 from ..models.plant_compliance import blocked_states_for as compliance_blocked_states_for
 from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
 from ..models.plant_compliance import excluded_taxa_for_state
@@ -1926,15 +1926,8 @@ class GroveHeadlessAPI(http.Controller):
             )
 
         raw_tracking = payload.get("tracking")
-        tracking = clean_tracking(raw_tracking if isinstance(raw_tracking, str) else "")
-        if not tracking:
-            return _json_response({"error": "Enter the tracking number."}, status=422)
-        if not is_valid_tracking(tracking):
-            return _json_response(
-                {"error": f"{tracking} doesn't look like a tracking number. Check it and try again."},
-                status=422,
-            )
         try:
+            tracking = parse_tracking(raw_tracking if isinstance(raw_tracking, str) else "")
             cost = parse_label_cost(payload.get("cost"))
         except ValueError as exc:
             return _json_response({"error": str(exc)}, status=422)
@@ -1956,7 +1949,7 @@ class GroveHeadlessAPI(http.Controller):
         if not result["newly_shipped"] and stage not in ("shipped", "delivered"):
             return _json_response(
                 {
-                    "error": f"{order.name} can't be marked shipped from its current status ({stage}).",
+                    "error": f"{order.name} can't be marked shipped yet. Its status is: {order._grove_stage_label()}.",
                     "grove_fulfillment_stage": stage,
                 },
                 status=409,

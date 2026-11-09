@@ -838,13 +838,23 @@ class SaleOrder(models.Model):
         return True
 
     def _grove_other_order_with_tracking(self, tracking):
-        """The first other order carrying exactly this tracking number, or an empty
-        recordset. Matched per number, so a number that merely contains this one
-        does not count."""
+        """The first other live order in this company carrying exactly this tracking
+        number, or an empty recordset. Matched per number, so a number that merely
+        contains this one does not count. A cancelled order's label is dead, so it
+        does not count either; Odoo's own cancel leaves the Grove stage as it was,
+        which is why both are excluded."""
         self.ensure_one()
         return (
             self.sudo()
-            .search([("id", "!=", self.id), ("grove_tracking_numbers", "ilike", tracking)])
+            .search(
+                [
+                    ("id", "!=", self.id),
+                    ("company_id", "=", self.company_id.id),
+                    ("state", "!=", "cancel"),
+                    ("grove_fulfillment_stage", "!=", "cancelled"),
+                    ("grove_tracking_numbers", "ilike", tracking),
+                ]
+            )
             .filtered(lambda o: tracking in (o.grove_tracking_numbers or "").split())[:1]
         )
 
@@ -1001,19 +1011,45 @@ class SaleOrder(models.Model):
         shipment email. Deferred import breaks the controller→models load cycle,
         mirroring ``_grove_settle_at_ship``. Refuses (``UserError``) an order that
         would ship with no tracking number, the same rule the endpoint enforces;
-        a pickup or an already-shipped order still falls through to its no-op.
-        Returns ``_operator_mark_shipped``'s
+        an order the shipped transition would not move still falls through to its
+        no-op. Returns ``_operator_mark_shipped``'s
         ``{"newly_shipped": bool, "settlement": <status> | None}``."""
         self.ensure_one()
         from ..controllers.main import _operator_mark_shipped
 
-        if (
-            self.grove_fulfillment != "pickup"
-            and self.grove_fulfillment_stage not in ("shipped", "delivered")
-            and not (self.grove_tracking_numbers or "").strip()
-        ):
+        if self._grove_ship_needs_tracking():
             raise UserError(f"{self.name} has no tracking number. Record its label first, then mark it shipped.")
         return _operator_mark_shipped(self.env, self, actor=operator, source="operator")
+
+    def _grove_ship_needs_tracking(self):
+        """True when marking this order shipped would really move it to shipped
+        but it has no tracking number. Pickup and every stage the transition
+        ignores stay no-ops."""
+        self.ensure_one()
+        return (
+            self.grove_fulfillment != "pickup"
+            and self.grove_fulfillment_stage in self._GROVE_TRANSITIONS["shipped"]
+            and not (self.grove_tracking_numbers or "").strip()
+        )
+
+    def _grove_mark_selection_shipped(self, operator=None):
+        """Entry for the Odoo "Mark shipped" server action on a multi-selection.
+
+        Checks every order before any ships. Each ship charges and emails, and a
+        ``UserError`` part way through would roll the whole request back, losing
+        the record of charges that really happened and re-sending the email on a
+        re-run. So anything the loop would raise on refuses the selection up front
+        in one ``UserError`` naming every order. Returns one
+        ``_grove_mark_shipped_and_settle`` result per order."""
+        problems = []
+        for order in self:
+            if order._grove_consult_compliance_missing():
+                problems.append(f"{order.name}: its compliance check is not recorded")
+            elif order._grove_ship_needs_tracking():
+                problems.append(f"{order.name}: no tracking number")
+        if problems:
+            raise UserError("Nothing was marked shipped. Fix these orders first:\n" + "\n".join(problems))
+        return [order._grove_mark_shipped_and_settle(operator=operator) for order in self]
 
     def grove_should_send_shipment_email(self):
         """Predicate the Phase 3 shipment notification consumes: a shipment

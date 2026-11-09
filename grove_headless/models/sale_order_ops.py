@@ -21,8 +21,11 @@ _logger = logging.getLogger(__name__)
 # (label_purchased is deliberately allowed: a bought label can still be held.)
 _HOLD_REFUSED_STAGES = ("shipped", "delivered", "collected", "cancelled")
 
-# The box has already left: Mark shipped can only retry or correct the label.
+# The box has left. Mark shipped with the same number is a no-op; a shipped order
+# (not a delivered one) can also have its label replaced.
 _ALREADY_SHIPPED_STAGES = ("shipped", "delivered")
+# Stages where an order's label can still be swapped for a different number.
+_LABEL_REPLACEABLE_STAGES = ("label_purchased", "shipped")
 # Stages Mark shipped can start from. A deposit_paid order also qualifies when it
 # has a fall wave, because the wave assignment happens as part of the same submit.
 _MARK_SHIPPED_STAGES = ("awaiting_label", "wave_assigned", "label_purchased", *_ALREADY_SHIPPED_STAGES)
@@ -152,11 +155,27 @@ class SaleOrder(models.Model):
     def _grove_needs_wave_for_ship(self):
         return self.grove_fulfillment_stage == "deposit_paid" and self.grove_ship_wave == "fall"
 
-    def _grove_refuse_mark_shipped(self):
-        """Raise ``UserError`` when this order cannot be marked shipped. The message
-        is shown to the operator as written. An order already out the door passes,
-        so a retry stays a no-op and a wrong number can still be corrected."""
+    def _grove_stage_label(self):
+        """The order's fulfilment stage in the words shown to staff."""
         stage = self.grove_fulfillment_stage
+        return dict(self._fields["grove_fulfillment_state"].selection).get(stage, stage)
+
+    def _grove_refuse_mark_shipped(self, tracking):
+        """Raise ``UserError`` when this order cannot be marked shipped with this
+        number. The message is shown to the operator as written. An order already
+        out the door skips the hold and spring checks, so a retry stays a no-op."""
+        stage = self.grove_fulfillment_stage
+        current = (self.grove_tracking_numbers or "").split()
+        if stage in _ALREADY_SHIPPED_STAGES and not current:
+            raise UserError(
+                f"{self.name} already shipped with no tracking number on file, so one can't be added "
+                f"from Discord. Its status is: {self._grove_stage_label()}."
+            )
+        if current and tracking not in current and stage not in _LABEL_REPLACEABLE_STAGES:
+            raise UserError(
+                f"{self.name} already has tracking {', '.join(current)}, and it can't be changed now. "
+                f"Its status is: {self._grove_stage_label()}."
+            )
         if stage in _ALREADY_SHIPPED_STAGES:
             return
         if self.grove_hold_until:
@@ -165,31 +184,41 @@ class SaleOrder(models.Model):
                 f"{self.name} is on hold until {until:%b} {until.day}, {until.year} "
                 f"({self.grove_hold_reason}). Release the hold before marking it shipped."
             )
-        if self.grove_lane == "spring" and not self.grove_tracking_numbers:
+        if self.grove_lane == "spring" and not current:
             zone = f"Zone {self.grove_usda_zone}" if self.grove_usda_zone else "an unknown zone"
             raise UserError(
                 f"{self.name} is a spring order for {zone}. It ships with its zone's batch, "
                 "so it needs its batch label before it can be marked shipped."
             )
         if stage not in _MARK_SHIPPED_STAGES and not self._grove_needs_wave_for_ship():
-            label = dict(self._fields["grove_fulfillment_state"].selection).get(stage, stage)
-            raise UserError(f"{self.name} can't be marked shipped yet. Its status is: {label}.")
+            raise UserError(f"{self.name} can't be marked shipped yet. Its status is: {self._grove_stage_label()}.")
 
     def _grove_apply_typed_label(self, tracking, cost, who, source):
         """Put the operator's number and cost on the order: record it, replace a
         different label, or leave a matching one alone."""
         current = (self.grove_tracking_numbers or "").split()
+        # Read before the write: a settled order was charged on the cost it had then.
+        charged_note = ""
+        if self.grove_checkout_status == "settled":
+            earlier_cost = self.grove_actual_shipping_cost or 0.0
+            charged_note = (
+                f" The balance was already charged on the earlier cost (${earlier_cost:.2f}), "
+                "so this does not change what the customer paid."
+            )
         if tracking in current:
-            # A retry or a prefilled modal. Until the order ships, the typed cost is
-            # still the one its balance settles on; after that the charge is done.
+            # A retry or a prefilled modal. Before the ship the typed cost is recorded,
+            # and an unsettled balance will settle on it. An order settled earlier keeps
+            # the charge it has, and the chatter says so. After the ship this is a no-op.
             shipped = self.grove_fulfillment_stage in _ALREADY_SHIPPED_STAGES
             if not shipped and round(cost, 2) != round(self.grove_actual_shipping_cost or 0.0, 2):
                 self.write({"grove_actual_shipping_cost": round(cost, 2)})
-                self.message_post(body=f"{who} set the cost of label {tracking} to ${cost:.2f}.")
+                self.message_post(body=f"{who} set the cost of label {tracking} to ${cost:.2f}.{charged_note}")
         elif current:
             self.action_grove_replace_label(
                 tracking, carrier=_TYPED_LABEL_CARRIER, actual_cost=cost, source=f"{source}, by {who}"
             )
+            if charged_note:
+                self.message_post(body=f"{who} replaced the label with {tracking} at ${cost:.2f}.{charged_note}")
         else:
             other = self._grove_other_order_with_tracking(tracking)
             if other:
@@ -215,10 +244,11 @@ class SaleOrder(models.Model):
         # cannot both pass the checks below on a stale read.
         self.env.cr.execute("SELECT id FROM sale_order WHERE id = %s FOR UPDATE", (self.id,))
         self.invalidate_recordset()
-        self._grove_refuse_mark_shipped()
+        tracking = clean_tracking(tracking)
+        self._grove_refuse_mark_shipped(tracking)
         who = actor or "An operator"
         with self.env.cr.savepoint():
             if self._grove_needs_wave_for_ship():
                 self.action_grove_assign_wave(wave_ref=f"fall (by {who})")
-            self._grove_apply_typed_label(clean_tracking(tracking), cost, who, source)
+            self._grove_apply_typed_label(tracking, cost, who, source)
         return _operator_mark_shipped(self.env, self, actor=actor, source=source)

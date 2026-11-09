@@ -33,6 +33,9 @@ _MONTHS = {
 _ISO_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
 _NUMERIC_RE = re.compile(r"^(\d{1,2})/(\d{1,2})$")
 _NAMED_RE = re.compile(r"^([A-Za-z]+)\.?\s+(\d{1,2})$")
+_TRACKING_RE = re.compile(r"^(1Z[A-Z0-9]{16}|[0-9]{20,34})$")
+
+MAX_LABEL_COST = 250.00
 
 
 def lane_for(fulfillment, is_printify, ship_wave):
@@ -94,8 +97,25 @@ def clean_tracking(text):
     return re.sub(r"\s+", "", text or "")
 
 
+def parse_tracking(text):
+    """Check a typed tracking number and return it in upper case, without spaces.
+
+    A UPS number is 1Z and 18 characters in all; anything else must be the 20 to
+    34 digits of a USPS number. Stricter than ``shippo_client.is_valid_tracking``
+    so a typo is caught before it reaches a customer. Raises ValueError."""
+    typed = clean_tracking(text)
+    if not typed:
+        raise ValueError("Enter the tracking number.")
+    number = typed.upper()
+    if not _TRACKING_RE.match(number):
+        raise ValueError(f"{typed} doesn't look like a UPS or USPS tracking number. Check it and try again.")
+    return number
+
+
 def parse_label_cost(text):
-    """Parse a label cost like "$12.40" into a positive float. Raises ValueError."""
+    """Parse a label cost like "$12.40" into a positive float no higher than
+    ``MAX_LABEL_COST``, because a dropped decimal would otherwise be billed to the
+    customer off-session. Raises ValueError."""
     raw = re.sub(r"[\s,$]", "", str(text or ""))
     try:
         value = float(raw)
@@ -103,4 +123,8 @@ def parse_label_cost(text):
         raise ValueError("Enter the label cost as a number, like 12.40.") from None
     if not math.isfinite(value) or value <= 0:
         raise ValueError("Label cost must be greater than zero.")
+    if value > MAX_LABEL_COST:
+        raise ValueError(
+            f"${value:,.2f} is over the ${MAX_LABEL_COST:.2f} limit for a label. Double-check the decimal."
+        )
     return value

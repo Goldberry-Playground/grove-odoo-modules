@@ -51,6 +51,39 @@ class TestOrderLanes(unittest.TestCase):
             date(2026, 12, 1),
         )
 
+    def test_parse_tracking_accepts_ups_and_usps_shapes(self):
+        self.assertEqual(ol.parse_tracking(" 1z999 aa1 0123456784\n"), "1Z999AA10123456784")
+        for digits in (20, 22, 34):
+            number = "9" * digits
+            self.assertEqual(ol.parse_tracking(number), number)
+
+    def test_parse_tracking_refuses_other_shapes(self):
+        for bad in (
+            "1Z999AA1012345678",  # 17, one short
+            "1Z999AA101234567845",  # 19, one over
+            "1Z999AA1012345678*",  # right length, not alphanumeric
+            "9" * 19,
+            "9" * 35,
+            "94001000000000000A00",  # 20 characters, not all digits
+            "٩" * 22,  # digits outside ASCII
+        ):
+            with self.assertRaises(ValueError, msg=bad) as caught:
+                ol.parse_tracking(bad)
+            self.assertIn(bad, str(caught.exception))
+
+    def test_parse_tracking_asks_for_a_missing_number(self):
+        for empty in ("", "   ", None):
+            with self.assertRaises(ValueError) as caught:
+                ol.parse_tracking(empty)
+            self.assertIn("Enter the tracking number", str(caught.exception))
+
+    def test_parse_label_cost_caps_at_250(self):
+        self.assertEqual(ol.parse_label_cost("250.00"), 250.0)
+        for too_big in ("250.01", "1240", "$1,240.00"):
+            with self.assertRaises(ValueError) as caught:
+                ol.parse_label_cost(too_big)
+            self.assertIn("decimal", str(caught.exception))
+
     def test_clean_tracking_and_cost(self):
         self.assertEqual(ol.clean_tracking(" 1Z999 AA1 0123456784\n"), "1Z999AA10123456784")
         self.assertEqual(ol.parse_label_cost("$12.40"), 12.40)

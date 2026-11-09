@@ -26,6 +26,7 @@ from odoo import fields
 from odoo.addons.grove_headless.controllers import main as grove_main
 from odoo.exceptions import UserError
 from odoo.tests.common import HttpCase, get_db_name, tagged
+from odoo.tools import mute_logger
 
 from .common import GroveTaxFixtureMixin
 
@@ -147,6 +148,33 @@ class TestMarkShippedTracking(GroveTaxFixtureMixin, HttpCase):
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(order.grove_tracking_numbers, UPS)
 
+    def test_endpoint_refuses_wrong_shaped_numbers(self):
+        order = self._order()
+        for typo in (UPS[:-1], "9400100000", "ABC1234567890"):
+            response = self._ship(order, tracking=typo)
+            self.assertEqual(response.status_code, 422, response.text)
+            self.assertIn(typo, response.json()["error"])
+        self.assertNothingHappened(order, "awaiting_label")
+
+    def test_endpoint_uppercases_the_number(self):
+        order = self._order()
+        response = self._ship(order, tracking=UPS.lower())
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(order.grove_tracking_numbers, UPS)
+
+    def test_endpoint_refuses_cost_over_the_cap(self):
+        order = self._order()
+        response = self._ship(order, cost="1240")
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("decimal", response.json()["error"].lower())
+        self.assertNothingHappened(order, "awaiting_label")
+
+    def test_endpoint_accepts_cost_at_the_cap(self):
+        order = self._order()
+        response = self._ship(order, cost="250.00")
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(order.grove_actual_shipping_cost, 250.0)
+
     # ── the normal ship ──────────────────────────────────────────────────
 
     def test_records_label_then_ships_and_settles_on_real_cost(self):
@@ -261,6 +289,25 @@ class TestMarkShippedTracking(GroveTaxFixtureMixin, HttpCase):
         self.assertEqual(seen["cost"], 12.40)
         self.assertIn("wesley", self._chatter(order))
 
+    def test_cost_correction_on_settled_order_says_balance_was_charged(self):
+        order = self._labelled_order(cost=9.0, grove_checkout_status="settled")
+        self.assertTrue(self._ship(order, cost="12.40").ok)
+        body = self._chatter(order)
+        self.assertIn("already charged", body)
+        self.assertIn("$9.00", body)
+
+    def test_label_replaced_on_settled_order_says_balance_was_charged(self):
+        order = self._labelled_order(cost=9.0, grove_checkout_status="settled")
+        self.assertTrue(self._ship(order, tracking=UPS_2, cost="12.40").ok)
+        body = self._chatter(order)
+        self.assertIn("already charged", body)
+        self.assertIn("$9.00", body)
+
+    def test_cost_correction_on_unsettled_order_makes_no_charged_claim(self):
+        order = self._labelled_order(cost=9.0)
+        self.assertTrue(self._ship(order, cost="12.40").ok)
+        self.assertNotIn("already charged", self._chatter(order))
+
     def test_different_number_on_shipped_order_replaces_and_charges_nothing_more(self):
         order = self._order()
         self.assertTrue(self._ship(order).ok)
@@ -306,12 +353,79 @@ class TestMarkShippedTracking(GroveTaxFixtureMixin, HttpCase):
         self.assertEqual(other.grove_tracking_numbers, UPS)
         self.assertEqual(other.grove_fulfillment_stage, "label_purchased")
 
+    def test_number_on_a_cancelled_order_is_not_a_duplicate(self):
+        odoo_cancelled = self._labelled_order(tracking=UPS)
+        odoo_cancelled.write({"state": "cancel"})
+        grove_cancelled = self._labelled_order(tracking=UPS_2)
+        grove_cancelled.write({"grove_fulfillment_state": "cancelled"})
+        for number in (UPS, UPS_2):
+            order = self._order()
+            response = self._ship(order, tracking=number)
+            self.assertEqual(response.status_code, 200, response.text)
+            self.assertEqual(order.grove_tracking_numbers, number)
+
+    def test_number_on_another_company_is_not_a_duplicate(self):
+        other_company = self.env["res.company"].create({"name": "Other Grove Co"})
+        partner = self.env["res.partner"].create({"name": "Other Customer", "company_id": False})
+        foreign = (
+            self.env["sale.order"]
+            .with_company(other_company)
+            .create({"partner_id": partner.id, "company_id": other_company.id})
+        )
+        foreign.write({"grove_tracking_numbers": UPS})
+        order = self._order()
+        response = self._ship(order)
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertEqual(order.grove_tracking_numbers, UPS)
+        self.assertEqual(foreign.grove_tracking_numbers, UPS)
+
     def test_number_that_only_contains_another_is_not_a_duplicate(self):
         self._labelled_order(tracking=f"{UPS}99")
         order = self._order()
         response = self._ship(order)
         self.assertEqual(response.status_code, 200, response.text)
         self.assertEqual(order.grove_tracking_numbers, UPS)
+
+    def assertPlainRefusal(self, response, *expected):
+        self.assertEqual(response.status_code, 409, response.text)
+        error = response.json()["error"]
+        for text in expected:
+            self.assertIn(text, error)
+        for jargon in ("stage", "ship wave", "awaiting_label", "label_purchased"):
+            self.assertNotIn(jargon, error)
+
+    def test_different_number_on_delivered_order_refused_in_plain_words(self):
+        order = self._order()
+        self.assertTrue(self._ship(order).ok)
+        order.action_grove_mark_delivered()
+        self.assertPlainRefusal(self._ship(order, tracking=UPS_2), order.name, UPS, "Delivered")
+        self.assertEqual(order.grove_tracking_numbers, UPS)
+        self.settle.assert_called_once()
+
+    def test_shipped_order_with_no_tracking_refused_in_plain_words(self):
+        order = self._order()
+        order.action_grove_mark_shipped(source="shippo")
+        self.assertPlainRefusal(self._ship(order), order.name, "no tracking number")
+        self.assertFalse(order.grove_tracking_numbers)
+        self.assertEqual(order.grove_fulfillment_stage, "shipped")
+        self.settle.assert_not_called()
+
+    def test_delivered_order_with_no_tracking_refused_in_plain_words(self):
+        order = self._order()
+        order.action_grove_mark_shipped(source="shippo")
+        order.action_grove_mark_delivered()
+        self.assertPlainRefusal(self._ship(order), order.name, "no tracking number")
+        self.assertFalse(order.grove_tracking_numbers)
+
+    def test_no_transition_refusal_reads_plainly(self):
+        order = self._order()
+        with mock.patch.object(
+            self.env.registry["sale.order"],
+            "_grove_ship_with_label",
+            return_value={"newly_shipped": False, "settlement": None},
+        ):
+            response = self._ship(order)
+        self.assertPlainRefusal(response, order.name, "Paid — awaiting label")
 
     def test_pickup_order_refused(self):
         order = self._order(grove_fulfillment="pickup")
@@ -365,6 +479,65 @@ class TestMarkShippedTracking(GroveTaxFixtureMixin, HttpCase):
     def test_odoo_server_action_still_skips_pickup_without_raising(self):
         order = self._order(grove_fulfillment="pickup")
         self.assertFalse(order._grove_mark_shipped_and_settle(operator="josh")["newly_shipped"])
+
+    def _run_server_action(self, orders):
+        action = self.env.ref("grove_headless.action_grove_mark_shipped")
+        return action.with_context(active_model="sale.order", active_ids=orders.ids).run()
+
+    def _waved_deposit_with_label(self):
+        order = self._deposit_order()
+        order.action_grove_assign_wave()
+        order.action_grove_record_hand_label(UPS, actual_cost=9.0)
+        return order
+
+    def test_server_action_checks_the_whole_selection_before_shipping_any(self):
+        """Raising mid-loop would roll back a charge that really happened."""
+        labelled = self._waved_deposit_with_label()
+        missing_one = self._order()
+        missing_two = self._order()
+        with self.assertRaises(UserError) as caught:
+            self._run_server_action(labelled | missing_one | missing_two)
+        message = str(caught.exception)
+        self.assertIn(missing_one.name, message)
+        self.assertIn(missing_two.name, message)
+        self.assertNotIn(labelled.name, message)
+        self.settle.assert_not_called()
+        self.notify.assert_not_called()
+        self.assertEqual(labelled.grove_fulfillment_stage, "label_purchased")
+
+    def test_server_action_refuses_up_front_when_compliance_is_missing(self):
+        """The compliance gate also raises from the loop, so it is checked first too."""
+        labelled = self._labelled_order()
+        blocked = self._labelled_order(tracking=UPS_2)
+        with mock.patch.object(
+            self.env.registry["sale.order"],
+            "_grove_consult_compliance_missing",
+            lambda order: order.id == blocked.id,
+        ):
+            with self.assertRaises(UserError) as caught:
+                self._run_server_action(labelled | blocked)
+        self.assertIn(blocked.name, str(caught.exception))
+        self.settle.assert_not_called()
+        self.notify.assert_not_called()
+
+    @mute_logger("odoo.addons.grove_headless.models.sale_order")
+    def test_server_action_no_op_stages_do_not_block_the_others(self):
+        labelled = self._labelled_order()
+        no_ops = (
+            self._order(grove_checkout_status="deposit_paid")  # no wave, no label
+            | self._order(grove_checkout_status="expired")  # cancelled
+            | self._order(grove_checkout_status=False)  # awaiting payment
+        )
+        self.assertEqual(
+            sorted(no_ops.mapped("grove_fulfillment_stage")),
+            ["awaiting_payment", "cancelled", "deposit_paid"],
+        )
+        stages = no_ops.mapped("grove_fulfillment_stage")
+        self._run_server_action(no_ops | labelled)
+        self.assertEqual(labelled.grove_fulfillment_stage, "shipped")
+        self.assertEqual(no_ops.mapped("grove_fulfillment_stage"), stages)
+        self.settle.assert_called_once()
+        self.notify.assert_called_once()
 
     def test_carrier_signal_is_not_gated(self):
         """The carrier poll and webhooks call action_grove_mark_shipped with no

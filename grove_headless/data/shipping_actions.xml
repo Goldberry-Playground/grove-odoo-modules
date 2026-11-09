@@ -51,7 +51,8 @@ for order in records:
        _operator_mark_shipped orchestration: canonical shipped transition +
        ship-time settlement (the deferred balance is captured off-session) + one
        branded shipment email. Best-effort settlement never rolls back shipped;
-       a pickup order is refused by the model guard. Iterates for multi-select. -->
+       a pickup order is refused by the model guard. A multi-select is checked as a
+       whole before any order ships, so one bad order cannot roll back a real charge. -->
   <record id="action_grove_mark_shipped" model="ir.actions.server">
     <field name="name">Mark shipped (settle + notify)</field>
     <field name="model_id" ref="sale.model_sale_order"/>
@@ -59,8 +60,7 @@ for order in records:
     <field name="binding_view_types">list,form</field>
     <field name="state">code</field>
     <field name="code">
-for order in records:
-    order._grove_mark_shipped_and_settle()
+records._grove_mark_selection_shipped()
     </field>
   </record>
 
