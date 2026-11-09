@@ -13,6 +13,7 @@ from zoneinfo import ZoneInfo
 import requests
 from odoo import api, fields, models
 from odoo.exceptions import AccessError, UserError
+from odoo.tools import config
 
 from .order_lanes import clean_tracking, lane_for, suggest_hold_date
 from .shipping_boxes import dormancy_window
@@ -23,6 +24,8 @@ _logger = logging.getLogger(__name__)
 # The shop's day, for the hold nudge's "due" and "already nudged today" checks.
 _NUDGE_TZ = ZoneInfo("America/New_York")
 _NUDGE_FROM_HOUR = 8
+# A dead bridge should cost a few timeouts, not one per order.
+_NUDGE_MAX_FAILURES = 3
 
 # Stages where a hold is meaningless: the order is already out the door or finished.
 # (label_purchased is deliberately allowed: a bought label can still be held.)
@@ -328,17 +331,17 @@ class SaleOrder(models.Model):
             self._grove_apply_typed_label(tracking, cost, who, source)
         return _operator_mark_shipped(self.env, self, actor=actor, source=source)
 
-    def _grove_post_notice(self, company, title, lines, buttons):
-        """POST a plain notice (title, lines, ``ord:`` buttons) to the Discord
-        bridge's ``/orders/notice``, which posts it to the company's order channel.
-        Returns True only when the bridge accepts it. Never raises: an unconfigured
-        bridge, a network error or a non-200 answer logs and returns False."""
+    def _grove_post_notice_status(self, company, title, lines, buttons):
+        """POST a notice to the Discord bridge's ``/orders/notice``. Returns
+        ``"ok"`` (accepted), ``"unmapped"`` (HTTP 422: no order channel for this
+        company, so retrying cannot help) or ``"failed"`` (anything else). Never
+        raises."""
         try:
             secret = os.environ.get("ORDER_ALERT_SECRET", "")
             base = os.environ.get("DISCORD_BRIDGE_BASE_URL", "").rstrip("/")
             if not secret or not base:
                 _logger.warning("Order notice not sent: the Discord bridge is not configured")
-                return False
+                return "failed"
             resp = requests.post(
                 f"{base}/orders/notice",
                 json={"companyId": company.id, "title": title, "lines": lines, "buttons": buttons},
@@ -346,11 +349,17 @@ class SaleOrder(models.Model):
                 timeout=10,
             )
             if resp.status_code == 200:
-                return True
+                return "ok"
             _logger.warning("Order notice POST returned %s", resp.status_code)
+            if resp.status_code == 422:
+                return "unmapped"
         except Exception:  # noqa: BLE001 — a notice is best-effort and must not break the cron
             _logger.warning("Order notice POST failed", exc_info=True)
-        return False
+        return "failed"
+
+    def _grove_post_notice(self, company, title, lines, buttons):
+        """True only when the bridge accepted the notice. Never raises."""
+        return self._grove_post_notice_status(company, title, lines, buttons) == "ok"
 
     def _grove_hold_nudge_notice(self):
         """Title, lines and buttons for one due hold."""
@@ -406,10 +415,37 @@ class SaleOrder(models.Model):
                 ]
             )
         )
+        # Skip the per-order commit under the test runner so a TransactionCase
+        # stays isolated (same as the settlement retry cron).
+        in_test = bool(config["test_enable"])
+        failures = 0
+        unmapped = set()
         for order in orders:
+            company = order.company_id
+            if company.id in unmapped:
+                continue
             try:
                 title, lines, buttons = order._grove_hold_nudge_notice()
-                if order._grove_post_notice(order.company_id, title, lines, buttons):
+                status = order._grove_post_notice_status(company, title, lines, buttons)
+                if status == "ok":
+                    failures = 0
                     order.write({"grove_hold_last_nudge": today})
+                    # A Discord post cannot be undone, so keep its stamp even if a
+                    # later order fails and the run rolls back.
+                    if not in_test:
+                        self.env.cr.commit()
+                elif status == "unmapped":
+                    unmapped.add(company.id)
+                    _logger.error(
+                        "Hold nudges skipped for company %s (id %s): the bridge has no order channel for it",
+                        company.name,
+                        company.id,
+                    )
+                else:
+                    failures += 1
             except Exception:  # noqa: BLE001 — keep nudging the other orders
                 _logger.exception("Hold nudge failed for order %s", order.id)
+                failures += 1
+            if failures >= _NUDGE_MAX_FAILURES:
+                _logger.error("Hold nudges stopped after %s consecutive failures; will retry next run", failures)
+                break

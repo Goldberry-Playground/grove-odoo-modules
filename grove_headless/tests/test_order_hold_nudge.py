@@ -17,7 +17,7 @@ MORNING_UTC = datetime(2026, 11, 9, 14, 0)
 BEFORE_8_UTC = datetime(2026, 11, 9, 12, 0)  # 07:00 EST
 NY_TODAY = date(2026, 11, 9)
 
-POST = "odoo.addons.grove_headless.models.sale_order_ops.SaleOrder._grove_post_notice"
+POST = "odoo.addons.grove_headless.models.sale_order_ops.SaleOrder._grove_post_notice_status"
 
 
 @tagged("post_install", "-at_install")
@@ -28,7 +28,7 @@ class TestOrderHoldNudge(GroveTaxFixtureMixin, TransactionCase):
         cls.company = cls.env.company
         cls.product = cls.env["product.product"].create({"name": "Nudge tree", "list_price": 25.0, "type": "consu"})
 
-    def _held_order(self, until=NY_TODAY, **vals):
+    def _held_order(self, until=NY_TODAY, company_id=None, **vals):
         partner = self.env["res.partner"].create(
             {"name": "Nudge Buyer", "zip": "26651", "country_id": self.env.ref("base.us").id}
         )
@@ -36,7 +36,7 @@ class TestOrderHoldNudge(GroveTaxFixtureMixin, TransactionCase):
             {
                 "partner_id": partner.id,
                 "partner_shipping_id": partner.id,
-                "company_id": self.company.id,
+                "company_id": company_id or self.company.id,
                 "order_line": [(0, 0, {"product_id": self.product.id, "product_uom_qty": 1})],
             }
         )
@@ -52,7 +52,7 @@ class TestOrderHoldNudge(GroveTaxFixtureMixin, TransactionCase):
         )
         return order
 
-    def _run(self, now=MORNING_UTC, ret=True):
+    def _run(self, now=MORNING_UTC, ret="ok"):
         with patch(POST, return_value=ret) as post:
             self.env["sale.order"]._cron_grove_order_nudges(now=now)
         return post
@@ -120,7 +120,7 @@ class TestOrderHoldNudge(GroveTaxFixtureMixin, TransactionCase):
 
     def test_failed_post_does_not_stamp_last_nudge(self):
         order = self._held_order()
-        post = self._run(ret=False)
+        post = self._run(ret="failed")
         self.assertEqual(len(self._posts_for(post, order)), 1)
         self.assertFalse(order.grove_hold_last_nudge)
         retry = self._run(now=MORNING_UTC + timedelta(hours=1))
@@ -144,7 +144,7 @@ class TestOrderHoldNudge(GroveTaxFixtureMixin, TransactionCase):
             calls.append(buttons[0]["customId"])
             if len(calls) == 1:
                 raise RuntimeError("boom")
-            return True
+            return "ok"
 
         with patch(POST, flaky):
             self.env["sale.order"]._cron_grove_order_nudges(now=MORNING_UTC)
@@ -166,5 +166,59 @@ class TestOrderHoldNudge(GroveTaxFixtureMixin, TransactionCase):
             with patch(f"{mod}.requests.post") as bad:
                 bad.return_value.status_code = 422
                 self.assertFalse(order._grove_post_notice(order.company_id, "t", ["l"], []))
+                self.assertEqual(order._grove_post_notice_status(order.company_id, "t", ["l"], []), "unmapped")
         with patch.dict("os.environ", {"ORDER_ALERT_SECRET": "", "DISCORD_BRIDGE_BASE_URL": ""}):
             self.assertFalse(order._grove_post_notice(order.company_id, "t", ["l"], []))
+
+    def test_earlier_stamps_survive_a_later_failure(self):
+        orders = [self._held_order() for _ in range(2)]
+        results = iter(["ok", "failed"])
+        with patch(POST, side_effect=lambda *a: next(results)):
+            self.env["sale.order"]._cron_grove_order_nudges(now=MORNING_UTC)
+        stamped = [o for o in orders if o.grove_hold_last_nudge]
+        self.assertEqual(len(stamped), 1)
+
+    def test_three_consecutive_failures_stop_the_run(self):
+        orders = [self._held_order() for _ in range(5)]
+        post = self._run(ret="failed")
+        self.assertEqual(post.call_count, 3)
+        self.assertFalse(any(o.grove_hold_last_nudge for o in orders))
+        # The next hourly run still tries again.
+        again = self._run(now=MORNING_UTC + timedelta(hours=1), ret="ok")
+        self.assertEqual(again.call_count, 5)
+
+    def test_a_success_resets_the_failure_count(self):
+        [self._held_order() for _ in range(5)]
+        results = iter(["failed", "failed", "ok", "failed", "failed"])
+        with patch(POST, side_effect=lambda *a: next(results)) as post:
+            self.env["sale.order"]._cron_grove_order_nudges(now=MORNING_UTC)
+        self.assertEqual(post.call_count, 5)
+
+    def test_unmapped_company_is_skipped_once_and_not_stamped(self):
+        other = self.env["res.company"].create({"name": "Unmapped Co"})
+        bad = [self._held_order(company_id=other.id) for _ in range(2)]
+        good = self._held_order()
+
+        def by_company(company, *a):
+            return "unmapped" if company == other else "ok"
+
+        with patch(POST, side_effect=by_company) as post:
+            self.env["sale.order"]._cron_grove_order_nudges(now=MORNING_UTC)
+        companies = [c.args[0] for c in post.call_args_list]
+        self.assertEqual(companies.count(other), 1)
+        self.assertEqual(companies.count(good.company_id), 1)
+        self.assertFalse(any(o.grove_hold_last_nudge for o in bad))
+        self.assertEqual(good.grove_hold_last_nudge, NY_TODAY)
+
+    def test_unmapped_company_does_not_count_toward_the_failure_stop(self):
+        other = self.env["res.company"].create({"name": "Unmapped Co"})
+        for _ in range(4):
+            self._held_order(company_id=other.id)
+        good = self._held_order()
+
+        def by_company(company, *a):
+            return "unmapped" if company == other else "ok"
+
+        with patch(POST, side_effect=by_company):
+            self.env["sale.order"]._cron_grove_order_nudges(now=MORNING_UTC)
+        self.assertEqual(good.grove_hold_last_nudge, NY_TODAY)
