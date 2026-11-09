@@ -92,6 +92,7 @@
         "data/order_rollup_cron.xml",
         "data/listing_audit_cron.xml",
         "data/carrier_tracking_cron.xml",
+        "data/order_ops_cron.xml",
         "data/enrich_job_cron.xml",
         "data/grove_dormancy_params.xml",
         "data/grove_zone_filters.xml",

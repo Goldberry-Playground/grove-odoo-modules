@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <!-- Daily nudge for a due order hold. Runs hourly and does nothing before
+         8am New York time, so the notice lands each morning until someone
+         answers it. noupdate="1": an upgrade must not rewrite the live
+         schedule. -->
+    <record id="ir_cron_grove_order_nudges" model="ir.cron">
+        <field name="name">Grove: nudge due order holds</field>
+        <field name="model_id" ref="sale.model_sale_order"/>
+        <field name="state">code</field>
+        <field name="code">model._cron_grove_order_nudges()</field>
+        <field name="interval_number">1</field>
+        <field name="interval_type">hours</field>
+        <field name="active" eval="True"/>
+    </record>
+</odoo>

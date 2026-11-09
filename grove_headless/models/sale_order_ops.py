@@ -6,8 +6,11 @@ chatter naming the actor.
 """
 
 import logging
-from datetime import date, timedelta
+import os
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
+import requests
 from odoo import api, fields, models
 from odoo.exceptions import AccessError, UserError
 
@@ -16,6 +19,10 @@ from .shipping_boxes import dormancy_window
 from .shipping_calendar import merge_calendar_override, preorder_waves
 
 _logger = logging.getLogger(__name__)
+
+# The shop's day, for the hold nudge's "due" and "already nudged today" checks.
+_NUDGE_TZ = ZoneInfo("America/New_York")
+_NUDGE_FROM_HOUR = 8
 
 # Stages where a hold is meaningless: the order is already out the door or finished.
 # (label_purchased is deliberately allowed: a bought label can still be held.)
@@ -320,3 +327,89 @@ class SaleOrder(models.Model):
                 self.action_grove_assign_wave(wave_ref=f"fall (by {who})")
             self._grove_apply_typed_label(tracking, cost, who, source)
         return _operator_mark_shipped(self.env, self, actor=actor, source=source)
+
+    def _grove_post_notice(self, company, title, lines, buttons):
+        """POST a plain notice (title, lines, ``ord:`` buttons) to the Discord
+        bridge's ``/orders/notice``, which posts it to the company's order channel.
+        Returns True only when the bridge accepts it. Never raises: an unconfigured
+        bridge, a network error or a non-200 answer logs and returns False."""
+        try:
+            secret = os.environ.get("ORDER_ALERT_SECRET", "")
+            base = os.environ.get("DISCORD_BRIDGE_BASE_URL", "").rstrip("/")
+            if not secret or not base:
+                _logger.warning("Order notice not sent: the Discord bridge is not configured")
+                return False
+            resp = requests.post(
+                f"{base}/orders/notice",
+                json={"companyId": company.id, "title": title, "lines": lines, "buttons": buttons},
+                headers={"X-Order-Alert-Secret": secret},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                return True
+            _logger.warning("Order notice POST returned %s", resp.status_code)
+        except Exception:  # noqa: BLE001 — a notice is best-effort and must not break the cron
+            _logger.warning("Order notice POST failed", exc_info=True)
+        return False
+
+    def _grove_hold_nudge_notice(self):
+        """Title, lines and buttons for one due hold."""
+        self.ensure_one()
+        zone = f"Zone {self.grove_usda_zone}" if self.grove_usda_zone else "no zone on file"
+        held_by = f" (held by {self.grove_hold_set_by})" if self.grove_hold_set_by else ""
+        title = f"{self.name}: held order is due"
+        lines = [
+            f"Customer: {self.partner_id.name or 'Unknown'}",
+            f"Zone: {zone}",
+            f"Held for: {self.grove_hold_reason or 'no reason recorded'}{held_by}",
+            f"Held until: {self.grove_hold_until.isoformat()}",
+            "Is it ready to ship, or should the hold move?",
+        ]
+        buttons = [
+            {"label": "Ready to ship", "style": 3, "customId": f"ord:ready:{self.id}"},
+            {"label": "Snooze a week", "style": 2, "customId": f"ord:snooze:{self.id}"},
+            {
+                "label": "Change date",
+                "style": 2,
+                "customId": f"ord:holddate:{self.id}:{self.grove_hold_until.isoformat()}",
+            },
+        ]
+        return title, lines, buttons
+
+    @api.model
+    def _cron_grove_order_nudges(self, now=None):
+        """Hourly: from 8am New York on, post one notice per order whose hold has
+        come due (on or before today, New York date) and not been nudged today.
+        The notice repeats each morning until the hold is answered. Stamps
+        ``grove_hold_last_nudge`` only after a post succeeded; one order's failure
+        never stops the rest. ``now`` (UTC, naive or aware) is for tests."""
+        now = now or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        local = now.astimezone(_NUDGE_TZ)
+        if local.hour < _NUDGE_FROM_HOUR:
+            return
+        today = local.date()
+        companies = self.env["res.company"].sudo().search([])
+        orders = (
+            self.sudo()
+            .with_context(allowed_company_ids=companies.ids)
+            .search(
+                [
+                    ("grove_hold_until", "!=", False),
+                    ("grove_hold_until", "<=", today),
+                    "|",
+                    ("grove_hold_last_nudge", "=", False),
+                    ("grove_hold_last_nudge", "<", today),
+                    ("grove_fulfillment_stage", "not in", list(_HOLD_REFUSED_STAGES)),
+                    ("state", "!=", "cancel"),
+                ]
+            )
+        )
+        for order in orders:
+            try:
+                title, lines, buttons = order._grove_hold_nudge_notice()
+                if order._grove_post_notice(order.company_id, title, lines, buttons):
+                    order.write({"grove_hold_last_nudge": today})
+            except Exception:  # noqa: BLE001 — keep nudging the other orders
+                _logger.exception("Hold nudge failed for order %s", order.id)
