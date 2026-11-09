@@ -135,5 +135,72 @@ class RecurrenceFallbacks(unittest.TestCase):
         self.assertIsNone(rule)
 
 
+class ExpectedOccurrences(unittest.TestCase):
+    """The local wall-clock grid used by exception detection (spec D.7)."""
+
+    def test_weekly_interval_1(self):
+        rep = datetime(2026, 11, 17, 18, 0)  # Tue
+        horizon = datetime(2026, 12, 9, 23, 59)  # ~3 weeks out
+        occ = dr.expected_occurrences(_rec(rrule_type="weekly", interval=1, tue=True), rep, horizon)
+        self.assertEqual(
+            occ,
+            [
+                datetime(2026, 11, 17, 18, 0),
+                datetime(2026, 11, 24, 18, 0),
+                datetime(2026, 12, 1, 18, 0),
+                datetime(2026, 12, 8, 18, 0),
+            ],
+        )
+
+    def test_weekly_interval_2_biweekly(self):
+        rep = datetime(2026, 11, 20, 19, 0)  # Fri
+        horizon = datetime(2026, 12, 20, 0, 0)
+        occ = dr.expected_occurrences(_rec(rrule_type="weekly", interval=2, fri=True), rep, horizon)
+        self.assertEqual(
+            occ, [datetime(2026, 11, 20, 19, 0), datetime(2026, 12, 4, 19, 0), datetime(2026, 12, 18, 19, 0)]
+        )
+
+    def test_weekly_wall_clock_is_dst_stable(self):
+        # US DST ended 2026-11-01; a weekly series straddling it keeps the same
+        # local wall-clock hour because the grid is naive local time.
+        rep = datetime(2026, 10, 27, 18, 0)  # Tue, before the change
+        horizon = datetime(2026, 11, 18, 0, 0)
+        occ = dr.expected_occurrences(_rec(rrule_type="weekly", interval=1, tue=True), rep, horizon)
+        self.assertTrue(all(dt.hour == 18 for dt in occ))
+
+    def test_daily(self):
+        rep = datetime(2026, 11, 17, 9, 0)
+        horizon = datetime(2026, 11, 20, 9, 0)
+        occ = dr.expected_occurrences(_rec(rrule_type="daily", interval=1), rep, horizon)
+        self.assertEqual(len(occ), 4)
+        self.assertEqual(occ[1], datetime(2026, 11, 18, 9, 0))
+
+    def test_monthly_nth_weekday(self):
+        # Second Wednesday, two months in the window.
+        rep = datetime(2026, 11, 11, 18, 0)  # 2nd Wed of Nov 2026
+        horizon = datetime(2026, 12, 31, 0, 0)
+        occ = dr.expected_occurrences(
+            _rec(rrule_type="monthly", interval=1, month_by="day", byday="2", weekday="WED"),
+            rep,
+            horizon,
+        )
+        self.assertEqual(occ, [datetime(2026, 11, 11, 18, 0), datetime(2026, 12, 9, 18, 0)])
+
+    def test_yearly_single_in_short_window(self):
+        rep = datetime(2026, 11, 17, 18, 0)
+        horizon = datetime(2026, 12, 17, 0, 0)
+        occ = dr.expected_occurrences(_rec(rrule_type="yearly", interval=1), rep, horizon)
+        self.assertEqual(occ, [datetime(2026, 11, 17, 18, 0)])
+
+    def test_fallback_pattern_returns_empty(self):
+        # Several weekdays: no Discord grid, published as fallbacks → no exceptions.
+        occ = dr.expected_occurrences(
+            _rec(rrule_type="weekly", interval=1, mon=True, wed=True),
+            datetime(2026, 11, 17, 18, 0),
+            datetime(2026, 12, 17, 0, 0),
+        )
+        self.assertEqual(occ, [])
+
+
 if __name__ == "__main__":
     unittest.main()

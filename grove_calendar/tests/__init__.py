@@ -9,6 +9,7 @@
 from . import (
     test_digest_cron,  # noqa: F401
     test_discord_events_cron,  # noqa: F401
+    test_discord_exceptions,  # noqa: F401
     test_discord_format,  # noqa: F401
     test_discord_recurrence,  # noqa: F401
     test_grove_public_domain,  # noqa: F401

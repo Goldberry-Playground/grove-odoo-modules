@@ -247,6 +247,9 @@ class GroveCalendarDiscord(models.AbstractModel):
             "marker": marker,
             "payload": payload,
             "hash": self._payload_hash(payload),
+            # Carried for exception detection (spec D.7); absent on one-offs and
+            # fallbacks, which have no series exceptions.
+            "series": {"recurrence": recurrence, "representative": representative},
         }
 
     def _event_unit(self, event, rooms):
@@ -435,10 +438,136 @@ class GroveCalendarDiscord(models.AbstractModel):
         recurrence.discord_fallback_warned = stamp
 
     # ------------------------------------------------------------- exceptions
+    _MOVE_PAIR_DAYS = 7  # a missing slot pairs with an off-grid row within a week.
+
+    def _to_local_naive(self, dt, tz):
+        """A naive-UTC Odoo datetime → naive local wall-clock in *tz*."""
+        return dt.replace(tzinfo=timezone.utc).astimezone(tz).replace(tzinfo=None)
+
+    def _fmt_when(self, local_dt):
+        """'Tue Nov 17, 6:00 PM' from a naive local datetime."""
+        weekdays = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+        months = ("", "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+        hour = local_dt.hour % 12 or 12
+        meridiem = "AM" if local_dt.hour < 12 else "PM"
+        return (
+            f"{weekdays[local_dt.weekday()]} {months[local_dt.month]} "
+            f"{local_dt.day}, {hour}:{local_dt.minute:02d} {meridiem}"
+        )
+
+    def _post_events_webhook(self, message):
+        """Post an exception alert to the events channel (best-effort).
+
+        Same URL fallback and disarmed ``allowed_mentions`` as the weekly digest."""
+        url = os.environ.get("DISCORD_EVENTS_WEBHOOK_URL", "") or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+        if not url:
+            _logger.info("grove.calendar.discord: no events/ops webhook — exception alert dropped")
+            return
+        try:
+            requests.post(
+                url,
+                json={"content": message[:2000], "allowed_mentions": {"parse": []}},
+                timeout=_TIMEOUT,
+            )
+        except Exception:  # noqa: BLE001 — alert is best-effort
+            _logger.warning("grove.calendar.discord: exception alert post failed", exc_info=True)
+
+    def _nearest_extra(self, expected_dt, extras):
+        """The off-grid actual datetime closest to *expected_dt* within the pair
+        window, or None — used to tell a *moved* occurrence from a *cancelled* one."""
+        best, best_gap = None, None
+        for dt in extras:
+            gap = abs((dt.date() - expected_dt.date()).days)
+            if gap <= self._MOVE_PAIR_DAYS and (best_gap is None or gap < best_gap):
+                best, best_gap = dt, gap
+        return best
+
     def _detect_exceptions(self, units):
         """Alert the events channel about skipped/moved occurrences (spec D.7).
 
-        Implemented in the exceptions follow-up; a no-op here keeps the core sync
-        shippable on its own.
+        Discord's repeating event carries no exceptions, so the series stays one
+        Discord event and people are told instead. For each mapped series this
+        compares the rule's expected occurrences (local wall-clock, DST-stable)
+        with the live Odoo occurrence rows: an expected slot with no row is a
+        cancellation; an off-grid row near a missing slot is a move; a previously
+        alerted slot that is well again posts a reversal. ``discord_alerted_exceptions``
+        dedupes to one alert per original occurrence and is pruned of past dates.
         """
-        return
+        now = fields.Datetime.now()
+        horizon = now + timedelta(days=self._window_days())
+        today = fields.Date.context_today(self)
+
+        for unit in units:
+            series = unit.get("series")
+            if not series:
+                continue
+            try:
+                self._detect_series_exceptions(series, now, horizon, today)
+            except Exception:  # noqa: BLE001 — one series never stops the run
+                _logger.warning("grove.calendar.discord: exception scan failed for %s", unit["marker"], exc_info=True)
+
+    def _detect_series_exceptions(self, series, now, horizon, today):
+        recurrence = series["recurrence"]
+        representative = series["representative"]
+        tz = ZoneInfo(representative.event_tz) if representative.event_tz else _EASTERN
+
+        rep_local = self._to_local_naive(representative.start, tz)
+        horizon_local = self._to_local_naive(horizon, tz)
+        expected = drec.expected_occurrences(self._recurrence_dict(recurrence), rep_local, horizon_local)
+        if not expected:
+            return
+
+        actual = recurrence.calendar_event_ids.filtered(
+            lambda e: e.active and e.privacy == "public" and e.start and e.start <= horizon and e.stop > now
+        )
+        actual_by_date = {}
+        for event in actual:
+            local = self._to_local_naive(event.start, tz)
+            actual_by_date[local.date()] = local
+
+        expected_by_date = {dt.date(): dt for dt in expected}
+        extras = [local for d, local in actual_by_date.items() if d not in expected_by_date]
+
+        try:
+            alerted = json.loads(recurrence.discord_alerted_exceptions or "[]")
+        except ValueError:
+            alerted = []
+        # Prune dates already past; keep the rest as the live dedupe set.
+        active = {d for d in alerted if fields.Date.to_date(d) and fields.Date.to_date(d) >= today}
+
+        name = recurrence.name or "A recurring event"
+        for ed, expected_dt in sorted(expected_by_date.items()):
+            iso = ed.isoformat()
+            actual_dt = actual_by_date.get(ed)
+            if actual_dt is not None and actual_dt == expected_dt:
+                # On the grid and on time: a prior alert for this slot is now stale.
+                if iso in active:
+                    self._post_events_webhook(f"✅ {name} on {self._fmt_when(expected_dt)} is back on as scheduled.")
+                    active.discard(iso)
+                continue
+            if actual_dt is not None:
+                # Same day, different time — a move within the day.
+                if iso not in active:
+                    self._post_events_webhook(
+                        f"⚠️ {name} moves from {self._fmt_when(expected_dt)} "
+                        f"to {self._fmt_when(actual_dt)} for that week only."
+                    )
+                    active.add(iso)
+                continue
+            # No row on this expected date: moved to another day, or cancelled.
+            moved_to = self._nearest_extra(expected_dt, extras)
+            if moved_to is not None:
+                extras.remove(moved_to)
+                if iso not in active:
+                    self._post_events_webhook(
+                        f"⚠️ {name} moves from {self._fmt_when(expected_dt)} "
+                        f"to {self._fmt_when(moved_to)} for that week only."
+                    )
+                    active.add(iso)
+            elif iso not in active:
+                self._post_events_webhook(
+                    f"⚠️ {name} on {self._fmt_when(expected_dt)} is cancelled. The Discord event still shows it."
+                )
+                active.add(iso)
+
+        recurrence.discord_alerted_exceptions = json.dumps(sorted(active))
