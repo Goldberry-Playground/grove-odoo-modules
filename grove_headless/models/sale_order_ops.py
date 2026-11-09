@@ -503,7 +503,7 @@ class SaleOrder(models.Model):
                 ("grove_lane", "=", "spring"),
                 ("grove_usda_zone", "!=", False),
                 ("grove_tracking_numbers", "=", False),
-                ("state", "!=", "cancel"),
+                ("state", "in", ["sale", "done"]),
                 ("grove_fulfillment_stage", "not in", ["shipped", "delivered", "collected"]),
             ]
         )

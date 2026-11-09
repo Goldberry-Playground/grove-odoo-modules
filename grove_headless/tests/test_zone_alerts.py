@@ -51,7 +51,7 @@ class TestZoneAlerts(GroveTaxFixtureMixin, TransactionCase):
                 }
             )
             order.grove_fulfillment = "ship"
-            extra = {"grove_ship_wave": "spring", "grove_usda_zone": zone, **vals}
+            extra = {"grove_ship_wave": "spring", "grove_usda_zone": zone, "state": "sale", **vals}
             if i < held:
                 extra["grove_hold_until"] = date(2027, 4, 10)
             order.sudo().write(extra)
@@ -100,6 +100,13 @@ class TestZoneAlerts(GroveTaxFixtureMixin, TransactionCase):
             [t for t in self._texts(self._run(START)) if t.startswith("Zone 6")],
             ["Zone 6 spring shipping starts today: 2 orders ready to batch."],
         )
+
+    def test_draft_spring_orders_are_not_counted_and_do_not_alert(self):
+        self._orders(1, state="draft")
+        self._run(T5).assert_not_called()
+        self.assertFalse(self.Alert.search([("company_id", "=", self.company.id)]))
+        self._orders(2)
+        self.assertEqual(self._texts(self._run(T5)), ["Zone 6 spring shipping starts in 5 days: 2 orders, 0 on hold."])
 
     def test_zone_without_orders_posts_nothing(self):
         post = self._run(T5)
