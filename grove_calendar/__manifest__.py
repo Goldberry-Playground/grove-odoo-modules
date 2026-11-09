@@ -33,8 +33,15 @@
         QA and the test runner install it without Google. The Google side is
         Odoo's own google_calendar module, paired by Josh out of band.
 
+          - Website tag + public feed (phase F, GOL-3842): a Public event also
+            carrying the grove_calendar.tag_website tag is served read-only on
+            GET /grove/api/v1/events (auth public, Cache-Control 5 min) via
+            calendar.event._grove_website_domain, and reads as its own calendar
+            through a "Website" search filter. Never attendees or organizer.
+
         Non-goals: no RSVP/ticketing (event/website_event stay uninstalled), no
-        Discord-to-Odoo direction, no storefront events feed (a later train).
+        Discord-to-Odoo direction, no grove-sites page rendering the feed yet
+        (that waits for the visit-page work, GOL-1585).
     """,
     "author": "Gathering at the Grove",
     "website": "https://goldberrygrove.farm",
@@ -47,6 +54,7 @@
     # fields live on existing models (calendar.event, calendar.recurrence,
     # res.users), so no new ACL is needed.
     "data": [
+        "data/calendar_event_type_data.xml",
         "data/calendar_digest_cron.xml",
         "views/calendar_event_views.xml",
         "views/res_users_views.xml",

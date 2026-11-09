@@ -9,5 +9,7 @@
 from . import (
     test_digest_cron,  # noqa: F401
     test_discord_format,  # noqa: F401
+    test_events_feed_route,  # noqa: F401
     test_grove_public_domain,  # noqa: F401
+    test_grove_website_domain,  # noqa: F401
 )

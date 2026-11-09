@@ -80,3 +80,21 @@ class CalendarEvent(models.Model):
             ("stop", ">", now),
             ("start", "<=", horizon),
         ]
+
+    @api.model
+    def _grove_website_domain(self, window_days):
+        """Public events (``_grove_public_domain``) that ALSO carry the Website tag.
+
+        The third publication tier: private = team only, public = Discord,
+        public + the ``grove_calendar.tag_website`` tag = the website. The
+        public feed route ``GET /grove/api/v1/events`` (phase F, GOL-3842) and
+        the "Website" calendar search filter share this one definition, so the
+        tagged subset reads as its own public calendar. The tag is resolved by
+        xmlid; if the seed record is ever missing the domain collapses to an
+        impossible clause rather than falling back to every public event, so a
+        broken install cannot leak the whole calendar to the open web.
+        """
+        tag = self.env.ref("grove_calendar.tag_website", raise_if_not_found=False)
+        if not tag:
+            return [("id", "=", False)]
+        return self._grove_public_domain(window_days) + [("categ_ids", "in", tag.ids)]
