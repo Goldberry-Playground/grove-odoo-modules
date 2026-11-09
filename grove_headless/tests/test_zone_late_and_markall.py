@@ -532,7 +532,6 @@ class TestMarkAllShipped(_Fixture, TransactionCase):
 
 
 @tagged("post_install", "-at_install")
-@tagged("post_install", "-at_install")
 class TestCancelledAndMovedOrders(_Fixture, TransactionCase):
     """A cancelled or moved order must never be charged or emailed from a batch."""
 
@@ -624,6 +623,19 @@ class TestCancelledAndMovedOrders(_Fixture, TransactionCase):
         self.assertNotIn(moved.name, csv_text)
         self.assertIn(stays.name, csv_text)
 
+    def test_cancelled_and_held_orders_drop_out_of_a_fresh_csv(self):
+        """The import refuses these rows, so the sheet must not offer them either."""
+        cancelled, grove_cancelled, held, stays = self._order(), self._order(), self._order(), self._order()
+        batch = self._build()["batch"]
+        cancelled.sudo().write({"state": "cancel"})
+        grove_cancelled.sudo().write({"grove_fulfillment_state": "cancelled"})
+        held.sudo().write({"grove_hold_until": date(2027, 5, 1), "grove_hold_reason": "Away"})
+        csv_text = batch._render_csv().decode()
+        self.assertNotIn(cancelled.name, csv_text)
+        self.assertNotIn(grove_cancelled.name, csv_text)
+        self.assertNotIn(held.name, csv_text)
+        self.assertIn(stays.name, csv_text)
+
     def test_tolerant_import_refuses_a_row_for_an_order_moved_out_of_spring(self):
         _batch, moved, stays = self._batched()
         moved.action_grove_move_wave("fall", "Wes")
@@ -676,6 +688,7 @@ class TestCancelledAndMovedOrders(_Fixture, TransactionCase):
         self.assertEqual(result["orders_advanced"], 1)
 
 
+@tagged("post_install", "-at_install")
 class TestMarkAllRoute(_Fixture, HttpCase):
     def setUp(self):
         super().setUp()

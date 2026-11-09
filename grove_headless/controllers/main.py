@@ -6237,6 +6237,9 @@ def settle_order_at_ship(env, order):
     env.cr.execute("SELECT id FROM sale_order WHERE id = %s FOR UPDATE", (order.id,))
     order.invalidate_recordset(
         [
+            "state",
+            "grove_fulfillment_state",
+            "grove_fulfillment_stage",
             "grove_checkout_status",
             "grove_settlement_attempts",
             "grove_settlement_reconcile",
@@ -6245,6 +6248,12 @@ def settle_order_at_ship(env, order):
             "grove_settlement_payment_intent",
         ]
     )
+    # Backstop for every caller: a cancelled order is never charged. Checked after
+    # the lock so a cancel that landed while this waited is honoured. Writes
+    # nothing, so the order is not marked paid or settled.
+    if order.state == "cancel" or order.grove_fulfillment_stage == "cancelled":
+        _logger.warning("Ship-time settlement refused for %s: the order is cancelled", order.name)
+        return "not_applicable"
     status = order.grove_checkout_status
     if status == "settled":
         return "already_settled"

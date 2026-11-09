@@ -573,6 +573,8 @@ class SaleOrder(models.Model):
     # Terminal states — an order here is no longer outstanding and no further
     # transition is legal.
     _GROVE_TERMINAL_STATES = ("delivered", "collected", "cancelled")
+    # The plants have left the farm, so a hold can no longer defer the balance.
+    _GROVE_OUT_THE_DOOR_STAGES = ("shipped", "delivered", "collected")
     # Which prior states each transition may legally advance FROM. A transition
     # requested from any other state is rejected (logged, no write) so a stray
     # signal can never skip the machine (e.g. delivered before shipped).
@@ -1661,16 +1663,24 @@ class SaleOrder(models.Model):
         Settles one order per committed transaction so a crash on order N never
         rolls back the successful settlements of 1..N-1 — and the row lock inside
         ``settle_order_at_ship`` makes a cron retry safe to run concurrently with a
-        manual ``Retry settlement`` on the same order (GOL-3011). A held order is left
-        out: a hold never charges anything by itself."""
+        manual ``Retry settlement`` on the same order (GOL-3011). A cancelled order is
+        never retried. A held order is left out until it has shipped: a hold never
+        charges anything by itself, but it must not strand the balance on plants the
+        customer already has."""
         max_retries = int(self.env["ir.config_parameter"].sudo().get_param("grove_headless.settlement_max_retries", 3))
         stuck = self.sudo().search(
             [
                 ("grove_checkout_status", "in", ("settlement_failed", "settlement_error")),
                 ("grove_settlement_attempts", "<", max_retries),
                 ("grove_settlement_needs_customer", "=", False),
-                # A hold never charges; the retry picks the order up once released.
+                # Odoo's own cancel leaves the Grove stage alone, so check both.
+                ("state", "!=", "cancel"),
+                ("grove_fulfillment_stage", "!=", "cancelled"),
+                # A hold never charges before the order ships; the retry picks it
+                # up once released. Once the plants are gone an old hold is moot.
+                "|",
                 ("grove_hold_until", "=", False),
+                ("grove_fulfillment_stage", "in", self._GROVE_OUT_THE_DOOR_STAGES),
             ]
         )
         now = fields.Datetime.now()

@@ -487,8 +487,12 @@ class GroveLabelBatch(models.Model):
         writer = csv.writer(buf)
         writer.writerow(CSV_COLUMNS)
         for line in self.line_ids.sorted(key=lambda ln: (ln.order_id.name or "", ln.box_index)):
+            order = line.order_id
             # Moved out of the spring lane after the build: no label should be bought.
-            if self.zone and line.order_id.grove_lane != "spring":
+            if self.zone and order.grove_lane != "spring":
+                continue
+            # Same refusals as the import: it would not record a label for these.
+            if order.state == "cancel" or order.grove_fulfillment_stage == "cancelled" or order.grove_hold_until:
                 continue
             # Already-labelled guard (GOL-3083): an aged, unacknowledged row is
             # likely already shipped by hand — never silently export it. It stays
