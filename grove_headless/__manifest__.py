@@ -85,6 +85,7 @@
         "views/grove_zone_views.xml",
         "report/bundle_substitution_report.xml",
         "views/label_batch_views.xml",
+        "views/label_batch_build_views.xml",
         "views/hand_label_views.xml",
         "views/label_reconcile_views.xml",
         "data/shipping_actions.xml",

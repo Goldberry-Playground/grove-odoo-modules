@@ -9,7 +9,13 @@ from odoo.tools import config
 from . import carrier_tracking, printify_client, promotions, shippo_client
 from .shipment_email import normalize_carrier
 from .shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
-from .shipping_calendar import merge_calendar_override, preorder_waves, usda_zone_for_zip
+from .shipping_calendar import (
+    USDA_ZONE_SELECTION,
+    merge_calendar_override,
+    preorder_waves,
+    spring_build_window,
+    usda_zone_for_zip,
+)
 from .shipping_zones import pack_for_state, unshippable_reason
 
 _logger = logging.getLogger(__name__)
@@ -467,7 +473,7 @@ class SaleOrder(models.Model):
     # so groups read "Zone 5" and sort by the declared 2..10 order — "Zone 10"
     # after "Zone 9", never the lexical "10 < 2" a Char would give.
     grove_usda_zone = fields.Selection(
-        selection=[(str(z), f"Zone {z}") for z in range(2, 11)],
+        selection=USDA_ZONE_SELECTION,
         string="USDA Zone",
         compute="_compute_grove_usda_zone",
         store=True,
@@ -1098,7 +1104,7 @@ class SaleOrder(models.Model):
         with self.env.registry.cursor() as cr:
             self.with_env(self.env(cr=cr)).write(vals)
 
-    def _wave_hold_reason(self, today):
+    def _wave_hold_reason(self, today, ignore_ship_window=False):
         """Why a chosen-wave pre-order cannot get a label on ``today``, else None.
 
         Only orders with a stored ``grove_ship_wave`` and a known zone are held
@@ -1106,7 +1112,11 @@ class SaleOrder(models.Model):
         ``today`` is inside the chosen wave's ship window for the order's zone,
         using the same admin calendar override as checkout. When the hold cannot
         be computed (no zone, or the zone is missing from the calendar) this
-        returns None and the dormancy check in the caller is the fallback."""
+        returns None and the dormancy check in the caller is the fallback.
+
+        ``ignore_ship_window`` is the spring batch build's 5-day allowance: a
+        spring order is not held while ``today`` is inside its zone's
+        ``spring_build_window``. Only that build passes it."""
         self.ensure_one()
         if not self.grove_ship_wave or not self.grove_usda_zone:
             return None
@@ -1125,6 +1135,10 @@ class SaleOrder(models.Model):
         wave = next((w for w in waves if w["wave"] == self.grove_ship_wave), None)
         if wave is None:
             return None
+        if ignore_ship_window and self.grove_ship_wave == "spring":
+            date_open, date_close = spring_build_window(int(self.grove_usda_zone), today, calendar)
+            if date_open <= today <= date_close:
+                return None
         (sm, sd), (em, ed) = wave["ship_window"]
         t = (today.month, today.day)
         inside = (sm, sd) <= t <= (em, ed) if (sm, sd) <= (em, ed) else t >= (sm, sd) or t <= (em, ed)
@@ -1135,7 +1149,7 @@ class SaleOrder(models.Model):
             f"{sm}/{sd} to {em}/{ed} for zone {self.grove_usda_zone}; no label until then."
         )
 
-    def _grove_pack_for_label(self):
+    def _grove_pack_for_label(self, ignore_ship_window=False):
         """Carrier-neutral shipment plan for ONE order: ``(address, plan, mode)``.
 
         The eligibility gate (preorder wave still closed → skip those lines;
@@ -1148,7 +1162,12 @@ class SaleOrder(models.Model):
         builder catches that to SKIP the order, the Shippo action re-raises it to
         the operator. ``address`` is Shippo-shaped (``street1``/``street2``/``zip``)
         because ``build_shipment_payload`` consumes it verbatim; the batch CSV
-        builder maps those keys to its own column names."""
+        builder maps those keys to its own column names.
+
+        ``ignore_ship_window`` is passed only by the spring batch build, once the
+        build is inside the zone's ``spring_build_window``: the wave then counts
+        as open up to 5 days before its ship start. Single-order paths never
+        pass it."""
         self.ensure_one()
         # Preorder lines owe no label UNTIL their ship wave opens.
         # grove_preorder_variant_ids is the permanent order-time record of
@@ -1160,10 +1179,16 @@ class SaleOrder(models.Model):
         # preorder lines only while the wave is still closed; once it is open
         # they pack.
         skip_preorder_ids = (
-            set() if self.grove_fulfillment_stage == "wave_assigned" else self._preorder_variant_id_set()
+            set()
+            if ignore_ship_window or self.grove_fulfillment_stage == "wave_assigned"
+            else self._preorder_variant_id_set()
         )
         today = fields.Date.context_today(self)
-        wave_hold = self._wave_hold_reason(today) if self.grove_fulfillment_stage != "wave_assigned" else None
+        wave_hold = (
+            self._wave_hold_reason(today, ignore_ship_window=ignore_ship_window)
+            if self.grove_fulfillment_stage != "wave_assigned"
+            else None
+        )
         if wave_hold:
             raise UserError(f"{self.name}: {wave_hold}")
         partner = self.partner_shipping_id

@@ -11,6 +11,7 @@
         <field name="arch" type="xml">
             <list decoration-muted="state == 'cancelled'" decoration-success="state == 'purchased'">
                 <field name="name" />
+                <field name="zone" />
                 <field name="state" widget="badge"
                        decoration-info="state == 'exported'"
                        decoration-success="state == 'purchased'" />
@@ -88,6 +89,7 @@
                     <group>
                         <group>
                             <field name="company_id" groups="base.group_multi_company" />
+                            <field name="zone" />
                             <field name="row_count" />
                             <field name="expected_total" widget="monetary" />
                             <field name="currency_id" invisible="1" />

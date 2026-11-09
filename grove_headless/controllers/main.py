@@ -61,6 +61,7 @@ from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_
 from ..models.shipping_calendar import (
     LEAFED_WINDOW,
     MODE_PREORDER,
+    USDA_ZONE_SELECTION,
     merge_calendar_override,
     pickup_waves,
     preorder_waves,
@@ -2172,30 +2173,48 @@ class GroveHeadlessAPI(http.Controller):
         csrf=False,
     )
     def labels_batch_build(self, **_kwargs):
-        """Build (or return) the open Pirate Ship label batch for this company.
+        """Build (or return) this company's open Pirate Ship batch for one zone.
+
+        Body: ``{"zone": "6"}``, required (400 when missing or not a USDA zone).
 
         Idempotent (spec §B1): repeated calls return the SAME open/exported
-        batch with freshly rebuilt rows — one row per packed box across every
-        eligible order (paid ship order awaiting a label, or a preorder whose
-        wave has opened; never pickup, never already-tracked). Returns the batch
-        id/name, the CSV download url, the row count and the expected total so
-        the runner (and the manual path) can price-check before buying.
+        batch with freshly rebuilt rows — one row per packed box across the
+        zone's eligible spring orders. Returns the batch id/name, the CSV
+        download url, the row count and the expected total so the runner (and
+        the manual path) can price-check before buying, plus ``skipped``: the
+        orders left out and why.
 
-        200 with ``{rows: 0}`` when nothing is eligible — the runner exits
-        "nothing to ship" rather than uploading an empty spreadsheet."""
+        200 with ``{rows: 0, batch_id: null, message}`` when nothing is eligible
+        — the runner exits "nothing to ship" rather than uploading an empty
+        spreadsheet. 409 when the zone's build window is not open."""
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        zone = str(payload.get("zone")) if isinstance(payload, dict) else ""
+        if zone not in dict(USDA_ZONE_SELECTION):
+            return _json_response({"error": "zone must be a USDA zone from 2 to 10"}, status=400)
         company = request.website.company_id
-        batch = request.env["grove.label.batch"].sudo().build_open_batch(company)
-        csv_name = batch.csv_export_filename or f"{batch.name}.csv"
-        return _json_response(
-            {
-                "batch_id": batch.id,
-                "name": batch.name,
-                "state": batch.state,
-                "rows": batch.row_count,
-                "expected_total": round(batch.expected_total, 2),
-                "csv_url": f"/web/content/grove.label.batch/{batch.id}/csv_export/{csv_name}?download=true",
-            }
-        )
+        try:
+            result = request.env["grove.label.batch"].sudo().build_open_batch(company, zone)
+        except UserError as exc:
+            return _json_response({"error": str(exc)}, status=409)
+        batch = result["batch"]
+        body = {
+            "batch_id": batch.id or None,
+            "name": batch.name or None,
+            "state": batch.state or None,
+            "zone": zone,
+            "rows": batch.row_count,
+            "expected_total": round(batch.expected_total, 2),
+            "csv_url": None,
+            "skipped": result["skipped"],
+            "message": result["message"],
+        }
+        if batch:
+            csv_name = batch.csv_export_filename or f"{batch.name}.csv"
+            body["csv_url"] = f"/web/content/grove.label.batch/{batch.id}/csv_export/{csv_name}?download=true"
+        return _json_response(body)
 
     @http.route(
         "/grove/api/v1/labels/batch/<int:batch_id>/tracking",

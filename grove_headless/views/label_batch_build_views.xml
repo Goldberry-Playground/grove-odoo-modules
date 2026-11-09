@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<odoo>
+
+    <record id="view_grove_label_batch_build_form" model="ir.ui.view">
+        <field name="name">grove.label.batch.build.form</field>
+        <field name="model">grove.label.batch.build</field>
+        <field name="arch" type="xml">
+            <form string="Build Pirate Ship batch">
+                <p class="text-muted">Pick a USDA zone to batch its spring orders. A zone's batch can
+                   be built from 5 days before it starts shipping.</p>
+                <group>
+                    <field name="zone" />
+                    <field name="company_id" groups="base.group_multi_company" />
+                </group>
+                <footer>
+                    <button name="action_build" type="object" string="Build"
+                            class="btn-primary" />
+                    <button string="Cancel" class="btn-secondary" special="cancel" />
+                </footer>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_grove_label_batch_build" model="ir.actions.act_window">
+        <field name="name">Build Pirate Ship batch</field>
+        <field name="res_model">grove.label.batch.build</field>
+        <field name="view_mode">form</field>
+        <field name="target">new</field>
+    </record>
+
+</odoo>
