@@ -2181,8 +2181,9 @@ class GroveHeadlessAPI(http.Controller):
         batch with freshly rebuilt rows — one row per packed box across the
         zone's eligible spring orders. Returns the batch id/name, the CSV
         download url, the row count and the expected total so the runner (and
-        the manual path) can price-check before buying, plus ``skipped``: the
-        orders left out and why.
+        the manual path) can price-check before buying, plus ``skipped`` (the
+        orders left out and why) and ``needs_confirmation`` (orders held out of
+        the CSV until someone confirms no label was bought).
 
         200 with ``{rows: 0, batch_id: null, message}`` when nothing is eligible
         — the runner exits "nothing to ship" rather than uploading an empty
@@ -2209,6 +2210,7 @@ class GroveHeadlessAPI(http.Controller):
             "expected_total": round(batch.expected_total, 2),
             "csv_url": None,
             "skipped": result["skipped"],
+            "needs_confirmation": result["needs_confirmation"],
             "message": result["message"],
         }
         if batch:

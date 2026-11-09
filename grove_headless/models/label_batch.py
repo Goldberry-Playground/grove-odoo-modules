@@ -251,7 +251,8 @@ class GroveLabelBatch(models.Model):
         With ``zone``, the orders a zone batch takes: spring-lane orders in that
         zone that are not held or cancelled, including those still at
         ``deposit_paid`` (the build assigns them to their wave). An order left
-        unbought in an already-purchased batch is free to join a new one.
+        with no label in an already-purchased batch can join a new one, where
+        its rows wait for confirmation (see ``_earlier_batches_without_label``).
 
         Without ``zone``, every paid ship order awaiting a label (and preorders
         whose wave has opened), for the legacy reconcile.
@@ -285,10 +286,34 @@ class GroveLabelBatch(models.Model):
             domain += [("grove_fulfillment_stage", "in", ("awaiting_label", "wave_assigned")), own_or_free]
         return self.env["sale.order"].sudo().with_company(company).search(domain)
 
+    def _earlier_batches_without_label(self, orders):
+        """``{order id: batch}`` for orders with a row in an earlier purchased
+        batch that never recorded a label.
+
+        A purchased batch can hold an order whose label really was bought but
+        whose import row was rejected (incomplete tracking), so a new batch must
+        not offer it again unasked: its rows stay out of the CSV until confirmed,
+        the same way as GOL-3083's aged rows. A row that did record a label, then
+        refunded, does not count."""
+        lines = (
+            self.env["grove.label.batch.line"]
+            .sudo()
+            .search(
+                [
+                    ("order_id", "in", orders.ids),
+                    ("batch_id", "!=", self.id),
+                    ("batch_id.state", "=", "purchased"),
+                    ("tracking_number", "in", (False, "")),
+                ]
+            )
+        )
+        return {line.order_id.id: line.batch_id for line in lines.sorted(key=lambda ln: ln.batch_id.id)}
+
     def _build_lines(self):
-        """(Re)build this zone batch's rows from its eligible orders and return
-        the list of orders left out, each with its reason. Idempotent: an
-        already-``exported`` batch rebuilds cleanly (drops stale lines, re-packs).
+        """(Re)build this zone batch's rows from its eligible orders. Returns
+        ``(skipped, needs_confirmation)``: the orders left out with why, and the
+        orders whose rows wait for confirmation. Idempotent: an already-``exported``
+        batch rebuilds cleanly (drops stale lines, re-packs).
 
         Each order is assigned to its wave and packed inside its own savepoint,
         so one that cannot ship a label yet (outside dormancy, unpriceable
@@ -304,30 +329,48 @@ class GroveLabelBatch(models.Model):
         previous_orders = self.order_ids
         self.line_ids.unlink()
         skipped = []
-        packed_orders = self.env["sale.order"].sudo()
-        for order in self._eligible_orders(company, zone=self.zone):
+        Order = self.env["sale.order"].sudo()
+        packed_orders = failed_orders = Order
+        eligible = self._eligible_orders(company, zone=self.zone)
+        earlier_batches = self._earlier_batches_without_label(eligible)
+        for order in eligible:
             try:
                 with self.env.cr.savepoint():
-                    packed = self._pack_order_into_batch(order)
+                    self._pack_order_into_batch(order, earlier_batches.get(order.id))
             except (UserError, KeyError, ValueError) as exc:
                 if not isinstance(exc, UserError):
                     _logger.warning("%s could not be packed into %s", order.name, self.name, exc_info=True)
                 reason = str(exc)
                 skipped.append(reason if reason.startswith(order.name) else f"{order.name}: {reason}")
+                failed_orders |= order
                 continue
-            if packed:
-                packed_orders |= order
+            packed_orders |= order
         if acked_refs:
             self.line_ids.filtered(lambda ln: ln.grove_ref in acked_refs).age_ack = True
-        (previous_orders - packed_orders).write({"grove_label_batch_id": False})
+        for order in (previous_orders - packed_orders).filtered(lambda o: o.grove_label_batch_id == self):
+            order.grove_label_batch_id = False
+            order.message_post(body=f"Order released from {self.name}: a rebuild no longer includes it.")
+            if order not in failed_orders:
+                skipped.append(f"{order.name}: released from {self.name}; it no longer qualifies for this batch")
         packed_orders.write({"grove_label_batch_id": self.id})
         self.order_ids = [(6, 0, packed_orders.ids)]
-        self.notes = ("Skipped (not shippable yet):\n" + "\n".join(skipped)) if skipped else False
-        return skipped
+        unconfirmed = self.line_ids.filtered(lambda ln: ln.prior_batch_id and not ln.age_ack)
+        needs_confirmation = [
+            f"{order.name} was in {batch.name} with no label recorded; confirm none was bought"
+            for order, batch in {ln.order_id: ln.prior_batch_id for ln in unconfirmed}.items()
+        ]
+        sections = []
+        if skipped:
+            sections.append("Skipped (not shippable yet):\n" + "\n".join(skipped))
+        if needs_confirmation:
+            sections.append("Held out of the CSV until confirmed:\n" + "\n".join(needs_confirmation))
+        self.notes = "\n\n".join(sections) or False
+        return skipped, needs_confirmation
 
-    def _pack_order_into_batch(self, order):
-        """Assign one order to its wave if needed and write its box rows. Returns
-        True when it packed; raises ``UserError`` when it cannot be labelled yet."""
+    def _pack_order_into_batch(self, order, prior_batch=None):
+        """Assign one order to its wave if needed and write its box rows. Raises
+        ``UserError`` when it cannot be labelled yet. ``prior_batch`` marks its
+        rows as needing confirmation (``_earlier_batches_without_label``)."""
         self.ensure_one()
         if order.grove_fulfillment_stage == "deposit_paid":
             actor = self.env.user.name
@@ -336,7 +379,7 @@ class GroveLabelBatch(models.Model):
         # build_open_batch has checked spring_build_window before any order gets here.
         address, plan, mode = order._grove_pack_for_label(ignore_ship_window=True)
         if not plan:
-            return False
+            raise UserError(f"{order.name}: no boxes to label.")
         Line = self.env["grove.label.batch.line"].sudo()
         for idx, pb in enumerate(plan, start=1):
             box = BOXES[pb.box_id]
@@ -366,9 +409,9 @@ class GroveLabelBatch(models.Model):
                     "height_in": box["height"],
                     "service": box_service_title(address["state"], pb.box_id),
                     "committed_rate": box_rate(address["state"], pb.box_id) or 0.0,
+                    "prior_batch_id": prior_batch.id if prior_batch else False,
                 }
             )
-        return True
 
     @api.model
     def _check_build_window(self, company, zone):
@@ -390,11 +433,15 @@ class GroveLabelBatch(models.Model):
         its rows. Idempotent per spec §B1: returns the same batch on repeated
         calls until it is purchased. Marks the batch ``exported`` once it has rows.
 
-        Returns ``{"batch", "skipped", "message"}``: ``skipped`` names the orders
-        left out and why. When nothing could be batched, ``batch`` is empty,
-        ``message`` says so, and no empty open batch is left behind."""
+        Returns ``{"batch", "skipped", "needs_confirmation", "message"}``:
+        ``skipped`` names the orders left out and why, ``needs_confirmation`` the
+        orders held out of the CSV until someone confirms no label was bought.
+        When nothing could be batched, ``batch`` is empty, ``message`` says so,
+        and no empty open batch is left behind."""
         self.env["sale.order"]._grove_require_order_operator()
         company = company or self.env.company
+        if not self.env.is_superuser() and company not in self.env.companies:
+            raise AccessError("You can only build label batches for your own companies.")
         zone = str(zone) if zone else ""
         if zone not in dict(USDA_ZONE_SELECTION):
             raise UserError("Pick a USDA zone from 2 to 10 to build a batch.")
@@ -403,7 +450,7 @@ class GroveLabelBatch(models.Model):
         created = not batch
         if created:
             batch = self.sudo().create({"name": self._next_name(company), "company_id": company.id, "zone": zone})
-        skipped = batch._build_lines()
+        skipped, needs_confirmation = batch._build_lines()
         if not batch.line_ids:
             if created:
                 batch.unlink()
@@ -411,11 +458,11 @@ class GroveLabelBatch(models.Model):
                 batch.action_cancel()
             message = f"Nothing to batch for zone {zone}."
             if skipped:
-                message += " These orders could not be packed:\n" + "\n".join(skipped)
-            return {"batch": self.browse(), "skipped": skipped, "message": message}
+                message += " These orders were left out:\n" + "\n".join(skipped)
+            return {"batch": self.browse(), "skipped": skipped, "needs_confirmation": [], "message": message}
         batch._render_csv()
         batch.state = "exported"
-        return {"batch": batch, "skipped": skipped, "message": None}
+        return {"batch": batch, "skipped": skipped, "needs_confirmation": needs_confirmation, "message": None}
 
     def _render_csv(self):
         """Serialise the rows to the Pirate Ship upload CSV and store it."""
@@ -783,6 +830,9 @@ class GroveLabelBatch(models.Model):
                 # tracked orders).
                 skipped_already += len(entries)
                 continue
+            if order.grove_hold_until:
+                errors.append(self._on_hold_reason(order))
+                continue
             stage = order.grove_fulfillment_stage
             if stage not in ("awaiting_label", "wave_assigned"):
                 errors.append(f"{order.name}: not awaiting a label (stage {stage})")
@@ -907,6 +957,12 @@ class GroveLabelBatch(models.Model):
         }
 
     @api.model
+    def _on_hold_reason(self, order):
+        """Why an import did not record a label on a held order: the customer
+        asked to wait, so neither the label nor the balance goes through."""
+        return f"{order.name}: on hold until {order.grove_hold_until.isoformat()}; release the hold and re-import"
+
+    @api.model
     def _is_valid_tracking(self, value):
         """Thin wrapper over shippo_client.is_valid_tracking (kept as the pure
         helper per spec §B1) so tests can stub it and the model has one seam."""
@@ -1012,6 +1068,9 @@ class GroveLabelBatch(models.Model):
             order, via_email, problem = self._resolve_loose_order(row, company)
             if not order:
                 summary["review"].append(f"{who} ({row['tracking']}): {problem}")
+                continue
+            if order.grove_hold_until:
+                summary["review"].append(self._on_hold_reason(order))
                 continue
             by_order.setdefault(order, []).append((row, carrier_key, service_token, cost, via_email))
         for order, entries in by_order.items():
@@ -1198,8 +1257,16 @@ class GroveLabelBatchLine(models.Model):
     age_ack = fields.Boolean(
         string="Confirmed not already shipped",
         copy=False,
-        help="Tick to confirm this aged order has NOT already been shipped on a hand-bought "
-        "label. Required before an aged row is written to the Pirate Ship CSV (GOL-3083).",
+        help="Tick to confirm this order has NOT already been shipped on a label bought earlier. "
+        "Required before a flagged row is written to the Pirate Ship CSV (GOL-3083).",
+    )
+    prior_batch_id = fields.Many2one(
+        "grove.label.batch",
+        string="Earlier batch",
+        readonly=True,
+        copy=False,
+        help="This order was in that purchased batch and no label was recorded for it. A label may "
+        "have been bought anyway, so the row stays out of the CSV until confirmed.",
     )
     # Written back on reconcile.
     tracking_number = fields.Char(copy=False)
@@ -1207,7 +1274,7 @@ class GroveLabelBatchLine(models.Model):
     service_token = fields.Char(copy=False, help="Ground service token (ups_ground/usps_ground_advantage).")
     actual_cost = fields.Float(digits=(8, 2), copy=False)
 
-    @api.depends("order_date", "order_id.grove_fulfillment_stage")
+    @api.depends("order_date", "order_id.grove_fulfillment_stage", "prior_batch_id")
     def _compute_order_age(self):
         """Age-since-order and the already-labelled flag (GOL-3083).
 
@@ -1215,12 +1282,13 @@ class GroveLabelBatchLine(models.Model):
         ``wave_assigned`` preorder is expected to be old (ordered seasons before
         its wave opens), so age-since-order is not a shipped-by-hand signal for it
         — the import-time email cross-check and the reconcile wizard cover that
-        case instead."""
+        case instead. Any row carried over from a purchased batch with no label
+        recorded is flagged whatever its age."""
         threshold = self.env["grove.label.batch"]._age_ack_days()
         now = fields.Datetime.now()
         for line in self:
             line.order_age_days = (now - line.order_date).days if line.order_date else 0
-            line.age_flagged = (
+            line.age_flagged = bool(line.prior_batch_id) or (
                 line.order_id.grove_fulfillment_stage == "awaiting_label" and line.order_age_days >= threshold
             )
 

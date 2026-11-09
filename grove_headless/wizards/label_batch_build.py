@@ -14,7 +14,12 @@ class GroveLabelBatchBuild(models.TransientModel):
     _name = "grove.label.batch.build"
     _description = "Build a Pirate Ship batch for one zone"
 
-    company_id = fields.Many2one("res.company", required=True, default=lambda self: self.env.company)
+    company_id = fields.Many2one(
+        "res.company",
+        required=True,
+        default=lambda self: self.env.company,
+        domain=lambda self: [("id", "in", self.env.companies.ids)],
+    )
     zone = fields.Selection(selection=USDA_ZONE_SELECTION, string="USDA Zone", required=True)
 
     def _notify(self, message, next_action=None):
@@ -36,9 +41,11 @@ class GroveLabelBatchBuild(models.TransientModel):
             "view_mode": "form",
             "views": [(False, "form")],
         }
+        warnings = []
         if result["skipped"]:
-            return self._notify(
-                f"{batch.name} was built, but these orders were left out:\n" + "\n".join(result["skipped"]),
-                next_action=open_batch,
-            )
+            warnings.append("These orders were left out:\n" + "\n".join(result["skipped"]))
+        if result["needs_confirmation"]:
+            warnings.append("Held out of the CSV until confirmed:\n" + "\n".join(result["needs_confirmation"]))
+        if warnings:
+            return self._notify(f"{batch.name} was built.\n" + "\n".join(warnings), next_action=open_batch)
         return open_batch

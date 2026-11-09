@@ -188,10 +188,63 @@ class TestLabelBatchZones(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(batch.order_ids, kept | dropped)
         with self._on(INSIDE_WINDOW):
             dropped.action_grove_set_hold(INSIDE_WINDOW + timedelta(days=30), "Customer away", "Josh")
-        again = self._build()["batch"]
-        self.assertEqual(again, batch)
+        result = self._build()
+        self.assertEqual(result["batch"], batch)
         self.assertEqual(batch.order_ids, kept)
         self.assertFalse(dropped.grove_label_batch_id)
+        self.assertEqual(len(result["skipped"]), 1)
+        self.assertIn(dropped.name, result["skipped"][0])
+        self.assertIn(dropped.name, batch.notes)
+        bodies = dropped.message_ids.mapped("body")
+        self.assertTrue(any(f"released from {batch.name}" in body for body in bodies), bodies)
+        self.assertFalse(any(f"released from {batch.name}" in body for body in kept.message_ids.mapped("body")))
+
+    def test_rebuild_drops_an_order_labelled_since_the_last_build(self):
+        kept, tracked = self._order(), self._order()
+        batch = self._build()["batch"]
+        tracked.grove_tracking_numbers = _T[0]
+
+        result = self._build()
+
+        self.assertEqual(result["batch"], batch)
+        self.assertEqual(batch.line_ids.order_id, kept)
+        self.assertEqual(tracked.grove_tracking_numbers, _T[0])
+        self.assertFalse(tracked.grove_label_batch_id)
+        self.assertIn(tracked.name, result["skipped"][0])
+
+    def test_rebuild_leaves_an_order_now_linked_to_another_batch(self):
+        kept, moved = self._order(), self._order()
+        batch = self._build()["batch"]
+        other = self.Batch.create({"name": "LB-TEST-OTHER", "company_id": self.company.id, "zone": "5"})
+        moved.grove_label_batch_id = other
+
+        self._build()
+
+        self.assertEqual(batch.order_ids, kept)
+        self.assertEqual(moved.grove_label_batch_id, other)
+
+    def test_empty_plan_is_left_out_unchanged_and_named(self):
+        order = self._order()
+        with self._on(INSIDE_WINDOW, plan=[]):
+            result = self.Batch.build_open_batch(self.company, "6")
+        self.assertFalse(result["batch"])
+        self.assertIn(order.name, result["skipped"][0])
+        self.assertIn(order.name, result["message"])
+        self.assertEqual(order.grove_fulfillment_stage, "deposit_paid")
+
+    def test_build_charges_nothing_and_sends_no_mail(self):
+        self._order()
+        self._order(checkout="paid")
+        counts = {
+            model: self.env[model].sudo().search_count([])
+            for model in ("payment.transaction", "account.payment", "mail.mail")
+        }
+        with patch.object(type(self.env["sale.order"]), "_grove_settle_at_ship") as settle:
+            batch = self._build()["batch"]
+        self.assertEqual(len(batch.order_ids), 2)
+        settle.assert_not_called()
+        for model, before in counts.items():
+            self.assertEqual(self.env[model].sudo().search_count([]), before, model)
 
     # build window
 
@@ -300,7 +353,54 @@ class TestLabelBatchZones(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(second.order_ids, late)
         self.assertEqual(first.grove_label_batch_id, batch)
 
-    def test_order_left_unbought_in_purchased_batch_can_be_rebatched(self):
+    def _csv_refs(self, batch):
+        rows = list(csv.reader(io.StringIO(batch.csv_bytes().decode("utf-8"))))
+        return [row[0] for row in rows[1:]]
+
+    def test_incomplete_tracking_order_is_held_out_until_confirmed(self):
+        complete, incomplete = self._order(), self._order()
+        two_boxes = _plan() + _plan()
+        with self._on(INSIDE_WINDOW, plan=two_boxes):
+            first = self.Batch.build_open_batch(self.company, "6")["batch"]
+        raw = self._csv(
+            ["Grove Ref", "Tracking Number", "Carrier", "Cost"],
+            [
+                [f"{complete.name}/1", _T[0], "UPS", "9.10"],
+                [f"{complete.name}/2", _T[1], "UPS", "9.10"],
+                [f"{incomplete.name}/1", _T[2], "UPS", "9.10"],
+            ],
+        )
+        with patch.object(type(self.env["sale.order"]), "_grove_settle_at_ship", return_value="already_settled"):
+            imported = self.Batch.import_pirateship_file(raw, filename="export.csv", company=self.company)
+        self.assertEqual(first.state, "purchased")
+        self.assertFalse(incomplete.grove_tracking_numbers)
+        self.assertTrue(any("incomplete tracking" in msg for msg in imported["review"]), imported["review"])
+
+        with self._on(INSIDE_WINDOW, plan=two_boxes):
+            result = self.Batch.build_open_batch(self.company, "6")
+
+        batch = result["batch"]
+        self.assertNotEqual(batch, first)
+        self.assertEqual(batch.order_ids, incomplete)
+        expected = f"{incomplete.name} was in {first.name} with no label recorded; confirm none was bought"
+        self.assertEqual(result["needs_confirmation"], [expected])
+        self.assertIn(expected, batch.notes)
+        self.assertEqual(batch.line_ids.prior_batch_id, first)
+        self.assertEqual(batch.unacked_flagged_count, 2)
+        self.assertEqual(self._csv_refs(batch), [])
+
+        batch.line_ids.age_ack = True
+        batch._render_csv()
+        self.assertEqual(self._csv_refs(batch), [f"{incomplete.name}/1", f"{incomplete.name}/2"])
+
+        # The confirmation survives a rebuild, and the order stops being named.
+        with self._on(INSIDE_WINDOW, plan=two_boxes):
+            again = self.Batch.build_open_batch(self.company, "6")
+        self.assertEqual(again["batch"], batch)
+        self.assertEqual(again["needs_confirmation"], [])
+        self.assertEqual(self._csv_refs(batch), [f"{incomplete.name}/1", f"{incomplete.name}/2"])
+
+    def test_order_left_out_of_a_purchased_batch_import_needs_confirmation(self):
         bought, unbought = self._order(), self._order()
         batch = self._build()["batch"]
         self.assertEqual(batch.order_ids, bought | unbought)
@@ -308,10 +408,25 @@ class TestLabelBatchZones(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(batch.state, "purchased")
         self.assertFalse(unbought.grove_tracking_numbers)
 
-        second = self._build()["batch"]
+        result = self._build()
 
-        self.assertNotEqual(second, batch)
-        self.assertEqual(second.order_ids, unbought)
+        self.assertNotEqual(result["batch"], batch)
+        self.assertEqual(result["batch"].order_ids, unbought)
+        self.assertEqual(self._csv_refs(result["batch"]), [])
+        self.assertIn(unbought.name, result["needs_confirmation"][0])
+
+    def test_refunded_label_rebatches_without_confirmation(self):
+        order = self._order()
+        batch = self._build()["batch"]
+        self._purchase(batch, order, _T[0])
+        order.action_grove_label_refunded("Josh")
+        self.assertFalse(order.grove_tracking_numbers)
+
+        result = self._build()
+
+        self.assertEqual(result["batch"].order_ids, order)
+        self.assertEqual(result["needs_confirmation"], [])
+        self.assertEqual(self._csv_refs(result["batch"]), [f"{order.name}/1"])
 
     # import
 
@@ -362,6 +477,81 @@ class TestLabelBatchZones(GroveTaxFixtureMixin, TransactionCase):
         self.assertFalse(result["labelled"])
         self.assertTrue(any(email in msg for msg in result["review"]), result["review"])
 
+    # holds on import
+
+    def _hold(self, order):
+        until = INSIDE_WINDOW + timedelta(days=30)
+        with self._on(INSIDE_WINDOW):
+            order.action_grove_set_hold(until, "Customer away", "Josh")
+        return f"{order.name}: on hold until {until.isoformat()}; release the hold and re-import"
+
+    def _export_row(self, order, tracking=_T[0]):
+        return self._csv(
+            ["Grove Ref", "Tracking Number", "Carrier", "Cost"],
+            [[f"{order.name}/1", tracking, "UPS", "9.10"]],
+        )
+
+    def test_held_order_row_is_not_recorded_or_charged(self):
+        order = self._order()
+        batch = self._build()["batch"]
+        reason = self._hold(order)
+        raw = self._export_row(order)
+
+        with patch.object(type(self.env["sale.order"]), "_grove_settle_at_ship") as settle:
+            result = self.Batch.import_pirateship_file(raw, filename="export.csv", company=self.company)
+
+        self.assertFalse(order.grove_tracking_numbers)
+        settle.assert_not_called()
+        self.assertIn(reason, result["review"])
+        self.assertFalse(result["labelled"])
+        self.assertEqual(batch.state, "exported")
+
+        order.action_grove_release_hold("Josh")
+        with patch.object(
+            type(self.env["sale.order"]), "_grove_settle_at_ship", return_value="already_settled"
+        ) as settle:
+            result = self.Batch.import_pirateship_file(raw, filename="export.csv", company=self.company)
+
+        self.assertEqual(order.grove_tracking_numbers, _T[0])
+        settle.assert_called_once()
+        self.assertEqual(result["labelled"], [order.name])
+        self.assertFalse(result["review"])
+
+    def test_held_order_is_not_recorded_on_a_second_import_of_the_file(self):
+        """Once another order buys out the batch, the held row no longer matches an
+        open batch. Importing the file again must not record it by another route."""
+        held, other = self._order(), self._order()
+        self._build()
+        reason = self._hold(held)
+        raw = self._csv(
+            ["Grove Ref", "Tracking Number", "Carrier", "Cost"],
+            [[f"{held.name}/1", _T[0], "UPS", "9.10"], [f"{other.name}/1", _T[1], "UPS", "9.10"]],
+        )
+        with patch.object(type(self.env["sale.order"]), "_grove_settle_at_ship", return_value="already_settled"):
+            self.Batch.import_pirateship_file(raw, filename="export.csv", company=self.company)
+            again = self.Batch.import_pirateship_file(raw, filename="export.csv", company=self.company)
+        self.assertEqual(other.grove_tracking_numbers, _T[1])
+        self.assertFalse(held.grove_tracking_numbers)
+        self.assertIn(reason, again["review"])
+
+    def test_held_order_rejects_the_strict_import(self):
+        order = self._order()
+        batch = self._build()["batch"]
+        reason = self._hold(order)
+        with patch.object(type(self.env["sale.order"]), "_grove_settle_at_ship") as settle:
+            with self.assertRaises(label_batch_module.LabelBatchError) as caught:
+                batch.import_tracking(self._export_row(order), filename="track.csv")
+        self.assertIn(reason, str(caught.exception))
+        settle.assert_not_called()
+        self.assertFalse(order.grove_tracking_numbers)
+
+    def test_held_order_in_no_open_batch_goes_to_review(self):
+        order = self._order(checkout="paid", wave=None)
+        reason = self._hold(order)
+        result = self.Batch.import_pirateship_file(self._export_row(order), filename="export.csv", company=self.company)
+        self.assertFalse(order.grove_tracking_numbers)
+        self.assertIn(reason, result["review"])
+
     # access and the wizard
 
     def test_plain_internal_user_cannot_build(self):
@@ -369,6 +559,46 @@ class TestLabelBatchZones(GroveTaxFixtureMixin, TransactionCase):
         with self._on(INSIDE_WINDOW):
             with self.assertRaises(AccessError):
                 self.Batch.with_user(user).build_open_batch(self.company, "6")
+
+    def _operator_of_main_company(self):
+        return new_test_user(
+            self.env,
+            login="zone-batch-operator",
+            groups="sales_team.group_sale_salesman_all_leads",
+            company_id=self.company.id,
+            company_ids=[(6, 0, [self.company.id])],
+        )
+
+    def test_operator_cannot_build_for_another_company(self):
+        operator = self._operator_of_main_company()
+        other = self.env["res.company"].create({"name": "Zone Other Co"})
+        with self._on(INSIDE_WINDOW):
+            with self.assertRaises(AccessError):
+                self.Batch.with_user(operator).build_open_batch(other, "6")
+            # Their own company is fine.
+            result = self.Batch.with_user(operator).build_open_batch(self.company, "6")
+        self.assertFalse(result["batch"])
+
+    def test_wizard_refuses_and_filters_other_companies(self):
+        operator = self._operator_of_main_company()
+        other = self.env["res.company"].create({"name": "Zone Other Co"})
+        Wizard = self.env["grove.label.batch.build"].with_user(operator)
+        self.assertEqual(Wizard.fields_get(["company_id"])["company_id"]["domain"], [("id", "in", self.company.ids)])
+        wizard = Wizard.create({"zone": "6", "company_id": other.id})
+        with self._on(INSIDE_WINDOW):
+            with self.assertRaises(AccessError):
+                wizard.action_build()
+
+    def test_wizard_names_rows_held_out_for_confirmation(self):
+        bought, unbought = self._order(), self._order()
+        batch = self._build()["batch"]
+        self._purchase(batch, bought, _T[0])
+        wizard = self.env["grove.label.batch.build"].create({"zone": "6", "company_id": self.company.id})
+        with self._on(INSIDE_WINDOW):
+            action = wizard.action_build()
+        self.assertEqual(action["tag"], "display_notification")
+        self.assertIn(f"{unbought.name} was in {batch.name}", action["params"]["message"])
+        self.assertEqual(action["params"]["next"]["res_model"], "grove.label.batch")
 
     def test_wizard_opens_the_built_batch(self):
         order = self._order()
