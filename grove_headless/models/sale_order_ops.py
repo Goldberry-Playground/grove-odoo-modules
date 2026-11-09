@@ -152,6 +152,69 @@ class SaleOrder(models.Model):
         self.message_post(body=f"{actor} snoozed the hold to {until.isoformat()}.")
         return True
 
+    def action_grove_label_refunded(self, actor):
+        """The label was refunded: clear it and send the order back to needing a
+        label (a wave order to Assigned to ship wave, any other to Paid, awaiting
+        label). Moves no money; the label can be recorded again afterwards."""
+        self._grove_require_order_operator()
+        self.ensure_one()
+        stage = self.grove_fulfillment_stage
+        if stage in _ALREADY_SHIPPED_STAGES:
+            raise UserError(
+                f"{self.name} has already shipped, so a refunded label can't be handled from Discord. "
+                "Ask Josh to fix it."
+            )
+        if stage != "label_purchased":
+            raise UserError(
+                f"{self.name} has no purchased label to refund. Its status is: {self._grove_stage_label()}."
+            )
+        old = (self.grove_tracking_numbers or "").split()
+        old_text = ", ".join(old) if old else "no number on file"
+        target = "wave_assigned" if self.grove_ship_wave else "awaiting_label"
+        self.sudo()._grove_advance_state(
+            target,
+            source="label_refunded",
+            operator=actor,
+            note=f"{actor} marked the label refunded (was {old_text}). The order needs a label again.",
+        )
+        self.sudo().write(
+            {
+                "grove_tracking_numbers": False,
+                "grove_shipping_carriers": False,
+                "grove_shipping_services": False,
+                "grove_label_urls": False,
+                "grove_actual_shipping_cost": 0.0,
+                "grove_label_purchased_at": False,
+                "grove_label_batch_id": False,
+                "grove_delivery_status": False,
+            }
+        )
+        return True
+
+    def action_grove_move_wave(self, wave, actor):
+        """Move an order between the fall and spring waves. Returns True when it
+        moved, False when it was already in that wave (a Discord retry). Never
+        emails the customer and never touches deposits or payments."""
+        self._grove_require_order_operator()
+        self.ensure_one()
+        if wave not in ("fall", "spring"):
+            raise UserError("Pick fall or spring.")
+        if self.grove_ship_wave == wave:
+            return False
+        stage = self.grove_fulfillment_stage
+        if self.state == "cancel" or stage in _HOLD_REFUSED_STAGES:
+            raise UserError(f"{self.name} is already {stage}; it can't be moved.")
+        if self.grove_fulfillment != "ship":
+            raise UserError(f"{self.name} isn't a shipped order, so it has no ship wave.")
+        if (self.grove_tracking_numbers or "").strip():
+            raise UserError(f"{self.name} already has a label. Use Label refunded first, then move it.")
+        if not self.grove_usda_zone:
+            raise UserError(f"{self.name} has no known zone, so it can't be moved. Check its shipping ZIP.")
+        old = self.grove_ship_wave or "no wave"
+        self.sudo().write({"grove_ship_wave": wave})
+        self.message_post(body=f"{actor} moved this order from {old} to {wave}.")
+        return True
+
     def _grove_needs_wave_for_ship(self):
         return self.grove_fulfillment_stage == "deposit_paid" and self.grove_ship_wave == "fall"
 

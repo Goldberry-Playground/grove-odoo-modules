@@ -562,7 +562,9 @@ class SaleOrder(models.Model):
     # requested from any other state is rejected (logged, no write) so a stray
     # signal can never skip the machine (e.g. delivered before shipped).
     _GROVE_TRANSITIONS = {
-        "wave_assigned": ("deposit_paid",),
+        # Label refunded walks back from label_purchased (the only backward moves).
+        "awaiting_label": ("label_purchased",),
+        "wave_assigned": ("deposit_paid", "label_purchased"),
         "label_purchased": ("awaiting_label", "wave_assigned"),
         "shipped": ("awaiting_label", "label_purchased"),
         "delivered": ("shipped",),

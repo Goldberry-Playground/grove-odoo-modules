@@ -40,6 +40,7 @@ from . import (
     test_newsletter_subscribe,  # noqa: F401
     test_order_digest,  # noqa: F401
     test_order_holds,  # noqa: F401
+    test_order_label_refunded_move,  # noqa: F401
     test_order_lanes,  # noqa: F401
     test_order_rollup,  # noqa: F401
     test_pickup_settlement,  # noqa: F401
