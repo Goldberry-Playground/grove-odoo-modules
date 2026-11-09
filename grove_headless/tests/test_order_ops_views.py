@@ -176,17 +176,35 @@ class TestOrderOpsViews(GroveTaxFixtureMixin, TransactionCase):
         b_order = self._order()
         # Lines forbid changing company through the ORM; move the order directly.
         self.env.cr.execute("UPDATE sale_order SET company_id = %s WHERE id = %s", (other.id, b_order.id))
+        # sale.order sorts newest first: make B the oldest so the run reaches it
+        # only after company A's three failures (a global stop would never get there).
+        a_orders.write({"date_order": fields.Datetime.now() + timedelta(days=30)})
+        b_order.write({"date_order": fields.Datetime.now() - timedelta(days=30)})
         b_order.invalidate_recordset()
+        calls = []
 
         def fake(order, context, is_deposit):
+            calls.append(order.company_id.id)
             return order.company_id == other
 
-        with patch(POST_CARD, side_effect=fake) as post:
-            self.Order._grove_repost_open_order_cards()
-        a_attempts = [c for c in post.call_args_list if c.args[0].company_id == self.company]
-        self.assertEqual(len(a_attempts), 3)
+        a_pending = self.Order.search_count(
+            [
+                ("company_id", "=", self.company.id),
+                ("state", "in", ("sale", "done")),
+                ("grove_fulfillment", "=", "ship"),
+                ("grove_is_printify", "=", False),
+                ("grove_fulfillment_stage", "not in", ["shipped", "delivered", "collected", "cancelled"]),
+                ("grove_card_reposted", "=", False),
+            ]
+        )
+        with patch(POST_CARD, side_effect=fake):
+            result = self.Order._grove_repost_open_order_cards()
+        self.assertEqual(calls, [self.company.id] * 3 + [other.id])
         self.assertTrue(b_order.grove_card_reposted)
         self.assertFalse(any(a_orders.mapped("grove_card_reposted")))
+        self.assertEqual(result["posted"], 1)
+        self.assertEqual(result["failed"], 3)
+        self.assertEqual(result["skipped"], a_pending - 3)
 
     def test_repost_survives_a_raising_post(self):
         bad = self._order()
