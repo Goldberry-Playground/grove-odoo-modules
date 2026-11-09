@@ -1,6 +1,6 @@
 # Odoo calendar to Discord (design)
 
-**Status:** approved in chat with Josh, 2026-11-06/07; phase D redesigned in a brainstorm with Josh on 2026-11-08 (series-aware, voice rooms). Target: phases A, B and C on Release Train #5 (freeze Fri 2026-11-13, QA Mon 11-16, promote Wed 11-18); phases D and F on Train #6 (freeze Fri 11-27, promote Wed 12-02). Builds on the Discord webhook pattern in `grove_headless` (`controllers/main.py:_notify_discord`, `models/order_rollup.py:_discord_digest`) and `grove_support/models/discord.py`, and on the topic-channel env vars from gom#384 / odoocker#967. Board: GOL-3828 (A, Josh), GOL-3830 (B, Ada), GOL-3831 (C, Terra), GOL-3832 (D, Ada, blocked by B), GOL-3829 (E, Josh gate, done 11-08), GOL-3842 (F, Ada, blocked by B).
+**Status:** approved in chat with Josh, 2026-11-06/07; phase D redesigned in a brainstorm with Josh on 2026-11-08 (series-aware, voice rooms). Target: **everything on Release Train #5** (freeze Fri 2026-11-13, QA Mon 11-16, promote Wed 11-18), ruled by Josh 2026-11-08. Phases D and F stack on phase B; if either is not green by the freeze it slips to Train #6 (freeze Fri 11-27, promote Wed 12-02) without holding B or C. Builds on the Discord webhook pattern in `grove_headless` (`controllers/main.py:_notify_discord`, `models/order_rollup.py:_discord_digest`) and `grove_support/models/discord.py`, and on the topic-channel env vars from gom#384 / odoocker#967. Board: GOL-3828 (A, Josh), GOL-3830 (B, Ada), GOL-3831 (C, Terra), GOL-3832 (D, Ada, blocked by B), GOL-3829 (E, Josh gate, done 11-08), GOL-3842 (F, Ada, blocked by B).
 
 ## Decision (Josh, 2026-11-06, revised 11-08)
 
@@ -114,7 +114,7 @@ The event form gets a collapsed "Discord" group showing those fields, or the ser
 - Add `grove_calendar` to the gom module list that the promote script installs, and `google_calendar` to the hand-installed core module list if one exists (else record where it is noted).
 - Prod `.env` is written by Josh (the auto-mode classifier blocks SSH writes to prod), with the same `apply.sh` pattern as the 2026-10-30 topic-channel wiring.
 
-## Phase D: native Discord Events, one per series (Ada, Train #6, blocked on phase B)
+## Phase D: native Discord Events, one per series (Ada, Train #5, stacks on phase B)
 
 `grove.calendar.discord` (AbstractModel) with `_cron_sync_discord_events()`, scheduled every **15 minutes**. Skips with one INFO log when `DISCORD_BOT_TOKEN` or `DISCORD_GUILD_ID` is unset.
 
@@ -216,7 +216,7 @@ Discord's repeating event cannot carry exceptions, and the series stays as one D
 
 A Discord webhook posts messages only. Guild scheduled events need a bot user, so phase D needs the token. Phase B ships without it so the weekly post exists on Train #5 either way.
 
-## Phase F: Website tag and public events feed (Ada, Train #6, blocked on phase B)
+## Phase F: Website tag and public events feed (Ada, Train #5, stacks on phase B)
 
 - Seed a `calendar.event.type` record **Website** (xmlid `grove_calendar.tag_website`, `noupdate="1"`). Set in Odoo only; Google has no tags.
 - `calendar.event._grove_website_domain(window_days)` = `_grove_public_domain(window_days)` AND `categ_ids` contains the Website tag.
@@ -245,11 +245,11 @@ A Discord webhook posts messages only. Guild scheduled events need a bot user, s
 | Phase C: compose passthrough prod + QA, module lists | Terra | Train #5 |
 | Prod `.env` written | Josh | Promote day Wed 11-18 |
 | Turn on "publishes to Discord" on Josh's user | Josh | Promote day Wed 11-18 |
-| Phase D: native events, one per series | Ada | Train #6 freeze Fri 11-27 |
-| Phase F: Website tag + `/grove/api/v1/events` | Ada | Train #6 |
-| Delete the hand-made Farm Meeting event in Discord once the synced Grove Team Meeting appears beside it | Josh | after Train #6 promote |
+| Phase D: native events, one per series | Ada | Train #5 freeze Fri 11-13 (else Train #6) |
+| Phase F: Website tag + `/grove/api/v1/events` | Ada | Train #5 freeze Fri 11-13 (else Train #6) |
+| Delete the hand-made Farm Meeting event in Discord once the synced Grove Team Meeting appears beside it | Josh | after the promote that carries phase D |
 
-First live check after Train #5 promote: the Monday 11-23 digest lists the Tuesday Farm Meeting in grove-chat, the Wednesday meeting with Wes at Armstrong Rd, and Friendsgiving. After Train #6 promote: five Discord events exist, each with the room or address above, and the Grove Team Meeting one repeats weekly.
+First live check after the Train #5 promote on Wed 11-18: within an hour, five Discord events exist, each with the room or address above, and the Grove Team Meeting one repeats weekly; the Monday 11-23 digest lists the Tuesday Farm Meeting in grove-chat, the Wednesday meeting with Wes at Armstrong Rd, and Friendsgiving.
 
 ## Open questions for Josh
 
