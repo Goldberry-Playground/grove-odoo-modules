@@ -38,6 +38,7 @@ from . import (
     test_migration_relink_xmlids,  # noqa: F401
     test_newsletter_subscribe,  # noqa: F401
     test_order_digest,  # noqa: F401
+    test_order_lanes,  # noqa: F401
     test_order_rollup,  # noqa: F401
     test_pickup_settlement,  # noqa: F401
     test_pirateship_import,  # noqa: F401
