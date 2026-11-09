@@ -13,11 +13,12 @@ from unittest.mock import patch
 
 from odoo.addons.grove_headless.controllers import main as controllers_main
 from odoo.addons.grove_headless.models.discord_tag import discord_env_tag, tag_discord_message
+from odoo.addons.grove_headless.tests.common import GroveTaxFixtureMixin
 from odoo.tests import TransactionCase, tagged
 
 
 @tagged("post_install", "-at_install")
-class TestDiscordEnvTag(TransactionCase):
+class TestDiscordEnvTag(GroveTaxFixtureMixin, TransactionCase):
     def _set_base_url(self, value):
         self.env["ir.config_parameter"].sudo().set_param("web.base.url", value)
 
@@ -60,3 +61,42 @@ class TestDiscordEnvTag(TransactionCase):
             controllers_main._notify_discord("bare ping")
         _, kwargs = mock_requests.post.call_args
         self.assertEqual(kwargs["json"]["content"], "bare ping")
+
+    # ── Stripe-webhook notifiers already hold ``env``: they forward it so the tag
+    # resolves even off the request path (queued/retried webhook) ──────────────
+
+    def _paid_order(self):
+        partner = self.env["res.partner"].create({"name": "Tag Buyer", "email": "tag@example.test"})
+        product = self.env["product.product"].create({"name": "Tag Tree", "type": "consu", "list_price": 40.0})
+        return self.env["sale.order"].create(
+            {
+                "partner_id": partner.id,
+                "order_line": [(0, 0, {"product_id": product.id, "product_uom_qty": 1})],
+            }
+        )
+
+    def test_new_order_alert_is_tagged_without_a_request(self):
+        self._set_base_url("https://odoo.example.test")
+        order = self._paid_order()
+        with (
+            patch.dict(os.environ, {"DISCORD_OPS_WEBHOOK_URL": "https://discord.example/ops"}, clear=True),
+            patch("odoo.addons.grove_headless.controllers.main.requests") as mock_requests,
+            patch("odoo.addons.grove_headless.controllers.main.request", None),
+            patch("odoo.addons.grove_headless.controllers.main._post_order_alert_card", return_value=False),
+        ):
+            controllers_main._notify_new_order(self.env, order, False)
+        _, kwargs = mock_requests.post.call_args
+        self.assertTrue(kwargs["json"]["content"].startswith("[odoo.example.test] "), kwargs["json"]["content"])
+
+    def test_sales_order_note_is_tagged_without_a_request(self):
+        self._set_base_url("https://odoo.example.test")
+        self.env["ir.config_parameter"].sudo().set_param("grove_headless.sales_large_order_threshold", "1")
+        order = self._paid_order()
+        with (
+            patch.dict(os.environ, {"DISCORD_OPS_WEBHOOK_URL": "https://discord.example/ops"}, clear=True),
+            patch("odoo.addons.grove_headless.controllers.main.requests") as mock_requests,
+            patch("odoo.addons.grove_headless.controllers.main.request", None),
+        ):
+            controllers_main._notify_sales_order(self.env, order)
+        _, kwargs = mock_requests.post.call_args
+        self.assertTrue(kwargs["json"]["content"].startswith("[odoo.example.test] "), kwargs["json"]["content"])

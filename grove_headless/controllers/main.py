@@ -6912,7 +6912,7 @@ def _notify_new_order(env, order, is_deposit):
         if _post_order_alert_card(order, context, is_deposit):
             return
         message = format_new_order_discord(is_deposit=is_deposit, **context)
-        _notify_discord(message)
+        _notify_discord(message, env=env)
     except Exception:  # noqa: BLE001 — ops alert is best-effort
         _logger.warning("New-order Discord alert failed for %s", order.name, exc_info=True)
 
@@ -6941,7 +6941,7 @@ def _notify_sales_order(env, order):
             consult=bool(order.grove_consult_requested),
         )
         if message:
-            _notify_discord(message, channel="sales")
+            _notify_discord(message, channel="sales", env=env)
     except Exception:  # noqa: BLE001 — sales note is best-effort
         _logger.warning("Sales Discord note failed for %s", order.name, exc_info=True)
 
