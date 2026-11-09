@@ -15,9 +15,9 @@ from odoo import api, fields, models
 from odoo.exceptions import AccessError, UserError
 from odoo.tools import config
 
-from .order_lanes import clean_tracking, lane_for, suggest_hold_date
+from .order_lanes import clean_tracking, lane_for, suggest_hold_date, zone_alert_kind
 from .shipping_boxes import dormancy_window
-from .shipping_calendar import merge_calendar_override, preorder_waves
+from .shipping_calendar import SPRING_BUILD_LEAD_DAYS, merge_calendar_override, preorder_waves, spring_build_window
 
 _logger = logging.getLogger(__name__)
 
@@ -448,4 +448,114 @@ class SaleOrder(models.Model):
                 failures += 1
             if failures >= _NUDGE_MAX_FAILURES:
                 _logger.error("Hold nudges stopped after %s consecutive failures; will retry next run", failures)
+                break
+
+    @api.model
+    def _cron_grove_order_ops(self, now=None):
+        """The hourly job: hold nudges, then spring zone warnings. A failure in
+        the first never stops the second."""
+        for name in ("_cron_grove_order_nudges", "_cron_grove_zone_alerts"):
+            try:
+                getattr(self, name)(now=now)
+            except Exception:  # noqa: BLE001 — the next step must still run
+                _logger.exception("%s failed", name)
+                if not config["test_enable"]:
+                    self.env.cr.rollback()
+
+    @api.model
+    def _grove_zone_alert_text(self, kind, zone, today, ship_start, total, held):
+        """The one-line warning for a zone, with the true number of days when a
+        missed run is catching up."""
+
+        def n(count, noun):
+            return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+        if kind == "t5":
+            days = (ship_start - today).days
+            return f"Zone {zone} spring shipping starts in {n(days, 'day')}: {n(total, 'order')}, {held} on hold."
+        if today == ship_start:
+            when = "starts today"
+        else:
+            when = f"started {n((today - ship_start).days, 'day')} ago"
+        return f"Zone {zone} spring shipping {when}: {n(total - held, 'order')} ready to batch."
+
+    @api.model
+    def _cron_grove_zone_alerts(self, now=None):
+        """Hourly: from 8am New York on, warn once per company, zone and year
+        five days before a zone's spring ship start, and once on the day. Only
+        zones with orders post. A missed day catches up on the next run (a missed
+        5-day warning is skipped once the start day has come). The alert row is
+        written only after the bridge accepted the post. ``now`` is for tests."""
+        now = now or datetime.now(timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=timezone.utc)
+        local = now.astimezone(_NUDGE_TZ)
+        if local.hour < _NUDGE_FROM_HOUR:
+            return
+        today = local.date()
+        from ..controllers.main import _parse_calendar_override
+
+        calendar = merge_calendar_override(_parse_calendar_override(self.env))
+        companies = self.env["res.company"].sudo().search([])
+        Order = self.sudo().with_context(allowed_company_ids=companies.ids)
+        orders = Order.search(
+            [
+                ("grove_lane", "=", "spring"),
+                ("grove_usda_zone", "!=", False),
+                ("grove_tracking_numbers", "=", False),
+                ("state", "!=", "cancel"),
+                ("grove_fulfillment_stage", "not in", ["shipped", "delivered", "collected"]),
+            ]
+        )
+        # (company, zone) -> [orders not yet out the door, of which on hold]
+        counts = {}
+        for order in orders:
+            entry = counts.setdefault((order.company_id.id, order.grove_usda_zone), [0, 0])
+            entry[0] += 1
+            entry[1] += 1 if order.grove_hold_until else 0
+
+        Alert = self.env["grove.zone.alert"].sudo()
+        in_test = bool(config["test_enable"])
+        failures = 0
+        unmapped = set()
+        for (company_id, zone), (total, held) in sorted(counts.items()):
+            if company_id in unmapped:
+                continue
+            company = companies.browse(company_id)
+            try:
+                lead_open, ship_end = spring_build_window(int(zone), today, calendar)
+                ship_start = lead_open + timedelta(days=SPRING_BUILD_LEAD_DAYS)
+                kind = zone_alert_kind(today, ship_start, ship_end)
+                if not kind:
+                    continue
+                # Day-of counts orders ready to batch, so a zone whose orders are all
+                # on hold has nothing to say yet.
+                if kind == "day_of" and total - held <= 0:
+                    continue
+                key = [("company_id", "=", company_id), ("zone", "=", zone), ("year", "=", ship_start.year)]
+                if Alert.search_count([*key, ("kind", "=", kind)]):
+                    continue
+                text = self._grove_zone_alert_text(kind, zone, today, ship_start, total, held)
+                status = self._grove_post_notice_status(company, f"Zone {zone} spring shipping", [text], [])
+                if status == "ok":
+                    failures = 0
+                    Alert.create({"company_id": company_id, "zone": zone, "year": ship_start.year, "kind": kind})
+                    # A Discord post cannot be undone, so keep its record even if a
+                    # later zone fails and the run rolls back.
+                    if not in_test:
+                        self.env.cr.commit()
+                elif status == "unmapped":
+                    unmapped.add(company_id)
+                    _logger.error(
+                        "Zone alerts skipped for company %s (id %s): the bridge has no order channel for it",
+                        company.name,
+                        company_id,
+                    )
+                else:
+                    failures += 1
+            except Exception:  # noqa: BLE001 — keep warning the other zones
+                _logger.exception("Zone alert failed for company %s zone %s", company_id, zone)
+                failures += 1
+            if failures >= _NUDGE_MAX_FAILURES:
+                _logger.error("Zone alerts stopped after %s consecutive failures; will retry next run", failures)
                 break

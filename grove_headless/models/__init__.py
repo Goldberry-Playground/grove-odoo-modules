@@ -26,4 +26,5 @@ from . import (
     stock_quant,  # noqa: F401  on-hand → product.availability webhook (GOL-1896)
     stripe_gateway,  # noqa: F401  pure Stripe REST client (GOL-642), no ORM models
     website,  # noqa: F401
+    zone_alert,  # noqa: F401  spring zone warnings already sent
 )

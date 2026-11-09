@@ -6,7 +6,7 @@ like ``order_alerts`` and ``shipping_calendar``. Never does I/O.
 
 import math
 import re
-from datetime import date
+from datetime import date, timedelta
 
 _MONTHS = {
     name: idx
@@ -128,3 +128,18 @@ def parse_label_cost(text):
             f"${value:,.2f} is over the ${MAX_LABEL_COST:.2f} limit for a label. Double-check the decimal."
         )
     return value
+
+
+# The 5-day warning goes out this many days before a zone's spring ship start.
+ZONE_ALERT_LEAD_DAYS = 5
+
+
+def zone_alert_kind(today, ship_start, ship_end):
+    """Which spring zone warning is due: ``"t5"`` from five days before the ship
+    start up to the day before it, ``"day_of"`` from the start through the end of
+    the window, else ``None``."""
+    if ship_start - timedelta(days=ZONE_ALERT_LEAD_DAYS) <= today < ship_start:
+        return "t5"
+    if ship_start <= today <= ship_end:
+        return "day_of"
+    return None

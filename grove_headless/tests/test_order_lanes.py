@@ -90,3 +90,26 @@ class TestOrderLanes(unittest.TestCase):
         for bad in ("", "abc", "-1", "0"):
             with self.assertRaises(ValueError):
                 ol.parse_label_cost(bad)
+
+
+class TestZoneAlertKind(unittest.TestCase):
+    START = date(2027, 4, 5)
+    END = date(2027, 4, 15)
+
+    def kind(self, today):
+        return ol.zone_alert_kind(today, self.START, self.END)
+
+    def test_before_the_five_day_window_is_none(self):
+        self.assertIsNone(self.kind(date(2027, 3, 30)))
+
+    def test_five_days_out_through_the_day_before_is_t5(self):
+        self.assertEqual(self.kind(date(2027, 3, 31)), "t5")
+        self.assertEqual(self.kind(date(2027, 4, 4)), "t5")
+
+    def test_start_through_end_is_day_of(self):
+        self.assertEqual(self.kind(self.START), "day_of")
+        self.assertEqual(self.kind(date(2027, 4, 10)), "day_of")
+        self.assertEqual(self.kind(self.END), "day_of")
+
+    def test_after_the_end_is_none(self):
+        self.assertIsNone(self.kind(date(2027, 4, 16)))
