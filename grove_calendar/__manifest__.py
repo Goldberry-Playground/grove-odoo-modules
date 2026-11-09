@@ -1,6 +1,6 @@
 {
     "name": "Grove Calendar",
-    "version": "19.0.1.1.0",
+    "version": "19.0.1.2.0",
     "category": "Marketing/Calendar",
     "summary": "Public calendar events to Discord: weekly 'This week at the Grove' digest (GOL-3830)",
     "description": """
@@ -48,6 +48,7 @@
     # res.users), so no new ACL is needed.
     "data": [
         "data/calendar_digest_cron.xml",
+        "data/calendar_discord_cron.xml",
         "views/calendar_event_views.xml",
         "views/res_users_views.xml",
     ],
