@@ -1968,6 +1968,7 @@ class GroveHeadlessAPI(http.Controller):
                 "settlement": result["settlement"],
                 "tracking_numbers": tracking.split("\n") if tracking else [],
                 "carriers": carriers.split("\n") if carriers else [],
+                "card": _order_card_payload(order),
             }
         )
 
@@ -6871,6 +6872,45 @@ def _shipping_address_text(order):
     return "<br/>".join(html.escape(x) for x in bits if x) or None
 
 
+def _order_card_payload(order, is_deposit=None, context=None):
+    """The one place an order becomes a Discord card body. The alert post, the
+    mark-shipped response and every order-action route all call this, so Odoo
+    stays the single source of what a card shows.
+
+    ``is_deposit`` defaults to whether the order carries preorder variants (the
+    same signal the new-order alert uses). The suggested hold date only pre-fills
+    a form, so a failure to work it out is logged and sent as null: the card
+    must still build."""
+    if is_deposit is None:
+        is_deposit = bool((order.grove_preorder_variant_ids or "").strip())
+    if context is None:
+        context = _order_alert_context(order)
+    try:
+        suggested = order._grove_suggested_hold().isoformat()
+    except Exception:  # noqa: BLE001 — a form pre-fill must never stop a card posting
+        _logger.warning("Suggested hold date failed for %s", order.name, exc_info=True)
+        suggested = None
+    hold = None
+    if order.grove_hold_until:
+        hold = {
+            "until": order.grove_hold_until.isoformat(),
+            "reason": order.grove_hold_reason or "",
+            "setBy": order.grove_hold_set_by or "",
+        }
+    return build_order_card_payload(
+        order_id=order.id,
+        company_id=order.company_id.id,
+        is_deposit=is_deposit,
+        context=context,
+        lane=order.grove_lane or None,
+        zone=order.grove_usda_zone or None,
+        ship_wave=order.grove_ship_wave or None,
+        suggested_hold=suggested,
+        label_cost=order.grove_actual_shipping_cost if order.grove_actual_shipping_cost else None,
+        hold=hold,
+    )
+
+
 def _post_order_alert_card(order, context, is_deposit):
     """POST the order to the Discord bridge's ``/orders/alert`` endpoint so the
     bridge bot-posts the *interactive* order card — the one carrying the
@@ -6887,12 +6927,7 @@ def _post_order_alert_card(order, context, is_deposit):
     base = os.environ.get("DISCORD_BRIDGE_BASE_URL", "").rstrip("/")
     if not secret or not base:
         return False
-    payload = build_order_card_payload(
-        order_id=order.id,
-        company_id=order.company_id.id,
-        is_deposit=is_deposit,
-        context=context,
-    )
+    payload = _order_card_payload(order, is_deposit, context)
     try:
         resp = requests.post(
             f"{base}/orders/alert",
