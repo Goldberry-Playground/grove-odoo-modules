@@ -122,4 +122,6 @@ collect_ignore_glob = [
     "grove_calendar/tests/test_digest_cron.py",
     "grove_calendar/tests/test_discord_events_cron.py",
     "grove_calendar/tests/test_discord_exceptions.py",
+    "grove_calendar/tests/test_grove_website_domain.py",
+    "grove_calendar/tests/test_events_feed_route.py",
 ]

@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Website tag (GOL-3842, phase F). A `calendar.event.type` (Odoo's
+         calendar "Tags") used as the third publication tier: a Public event
+         ALSO carrying this tag is served on the public website feed
+         /grove/api/v1/events. noupdate so renaming or re-tagging it on prod
+         survives a module upgrade. Google has no tags, so the tag is set in
+         Odoo only. -->
+    <data noupdate="1">
+        <record id="tag_website" model="calendar.event.type">
+            <field name="name">Website</field>
+        </record>
+    </data>
+</odoo>
