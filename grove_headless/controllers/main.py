@@ -15,6 +15,7 @@ import psycopg2
 import requests
 from markupsafe import Markup
 from odoo import fields, http, tools
+from odoo.exceptions import UserError
 from odoo.http import Response, request
 
 from ..hooks import _get_company_wv_state_tax
@@ -37,6 +38,7 @@ from ..models.order_alerts import (
     format_sales_order_note,
     promo_codes_from_line_names,
 )
+from ..models.order_lanes import clean_tracking, parse_label_cost
 from ..models.plant_compliance import blocked_states_for as compliance_blocked_states_for
 from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
 from ..models.plant_compliance import excluded_taxa_for_state
@@ -1883,12 +1885,21 @@ class GroveHeadlessAPI(http.Controller):
         failure — so the bridge surfaces it as an ephemeral error rather than
         acking in Discord and silently dropping the write (GOL-1975 guard).
 
-        Body (optional): ``{"actor": "<discord user id>"}`` — stamped into the
-        order chatter for the audit trail.
+        Body: ``{"actor": "<discord user id>", "tracking": "...", "cost": "12.40"}``.
+        ``actor`` is stamped into the order chatter for the audit trail. Tracking
+        and the label cost are required: a missing or invalid one is 422 and
+        writes nothing. A held order, or a spring order with no batch label, is
+        409. Every ``error`` string is shown to the operator as written. The
+        label goes on the order before the ship, so the balance settles on the
+        real cost and the email carries the number (``_grove_ship_with_label``).
+        A resubmit with the same number changes nothing; a different number
+        replaces the label and charges nothing more.
         """
         try:
             payload = json.loads(request.httprequest.data or "{}")
         except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
             payload = {}
         actor = payload.get("actor")
         actor = actor if isinstance(actor, str) and actor.strip() else None
@@ -1914,7 +1925,26 @@ class GroveHeadlessAPI(http.Controller):
                 status=409,
             )
 
-        result = _operator_mark_shipped(request.env, order, actor)
+        raw_tracking = payload.get("tracking")
+        tracking = clean_tracking(raw_tracking if isinstance(raw_tracking, str) else "")
+        if not tracking:
+            return _json_response({"error": "Enter the tracking number."}, status=422)
+        if not is_valid_tracking(tracking):
+            return _json_response(
+                {"error": f"{tracking} doesn't look like a tracking number. Check it and try again."},
+                status=422,
+            )
+        try:
+            cost = parse_label_cost(payload.get("cost"))
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, status=422)
+
+        try:
+            result = order._grove_ship_with_label(tracking, cost, actor)
+        except UserError as exc:
+            # Returned, not raised, so a label that was already recorded stays
+            # committed for a retry.
+            return _json_response({"error": str(exc)}, status=409)
 
         stage = order.grove_fulfillment_stage
         # action_grove_mark_shipped returns False for BOTH "already shipped"
@@ -1926,7 +1956,7 @@ class GroveHeadlessAPI(http.Controller):
         if not result["newly_shipped"] and stage not in ("shipped", "delivered"):
             return _json_response(
                 {
-                    "error": f"Order is not in a shippable state (stage: {stage}); not marked shipped",
+                    "error": f"{order.name} can't be marked shipped from its current status ({stage}).",
                     "grove_fulfillment_stage": stage,
                 },
                 status=409,

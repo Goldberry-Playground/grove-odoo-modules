@@ -11,7 +11,7 @@ from datetime import date, timedelta
 from odoo import api, fields, models
 from odoo.exceptions import AccessError, UserError
 
-from .order_lanes import lane_for, suggest_hold_date
+from .order_lanes import clean_tracking, lane_for, suggest_hold_date
 from .shipping_boxes import dormancy_window
 from .shipping_calendar import merge_calendar_override, preorder_waves
 
@@ -20,6 +20,15 @@ _logger = logging.getLogger(__name__)
 # Stages where a hold is meaningless: the order is already out the door or finished.
 # (label_purchased is deliberately allowed: a bought label can still be held.)
 _HOLD_REFUSED_STAGES = ("shipped", "delivered", "collected", "cancelled")
+
+# The box has already left: Mark shipped can only retry or correct the label.
+_ALREADY_SHIPPED_STAGES = ("shipped", "delivered")
+# Stages Mark shipped can start from. A deposit_paid order also qualifies when it
+# has a fall wave, because the wave assignment happens as part of the same submit.
+_MARK_SHIPPED_STAGES = ("awaiting_label", "wave_assigned", "label_purchased", *_ALREADY_SHIPPED_STAGES)
+# The Mark shipped modal has no carrier field. Pirate Ship sells only UPS and USPS
+# and a UPS number is recognised by its 1Z prefix, so anything else is USPS.
+_TYPED_LABEL_CARRIER = "USPS"
 
 
 def _window_start_date(window, today):
@@ -139,3 +148,74 @@ class SaleOrder(models.Model):
         self.sudo().write({"grove_hold_until": until, "grove_hold_last_nudge": False})
         self.message_post(body=f"{actor} snoozed the hold to {until.isoformat()}.")
         return True
+
+    def _grove_needs_wave_for_ship(self):
+        return self.grove_fulfillment_stage == "deposit_paid" and self.grove_ship_wave == "fall"
+
+    def _grove_refuse_mark_shipped(self):
+        """Raise ``UserError`` when this order cannot be marked shipped. The message
+        is shown to the operator as written. An order already out the door passes,
+        so a retry stays a no-op and a wrong number can still be corrected."""
+        stage = self.grove_fulfillment_stage
+        if stage in _ALREADY_SHIPPED_STAGES:
+            return
+        if self.grove_hold_until:
+            until = self.grove_hold_until
+            raise UserError(
+                f"{self.name} is on hold until {until:%b} {until.day}, {until.year} "
+                f"({self.grove_hold_reason}). Release the hold before marking it shipped."
+            )
+        if self.grove_lane == "spring" and not self.grove_tracking_numbers:
+            zone = f"Zone {self.grove_usda_zone}" if self.grove_usda_zone else "an unknown zone"
+            raise UserError(
+                f"{self.name} is a spring order for {zone}. It ships with its zone's batch, "
+                "so it needs its batch label before it can be marked shipped."
+            )
+        if stage not in _MARK_SHIPPED_STAGES and not self._grove_needs_wave_for_ship():
+            label = dict(self._fields["grove_fulfillment_state"].selection).get(stage, stage)
+            raise UserError(f"{self.name} can't be marked shipped yet. Its status is: {label}.")
+
+    def _grove_apply_typed_label(self, tracking, cost, who, source):
+        """Put the operator's number and cost on the order: record it, replace a
+        different label, or leave a matching one alone."""
+        current = (self.grove_tracking_numbers or "").split()
+        if tracking in current:
+            # A retry or a prefilled modal. Until the order ships, the typed cost is
+            # still the one its balance settles on; after that the charge is done.
+            shipped = self.grove_fulfillment_stage in _ALREADY_SHIPPED_STAGES
+            if not shipped and round(cost, 2) != round(self.grove_actual_shipping_cost or 0.0, 2):
+                self.write({"grove_actual_shipping_cost": round(cost, 2)})
+                self.message_post(body=f"{who} set the cost of label {tracking} to ${cost:.2f}.")
+        elif current:
+            self.action_grove_replace_label(
+                tracking, carrier=_TYPED_LABEL_CARRIER, actual_cost=cost, source=f"{source}, by {who}"
+            )
+        else:
+            self.action_grove_record_hand_label(tracking, carrier=_TYPED_LABEL_CARRIER, actual_cost=cost)
+            self.message_post(body=f"{who} recorded label {tracking} ({self.grove_shipping_carriers}) at ${cost:.2f}.")
+
+    def _grove_ship_with_label(self, tracking, cost, actor, source="discord"):
+        """Operator Mark shipped with the label typed in: refuse a held order or a
+        spring order with no batch label, assign a fall deposit order to its wave,
+        record the label (or replace a different one), then ship and settle.
+
+        The savepoint covers only the wave and the label, so a label failure writes
+        nothing. ``_operator_mark_shipped`` runs after it on purpose: rolling back
+        after a Stripe charge would erase the record of a real charge. A failure
+        there leaves a recorded label on an unshipped order, which is visible and
+        retryable. Raises ``UserError`` with a message written for the operator.
+        Returns ``_operator_mark_shipped``'s dict."""
+        self.ensure_one()
+        from ..controllers.main import _operator_mark_shipped
+
+        # Same row lock as action_grove_mark_shipped, taken here so two submits
+        # cannot both pass the checks below on a stale read.
+        self.env.cr.execute("SELECT id FROM sale_order WHERE id = %s FOR UPDATE", (self.id,))
+        self.invalidate_recordset()
+        self._grove_refuse_mark_shipped()
+        who = actor or "An operator"
+        with self.env.cr.savepoint():
+            if self._grove_needs_wave_for_ship():
+                self.action_grove_assign_wave(wave_ref=f"fall (by {who})")
+            self._grove_apply_typed_label(clean_tracking(tracking), cost, who, source)
+        return _operator_mark_shipped(self.env, self, actor=actor, source=source)

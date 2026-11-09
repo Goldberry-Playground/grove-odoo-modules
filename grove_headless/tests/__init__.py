@@ -35,6 +35,7 @@ from . import (
     test_listing_audit,  # noqa: F401
     test_listing_gate,  # noqa: F401
     test_mark_shipped,  # noqa: F401
+    test_mark_shipped_tracking,  # noqa: F401
     test_migration_relink_xmlids,  # noqa: F401
     test_newsletter_subscribe,  # noqa: F401
     test_order_digest,  # noqa: F401

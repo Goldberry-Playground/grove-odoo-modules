@@ -992,11 +992,20 @@ class SaleOrder(models.Model):
         flow never depends on Discord being wired: the canonical GOL-1981 shipped
         transition + ship-time settlement (GOL-2053) + exactly one branded
         shipment email. Deferred import breaks the controller→models load cycle,
-        mirroring ``_grove_settle_at_ship``. Returns ``_operator_mark_shipped``'s
+        mirroring ``_grove_settle_at_ship``. Refuses (``UserError``) an order that
+        would ship with no tracking number, the same rule the endpoint enforces;
+        a pickup or an already-shipped order still falls through to its no-op.
+        Returns ``_operator_mark_shipped``'s
         ``{"newly_shipped": bool, "settlement": <status> | None}``."""
         self.ensure_one()
         from ..controllers.main import _operator_mark_shipped
 
+        if (
+            self.grove_fulfillment != "pickup"
+            and self.grove_fulfillment_stage not in ("shipped", "delivered")
+            and not (self.grove_tracking_numbers or "").strip()
+        ):
+            raise UserError(f"{self.name} has no tracking number. Record its label first, then mark it shipped.")
         return _operator_mark_shipped(self.env, self, actor=operator, source="operator")
 
     def grove_should_send_shipment_email(self):
