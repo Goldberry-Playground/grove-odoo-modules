@@ -84,8 +84,11 @@ class TestOrderLabelRefundedMove(GroveTaxFixtureMixin, TransactionCase):
     def test_refund_refused_outside_label_purchased(self):
         for state in ("shipped", "delivered", "collected", "cancelled", "awaiting_label", "wave_assigned"):
             order = self._order(grove_fulfillment_state=state)
+            msgs = len(order.message_ids)
             with self.assertRaises(UserError, msg=state):
                 order.action_grove_label_refunded("Wes")
+            self.assertEqual(order.grove_fulfillment_stage, state)
+            self.assertEqual(len(order.message_ids), msgs)
 
     def test_refund_refused_once_shipped(self):
         order = self._labelled()
@@ -151,8 +154,31 @@ class TestOrderLabelRefundedMove(GroveTaxFixtureMixin, TransactionCase):
             order.action_grove_move_wave("spring", "Wes")
         order = self._order(grove_ship_wave="fall")
         order.action_cancel()
+        with self.assertRaises(UserError) as ctx:
+            order.action_grove_move_wave("spring", "Wes")
+        self.assertIn("cancelled", str(ctx.exception))
+        self.assertEqual(order.grove_ship_wave, "fall")
+
+    def test_move_refused_for_pickup(self):
+        order = self._order(grove_ship_wave="fall")
+        order.grove_fulfillment = "pickup"
+        msgs = len(order.message_ids)
         with self.assertRaises(UserError):
             order.action_grove_move_wave("spring", "Wes")
+        self.assertEqual(order.grove_ship_wave, "fall")
+        self.assertEqual(len(order.message_ids), msgs)
+
+    def test_assign_wave_cannot_walk_a_labelled_order_back(self):
+        order = self._labelled(wave="fall")
+        self.assertFalse(order.action_grove_assign_wave())
+        self.assertEqual(order.grove_fulfillment_stage, "label_purchased")
+        self.assertEqual(order.grove_tracking_numbers, UPS)
+
+    def test_advance_state_is_forward_only_by_default(self):
+        order = self._labelled()
+        self.assertFalse(order._grove_advance_state("awaiting_label", source="test"))
+        self.assertEqual(order.grove_fulfillment_stage, "label_purchased")
+        self.assertEqual(order.grove_tracking_numbers, UPS)
 
     def test_move_refused_without_zone(self):
         order = self._order(grove_ship_wave="fall")

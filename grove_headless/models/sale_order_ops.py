@@ -171,12 +171,15 @@ class SaleOrder(models.Model):
         old = (self.grove_tracking_numbers or "").split()
         old_text = ", ".join(old) if old else "no number on file"
         target = "wave_assigned" if self.grove_ship_wave else "awaiting_label"
-        self.sudo()._grove_advance_state(
+        moved = self.sudo()._grove_advance_state(
             target,
             source="label_refunded",
             operator=actor,
             note=f"{actor} marked the label refunded (was {old_text}). The order needs a label again.",
+            allow_backward=True,
         )
+        if not moved:
+            raise UserError(f"{self.name} could not be sent back to needing a label. Nothing was changed.")
         self.sudo().write(
             {
                 "grove_tracking_numbers": False,
@@ -202,7 +205,9 @@ class SaleOrder(models.Model):
         if self.grove_ship_wave == wave:
             return False
         stage = self.grove_fulfillment_stage
-        if self.state == "cancel" or stage in _HOLD_REFUSED_STAGES:
+        if self.state == "cancel" or stage == "cancelled":
+            raise UserError(f"{self.name} is cancelled; it can't be moved.")
+        if stage in _HOLD_REFUSED_STAGES:
             raise UserError(f"{self.name} is already {stage}; it can't be moved.")
         if self.grove_fulfillment != "ship":
             raise UserError(f"{self.name} isn't a shipped order, so it has no ship wave.")

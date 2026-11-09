@@ -18,6 +18,15 @@ _logger = logging.getLogger(__name__)
 GROVE_API_CART_TTL = timedelta(days=1)
 
 
+# Backward moves, accepted only when a caller passes allow_backward=True. Only
+# Label refunded does. Kept out of _GROVE_TRANSITIONS so no forward path (wave
+# assignment, webhooks) can walk a labelled order back.
+_GROVE_BACKWARD_TRANSITIONS = {
+    "awaiting_label": ("label_purchased",),
+    "wave_assigned": ("label_purchased",),
+}
+
+
 class SaleOrder(models.Model):
     _inherit = "sale.order"
 
@@ -562,9 +571,7 @@ class SaleOrder(models.Model):
     # requested from any other state is rejected (logged, no write) so a stray
     # signal can never skip the machine (e.g. delivered before shipped).
     _GROVE_TRANSITIONS = {
-        # Label refunded walks back from label_purchased (the only backward moves).
-        "awaiting_label": ("label_purchased",),
-        "wave_assigned": ("deposit_paid", "label_purchased"),
+        "wave_assigned": ("deposit_paid",),
         "label_purchased": ("awaiting_label", "wave_assigned"),
         "shipped": ("awaiting_label", "label_purchased"),
         "delivered": ("shipped",),
@@ -610,7 +617,7 @@ class SaleOrder(models.Model):
             return "awaiting_label"
         return "awaiting_payment"
 
-    def _grove_advance_state(self, target, *, source="operator", operator=None, note=None):
+    def _grove_advance_state(self, target, *, source="operator", operator=None, note=None, allow_backward=False):
         """Advance the fulfilment watermark to ``target`` if the transition is
         legal from the current stage. Returns True only when the state actually
         moved, so callers (Discord signal, Shippo webhook) are idempotent across
@@ -624,6 +631,8 @@ class SaleOrder(models.Model):
         if current == target:
             return False  # idempotent: already there
         allowed = self._GROVE_TRANSITIONS.get(target, ())
+        if allow_backward:
+            allowed = (*allowed, *_GROVE_BACKWARD_TRANSITIONS.get(target, ()))
         if current not in allowed:
             _logger.warning(
                 "Rejected fulfilment transition %s -> %s on %s (source=%s): not a legal move from %s.",
