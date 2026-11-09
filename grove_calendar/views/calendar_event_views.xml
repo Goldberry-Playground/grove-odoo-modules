@@ -27,4 +27,22 @@
             </xpath>
         </field>
     </record>
+
+    <!-- "Website" filter on the calendar search view (GOL-3842, phase F). The
+         Public events tagged for the website (the subset served by
+         /grove/api/v1/events) read as their own calendar in Odoo. Matched by
+         the tag's name rather than its database id so the static search-view
+         domain needs no id substitution. -->
+    <record id="calendar_event_view_search_grove_website" model="ir.ui.view">
+        <field name="name">calendar.event.search.grove.website</field>
+        <field name="model">calendar.event</field>
+        <field name="inherit_id" ref="calendar.view_calendar_event_search"/>
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <separator/>
+                <filter name="grove_website" string="Website"
+                        domain="[('categ_ids.name', '=', 'Website')]"/>
+            </xpath>
+        </field>
+    </record>
 </odoo>
