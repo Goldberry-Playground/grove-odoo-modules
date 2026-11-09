@@ -9,7 +9,7 @@ import logging
 from datetime import date, timedelta
 
 from odoo import api, fields, models
-from odoo.exceptions import UserError
+from odoo.exceptions import AccessError, UserError
 
 from .order_lanes import lane_for, suggest_hold_date
 from .shipping_boxes import dormancy_window
@@ -17,7 +17,8 @@ from .shipping_calendar import merge_calendar_override, preorder_waves
 
 _logger = logging.getLogger(__name__)
 
-# Stages after which a hold means nothing (label may already be out, or the order is done).
+# Stages where a hold is meaningless: the order is already out the door or finished.
+# (label_purchased is deliberately allowed: a bought label can still be held.)
 _HOLD_REFUSED_STAGES = ("shipped", "delivered", "collected", "cancelled")
 
 
@@ -53,9 +54,16 @@ class SaleOrder(models.Model):
         for order in self:
             order.grove_lane = lane_for(order.grove_fulfillment, order.grove_is_printify, order.grove_ship_wave)
 
+    def _grove_require_order_operator(self):
+        """Gate for operator actions that write with sudo(): superuser (controllers,
+        crons) or a user with access to all sales orders."""
+        if not self.env.is_superuser() and not self.env.user.has_group("sales_team.group_sale_salesman_all_leads"):
+            raise AccessError("Order actions need access to all sales orders.")
+
     def _grove_suggested_hold(self):
         """Default hold date to pre-fill the form: the later of dormancy start and
-        the zone's ship-window start (the order's own wave, else fall). Never raises."""
+        the zone's ship-window start (the order's own wave, else fall). Does not raise
+        on a missing zone (the value only pre-fills a form)."""
         self.ensure_one()
         today = fields.Date.context_today(self)
         dormancy_start = _window_start_date(dormancy_window(self.env), today)
@@ -79,13 +87,17 @@ class SaleOrder(models.Model):
                 )
         return suggest_hold_date(today, dormancy_start, zone_start)
 
+    def _grove_refuse_finished(self):
+        if self.grove_fulfillment_stage in _HOLD_REFUSED_STAGES:
+            raise UserError(f"{self.name} is already {self.grove_fulfillment_stage}; it cannot be held.")
+
     def action_grove_set_hold(self, until, reason, actor):
+        self._grove_require_order_operator()
         self.ensure_one()
         reason = (reason or "").strip()
         if not reason:
             raise UserError("Enter a reason for the hold.")
-        if self.grove_fulfillment_stage in _HOLD_REFUSED_STAGES:
-            raise UserError(f"{self.name} is already {self.grove_fulfillment_stage}; it cannot be held.")
+        self._grove_refuse_finished()
         if until < fields.Date.context_today(self):
             raise UserError("The hold date cannot be in the past.")
         self.sudo().write(
@@ -100,6 +112,7 @@ class SaleOrder(models.Model):
         return True
 
     def action_grove_release_hold(self, actor):
+        self._grove_require_order_operator()
         self.ensure_one()
         if not self.grove_hold_until:
             return False
@@ -115,7 +128,11 @@ class SaleOrder(models.Model):
         return True
 
     def action_grove_snooze_hold(self, actor, days=7):
+        self._grove_require_order_operator()
         self.ensure_one()
+        if isinstance(days, bool) or not isinstance(days, int) or not 1 <= days <= 365:
+            raise UserError("Snooze days must be a whole number from 1 to 365.")
+        self._grove_refuse_finished()
         if not self.grove_hold_until:
             raise UserError(f"{self.name} has no hold to snooze.")
         until = fields.Date.context_today(self) + timedelta(days=days)

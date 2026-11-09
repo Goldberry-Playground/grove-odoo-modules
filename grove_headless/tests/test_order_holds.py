@@ -9,8 +9,8 @@ from datetime import date, timedelta
 from unittest.mock import patch
 
 from odoo import fields
-from odoo.exceptions import UserError
-from odoo.tests import TransactionCase, tagged
+from odoo.exceptions import AccessError, UserError
+from odoo.tests import TransactionCase, new_test_user, tagged
 
 from .common import GroveTaxFixtureMixin
 
@@ -70,7 +70,7 @@ class TestOrderHolds(GroveTaxFixtureMixin, TransactionCase):
             order.action_grove_set_hold(fields.Date.context_today(order) - timedelta(days=1), "Because", "Josh")
 
     def test_set_hold_refuses_finished_order(self):
-        for state in ("shipped", "delivered", "cancelled"):
+        for state in ("shipped", "delivered", "collected", "cancelled"):
             order = self._order(grove_fulfillment_state=state)
             with self.assertRaises(UserError, msg=state):
                 order.action_grove_set_hold(fields.Date.context_today(order), "Because", "Josh")
@@ -97,6 +97,44 @@ class TestOrderHolds(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(self._order().grove_lane, "individual")
         self.assertEqual(self._order(grove_ship_wave="spring").grove_lane, "spring")
         self.assertEqual(self._order(grove_fulfillment="pickup").grove_lane, "none")
+
+    def test_snooze_validates_days_and_stage(self):
+        order = self._held()
+        for bad in (0, 366, -1, "7", 1.5, True, None):
+            with self.assertRaises(UserError, msg=repr(bad)):
+                order.action_grove_snooze_hold("Wes", days=bad)
+        order.action_grove_snooze_hold("Wes", days=365)
+        order.sudo().grove_fulfillment_state = "shipped"
+        with self.assertRaises(UserError):
+            order.action_grove_snooze_hold("Wes")
+
+    def test_hold_methods_need_order_operator(self):
+        order = self._held()
+        before = (order.grove_hold_until, order.grove_hold_reason, order.grove_hold_set_by)
+        msgs = len(order.message_ids)
+        today = fields.Date.context_today(order)
+        users = [
+            new_test_user(self.env, login="hold_portal", groups="base.group_portal"),
+            new_test_user(self.env, login="hold_internal", groups="base.group_user"),
+        ]
+        for user in users:
+            as_user = order.with_user(user)
+            with self.assertRaises(AccessError):
+                as_user.action_grove_set_hold(today, "Forged", "Someone")
+            with self.assertRaises(AccessError):
+                as_user.action_grove_release_hold("Someone")
+            with self.assertRaises(AccessError):
+                as_user.action_grove_snooze_hold("Someone")
+        self.assertEqual((order.grove_hold_until, order.grove_hold_reason, order.grove_hold_set_by), before)
+        self.assertEqual(len(order.message_ids), msgs)
+        # sudo (controllers, crons) still works.
+        self.assertTrue(order.sudo().action_grove_release_hold("Bridge"))
+
+    def test_suggested_hold_zone_missing_from_calendar_falls_back(self):
+        order = self._order()
+        self.assertTrue(order.grove_usda_zone)
+        with patch("odoo.addons.grove_headless.models.sale_order_ops.preorder_waves", side_effect=KeyError(6)):
+            self.assertEqual(self._suggest(order, date(2027, 8, 1)), date(2027, 11, 1))
 
     def _suggest(self, order, today):
         with patch.object(fields.Date, "context_today", return_value=today):
