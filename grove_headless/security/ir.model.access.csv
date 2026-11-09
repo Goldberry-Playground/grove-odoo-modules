@@ -29,3 +29,4 @@ access_grove_email_log_user,grove_headless.email_log.user,model_grove_email_log,
 access_grove_email_log_manager,grove_headless.email_log.manager,model_grove_email_log,sales_team.group_sale_manager,1,1,1,1
 access_grove_mailgun_token_manager,grove_headless.mailgun_token.manager,model_grove_mailgun_token,sales_team.group_sale_manager,1,0,0,0
 access_grove_zone_alert_manager,grove_headless.zone_alert.manager,model_grove_zone_alert,sales_team.group_sale_manager,1,0,0,0
+access_grove_order_hold_fulfillment,grove_headless.order_hold.fulfillment,model_grove_order_hold,sales_team.group_sale_salesman_all_leads,1,1,1,1

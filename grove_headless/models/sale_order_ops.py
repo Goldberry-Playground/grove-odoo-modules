@@ -78,6 +78,9 @@ class SaleOrder(models.Model):
     grove_hold_reason = fields.Char(readonly=True, copy=False)
     grove_hold_set_by = fields.Char(readonly=True, copy=False)
     grove_hold_last_nudge = fields.Date(readonly=True, copy=False)
+    # Stamped once the launch repost has put the new-style card in Discord for this
+    # order, so a second run (or a resume after a failure) never double-posts.
+    grove_card_reposted = fields.Boolean(readonly=True, copy=False)
 
     @api.depends("grove_fulfillment", "grove_is_printify", "grove_ship_wave")
     def _compute_grove_lane(self):
@@ -700,3 +703,53 @@ class SaleOrder(models.Model):
             )
         verb = "needs" if count == 1 else "need"
         return f"Zone {zone}: {count} {noun} still {verb} a batch."
+
+    @api.model
+    def _grove_repost_open_order_cards(self):
+        """Run once by hand from an Odoo shell after the lanes launch: repost the
+        confirmed ship orders that are still open so they get the new buttons.
+
+        Each order is stamped (``grove_card_reposted``) only after its post
+        succeeded and committed, so a second run posts nothing and a partial
+        failure can be resumed by running it again. One order's failure never
+        stops the others; three failures in a row stop the run (a dead bridge).
+        Returns ``{"posted": n, "skipped": n, "failed": n}``; ``skipped`` counts
+        open orders already reposted."""
+        from ..controllers import main as controllers
+
+        domain = [
+            ("state", "in", ("sale", "done")),
+            ("grove_fulfillment", "=", "ship"),
+            ("grove_fulfillment_stage", "not in", list(_HOLD_REFUSED_STAGES)),
+        ]
+        orders = self.sudo().search(domain)
+        pending = orders.filtered(lambda o: not o.grove_card_reposted)
+        result = {"posted": 0, "skipped": len(orders) - len(pending), "failed": 0}
+        # Skip the per-order commit under the test runner so a TransactionCase
+        # stays isolated (same as the crons).
+        in_test = bool(config["test_enable"])
+        consecutive = 0
+        for order in pending:
+            try:
+                scoped = order.with_context(tz=controllers.ORDER_CARD_TZ)
+                context = controllers._order_alert_context(scoped)
+                is_deposit = bool((scoped.grove_preorder_variant_ids or "").strip())
+                posted = controllers._post_order_alert_card(scoped, context, is_deposit)
+            except Exception:  # noqa: BLE001 — keep reposting the other orders
+                _logger.exception("Card repost failed for order %s", order.id)
+                posted = False
+            if posted:
+                consecutive = 0
+                order.write({"grove_card_reposted": True})
+                # A Discord post cannot be undone, so keep its stamp even if a
+                # later order fails.
+                if not in_test:
+                    self.env.cr.commit()
+                result["posted"] += 1
+                continue
+            result["failed"] += 1
+            consecutive += 1
+            if consecutive >= _NUDGE_MAX_FAILURES:
+                _logger.error("Card repost stopped after %s consecutive failures; run it again to resume", consecutive)
+                break
+        return result

@@ -1886,7 +1886,7 @@ class GroveHeadlessAPI(http.Controller):
         failure — so the bridge surfaces it as an ephemeral error rather than
         acking in Discord and silently dropping the write (GOL-1975 guard).
 
-        Body: ``{"actor": "<discord user id>", "tracking": "...", "cost": "12.40"}``.
+        Body: ``{"actor": "<operator display name>", "tracking": "...", "cost": "12.40"}``.
         ``actor`` is stamped into the order chatter for the audit trail. Tracking
         and the label cost are required: a missing or invalid one is 422 and
         writes nothing. A held order, or a spring order with no batch label, is
