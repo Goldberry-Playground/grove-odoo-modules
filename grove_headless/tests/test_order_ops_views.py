@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from odoo import fields
 from odoo.exceptions import AccessError, UserError
-from odoo.tests import TransactionCase, new_test_user, tagged
+from odoo.tests import Form, TransactionCase, new_test_user, tagged
 
 from .common import GroveTaxFixtureMixin
 
@@ -168,3 +168,67 @@ class TestOrderOpsViews(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(post.call_count, 3)
         self.assertEqual(result["failed"], 3)
         self.assertEqual(result["posted"], 0)
+        self.assertGreaterEqual(result["skipped"], 2)
+
+    def test_repost_failure_stop_is_per_company(self):
+        other = self.env["res.company"].create({"name": "Repost Other Co"})
+        a_orders = self._order() | self._order() | self._order() | self._order()
+        b_order = self._order()
+        # Lines forbid changing company through the ORM; move the order directly.
+        self.env.cr.execute("UPDATE sale_order SET company_id = %s WHERE id = %s", (other.id, b_order.id))
+        b_order.invalidate_recordset()
+
+        def fake(order, context, is_deposit):
+            return order.company_id == other
+
+        with patch(POST_CARD, side_effect=fake) as post:
+            self.Order._grove_repost_open_order_cards()
+        a_attempts = [c for c in post.call_args_list if c.args[0].company_id == self.company]
+        self.assertEqual(len(a_attempts), 3)
+        self.assertTrue(b_order.grove_card_reposted)
+        self.assertFalse(any(a_orders.mapped("grove_card_reposted")))
+
+    def test_repost_survives_a_raising_post(self):
+        bad = self._order()
+        good = self._order()
+
+        def fake(order, context, is_deposit):
+            if order.id == bad.id:
+                raise RuntimeError("bridge exploded")
+            return True
+
+        with patch(POST_CARD, side_effect=fake):
+            result = self.Order._grove_repost_open_order_cards()
+        self.assertFalse(bad.grove_card_reposted)
+        self.assertTrue(good.grove_card_reposted)
+        self.assertGreaterEqual(result["failed"], 1)
+
+    def test_repost_leaves_printify_orders_alone(self):
+        printify = self._order()
+        printify.sudo().write({"grove_is_printify": True})
+        with patch(POST_CARD, return_value=True) as post:
+            self.Order._grove_repost_open_order_cards()
+        self.assertNotIn(printify.id, {c.args[0].id for c in post.call_args_list})
+        self.assertFalse(printify.grove_card_reposted)
+
+    # -- hold wizard through the real view -----------------------------------
+    def test_hold_wizard_form_saves_hold_on_order(self):
+        order = self._order()
+        until = fields.Date.context_today(order) + timedelta(days=12)
+        ctx = {"active_model": "sale.order", "active_id": order.id, "active_ids": order.ids}
+        form = Form(self.env["grove.order.hold"].with_context(**ctx), view="grove_headless.view_grove_order_hold_form")
+        form.hold_until = until
+        form.reason = "Customer travelling"
+        wizard = form.save()
+        self.assertEqual(wizard.order_id, order)
+        wizard.action_confirm()
+        self.assertEqual(order.grove_hold_until, until)
+        self.assertEqual(order.grove_hold_reason, "Customer travelling")
+
+    def test_hold_wizard_refuses_multi_select(self):
+        a, b = self._order(), self._order()
+        Wizard = self.env["grove.order.hold"].with_context(
+            active_model="sale.order", active_id=a.id, active_ids=(a | b).ids
+        )
+        with self.assertRaises(UserError):
+            Wizard.default_get(["order_id", "hold_until"])

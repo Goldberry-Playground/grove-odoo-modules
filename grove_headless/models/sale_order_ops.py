@@ -712,14 +712,20 @@ class SaleOrder(models.Model):
         Each order is stamped (``grove_card_reposted``) only after its post
         succeeded and committed, so a second run posts nothing and a partial
         failure can be resumed by running it again. One order's failure never
-        stops the others; three failures in a row stop the run (a dead bridge).
+        stops the others. Consecutive failures are counted per company (each
+        company has its own bridge channel); after three in a row a company's
+        remaining orders are left for this run, unstamped, and the other companies
+        carry on. A success resets only that company's count. Printify orders are
+        left out (they have no buttons to show).
         Returns ``{"posted": n, "skipped": n, "failed": n}``; ``skipped`` counts
-        open orders already reposted."""
+        open orders already reposted plus orders left unattempted when their
+        company was stopped, so every open order is in exactly one count."""
         from ..controllers import main as controllers
 
         domain = [
             ("state", "in", ("sale", "done")),
             ("grove_fulfillment", "=", "ship"),
+            ("grove_is_printify", "=", False),
             ("grove_fulfillment_stage", "not in", list(_HOLD_REFUSED_STAGES)),
         ]
         orders = self.sudo().search(domain)
@@ -728,8 +734,12 @@ class SaleOrder(models.Model):
         # Skip the per-order commit under the test runner so a TransactionCase
         # stays isolated (same as the crons).
         in_test = bool(config["test_enable"])
-        consecutive = 0
+        consecutive = {}
         for order in pending:
+            company_id = order.company_id.id
+            if consecutive.get(company_id, 0) >= _NUDGE_MAX_FAILURES:
+                result["skipped"] += 1
+                continue
             try:
                 scoped = order.with_context(tz=controllers.ORDER_CARD_TZ)
                 context = controllers._order_alert_context(scoped)
@@ -739,7 +749,7 @@ class SaleOrder(models.Model):
                 _logger.exception("Card repost failed for order %s", order.id)
                 posted = False
             if posted:
-                consecutive = 0
+                consecutive[company_id] = 0
                 order.write({"grove_card_reposted": True})
                 # A Discord post cannot be undone, so keep its stamp even if a
                 # later order fails.
@@ -748,8 +758,11 @@ class SaleOrder(models.Model):
                 result["posted"] += 1
                 continue
             result["failed"] += 1
-            consecutive += 1
-            if consecutive >= _NUDGE_MAX_FAILURES:
-                _logger.error("Card repost stopped after %s consecutive failures; run it again to resume", consecutive)
-                break
+            consecutive[company_id] = consecutive.get(company_id, 0) + 1
+            if consecutive[company_id] == _NUDGE_MAX_FAILURES:
+                _logger.error(
+                    "Card repost stopped for company %s after %s consecutive failures; run it again to resume",
+                    company_id,
+                    _NUDGE_MAX_FAILURES,
+                )
         return result

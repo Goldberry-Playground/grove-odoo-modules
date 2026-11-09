@@ -21,6 +21,8 @@ class GroveOrderHold(models.TransientModel):
     def default_get(self, fields_list):
         values = super().default_get(fields_list)
         if self.env.context.get("active_model") == "sale.order" and self.env.context.get("active_id"):
+            if len(self.env.context.get("active_ids") or []) > 1:
+                raise UserError("Hold one order at a time.")
             order = self.env["sale.order"].browse(self.env.context["active_id"]).exists()
             if order:
                 values["order_id"] = order.id

@@ -10,7 +10,7 @@
                 <p class="text-muted">A hold only reminds us to wait. It never ships, charges or
                    emails anything.</p>
                 <group>
-                    <field name="order_id" />
+                    <field name="order_id" force_save="1" />
                     <field name="hold_until" />
                     <field name="reason" />
                 </group>
