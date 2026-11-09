@@ -16,6 +16,7 @@ from odoo.exceptions import UserError, ValidationError
 from ..services.plant_data import mapping as plant_mapping
 from ..services.plant_data.usda import USDAProvider
 from . import printify_client, printify_sync
+from .discord_tag import tag_discord_message
 
 _logger = logging.getLogger(__name__)
 
@@ -1839,7 +1840,7 @@ class ProductTemplate(models.Model):
         if not url:
             _logger.info("listing-content audit: DISCORD_OPS_WEBHOOK_URL unset — skipping Discord post")
             return
-        text = self._grove_audit_discord_text(products, planner=planner)
+        text = tag_discord_message(self.env, self._grove_audit_discord_text(products, planner=planner))
         try:
             requests.post(url, json={"content": text[:2000]}, timeout=10)
         except Exception:

@@ -97,6 +97,7 @@ class TestGroveEmailLog(GroveTaxFixtureMixin, TransactionCase):
         def _boom(self, *a, **k):
             raise RuntimeError("smtp down")
 
+        self.env["ir.config_parameter"].sudo().set_param("web.base.url", "https://odoo.example.test")
         with mock.patch.dict("os.environ", {"DISCORD_OPS_WEBHOOK_URL": "https://d/ops"}, clear=True):
             with mock.patch.object(type(self.env["mail.mail"]), "send", _boom):
                 with mock.patch(_POST) as post:
@@ -107,6 +108,10 @@ class TestGroveEmailLog(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(log.failure_severity, "permanent")
         self.assertTrue(log.alerted)
         post.assert_called_once()
+        self.assertTrue(
+            post.call_args[1]["json"]["content"].startswith("[odoo.example.test] :warning: Customer email"),
+            post.call_args[1]["json"]["content"],
+        )
 
     def test_unknown_kind_raises(self):
         with self.assertRaises(ValueError):

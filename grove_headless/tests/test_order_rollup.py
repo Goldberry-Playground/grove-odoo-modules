@@ -14,6 +14,7 @@ from odoo.tests import TransactionCase, tagged
 class TestOrderRollupDiscordRouting(TransactionCase):
     def test_prefers_orders_webhook_over_ops(self):
         rollup = self.env["grove.order.rollup"]
+        self.env["ir.config_parameter"].sudo().set_param("web.base.url", "https://odoo.example.test")
         with mock.patch.dict(
             "os.environ",
             {
@@ -25,6 +26,7 @@ class TestOrderRollupDiscordRouting(TransactionCase):
                 rollup._discord_digest(self.env.company, "weekly rollup body")
         post.assert_called_once()
         self.assertEqual(post.call_args[0][0], "https://discord.example/orders")
+        self.assertEqual(post.call_args[1]["json"]["content"], "[odoo.example.test] weekly rollup body")
 
     def test_falls_back_to_ops_when_orders_webhook_unset(self):
         rollup = self.env["grove.order.rollup"]

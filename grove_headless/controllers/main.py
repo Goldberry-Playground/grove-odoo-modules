@@ -19,6 +19,7 @@ from odoo.http import Response, request
 
 from ..hooks import _get_company_wv_state_tax
 from ..models import bundle_substitution, capture_leads, printify_client, promotions, stripe_gateway
+from ..models.discord_tag import tag_discord_message
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
 from ..models.mail_from import mail_from_vals
@@ -6780,17 +6781,25 @@ def _discord_webhook_url(channel=None):
     )
 
 
-def _notify_discord(message, channel=None):
+def _notify_discord(message, channel=None, env=None):
     """Best-effort order-ops ping. Order/pickup summaries go to their own
     channel (DISCORD_ORDERS_WEBHOOK_URL — Josh 2026-09-03), separate from the
     bot-logs/observability channel CI posts to; ``channel`` routes sales and
     shipping alerts to their topic channels (see ``_discord_webhook_url``).
     Falls back to DISCORD_OPS_WEBHOOK_URL so a missing orders webhook surfaces
     alerts in the ops channel (visibly misrouted) instead of dropping them
-    silently; all unset, or a failed POST, never breaks webhook processing."""
+    silently; all unset, or a failed POST, never breaks webhook processing.
+
+    The message is prefixed with the instance tag (``discord_tag``): ``env`` from
+    the caller (model/cron code), else the bound HTTP request's env. With
+    neither — nothing to resolve the tag against — the message posts as-is."""
     url = _discord_webhook_url(channel)
     if not url:
         return
+    if env is None and request:
+        env = request.env
+    if env is not None:
+        message = tag_discord_message(env, message)
     try:
         # allowed_mentions parse:[] disarms every mention — a customer named
         # "@everyone"/"@here" reaching the ops channel via order alerts (GOL-1933)

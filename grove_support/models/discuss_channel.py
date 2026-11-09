@@ -46,7 +46,7 @@ from markupsafe import Markup, escape
 from odoo import api, fields, models
 from odoo.tools import email_normalize
 
-from .discord import format_chat_start, notify_discord
+from .discord import env_tag, format_chat_start, notify_discord
 
 _logger = logging.getLogger(__name__)
 
@@ -126,11 +126,13 @@ class DiscussChannel(models.Model):
         self.ensure_one()
         try:
             company = self._grove_support_company()
+            base_url = self.env["ir.config_parameter"].sudo().get_param("web.base.url", "")
             notify_discord(
                 format_chat_start(
                     brand=company.name or None,
                     visitor=self._grove_support_visitor_label(),
-                )
+                ),
+                env_tag=env_tag(base_url, self.env.cr.dbname),
             )
         except Exception:  # noqa: BLE001 — ping must never break channel creation
             _logger.warning(
