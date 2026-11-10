@@ -88,6 +88,40 @@ class ProductProduct(models.Model):
         self.ensure_one()
         return self[field] + sum(s[field] for s in self._grove_potted_pool_siblings())
 
+    def grove_shared_pool_qty_map(self, field="free_qty"):
+        """``{variant id: grove_shared_pool_qty(field)}`` for every variant in ``self``.
+
+        Same pool rule and the same arithmetic as :meth:`grove_shared_pool_qty`
+        (own quantity plus the non-Bareroot siblings that match on every axis
+        except Format, summed in template variant order), but it groups each
+        template's variants once instead of rescanning every sibling per variant.
+        The product detail reads it for an 84-variant apple, where the per-variant
+        scan was quadratic.
+        """
+        siblings_by_key = {}
+        for template in self.product_tmpl_id:
+            for sibling in template.product_variant_ids:
+                if sibling.grove_effective_shipping_tier != "bareroot":
+                    siblings_by_key.setdefault(sibling._grove_pool_key(), []).append(sibling)
+        result = {}
+        for variant in self:
+            if variant.grove_effective_shipping_tier == "bareroot":
+                siblings = [s for s in siblings_by_key.get(variant._grove_pool_key(), []) if s.id != variant.id]
+            else:
+                siblings = []
+            result[variant.id] = variant[field] + sum(s[field] for s in siblings)
+        return result
+
+    def _grove_pool_key(self):
+        """Template plus the non-Format axis values: variants sharing a key share a pool.
+
+        Mirrors ``non_format(s) == mine`` in :meth:`_grove_potted_pool_siblings`
+        (recordset equality is set equality on ids).
+        """
+        self.ensure_one()
+        values = self.product_template_variant_value_ids.filtered(lambda v: v.attribute_id.name != FORMAT_ATTRIBUTE)
+        return (self.product_tmpl_id.id, frozenset(values.ids))
+
     # ── Back-in-stock alerts (2026-10-15 capture hotfix) ────────────────────
     # website_sale_stock's hourly cron judges stock against the *current*
     # website (the farm, in a cron) and links to Odoo's own /shop. On the
