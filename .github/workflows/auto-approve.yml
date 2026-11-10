@@ -455,6 +455,12 @@ jobs:
           # "ever approved?" check wedged PRs whose head advanced after a bot
           # approval (e.g. #378: Oct approval on 900bca5, head now 7984772:
           # every run logged "already approved" and skipped). (GOL-3914)
+          #
+          # HEAD_SHA is set by the agent-review gate (agent PRs) and the
+          # maintainer protected-path gate above, but NOT on the maintainer +
+          # unprotected-path branch — resolve it here if unset so the commit_id
+          # comparison works on every path (and does not trip `set -u`).
+          HEAD_SHA="${HEAD_SHA:-$(gh pr view "$PR" --repo "$REPO" --json headRefOid -q '.headRefOid')}"
           ALREADY=$(gh api "repos/$REPO/pulls/$PR/reviews" \
             --jq "[.[] | select(.user.login==\"github-actions[bot]\" and .state==\"APPROVED\" and .commit_id==\"$HEAD_SHA\")] | length")
           if [ "${ALREADY:-0}" -gt 0 ]; then
