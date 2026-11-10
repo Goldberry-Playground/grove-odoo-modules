@@ -291,7 +291,14 @@ class TestConsultFeed(GroveTaxFixtureMixin, HttpCase):
     def test_retail_feed_has_no_consult_keys(self):
         plant = self._plant(grove_botanical_name="Diospyros virginiana")
         body = self.url_open("/grove/api/v1/planner/catalog").json()
-        self.assertNotIn("rules", body)
+        # Planner beta B (#372, GOL-3549 spec B.1) serves the retail rule table
+        # as a top-level `rules` once grove.planner.rule exists; before it lands
+        # the retail feed has none. Either way the retail feed never carries
+        # the consult scope marker.
+        if "grove.planner.rule" in self.env:
+            self.assertIn("rules", body)
+        else:
+            self.assertNotIn("rules", body)
         self.assertNotIn("scope", body)
         row = next(p for p in body["plants"] if p["id"] == plant.id)
         self.assertNotIn("syntropic_stratum", row)
