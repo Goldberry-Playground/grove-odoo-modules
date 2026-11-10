@@ -1476,6 +1476,11 @@ class GroveHeadlessAPI(http.Controller):
             "state_zones": {state: STATE_ZONE_BANDS[state] for state in sorted(STATE_ZONE_BANDS)},
             "plants": plant_rows,
             "bundles": bundle_rows,
+            # Editable scoring weights for the storefront engine (GOL-3549 §B.1).
+            # Only keys that exist as rows ship; the engine falls back to its
+            # constants (== the seed) for any missing key, so the first feed
+            # after this lands changes nothing.
+            "rules": request.env["grove.planner.rule"].sudo().rules_for_scope("retail"),
         }
         # scope=consult serves the consult-scope scoring rules (planner beta B's
         # table; {} until it lands). The retail feed's own `rules` object is
