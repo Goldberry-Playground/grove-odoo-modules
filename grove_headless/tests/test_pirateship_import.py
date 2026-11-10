@@ -14,6 +14,7 @@ import base64
 import csv
 import io
 from contextlib import contextmanager
+from datetime import date
 from unittest.mock import patch
 
 from odoo.addons.grove_headless.models import label_batch as label_batch_module
@@ -55,6 +56,12 @@ class TestPirateShipImport(GroveTaxFixtureMixin, TransactionCase):
             }
         )
 
+    def _spring_order(self, email="buyer@example.com"):
+        """An order the zone 6 batch takes (the fixture's ZIP, 26651, is zone 6)."""
+        order = self._order(email)
+        order.grove_ship_wave = "spring"
+        return order
+
     def _order(self, email="buyer@example.com"):
         order = (
             self.env["sale.order"]
@@ -80,7 +87,10 @@ class TestPirateShipImport(GroveTaxFixtureMixin, TransactionCase):
 
     @contextmanager
     def _stub_packer(self):
+        always_open = (date.min, date.max)
         with (
+            patch.object(label_batch_module, "spring_build_window", return_value=always_open),
+            patch.object(sale_order_module, "spring_build_window", return_value=always_open),
             patch.object(sale_order_module, "pack_for_state", return_value=[PackedBox(box_id="p24x10x4", count=1)]),
             patch.object(sale_order_module, "unshippable_reason", return_value=None),
             patch.object(sale_order_module, "can_ship_bareroot", return_value=True),
@@ -103,9 +113,9 @@ class TestPirateShipImport(GroveTaxFixtureMixin, TransactionCase):
 
     # ── Batch rows + strays in one file ────────────────────────────────────
     def test_batch_rows_recorded_and_stray_rows_listed_not_fatal(self):
-        order = self._order()
+        order = self._spring_order()
         with self._stub_packer():
-            batch = self.Batch.build_open_batch(self.company)
+            batch = self.Batch.build_open_batch(self.company, "6")["batch"]
         raw = self._csv(
             ["Grove Ref", "Tracking Number", "Carrier", "Cost"],
             [[f"{order.name}/1", _T[0], "UPS", "9.10"], ["S99999/1", _T[1], "UPS", "8.00"]],
@@ -119,9 +129,9 @@ class TestPirateShipImport(GroveTaxFixtureMixin, TransactionCase):
 
     def test_strict_batch_import_still_all_or_nothing(self):
         """The runner endpoint keeps the all-or-nothing contract."""
-        order = self._order()
+        order = self._spring_order()
         with self._stub_packer():
-            batch = self.Batch.build_open_batch(self.company)
+            batch = self.Batch.build_open_batch(self.company, "6")["batch"]
         raw = self._csv(
             ["Grove Ref", "Tracking Number", "Carrier", "Cost"],
             [[f"{order.name}/1", _T[0], "UPS", "9.10"], ["S99999/1", _T[1], "UPS", "8.00"]],

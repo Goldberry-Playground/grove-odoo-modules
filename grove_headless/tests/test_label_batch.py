@@ -18,7 +18,7 @@ import base64
 import csv
 import io
 from contextlib import contextmanager
-from datetime import timedelta
+from datetime import date, timedelta
 from unittest.mock import patch
 
 from odoo import fields
@@ -77,6 +77,7 @@ class TestLabelBatch(GroveTaxFixtureMixin, TransactionCase):
                     "company_id": self.company.id,
                     "grove_fulfillment": "ship",
                     "grove_checkout_status": "paid",
+                    "grove_ship_wave": "spring",
                     "order_line": [(0, 0, {"product_id": self.product.id, "product_uom_qty": qty, "price_unit": 40.0})],
                 }
             )
@@ -87,7 +88,10 @@ class TestLabelBatch(GroveTaxFixtureMixin, TransactionCase):
     @contextmanager
     def _stub_packer(self, plan):
         """Isolate build from the live rate table / ship calendar."""
+        always_open = (date.min, date.max)
         with (
+            patch.object(label_batch_module, "spring_build_window", return_value=always_open),
+            patch.object(sale_order_module, "spring_build_window", return_value=always_open),
             patch.object(sale_order_module, "pack_for_state", return_value=plan),
             patch.object(sale_order_module, "unshippable_reason", return_value=None),
             patch.object(sale_order_module, "can_ship_bareroot", return_value=True),
@@ -100,7 +104,8 @@ class TestLabelBatch(GroveTaxFixtureMixin, TransactionCase):
 
     def _build(self, plan):
         with self._stub_packer(plan):
-            return self.env["grove.label.batch"].build_open_batch(self.company)
+            # The fixture's ZIP (26651) is USDA zone 6.
+            return self.env["grove.label.batch"].build_open_batch(self.company, "6")["batch"]
 
     # ── Build ────────────────────────────────────────────────────────────
     def test_build_one_row_per_packed_box(self):

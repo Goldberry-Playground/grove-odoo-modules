@@ -15,6 +15,7 @@ import psycopg2
 import requests
 from markupsafe import Markup
 from odoo import fields, http, tools
+from odoo.exceptions import AccessError, UserError
 from odoo.http import Response, request
 
 from ..hooks import _get_company_wv_state_tax
@@ -38,6 +39,7 @@ from ..models.order_alerts import (
     format_sales_order_note,
     promo_codes_from_line_names,
 )
+from ..models.order_lanes import parse_label_cost, parse_tracking
 from ..models.plant_compliance import blocked_states_for as compliance_blocked_states_for
 from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
 from ..models.plant_compliance import excluded_taxa_for_state
@@ -60,6 +62,7 @@ from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_
 from ..models.shipping_calendar import (
     LEAFED_WINDOW,
     MODE_PREORDER,
+    USDA_ZONE_SELECTION,
     merge_calendar_override,
     pickup_waves,
     preorder_waves,
@@ -234,6 +237,21 @@ def _json_response(data, status=200, headers=None):
         content_type="application/json",
         headers=headers,
     )
+
+
+def _operator_denied():
+    """Answer 403 unless the logged-in caller may run order actions, else None.
+
+    ``auth="bearer"`` accepts any valid login, and the order routes then work under
+    ``sudo()``, where the check inside the model always passes. So each route calls
+    this first, on the caller's own rights. Runs before any lookup, so a refused
+    caller can't learn which orders exist."""
+    try:
+        request.env["sale.order"]._grove_require_order_operator()
+    except AccessError:
+        _logger.warning("Order route refused for user id %s on %s", request.env.uid, request.httprequest.path)
+        return _json_response({"error": "Not allowed to change this order."}, status=403)
+    return None
 
 
 def _wants_html(httprequest):
@@ -1889,12 +1907,25 @@ class GroveHeadlessAPI(http.Controller):
         failure — so the bridge surfaces it as an ephemeral error rather than
         acking in Discord and silently dropping the write (GOL-1975 guard).
 
-        Body (optional): ``{"actor": "<discord user id>"}`` — stamped into the
-        order chatter for the audit trail.
+        Body: ``{"actor": "<operator display name>", "tracking": "...", "cost": "12.40"}``.
+        ``actor`` is stamped into the order chatter for the audit trail. Tracking
+        and the label cost are required: a missing or invalid one is 422 and
+        writes nothing. A held order, or a spring order with no batch label, is
+        409. Every ``error`` string is shown to the operator as written. The
+        label goes on the order before the ship, so the balance settles on the
+        real cost and the email carries the number (``_grove_ship_with_label``).
+        A resubmit with the same number changes nothing; a different number
+        replaces the label and charges nothing more.
         """
+        denied = _operator_denied()
+        if denied:
+            return denied
+
         try:
             payload = json.loads(request.httprequest.data or "{}")
         except json.JSONDecodeError:
+            payload = {}
+        if not isinstance(payload, dict):
             payload = {}
         actor = payload.get("actor")
         actor = actor if isinstance(actor, str) and actor.strip() else None
@@ -1920,7 +1951,19 @@ class GroveHeadlessAPI(http.Controller):
                 status=409,
             )
 
-        result = _operator_mark_shipped(request.env, order, actor)
+        raw_tracking = payload.get("tracking")
+        try:
+            tracking = parse_tracking(raw_tracking if isinstance(raw_tracking, str) else "")
+            cost = parse_label_cost(payload.get("cost"))
+        except ValueError as exc:
+            return _json_response({"error": str(exc)}, status=422)
+
+        try:
+            result = order._grove_ship_with_label(tracking, cost, actor)
+        except UserError as exc:
+            # Returned, not raised, so a label that was already recorded stays
+            # committed for a retry.
+            return _json_response({"error": str(exc)}, status=409)
 
         stage = order.grove_fulfillment_stage
         # action_grove_mark_shipped returns False for BOTH "already shipped"
@@ -1932,7 +1975,7 @@ class GroveHeadlessAPI(http.Controller):
         if not result["newly_shipped"] and stage not in ("shipped", "delivered"):
             return _json_response(
                 {
-                    "error": f"Order is not in a shippable state (stage: {stage}); not marked shipped",
+                    "error": f"{order.name} can't be marked shipped yet. Its status is: {order._grove_stage_label()}.",
                     "grove_fulfillment_stage": stage,
                 },
                 status=409,
@@ -1951,6 +1994,7 @@ class GroveHeadlessAPI(http.Controller):
                 "settlement": result["settlement"],
                 "tracking_numbers": tracking.split("\n") if tracking else [],
                 "carriers": carriers.split("\n") if carriers else [],
+                "card": _safe_order_card(order),
             }
         )
 
@@ -1987,6 +2031,10 @@ class GroveHeadlessAPI(http.Controller):
         Returns ``{newly_collected, settlement, grove_fulfillment_stage,
         grove_checkout_status}``.
         """
+        denied = _operator_denied()
+        if denied:
+            return denied
+
         try:
             payload = json.loads(request.httprequest.data or "{}")
         except json.JSONDecodeError:
@@ -2073,6 +2121,10 @@ class GroveHeadlessAPI(http.Controller):
         Body (optional): ``{"wave_ref": "<label>", "actor": "<operator id>"}`` —
         ``wave_ref`` is stamped into the chatter, ``actor`` is not used here (the
         wave note carries the audit trail)."""
+        denied = _operator_denied()
+        if denied:
+            return denied
+
         try:
             payload = json.loads(request.httprequest.data or "{}")
         except json.JSONDecodeError:
@@ -2154,30 +2206,54 @@ class GroveHeadlessAPI(http.Controller):
         csrf=False,
     )
     def labels_batch_build(self, **_kwargs):
-        """Build (or return) the open Pirate Ship label batch for this company.
+        """Build (or return) this company's open Pirate Ship batch for one zone.
+
+        Body: ``{"zone": "6"}``, required (400 when missing or not a USDA zone).
 
         Idempotent (spec §B1): repeated calls return the SAME open/exported
-        batch with freshly rebuilt rows — one row per packed box across every
-        eligible order (paid ship order awaiting a label, or a preorder whose
-        wave has opened; never pickup, never already-tracked). Returns the batch
-        id/name, the CSV download url, the row count and the expected total so
-        the runner (and the manual path) can price-check before buying.
+        batch with freshly rebuilt rows — one row per packed box across the
+        zone's eligible spring orders. Returns the batch id/name, the CSV
+        download url, the row count and the expected total so the runner (and
+        the manual path) can price-check before buying, plus ``skipped`` (the
+        orders left out and why) and ``needs_confirmation`` (orders held out of
+        the CSV until someone confirms no label was bought).
 
-        200 with ``{rows: 0}`` when nothing is eligible — the runner exits
-        "nothing to ship" rather than uploading an empty spreadsheet."""
+        200 with ``{rows: 0, batch_id: null, message}`` when nothing is eligible
+        — the runner exits "nothing to ship" rather than uploading an empty
+        spreadsheet. 409 when the zone's build window is not open."""
+        denied = _operator_denied()
+        if denied:
+            return denied
+
+        try:
+            payload = json.loads(request.httprequest.data or "{}")
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            return _json_response({"error": "Invalid JSON body"}, status=400)
+        zone = str(payload.get("zone")) if isinstance(payload, dict) else ""
+        if zone not in dict(USDA_ZONE_SELECTION):
+            return _json_response({"error": "zone must be a USDA zone from 2 to 10"}, status=400)
         company = request.website.company_id
-        batch = request.env["grove.label.batch"].sudo().build_open_batch(company)
-        csv_name = batch.csv_export_filename or f"{batch.name}.csv"
-        return _json_response(
-            {
-                "batch_id": batch.id,
-                "name": batch.name,
-                "state": batch.state,
-                "rows": batch.row_count,
-                "expected_total": round(batch.expected_total, 2),
-                "csv_url": f"/web/content/grove.label.batch/{batch.id}/csv_export/{csv_name}?download=true",
-            }
-        )
+        try:
+            result = request.env["grove.label.batch"].sudo().build_open_batch(company, zone)
+        except UserError as exc:
+            return _json_response({"error": str(exc)}, status=409)
+        batch = result["batch"]
+        body = {
+            "batch_id": batch.id or None,
+            "name": batch.name or None,
+            "state": batch.state or None,
+            "zone": zone,
+            "rows": batch.row_count,
+            "expected_total": round(batch.expected_total, 2),
+            "csv_url": None,
+            "skipped": result["skipped"],
+            "needs_confirmation": result["needs_confirmation"],
+            "message": result["message"],
+        }
+        if batch:
+            csv_name = batch.csv_export_filename or f"{batch.name}.csv"
+            body["csv_url"] = f"/web/content/grove.label.batch/{batch.id}/csv_export/{csv_name}?download=true"
+        return _json_response(body)
 
     @http.route(
         "/grove/api/v1/labels/batch/<int:batch_id>/tracking",
@@ -2197,6 +2273,10 @@ class GroveHeadlessAPI(http.Controller):
         offending refs and writes nothing. Idempotent re-import: an order already
         tracked is skipped, never re-written. A batch from another tenant is 404.
         """
+        denied = _operator_denied()
+        if denied:
+            return denied
+
         company = request.website.company_id
         batch = (
             request.env["grove.label.batch"]
@@ -6198,6 +6278,9 @@ def settle_order_at_ship(env, order):
     env.cr.execute("SELECT id FROM sale_order WHERE id = %s FOR UPDATE", (order.id,))
     order.invalidate_recordset(
         [
+            "state",
+            "grove_fulfillment_state",
+            "grove_fulfillment_stage",
             "grove_checkout_status",
             "grove_settlement_attempts",
             "grove_settlement_reconcile",
@@ -6206,6 +6289,12 @@ def settle_order_at_ship(env, order):
             "grove_settlement_payment_intent",
         ]
     )
+    # Backstop for every caller: a cancelled order is never charged. Checked after
+    # the lock so a cancel that landed while this waited is honoured. Writes
+    # nothing, so the order is not marked paid or settled.
+    if order.state == "cancel" or order.grove_fulfillment_stage == "cancelled":
+        _logger.warning("Ship-time settlement refused for %s: the order is cancelled", order.name)
+        return "not_applicable"
     status = order.grove_checkout_status
     if status == "settled":
         return "already_settled"
@@ -6821,16 +6910,15 @@ def _notify_discord(message, channel=None, env=None):
 def _order_alert_context(order):
     """Primitive values the pure alert formatters need, read off the order once
     (GOL-1933). Kept together so the Discord ping and the merchant email describe
-    the same order identically. Carrier is read defensively so the alert lights
-    up automatically once GOL-1906 persists it — no field reference that would
-    break on origin/main where it does not yet exist."""
+    the same order identically. Carrier names each carrier once, in box order."""
     lines = [
         (line.product_id.display_name, line.product_uom_qty)
         for line in order.order_line
         if not line.display_type and line.product_id and line.product_id.product_tmpl_id.type != "service"
     ]
     tracking = (order.grove_tracking_numbers or "").strip().replace("\n", ", ") or None
-    carrier = getattr(order, "grove_carrier", False) or None
+    carriers = [name.strip() for name in (order.grove_shipping_carriers or "").splitlines() if name.strip()]
+    carrier = ", ".join(dict.fromkeys(carriers)) or None
     return {
         "order_ref": order.name,
         "customer": order.partner_id.name,
@@ -6862,6 +6950,77 @@ def _shipping_address_text(order):
     return "<br/>".join(html.escape(x) for x in bits if x) or None
 
 
+def _order_card_payload(order, is_deposit=None, context=None):
+    """The one place an order becomes a Discord card body. The alert post, the
+    mark-shipped response and every order-action route all call this, so Odoo
+    stays the single source of what a card shows.
+
+    ``is_deposit`` defaults to whether the order carries preorder variants (the
+    same signal the new-order alert uses). The suggested hold date only pre-fills
+    a form, so a failure to work it out is logged and sent as null: the card
+    must still build."""
+    if is_deposit is None:
+        is_deposit = bool((order.grove_preorder_variant_ids or "").strip())
+    if context is None:
+        context = _order_alert_context(order)
+    try:
+        suggested = order._grove_suggested_hold().isoformat()
+    except Exception:  # noqa: BLE001 — a form pre-fill must never stop a card posting
+        _logger.warning("Suggested hold date failed for %s", order.name, exc_info=True)
+        suggested = None
+    hold = None
+    if order.grove_hold_until:
+        hold = {
+            "until": order.grove_hold_until.isoformat(),
+            "reason": order.grove_hold_reason or "",
+            "setBy": order.grove_hold_set_by or "",
+        }
+    return build_order_card_payload(
+        order_id=order.id,
+        company_id=order.company_id.id,
+        is_deposit=is_deposit,
+        context=context,
+        lane=order.grove_lane or None,
+        zone=order.grove_usda_zone or None,
+        ship_wave=order.grove_ship_wave or None,
+        suggested_hold=suggested,
+        label_cost=order.grove_actual_shipping_cost if order.grove_actual_shipping_cost else None,
+        hold=hold,
+        shipped=order.grove_fulfillment_stage in ("shipped", "delivered"),
+    )
+
+
+# "Today" for card dates and typed hold dates is the shop's, never UTC.
+ORDER_CARD_TZ = "America/New_York"
+
+
+def _safe_order_card(order):
+    """The card for a response sent after an action already succeeded. If building
+    it fails, log it and return None: the action's result stands, so the caller
+    answers success with ``card: null`` and never reports a failure. The savepoint
+    keeps a database error here from aborting the transaction that holds the
+    action."""
+    try:
+        with order.env.cr.savepoint():
+            return _order_card_payload(order.with_context(tz=ORDER_CARD_TZ))
+    except Exception:  # noqa: BLE001 — the action already succeeded; never fail the reply
+        _logger.exception("Order card build failed for %s", order.name)
+        return None
+
+
+def _store_card_message_id(order, response):
+    """Keep the Discord message id the bridge answered with, so the card can be
+    edited in place later. The post already happened, so a problem here is logged
+    and never reported as a failed post."""
+    try:
+        message_id = response.json().get("message_id")
+        if isinstance(message_id, str) and message_id.isdigit():
+            with order.env.cr.savepoint():
+                order.sudo().write({"grove_card_message_id": message_id})
+    except Exception:  # noqa: BLE001 — the card is posted; only a later edit is lost
+        _logger.warning("Could not store the Discord card id for %s", order.name, exc_info=True)
+
+
 def _post_order_alert_card(order, context, is_deposit):
     """POST the order to the Discord bridge's ``/orders/alert`` endpoint so the
     bridge bot-posts the *interactive* order card — the one carrying the
@@ -6878,12 +7037,7 @@ def _post_order_alert_card(order, context, is_deposit):
     base = os.environ.get("DISCORD_BRIDGE_BASE_URL", "").rstrip("/")
     if not secret or not base:
         return False
-    payload = build_order_card_payload(
-        order_id=order.id,
-        company_id=order.company_id.id,
-        is_deposit=is_deposit,
-        context=context,
-    )
+    payload = _order_card_payload(order, is_deposit, context)
     try:
         resp = requests.post(
             f"{base}/orders/alert",
@@ -6895,6 +7049,7 @@ def _post_order_alert_card(order, context, is_deposit):
         _logger.warning("Order-card bridge POST failed for %s", order.name, exc_info=True)
         return False
     if resp.status_code == 200:
+        _store_card_message_id(order, resp)
         return True
     # 422 (no channel mapped for this company_id yet), 401, or 5xx: log it and
     # let the caller fall back to the plain ping so staff still get *some* alert.

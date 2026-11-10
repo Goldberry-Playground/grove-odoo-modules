@@ -401,6 +401,100 @@ class TestSettlementFailureHandling(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(order.grove_checkout_status, "settled")
         self.assertEqual(len(charges), 1)
 
+    def test_daily_retry_never_charges_a_held_order(self):
+        """A failed balance can be retried only once the hold is released."""
+        order = self._ship_order(grove_checkout_status="settlement_failed", grove_settlement_attempts=1)
+        order.write(
+            {"grove_hold_until": "2027-04-20", "grove_hold_reason": "Away", "grove_settlement_last_attempt": False}
+        )
+        self.env["ir.config_parameter"].sudo().set_param("grove_headless.settlement_max_retries", "3")
+        pi = mock.Mock(return_value={"id": "pi_held", "status": "succeeded"})
+        with self._no_stripe_tax(), mock.patch.object(stripe_gateway, "create_payment_intent", pi), self._env():
+            self.env["sale.order"]._cron_retry_settlements()
+        pi.assert_not_called()
+        self.assertEqual(order.grove_checkout_status, "settlement_failed")
+
+        order.write({"grove_hold_until": False, "grove_hold_reason": False})
+        with self._no_stripe_tax(), mock.patch.object(stripe_gateway, "create_payment_intent", pi), self._env():
+            self.env["sale.order"]._cron_retry_settlements()
+        pi.assert_called_once()
+
+    def _retryable(self, **vals):
+        """A failed balance the daily retry would pick up, plus ``vals``."""
+        self.env["ir.config_parameter"].sudo().set_param("grove_headless.settlement_max_retries", "3")
+        order = self._ship_order(grove_checkout_status="settlement_failed", grove_settlement_attempts=1)
+        order.write({"grove_settlement_last_attempt": False, **vals})
+        return order
+
+    def _run_retry(self):
+        """Run the daily retry; returns the Stripe charge mock."""
+        pi = mock.Mock(return_value={"id": "pi_retry", "status": "succeeded"})
+        with self._no_stripe_tax(), mock.patch.object(stripe_gateway, "create_payment_intent", pi), self._env():
+            self.env["sale.order"]._cron_retry_settlements()
+        return pi
+
+    def test_daily_retry_skips_a_cancelled_order(self):
+        """Selected by the domain, not just refused later: a cancelled order is
+        not a retry candidate at all, so it never reaches the charge path."""
+        for vals in ({"state": "cancel"}, {"grove_fulfillment_state": "cancelled"}):
+            with self.subTest(vals=vals):
+                order = self._retryable(**vals)
+                settle = type(order)._grove_settle_at_ship
+                with mock.patch.object(type(order), "_grove_settle_at_ship", autospec=True, side_effect=settle) as spy:
+                    pi = self._run_retry()
+                self.assertNotIn(order, [call.args[0] for call in spy.call_args_list])
+                pi.assert_not_called()
+                self.assertEqual(order.grove_checkout_status, "settlement_failed")
+                self.assertEqual(order.grove_settlement_attempts, 1)
+                # Leave no retryable order behind for the next subTest's run.
+                order.write({"grove_settlement_attempts": 3})
+
+    def test_direct_settlement_of_a_cancelled_order_makes_no_stripe_call(self):
+        for vals in ({"state": "cancel"}, {"grove_fulfillment_state": "cancelled"}):
+            with self.subTest(vals=vals):
+                order = self._retryable(**vals)
+                pi = mock.Mock(return_value={"id": "pi_direct", "status": "succeeded"})
+                with self._no_stripe_tax(), mock.patch.object(stripe_gateway, "create_payment_intent", pi), self._env():
+                    result = grove_main.settle_order_at_ship(self.env, order)
+                self.assertEqual(result, "not_applicable")
+                pi.assert_not_called()
+                self.assertEqual(order.grove_checkout_status, "settlement_failed")
+                self.assertEqual(order.grove_settlement_attempts, 1)
+
+    def test_manual_retry_on_a_cancelled_order_reports_the_refusal(self):
+        order = self._retryable(state="cancel")
+        pi = mock.Mock(return_value={"id": "pi_manual", "status": "succeeded"})
+        with self._no_stripe_tax(), mock.patch.object(stripe_gateway, "create_payment_intent", pi), self._env():
+            order.action_grove_retry_settlement()
+        pi.assert_not_called()
+        self.assertEqual(order.grove_checkout_status, "settlement_failed")
+        self.assertIn("not_applicable", " ".join(order.message_ids.mapped("body")))
+
+    def test_daily_retry_still_charges_a_shipped_order_with_an_old_hold(self):
+        """The trees have left, so an old hold must not strand the balance."""
+        for stage in ("shipped", "delivered"):
+            with self.subTest(stage=stage):
+                order = self._retryable(
+                    grove_fulfillment_state=stage,
+                    grove_hold_until="2027-04-20",
+                    grove_hold_reason="Away",
+                )
+                pi = self._run_retry()
+                pi.assert_called_once()
+                self.assertEqual(order.grove_checkout_status, "settled")
+
+    def test_daily_retry_never_charges_a_held_order_before_it_ships(self):
+        for stage in ("awaiting_label", "wave_assigned", "label_purchased"):
+            with self.subTest(stage=stage):
+                order = self._retryable(
+                    grove_fulfillment_state=stage,
+                    grove_hold_until="2027-04-20",
+                    grove_hold_reason="Away",
+                )
+                pi = self._run_retry()
+                pi.assert_not_called()
+                self.assertEqual(order.grove_checkout_status, "settlement_failed")
+
     def test_manual_retry_racing_cron_charges_once(self):
         """Double-fire: a manual Retry settlement and the cron both act on the same
         order. The first settles it; the second sees status==settled under the row

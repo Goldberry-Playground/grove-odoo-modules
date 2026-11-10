@@ -1,8 +1,9 @@
 """Operator Mark-Shipped orchestration (GOL-1980, Phase 2 of GOL-1975).
 
 The Discord-bridge endpoint ``POST /grove/api/v1/orders/<id>/mark-shipped``
-delegates to ``_operator_mark_shipped(env, order, actor)`` — the module-level
-seam these tests drive directly (the house idiom: ``settle_order_at_ship`` /
+reaches ``_operator_mark_shipped(env, order, actor)`` once the label is on the
+order (see test_mark_shipped_tracking.py) — the module-level seam these tests
+drive directly (the house idiom: ``settle_order_at_ship`` /
 ``_notify_shipping_status`` are likewise env-taking module functions, not
 request-bound). What must hold, per the 2026-09-07 CEO directive coupling this
 to the merged GOL-2053 settlement:

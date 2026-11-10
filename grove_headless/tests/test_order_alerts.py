@@ -159,6 +159,14 @@ class OrderCardPayloadTests(unittest.TestCase):
             "tracking": None,
         }
 
+    def test_shipped_defaults_to_false_and_is_passed_through(self):
+        ctx = self._ctx()
+        self.assertIs(
+            oa.build_order_card_payload(order_id=1, company_id=1, is_deposit=False, context=ctx)["shipped"], False
+        )
+        shipped = oa.build_order_card_payload(order_id=1, company_id=1, is_deposit=False, context=ctx, shipped=True)
+        self.assertIs(shipped["shipped"], True)
+
     def test_reshapes_context_into_bridge_body(self):
         p = oa.build_order_card_payload(order_id=42, company_id=1, is_deposit=False, context=self._ctx())
         self.assertEqual(p["orderId"], 42)
@@ -175,6 +183,26 @@ class OrderCardPayloadTests(unittest.TestCase):
                 {"name": "Pawpaw 'Shenandoah'", "qty": 1.0},
             ],
         )
+
+    def test_lane_zone_hold_keys_default_to_none_and_pass_through(self):
+        bare = oa.build_order_card_payload(order_id=1, company_id=1, is_deposit=False, context=self._ctx())
+        for key in ("lane", "zone", "shipWave", "suggestedHold", "labelCost", "hold"):
+            self.assertIsNone(bare[key], key)
+        hold = {"until": "2027-03-01", "reason": "Spring", "setBy": "wes"}
+        p = oa.build_order_card_payload(
+            order_id=1,
+            company_id=1,
+            is_deposit=False,
+            context=self._ctx(),
+            lane="spring",
+            zone="6",
+            ship_wave="spring",
+            suggested_hold="2027-03-15",
+            label_cost=9.5,
+            hold=hold,
+        )
+        self.assertEqual((p["lane"], p["zone"], p["shipWave"]), ("spring", "6", "spring"))
+        self.assertEqual((p["suggestedHold"], p["labelCost"], p["hold"]), ("2027-03-15", 9.5, hold))
 
     def test_carries_deposit_flag(self):
         p = oa.build_order_card_payload(order_id=7, company_id=2, is_deposit=True, context=self._ctx())

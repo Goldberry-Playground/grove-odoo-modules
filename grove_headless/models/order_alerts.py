@@ -141,7 +141,20 @@ def format_sales_order_note(
     return f":moneybag: {order_ref}{where} {format_money(total, currency)}: " + " · ".join(reasons)
 
 
-def build_order_card_payload(*, order_id, company_id, is_deposit, context):
+def build_order_card_payload(
+    *,
+    order_id,
+    company_id,
+    is_deposit,
+    context,
+    lane=None,
+    zone=None,
+    ship_wave=None,
+    suggested_hold=None,
+    label_cost=None,
+    hold=None,
+    shipped=False,
+):
     """Reshape the shared order-alert ``context`` (the controller's
     ``_order_alert_context``) into the JSON body the Discord bridge's
     ``POST /orders/alert`` endpoint expects (GOL-1980): camelCase keys, the ids
@@ -152,6 +165,11 @@ def build_order_card_payload(*, order_id, company_id, is_deposit, context):
     Pure/side-effect free like the formatters above — the controller owns the
     actual POST. Keeping it here means the same primitives feed the interactive
     card, the plain fallback ping, and the merchant email identically.
+
+    The lane, zone, wave, suggested hold date (ISO), label cost (number) and hold
+    (``{until, reason, setBy}``) arrive as keyword arguments, already read off the
+    order by the caller; ``None`` means the order has none. ``shipped`` says the
+    box has left, so the card offers no actions.
     """
     return {
         "orderId": order_id,
@@ -166,6 +184,13 @@ def build_order_card_payload(*, order_id, company_id, is_deposit, context):
         "currency": context["currency"],
         "carrier": context["carrier"],
         "tracking": context["tracking"],
+        "lane": lane,
+        "zone": zone,
+        "shipWave": ship_wave,
+        "suggestedHold": suggested_hold,
+        "labelCost": label_cost,
+        "hold": hold,
+        "shipped": shipped,
     }
 
 
