@@ -1,19 +1,32 @@
-"""Best-effort Discord ops ping for grove_support (GOL-2022).
+"""Best-effort Discord support-channel ping for grove_support (GOL-2022).
 
 Mirrors the ``_notify_discord`` pattern in grove_headless
-``controllers/main.py`` (~2251): a missing ``DISCORD_OPS_WEBHOOK_URL`` or a
-failed POST is swallowed so a chat event never fails because the ops channel is
-unreachable. Kept in its own module (no ``odoo`` import) so the message
+``controllers/main.py``: a missing webhook (``DISCORD_SUPPORT_WEBHOOK_URL``, then
+``DISCORD_OPS_WEBHOOK_URL``) or a failed POST is swallowed so a chat event never
+fails because the channel is unreachable. Kept in its own module (no ``odoo`` import) so the message
 formatter stays trivially unit-testable and the network I/O is a single,
 monkeypatchable seam in tests.
 """
 
 import logging
 import os
+from urllib.parse import urlsplit
 
 import requests
 
 _logger = logging.getLogger(__name__)
+
+
+def env_tag(base_url, dbname):
+    """``[host]`` of ``base_url`` (``web.base.url``), else ``[db:<dbname>]``.
+
+    Prod, QA and any restored copy post through the same ops webhook, so every
+    message names the instance that sent it (same rule as grove_headless
+    ``discord_tag.env_tag_from``; duplicated here because grove_support must not
+    import grove_headless).
+    """
+    host = urlsplit(base_url or "").netloc
+    return f"[{host}]" if host else f"[db:{dbname}]"
 
 
 def format_chat_start(*, brand=None, visitor=None):
@@ -23,17 +36,22 @@ def format_chat_start(*, brand=None, visitor=None):
     return f"\U0001f4ac New support chat started{where}: {who}"
 
 
-def notify_discord(message):
-    """POST ``message`` to ``DISCORD_OPS_WEBHOOK_URL``.
+def notify_discord(message, env_tag=None):
+    """POST ``message`` to ``DISCORD_SUPPORT_WEBHOOK_URL`` (the support channel,
+    Josh 2026-10-30), falling back to ``DISCORD_OPS_WEBHOOK_URL`` so an unset
+    support webhook keeps the ping where it landed before. ``env_tag`` (see
+    :func:`env_tag`) is prefixed so the channel shows which instance posted.
 
     Best-effort: a missing URL or a failed request is logged and swallowed,
     never raised to the caller. ``allowed_mentions`` is disarmed so a visitor
     display name of ``@everyone``/``@here`` can never ping staff (same stance as
     grove_headless order alerts).
     """
-    url = os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+    url = os.environ.get("DISCORD_SUPPORT_WEBHOOK_URL", "") or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
     if not url:
         return
+    if env_tag:
+        message = f"{env_tag} {message}"
     try:
         requests.post(
             url,

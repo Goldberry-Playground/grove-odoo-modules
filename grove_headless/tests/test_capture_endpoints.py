@@ -96,6 +96,7 @@ class TestLeadEndpoint(_BearerMixin, HttpCase):
         self.assertEqual(lead.company_id, self.env.ref("base.main_company"))
         self.assertTrue(resp.json()["created"])
         discord.assert_called_once()
+        self.assertEqual(discord.call_args.kwargs.get("channel"), "sales")
 
     def test_same_kind_within_a_day_appends_instead_of_duplicating(self):
         with mock.patch.object(grove_main, "_notify_discord"):
@@ -177,6 +178,18 @@ class TestRestockEndpoint(_ShrubFixture, _BearerMixin, GroveTaxFixtureMixin, Htt
         self.assertEqual(resp.status_code, 200)
         self.assertIn("one@example.com", target.stock_notification_partner_ids.mapped("email"))
         self.assertNotIn("one@example.com", self.variants[1].stock_notification_partner_ids.mapped("email"))
+
+    def test_new_request_pings_sales_with_waiting_count_and_repeat_is_silent(self):
+        path = f"/grove/api/v1/products/{self.tmpl.id}/notify-restock"
+        with mock.patch.object(grove_main, "_notify_discord") as discord:
+            self._post(path, {"email": "first@example.com"})
+            self._post(path, {"email": "second@example.com", "variant_id": self.variants[0].id})
+            self._post(path, {"email": "first@example.com"})
+        self.assertEqual(discord.call_count, 2, "a repeat subscribe must not ping again")
+        last = discord.call_args
+        self.assertEqual(last.kwargs.get("channel"), "sales")
+        self.assertIn(self.tmpl.name, last.args[0])
+        self.assertIn("2 people waiting", last.args[0])
 
     def test_unknown_product_404_and_bad_email_400(self):
         self.assertEqual(

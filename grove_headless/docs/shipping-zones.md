@@ -96,7 +96,7 @@ the rate zone) to determine:
 
 `scripts/rate_check/rate_check.py` + `.github/workflows/rate-check.yml`:
 
-- Runs daily at 07:00 ET via GitHub Actions cron
+- Runs by manual `workflow_dispatch`; the daily 07:00 ET cron was removed 2026-10-14 (GOL-2605)
 - Fetches real least-cost ground quotes from **Pirate Ship's public rate
   calculator** (`POST https://ship.pirateship.com/api/graphql?opname=RatesQuery`,
   no auth) — cheapest allowlisted ground among UPS Ground (`03`), UPS Ground

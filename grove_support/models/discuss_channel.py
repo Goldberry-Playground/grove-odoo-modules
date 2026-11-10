@@ -9,12 +9,15 @@ This module does FOUR jobs and no more, additively — grove_headless is untouch
      reuse as-is or create; NEVER mutate an existing partner from chat input.
   2. Lead creation — one crm.lead per chat, tagged ``livechat``, linked to the
      partner, with a transcript deep-link in the description.
-  3. Recent-orders note — a one-line INTERNAL note (mt_note, never relayed to the
-     visitor) into the operator's chat thread listing the partner's 3 most recent
-     orders. Everything deeper lives on the native partner form, which already
-     lists the customer's sale orders — no new order endpoints.
-  4. Discord ping — a best-effort ops ping on chat start via the existing
-     ``DISCORD_OPS_WEBHOOK_URL`` (grove_headless ``_notify_discord`` pattern).
+  3. Recent-orders note — a one-line internal note on the LEAD's chatter listing
+     the partner's 3 most recent orders. Never on the chat channel itself: the
+     visitor is a member of that channel and sees every message in it, mt_note
+     included (2026-10-28 leak — anyone typing a customer's email saw their orders).
+     Everything deeper lives on the native partner form, which already lists
+     the customer's sale orders — no new order endpoints.
+  4. Discord ping — a best-effort ping on chat start via
+     ``DISCORD_SUPPORT_WEBHOOK_URL``, falling back to ``DISCORD_OPS_WEBHOOK_URL``
+     (grove_headless ``_notify_discord`` pattern).
 
 Trigger seams (Odoo 19 im_livechat):
   * ``create()`` — chat-start Discord ping for ``channel_type == 'livechat'``.
@@ -43,7 +46,7 @@ from markupsafe import Markup, escape
 from odoo import api, fields, models
 from odoo.tools import email_normalize
 
-from .discord import format_chat_start, notify_discord
+from .discord import env_tag, format_chat_start, notify_discord
 
 _logger = logging.getLogger(__name__)
 
@@ -123,11 +126,13 @@ class DiscussChannel(models.Model):
         self.ensure_one()
         try:
             company = self._grove_support_company()
+            base_url = self.env["ir.config_parameter"].sudo().get_param("web.base.url", "")
             notify_discord(
                 format_chat_start(
                     brand=company.name or None,
                     visitor=self._grove_support_visitor_label(),
-                )
+                ),
+                env_tag=env_tag(base_url, self.env.cr.dbname),
             )
         except Exception:  # noqa: BLE001 — ping must never break channel creation
             _logger.warning(
@@ -164,7 +169,7 @@ class DiscussChannel(models.Model):
         partner = self._grove_support_match_partner(email, company)
         lead = self._grove_support_create_lead(partner, email, company)
         self.grove_support_lead_id = lead.id
-        self._grove_support_post_recent_orders(partner, company)
+        self._grove_support_post_recent_orders(lead, partner, company)
 
     def _grove_support_collected_email(self):
         """The chatbot-collected email (normalized), or ``''`` if none/invalid.
@@ -253,10 +258,17 @@ class DiscussChannel(models.Model):
         url = f"{base}/web#id={self.id}&model=discuss.channel&view_type=form"
         return Markup('<p>Livechat transcript: <a href="%s">%s</a></p>') % (url, url)
 
-    def _grove_support_post_recent_orders(self, partner, company):
-        """Post a one-line INTERNAL note (mt_note — never relayed to the visitor)
-        into this operator thread with the partner's 3 most recent orders. The
-        operator opens the native partner form for anything deeper."""
+    def _grove_support_post_recent_orders(self, lead, partner, company):
+        """Post a one-line internal note on ``lead``'s chatter with the partner's
+        3 most recent orders. The operator opens the lead (or the native partner
+        form) for anything deeper.
+
+        NEVER post this into the livechat channel (``self``): the visitor is a
+        channel member and sees every message there — mt_note only governs
+        follower notifications, not channel visibility — and the email that
+        selected the partner is unverified chat input (2026-10-28 leak). Authored by
+        OdooBot because this runs in the visitor's request, where the current
+        user is the public user."""
         self.ensure_one()
         orders = (
             self.env["sale.order"]
@@ -279,4 +291,8 @@ class DiscussChannel(models.Model):
             )
         else:
             body = Markup("<p><b>Recent orders for %s:</b> none on file.</p>") % partner.display_name
-        self.message_post(body=body, subtype_xmlid="mail.mt_note")
+        lead.message_post(
+            body=body,
+            subtype_xmlid="mail.mt_note",
+            author_id=self.env.ref("base.partner_root").id,
+        )

@@ -22,6 +22,18 @@ partitions:
     owner: engineering-ada
     review: [devops-terra]
     wave: 1
+  - name: module-grove-schedule-f
+    paths:
+      - grove_schedule_f/**
+    owner: engineering-ada
+    review: [devops-terra]
+    wave: 1
+  - name: module-grove-calendar
+    paths:
+      - grove_calendar/**
+    owner: engineering-ada
+    review: [devops-terra]
+    wave: 1
   - name: module-web-dark-mode
     paths:
       - web_dark_mode/**

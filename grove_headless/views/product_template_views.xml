@@ -147,7 +147,7 @@
                             </group>
                         </group>
                         <!-- Syntropic framing (GOL-3548): role, succession and the
-                             stratum (derived from the layer), plus the living-mulch,
+                             stratum (derived from the layer: overstory, midstory, shrub, ground), plus the living-mulch,
                              substrate and review-flag markers. Role and succession
                              also gate planner readiness; substrate gates it for a
                              Fungal (spawn) plant. -->

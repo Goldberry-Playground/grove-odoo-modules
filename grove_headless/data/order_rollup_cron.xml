@@ -1,6 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Weekly order/preorder rollup digest (GOL-1978). -->
-<odoo>
+<!-- noupdate="1" (GOL-3562): the fixed past nextcall below is a *first-run*
+     seed, not a schedule to re-apply on every upgrade. Without noupdate this
+     record sits under the default noupdate="0", so every `-u grove_headless`
+     rewrites the live ir.cron row — including nextcall — back to the past,
+     and the scheduler fires the digest on its next tick (it did, off-schedule,
+     at 10:09 UTC on 2026-10-21 right after a 10:08 module update). With
+     noupdate="1" an upgrade leaves the existing row's advanced nextcall
+     untouched; the seed only applies on a fresh install. A future schedule
+     change is then a migration, matching Odoo's own base crons and the sibling
+     *_cron.xml files in this directory. -->
+<odoo noupdate="1">
     <record id="ir_cron_weekly_order_digest" model="ir.cron">
         <field name="name">Grove: weekly order/preorder rollup digest</field>
         <field name="model_id" ref="model_grove_order_rollup"/>
@@ -8,7 +18,9 @@
         <field name="code">model._cron_send_weekly_digest()</field>
         <field name="interval_number">1</field>
         <field name="interval_type">weeks</field>
-        <!-- Monday 08:00 UTC, before the team starts their week -->
+        <!-- First-run seed: Monday 08:00 UTC, before the team starts their week.
+             2026-09-07 is a Monday, so Odoo's advance-by-interval keeps every
+             subsequent run on Monday 08:00 UTC. Fresh-install only (noupdate). -->
         <field name="nextcall">2026-09-07 08:00:00</field>
         <!-- NB: ir.cron.doall was removed in Odoo 17+; setting it fails module
              load with "Invalid field 'doall'" on Odoo 19. -->

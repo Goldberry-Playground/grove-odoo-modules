@@ -14,6 +14,9 @@ from .shipping_zones import pack_for_state, unshippable_reason
 
 _logger = logging.getLogger(__name__)
 
+# How long an anonymous headless-API cart may sit before the autovacuum deletes it.
+GROVE_API_CART_TTL = timedelta(days=1)
+
 
 class SaleOrder(models.Model):
     _inherit = "sale.order"
@@ -349,7 +352,11 @@ class SaleOrder(models.Model):
             self.sudo().write(vals)
             self.message_post(body=f"Printify push attempt {attempts} failed: {exc}")
             if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
-                _notify_discord(f":rotating_light: Printify push FAILED on {self.name} after {attempts} tries: {exc}")
+                _notify_discord(
+                    f":rotating_light: Printify push FAILED on {self.name} after {attempts} tries: {exc}",
+                    channel="shipping",
+                    env=self.env,
+                )
             return False
 
     def _printify_record_push_crash(self, exc):
@@ -368,7 +375,11 @@ class SaleOrder(models.Model):
         }
         self.sudo().write(vals)
         if attempts >= self._PRINTIFY_MAX_ATTEMPTS:
-            _notify_discord(f":rotating_light: Printify push CRASHED on {self.name} after {attempts} tries: {exc}")
+            _notify_discord(
+                f":rotating_light: Printify push CRASHED on {self.name} after {attempts} tries: {exc}",
+                channel="shipping",
+                env=self.env,
+            )
 
     @api.model
     def _cron_printify_push(self):
@@ -389,6 +400,30 @@ class SaleOrder(models.Model):
                 order._printify_record_push_crash(exc)
             if not config["test_enable"]:
                 self.env.cr.commit()
+
+    @api.autovacuum
+    def _gc_grove_abandoned_api_carts(self):
+        """Delete headless-API session carts nobody took to checkout.
+
+        ``POST /grove/api/v1/cart`` creates a website_sale cart: a draft on the
+        website's public partner with no Stripe session. Nothing expires those,
+        and the prod synthetic cart-flow journey makes one a minute (119 farm
+        drafts on 2026-10-30). A cart that started checkout carries a session id
+        and a named customer, so it never matches.
+        """
+        public_partners = self.env["website"].sudo().search([]).user_id.partner_id
+        carts = self.sudo().search(
+            [
+                ("state", "=", "draft"),
+                ("website_id", "!=", False),
+                ("partner_id", "in", public_partners.ids),
+                ("grove_stripe_session_id", "=", False),
+                ("create_date", "<", fields.Datetime.now() - GROVE_API_CART_TTL),
+            ]
+        )
+        if carts:
+            _logger.info("Deleting %d abandoned headless-API cart(s)", len(carts))
+            carts.unlink()
 
     def action_grove_retry_printify_push(self):
         """Re-queue a push_failed Printify order from the back office. Only a
@@ -801,6 +836,70 @@ class SaleOrder(models.Model):
                 "grove_actual_shipping_cost": cost,
                 "grove_delivery_status": "label_purchased",
             }
+        )
+        return True
+
+    def action_grove_replace_label(
+        self, tracking_number, carrier=None, actual_cost=None, service=None, source="hand_label"
+    ):
+        """Swap the order's label for a new one: a reprint, or a re-buy after the
+        first label was refunded in Pirate Ship.
+
+        Pirate Ship refunds and reprints never reach Odoo on their own, so without
+        this the order kept the dead tracking number and the carrier poll watched a
+        label that would never move. The fulfilment stage and delivery status are
+        left alone (the parcel's progress is whatever it is); the poll restarts on
+        the new label from today, and the chatter keeps the old number for the
+        record. Returns False when the number is already the order's label (a
+        re-import), True when it was replaced. Raises ``UserError`` on a pickup
+        order, an order with no label yet (record it instead), an order past the
+        point a label can change (anything but label purchased or shipped, so an
+        old export row cannot overwrite a finished order), a bad tracking number,
+        or a number already on a different order."""
+        self.ensure_one()
+        if self.grove_fulfillment == "pickup":
+            raise UserError(f"{self.name}: farm-pickup orders buy no shipping label.")
+        if not self.grove_tracking_numbers:
+            raise UserError(f"{self.name} has no label yet; record it as a new label instead.")
+        if self.grove_fulfillment_stage not in ("label_purchased", "shipped"):
+            raise UserError(f"{self.name}: its label can't be replaced at stage {self.grove_fulfillment_stage}.")
+        tracking = (tracking_number or "").strip()
+        if not shippo_client.is_valid_tracking(tracking):
+            raise UserError(f"{self.name}: {tracking!r} is not a valid tracking number.")
+        current = (self.grove_tracking_numbers or "").split()
+        if current == [tracking]:
+            return False
+        other = (
+            self.sudo()
+            .search([("id", "!=", self.id), ("grove_tracking_numbers", "ilike", tracking)])
+            .filtered(lambda o: tracking in (o.grove_tracking_numbers or "").split())
+        )
+        if other:
+            raise UserError(f"{self.name}: {tracking} is already the label on {other[0].name}.")
+        carrier_key = self._grove_infer_carrier(tracking, fallback=carrier)
+        if not carrier_key:
+            raise UserError(f"{self.name}: could not determine the carrier for {tracking!r}; pick UPS or USPS.")
+        vals = {
+            "grove_tracking_numbers": tracking,
+            "grove_shipping_carriers": carrier_key,
+            "grove_shipping_services": service or ("ups_ground" if carrier_key == "UPS" else "usps_ground_advantage"),
+            "grove_label_urls": "",
+            "grove_label_purchased_at": fields.Datetime.now(),
+            "grove_carrier_poll_stopped": False,
+            "grove_carrier_exception_noted": False,
+        }
+        if actual_cost is not None:
+            try:
+                cost = round(float(actual_cost), 2)
+            except (TypeError, ValueError):
+                raise UserError(f"{self.name}: actual shipping cost {actual_cost!r} is not a number.")
+            if cost < 0:
+                raise UserError(f"{self.name}: actual shipping cost cannot be negative.")
+            vals["grove_actual_shipping_cost"] = cost
+        old = ", ".join(current)
+        self.write(vals)
+        self.message_post(
+            body=f"Label replaced ({source}): {old} → {tracking} ({carrier_key}). The old label is no longer tracked."
         )
         return True
 
@@ -1523,6 +1622,24 @@ class SaleOrder(models.Model):
     # lost or stuck, not in transit.
     _CARRIER_POLL_MAX_AGE = timedelta(days=30)
 
+    # ir.config_parameter holding the UTC date (ISO) a carrier-health ops note
+    # was last posted, so the "tracking OFF / failing" alert fires at most once
+    # per day instead of every 2-hour poll (GOL-3681). Internal state, not an
+    # operator knob — created on first write by set_param.
+    _CARRIER_HEALTH_ALERT_PARAM = "grove_headless.carrier_health_alert_date"
+
+    # Operator knob (GOL-3681, UPS-only launch): comma list of carrier keys to
+    # mute, e.g. "USPS". A muted carrier never trips the daily missing-creds or
+    # all-calls-failed ops note — the USPS keys can't be minted yet (COP sign-in
+    # is wedged for Josh), so nagging daily would be noise. Its gap is still
+    # reported, once a week, by the summary below so it never goes unseen.
+    _CARRIER_POLL_MUTED_PARAM = "grove_headless.carrier_poll_muted"
+
+    # ir.config_parameter holding the ISO year-week ("2026-W44") a muted-carrier
+    # summary was last posted, so the weekly gap line fires at most once per ISO
+    # week. Internal state, not an operator knob.
+    _CARRIER_MUTED_SUMMARY_PARAM = "grove_headless.carrier_muted_summary_week"
+
     def _grove_tracking_pairs(self):
         """(carrier_key, tracking_number) pairs for this order's boxes, carrier
         folded to the canonical "UPS"/"USPS"/"" key. Index-aligned reads of
@@ -1563,13 +1680,19 @@ class SaleOrder(models.Model):
         An exception status posts a silent Discord ops note (once per order); the
         30-day cap posts one note and drops the order from the poll. Per-call
         errors are logged and skipped; three consecutive auth failures for a
-        carrier post one ops alert and pause that carrier until the next run."""
+        carrier post one ops alert and pause that carrier until the next run.
+
+        Loud-when-broken (GOL-3681): at most once per UTC day, post an ops note
+        when a carrier's credentials are absent while orders wait on it, or when
+        every call for a carrier failed this run (non-auth). A carrier named in
+        ``grove_headless.carrier_poll_muted`` is exempt from that daily note (the
+        UPS-only launch mutes USPS until its keys can be minted); its untracked
+        backlog is reported once a week instead. Stale-label email suppression
+        lives in ``_apply_delivery_status`` (the carrier_poll source gate), so
+        turning the creds on can never blast the backlog by email."""
         from ..controllers.main import _apply_delivery_status, _notify_discord
 
         clients = carrier_tracking.build_clients()
-        if not any(clients.values()):
-            _logger.info("poll_carrier_tracking: no UPS/USPS credentials configured; nothing to poll")
-            return
 
         orders = self.sudo().search(
             [
@@ -1582,8 +1705,43 @@ class SaleOrder(models.Model):
                 ("grove_is_printify", "=", False),
             ]
         )
+
+        # Loud-when-broken health lines (GOL-3681), batched and posted to ops at
+        # most once per UTC day at the end of the run. First signal: a carrier
+        # whose credentials are absent while orders are waiting on it — so
+        # switching the poll on (or forgetting to) is never silent. A muted
+        # carrier (USPS at the UPS-only launch) is held out of the daily note and
+        # folded into a once-a-week summary instead.
+        muted = self._carrier_poll_muted()
+        health_problems = []
+        muted_untracked = {}
+        for carrier_key, waiting in self._carrier_poll_inflight_counts(orders).items():
+            if clients.get(carrier_key) is not None or not waiting:
+                continue
+            if carrier_key in muted:
+                muted_untracked[carrier_key] = waiting
+                continue
+            health_problems.append(
+                f"Carrier tracking OFF for {carrier_key}: {waiting} order(s) waiting. "
+                f"Set {carrier_key}_CLIENT_ID/{carrier_key}_CLIENT_SECRET."
+            )
+
+        if not any(clients.values()):
+            # No carrier configured — nothing to poll, but the missing-creds note
+            # above still owes ops a daily ping while the switch stays off, and a
+            # muted carrier still owes its weekly gap line.
+            self._maybe_post_carrier_health(health_problems)
+            self._maybe_post_carrier_muted_summary(muted_untracked)
+            _logger.info("poll_carrier_tracking: no UPS/USPS credentials configured; nothing to poll")
+            return
+
         now = fields.Datetime.now()
         auth_failures = {"UPS": 0, "USPS": 0}
+        # Per-carrier call accounting for the second health signal: a carrier
+        # whose EVERY call this run was a non-auth failure (auth failures have
+        # their own alert at 3) is down or misconfigured.
+        calls = {"UPS": 0, "USPS": 0}
+        hard_failures = {"UPS": 0, "USPS": 0}
         paused = set()
 
         for order in orders:
@@ -1592,7 +1750,9 @@ class SaleOrder(models.Model):
                 order.grove_carrier_poll_stopped = True
                 _notify_discord(
                     f"Tracking poll stopped for {order.name}: 30 days since the label was bought with no "
-                    f"delivery scan. Please check the shipment manually."
+                    f"delivery scan. Please check the shipment manually.",
+                    channel="shipping",
+                    env=self.env,
                 )
                 continue
 
@@ -1605,6 +1765,7 @@ class SaleOrder(models.Model):
                     # Unknown carrier, or credentials for it not provisioned this
                     # stage — skip the box, not the whole order.
                     continue
+                calls[carrier_key] = calls.get(carrier_key, 0) + 1
                 try:
                     status = client.track(tracking)
                     auth_failures[carrier_key] = 0
@@ -1621,10 +1782,13 @@ class SaleOrder(models.Model):
                         paused.add(carrier_key)
                         _notify_discord(
                             f"Carrier tracking paused: {carrier_key} auth failed 3 times this run. "
-                            f"Check {carrier_key}_CLIENT_ID / {carrier_key}_CLIENT_SECRET."
+                            f"Check {carrier_key}_CLIENT_ID / {carrier_key}_CLIENT_SECRET.",
+                            channel="shipping",
+                            env=self.env,
                         )
                     continue
                 except Exception:  # noqa: BLE001 — one bad call never stops the sweep
+                    hard_failures[carrier_key] = hard_failures.get(carrier_key, 0) + 1
                     _logger.warning(
                         "Carrier track failed for %s on %s (%s)", order.name, carrier_key, tracking, exc_info=True
                     )
@@ -1636,7 +1800,9 @@ class SaleOrder(models.Model):
                 order.grove_carrier_exception_noted = True
                 _notify_discord(
                     f"Shipment exception on {order.name}: a carrier reported a delivery problem "
-                    f"(tracking {order.grove_tracking_numbers or ''}). Please review."
+                    f"(tracking {order.grove_tracking_numbers or ''}). Please review.",
+                    channel="shipping",
+                    env=self.env,
                 )
 
             new_status = carrier_tracking.least_advanced_status(statuses)
@@ -1644,6 +1810,88 @@ class SaleOrder(models.Model):
                 _apply_delivery_status(
                     order.env, order, new_status, order.grove_tracking_numbers or "", source="carrier_poll"
                 )
+
+        # Second health signal (GOL-3681): a carrier whose every call this run was
+        # a non-auth failure. Auth failures already trip the pause alert at 3, so
+        # they are excluded here to avoid a duplicate ops ping. A muted carrier is
+        # exempt — we have deliberately switched it off, so a failing call is
+        # expected noise, not an alert.
+        for carrier_key in ("UPS", "USPS"):
+            if carrier_key in muted:
+                continue
+            made = calls.get(carrier_key, 0)
+            if made and hard_failures.get(carrier_key, 0) == made:
+                health_problems.append(
+                    f"Carrier tracking failing for {carrier_key}: all {made} tracking call(s) failed "
+                    f"this run. Check the {carrier_key} API and credentials."
+                )
+
+        self._maybe_post_carrier_health(health_problems)
+        self._maybe_post_carrier_muted_summary(muted_untracked)
+
+    def _carrier_poll_inflight_counts(self, orders):
+        """``{carrier_key: number of in-flight orders carrying a box on that
+        carrier}`` for UPS and USPS, over the already-filtered poll ``orders``.
+        Drives the "tracking OFF" ops note (GOL-3681) so a carrier with no
+        credentials but orders waiting on it is never a silent no-op."""
+        counts = {"UPS": 0, "USPS": 0}
+        for order in orders:
+            seen = {carrier_key for carrier_key, _tracking in order._grove_tracking_pairs()}
+            for carrier_key in counts:
+                if carrier_key in seen:
+                    counts[carrier_key] += 1
+        return counts
+
+    def _maybe_post_carrier_health(self, problems):
+        """Post carrier-health ``problems`` (missing creds, all-calls-failed) to
+        the ops Discord at most once per UTC day (GOL-3681). Empty means healthy
+        and posts nothing. The last-sent UTC date lives in an ir.config_parameter
+        so a wedged or switched-off carrier pings ops once a day, not every
+        2-hour run."""
+        if not problems:
+            return
+        from ..controllers.main import _notify_discord
+
+        param = self.env["ir.config_parameter"].sudo()
+        today = fields.Datetime.now().date().isoformat()
+        if param.get_param(self._CARRIER_HEALTH_ALERT_PARAM) == today:
+            return
+        _notify_discord("\n".join(problems), channel="shipping", env=self.env)
+        param.set_param(self._CARRIER_HEALTH_ALERT_PARAM, today)
+
+    def _carrier_poll_muted(self):
+        """Set of carrier keys the operator has muted via ir.config_parameter
+        ``grove_headless.carrier_poll_muted`` (comma list, e.g. "USPS"). Values
+        are folded through ``normalize_carrier`` so "usps"/"USPS" both match, and
+        blanks are dropped. A muted carrier is held out of the daily ops note
+        (GOL-3681, UPS-only launch)."""
+        raw = self.env["ir.config_parameter"].sudo().get_param(self._CARRIER_POLL_MUTED_PARAM, "") or ""
+        return {key for key in (normalize_carrier(part) for part in raw.split(",")) if key}
+
+    def _maybe_post_carrier_muted_summary(self, muted_untracked):
+        """Post a once-a-week ops summary of muted carriers that still have
+        untracked in-flight orders (GOL-3681). ``muted_untracked`` is
+        ``{carrier_key: waiting count}``; empty posts nothing. The last-sent ISO
+        year-week lives in an ir.config_parameter so the USPS gap surfaces weekly
+        — loud enough not to be forgotten, quiet enough not to nag daily like a
+        live carrier would."""
+        if not muted_untracked:
+            return
+        from ..controllers.main import _notify_discord
+
+        param = self.env["ir.config_parameter"].sudo()
+        iso = fields.Datetime.now().isocalendar()
+        week = f"{iso[0]}-W{iso[1]:02d}"
+        if param.get_param(self._CARRIER_MUTED_SUMMARY_PARAM) == week:
+            return
+        lines = [
+            f"Carrier {carrier_key} is muted (no tracking): {waiting} in-flight order(s) untracked."
+            for carrier_key, waiting in sorted(muted_untracked.items())
+        ]
+        _notify_discord(
+            "\n".join(["Weekly muted-carrier summary (GOL-3681):", *lines]), channel="shipping", env=self.env
+        )
+        param.set_param(self._CARRIER_MUTED_SUMMARY_PARAM, week)
 
 
 class SaleOrderLine(models.Model):

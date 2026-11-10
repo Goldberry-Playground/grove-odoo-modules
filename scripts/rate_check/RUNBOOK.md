@@ -22,25 +22,22 @@ the run summary, and never fails the run.
 |---|---|---|
 | `DISCORD_OPS_WEBHOOK_URL` | repo (or org) secret, the shared ops webhook | All three Discord alerts — rate drift, "regenerated table FAILED its invariants, PR held as DRAFT", and "rate-check failed, rates NOT updated" — short-circuit and send nothing. The money-path rate alarm surfaces only as a red CI badge plus a router-filed GitHub issue. |
 
-**GOL-2642 (2026-09-29).** A live read of
-`GET /repos/Goldberry-Playground/grove-odoo-modules/actions/secrets` returned
-exactly `CLAUDE_CODE_OAUTH_TOKEN`, `REQUIRED_CHECKS_ADMIN_TOKEN`,
-`SHIPPO_API_KEY` — zero org-level secrets visible to the repo — so
-`DISCORD_OPS_WEBHOOK_URL` had **never** existed here and every Discord alert this
-workflow has ever attempted was a no-op. Setting the webhook at the **org** level
-is preferred, so a sibling repo cannot drift into the same silent state.
+**GOL-2642, resolved 2026-10-30.** Until 2026-09-29 a live read of the repo
+secrets showed `DISCORD_OPS_WEBHOOK_URL` had never existed here, so every Discord
+alert this workflow attempted was a no-op. On 2026-10-30 Josh set it as a repo
+secret pointing at the **shipping/logistics** Discord channel (this repo only
+uses it for `rate-check.yml` and `pirateship-query-drift.yml`). The same name in
+`odoocker-goldberrygrove` and on prod Odoo is the infra/ops channel, a different
+webhook.
 
-To provision the webhook (use the same ops webhook the `odoocker-goldberrygrove`
-repo uses):
+If the secret is ever removed, the preflight step warns again. To re-provision:
 
 ```bash
-gh secret set DISCORD_OPS_WEBHOOK_URL \
-  -R Goldberry-Playground/grove-odoo-modules   # or: --org Goldberry-Playground
+gh secret set DISCORD_OPS_WEBHOOK_URL -R Goldberry-Playground/grove-odoo-modules
 ```
 
-Verify: `workflow_dispatch` the workflow and confirm the preflight step no longer
-warns. On a failing run the `Discord failure alert` step should post to the ops
-channel instead of logging that no webhook is configured.
+The value is stored as `DISCORD_SHIPPING_WEBHOOK_URL` on `Grove Prod/odoocker` in
+1Password.
 
 ## Calibrating the packed-weight model (GOL-3201)
 
@@ -127,10 +124,10 @@ The daily `rate-check` job runs it, in two steps that bracket the probe:
    drifted on the same day. A missing/blank verdict is treated as **BROKEN**
    (red), never as fresh.
 
-**A red freshness verdict escalates through the CI failure router, not Discord.**
-`DISCORD_OPS_WEBHOOK_URL` does not exist in this repo (GOL-2642), so every Discord
-step in this workflow short-circuits to a no-op. The router files the red run as a
-GitHub issue, which reaches Paperclip. Note the dedupe key is
+**A red freshness verdict escalates through the CI failure router and Discord.**
+The Discord steps post to the shipping channel (`DISCORD_OPS_WEBHOOK_URL`, set
+2026-10-30, GOL-2642), and the router files the red run as a GitHub issue, which
+reaches Paperclip. Note the dedupe key is
 `d3-ci-failure:rate-check:main`, which is shared with the quote-source failure — so
 while the source is down the freshness escalation lands as another comment on that
 same open issue. Read the run summary for which alarm actually fired.

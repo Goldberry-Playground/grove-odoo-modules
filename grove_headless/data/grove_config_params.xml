@@ -112,4 +112,34 @@
         <field name="value">True</field>
     </record>
 
+    <!-- Carrier-poll stale-label cut-off in days (GOL-3681). A UPS/USPS poll
+         event for a label bought more than this many days ago (or for an order
+         with no recorded label-purchase date) still applies the status and marks
+         the notice key, but posts an operator chatter note INSTEAD of emailing
+         the customer — so turning the carrier credentials on does not blast a
+         "shipped"/"delivered" email to every order stuck in the backlog (incl.
+         labels bought 2026-10-05). Seed = 10. noupdate="1" so an operator can
+         tune it in Settings / Technical / System Parameters without a deploy —
+         that adjustability is the requirement, so 10 is never a code constant
+         (_CARRIER_NOTICE_MAX_AGE_DAYS_DEFAULT in controllers/main.py is only the
+         missing-row fallback). -->
+    <record id="carrier_notice_max_age_days_param" model="ir.config_parameter">
+        <field name="key">grove_headless.carrier_notice_max_age_days</field>
+        <field name="value">10</field>
+    </record>
+
+    <!-- Carriers muted from the daily carrier-health ops note (GOL-3681,
+         UPS-only launch). Comma list of carrier keys. Seed = USPS because its
+         Tracking v3 keys can't be minted yet (USPS COP sign-in is stuck in a
+         redirect loop for Josh's account), so a daily "tracking OFF for USPS"
+         ping would be pure noise. A muted carrier is reported once a WEEK
+         instead, so its untracked backlog never goes unseen. noupdate="1" so an
+         operator can clear it in Settings / Technical / System Parameters — the
+         moment USPS creds go live — without a deploy, and the daily note
+         switches back on for USPS automatically. -->
+    <record id="carrier_poll_muted_param" model="ir.config_parameter">
+        <field name="key">grove_headless.carrier_poll_muted</field>
+        <field name="value">USPS</field>
+    </record>
+
 </odoo>

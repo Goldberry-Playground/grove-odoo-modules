@@ -23,17 +23,25 @@ suite can unit-case it:
   ``companion``. Spawn (``grove_layer == "fungal"``): wine cap is ``anchor``, the
   others ``companion``.
 - ``grove_succession``:      ``fast`` when ``grove_years_to_fruit_min <= 2``;
-  ``long`` when ``>= 4`` and ``grove_layer == "canopy"``; else ``mid``. (An
-  unset years value is 0, which reads as ``fast`` — the facts backfill runs
-  first, and the dry-run table and review sitting catch anything still unset.)
+  ``long`` when ``>= 4`` and ``grove_layer == "canopy"``; else ``mid``.
 - ``grove_living_mulch``:    true for a ``ground`` layer plant whose
   ``grove_wildlife`` or ``grove_soil`` prose mentions mulch, cover, fix, clover
   or comfrey.
 
-Role and succession are set on every template (every planner plant carries one);
-living mulch is set only when true. A re-run is idempotent: a field already
-holding its parsed value is dropped from the write, so the sign-off is only
-cleared when something actually changes.
+A template whose ``grove_years_to_fruit_min`` is 0/unset is skipped (GOL-3836
+defect 5): the facts backfill fills years first, and seeding ``succession = fast``
+off a missing value would mislabel the unpublished stubs. Spawn
+(``grove_layer == "fungal"``) legitimately has no years and is still seeded off
+its layer.
+
+Role and succession are set on every seeded template (every planner plant carries
+one); living mulch is set only when true. A re-run is idempotent: a field already
+holding its parsed value — or one a human holds in ``grove_facts_provenance``
+(GOL-2543) — is dropped from the write, so the sign-off is only cleared when
+something actually changes. Scope is every gated planner plant (``grove_layer``
+set, not just the ``categ_plants`` tree) so the bareroot fruit trees are included
+(GOL-3836 defect 4). Clearing ``grove_facts_reviewed`` drops
+``grove_planner_ready`` until a human re-reviews (GOL-3836 defect 6).
 
 Usage
 -----
@@ -69,6 +77,7 @@ _SOURCE_FIELDS = [
     "grove_years_to_fruit_min",
     "grove_wildlife",
     "grove_soil",
+    "grove_facts_provenance",
 ]
 _TARGET_FIELDS = [
     "grove_planner_role",
@@ -79,6 +88,20 @@ _TARGET_FIELDS = [
 # Ground-cover prose that marks a plant as living mulch (spec A.2). "fix" is a
 # substring so it also catches "fixes" / "nitrogen-fixing".
 _MULCH_WORDS = ("mulch", "cover", "fix", "clover", "comfrey")
+
+# Provenance sources this backfill may seed over. A field already stamped by a
+# non-machine source is a protected human value (GOL-2543), so a re-run over the
+# hand-set prod roles changes nothing (GOL-3836 defect 6).
+_MACHINE_SOURCES = ("usda", "perenual", "agent", "backfill")
+
+# Scope: every gated planner plant, keyed on grove_layer rather than the
+# categ_plants tree so the bareroot fruit trees are included (GOL-3836 defect 4).
+_PLANT_DOMAIN = [
+    ("grove_layer", "!=", False),
+    ("type", "=", "consu"),
+    ("grove_gate_exempt", "=", False),
+    ("name", "not ilike", _HISTORICAL_MARKER),
+]
 
 
 # ── Pure parse rules (unit-tested in test_planner_roles.py) ──────────────────
@@ -118,14 +141,22 @@ def parse_living_mulch(layer: str | None, wildlife: str | None, soil: str | None
 
 
 def parse_planner_roles(rec: dict) -> dict:
-    """Build the full intent vals for one template row.
+    """Build the full intent vals for one template row; {} when years is unset.
 
-    Role and succession are always present (every planner plant carries one);
-    living mulch is included only when true. The caller drops any field already
-    holding its parsed value before writing, so a re-run clears no sign-off.
+    Role and succession are present on every row that carries a years-to-first-crop
+    value; living mulch is added only when true. A template whose
+    ``grove_years_to_fruit_min`` is 0/unset is skipped entirely (returns {}) so the
+    facts backfill's un-run stubs do not get seeded ``grove_succession = fast`` off
+    a missing years value (GOL-3836 defect 5). Spawn (``grove_layer == "fungal"``)
+    is the one exception — mushroom spawn legitimately has no years-to-fruit, and
+    its role/succession come from the layer, so it is still seeded. The caller
+    drops any field already holding its parsed value before writing, so a re-run
+    clears no sign-off.
     """
     layer = rec.get("grove_layer")
-    years = rec.get("grove_years_to_fruit_min")
+    years = rec.get("grove_years_to_fruit_min") or 0
+    if years <= 0 and layer != "fungal":
+        return {}
     vals: dict = {
         "grove_planner_role": parse_role(layer, years, rec.get("name")),
         "grove_succession": parse_succession(layer, years),
@@ -135,15 +166,29 @@ def parse_planner_roles(rec: dict) -> dict:
     return vals
 
 
+def _is_human_held(provenance: dict | None, field: str) -> bool:
+    """True when *field* carries a non-machine (human / import / seed) provenance.
+
+    Such a value is protected — the GOL-2543 "never clobber a human" rule.
+    """
+    meta = (provenance or {}).get(field)
+    source = meta.get("source") if isinstance(meta, dict) else None
+    return bool(source) and source not in _MACHINE_SOURCES
+
+
 def changed_vals(rec: dict, parsed: dict) -> dict:
     """Subset of parsed vals that differ from the record's current values.
 
     An Odoo read returns False for an unset Selection/Boolean, so a first-run
     role of "companion" differs from False and is kept, while a second run that
-    re-derives the same value is dropped.
+    re-derives the same value is dropped. A field a human holds in
+    ``grove_facts_provenance`` is never written (GOL-2543 / GOL-3836 defect 6).
     """
+    provenance = rec.get("grove_facts_provenance") or {}
     changed = {}
     for name, new in parsed.items():
+        if _is_human_held(provenance, name):
+            continue
         old = rec.get(name)
         if name == "grove_living_mulch":
             if bool(old) != bool(new):
@@ -175,35 +220,20 @@ def call(models, uid, model, method, args, kwargs=None):
     return models.execute_kw(ODOO_DB, uid, ODOO_PASSWORD, model, method, args, kwargs or {})
 
 
-def plants_root_id(models, uid) -> int:
-    rows = call(
-        models,
-        uid,
-        "ir.model.data",
-        "search_read",
-        [[("module", "=", "grove_headless"), ("name", "=", "categ_plants")]],
-        {"fields": ["res_id"], "limit": 1},
-    )
-    if not rows:
-        fail("category xmlid grove_headless.categ_plants not found — is grove_headless installed on this host?")
-    return rows[0]["res_id"]
-
-
 def real_plant_templates(models, uid) -> list[dict]:
-    """Gated plant templates minus historical rows, ordered by name."""
-    root = plants_root_id(models, uid)
-    domain = [
-        ("categ_id", "child_of", root),
-        ("type", "=", "consu"),
-        ("grove_gate_exempt", "=", False),
-        ("name", "not ilike", _HISTORICAL_MARKER),
-    ]
+    """Gated plant templates minus historical rows, ordered by name.
+
+    Scoped on ``grove_layer`` rather than the ``categ_plants`` category tree
+    (GOL-3836 defect 4): the bareroot fruit trees live in Apple / Plum / Fig /
+    Mulberry / Serviceberry / Goods categories, none children of
+    ``grove_headless.categ_plants``, so a ``categ_id child_of`` scope skipped them.
+    """
     return call(
         models,
         uid,
         "product.template",
         "search_read",
-        [domain],
+        [_PLANT_DOMAIN],
         {"fields": _SOURCE_FIELDS + _TARGET_FIELDS, "order": "name"},
     )
 
@@ -222,6 +252,11 @@ def main() -> None:
     models, uid = authenticate()
     templates = real_plant_templates(models, uid)
     print(f"\n── Backfill planner roles ── {len(templates)} real plant template(s)")
+    print(
+        "NOTE: a write here clears grove_facts_reviewed on that template, which drops "
+        "grove_listing_complete (and so grove_planner_ready) to False until a human "
+        "re-reviews it — the planner does NOT go live right after this run (GOL-3836 defect 6)."
+    )
     if DRY_RUN:
         print("DRY_RUN=1 (default): planning only, no writes. Set DRY_RUN=0 to apply.\n")
 

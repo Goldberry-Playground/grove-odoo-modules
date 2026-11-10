@@ -78,10 +78,26 @@ class TestGroveEmailLog(GroveTaxFixtureMixin, TransactionCase):
         self.assertIn(log, self.order.grove_email_log_ids)
 
     @mute_logger("odoo.addons.grove_headless.models.grove_email_log")
+    def test_failure_alert_prefers_support_webhook(self):
+        def _boom(self, *a, **k):
+            raise RuntimeError("smtp down")
+
+        env = {"DISCORD_SUPPORT_WEBHOOK_URL": "https://d/support", "DISCORD_OPS_WEBHOOK_URL": "https://d/ops"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            with mock.patch.object(type(self.env["mail.mail"]), "send", _boom):
+                with mock.patch(_POST) as post:
+                    self.Log.log_and_send(
+                        self.order, "receipt", self.partner.email, "Receipt", mail_vals=self._mail_vals()
+                    )
+        post.assert_called_once()
+        self.assertEqual(post.call_args[0][0], "https://d/support")
+
+    @mute_logger("odoo.addons.grove_headless.models.grove_email_log")
     def test_send_error_records_permanent_failure_and_alerts_once(self):
         def _boom(self, *a, **k):
             raise RuntimeError("smtp down")
 
+        self.env["ir.config_parameter"].sudo().set_param("web.base.url", "https://odoo.example.test")
         with mock.patch.dict("os.environ", {"DISCORD_OPS_WEBHOOK_URL": "https://d/ops"}, clear=True):
             with mock.patch.object(type(self.env["mail.mail"]), "send", _boom):
                 with mock.patch(_POST) as post:
@@ -92,6 +108,10 @@ class TestGroveEmailLog(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(log.failure_severity, "permanent")
         self.assertTrue(log.alerted)
         post.assert_called_once()
+        self.assertTrue(
+            post.call_args[1]["json"]["content"].startswith("[odoo.example.test] :warning: Customer email"),
+            post.call_args[1]["json"]["content"],
+        )
 
     def test_unknown_kind_raises(self):
         with self.assertRaises(ValueError):
