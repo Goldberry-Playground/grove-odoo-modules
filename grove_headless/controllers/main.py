@@ -19,6 +19,7 @@ from odoo.http import Response, request
 
 from ..hooks import _get_company_wv_state_tax
 from ..models import bundle_substitution, capture_leads, printify_client, promotions, stripe_gateway
+from ..models.discord_tag import tag_discord_message
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
 from ..models.mail_from import mail_from_vals
@@ -30,9 +31,12 @@ from ..models.newsletter import (
     resolve_newsletter_lists,
 )
 from ..models.order_alerts import (
+    SALES_LARGE_ORDER_THRESHOLD,
     build_order_card_payload,
     format_merchant_email,
     format_new_order_discord,
+    format_sales_order_note,
+    promo_codes_from_line_names,
 )
 from ..models.plant_compliance import blocked_states_for as compliance_blocked_states_for
 from ..models.plant_compliance import evaluate_line as compliance_evaluate_line
@@ -232,6 +236,22 @@ def _json_response(data, status=200, headers=None):
     )
 
 
+def _wants_html(httprequest):
+    """True when the caller is a browser that prefers HTML over JSON.
+
+    A mail client doing an RFC 8058 one-click POST (or any programmatic caller)
+    sends no ``Accept`` header or ``*/*`` and keeps getting JSON; a human who
+    clicks a newsletter link opens it in a browser, whose ``Accept`` lists
+    ``text/html``, and is served a rendered page instead (GOL-3808).
+    """
+    return "text/html" in (httprequest.headers.get("Accept") or "")
+
+
+def _html_response(markup_body, status=200):
+    """Return a minimal HTML page response (``markup_body`` is trusted markup)."""
+    return Response(markup_body, status=status, content_type="text/html; charset=utf-8")
+
+
 # Each tenant sandbox (nursery/ggg/goldberry) signs its Stripe webhook events
 # with a DIFFERENT endpoint secret, yet all tenants POST to the single
 # /grove/api/v1/stripe/webhook URL. So verification must try EVERY configured
@@ -397,20 +417,29 @@ def _image_url(model, record, size):
     return f"/web/image/{model}/{record.id}/{size}" if record[size] else None
 
 
+def _serialize_products(products, fields):
+    """Read a product recordset into plain dicts safe for JSON, in ONE batched read.
+
+    ``read()`` only fetches for the records it is called on, so calling it per
+    card skips the page's prefetch and costs a query (plus, for an image field,
+    a filestore read) per product. The list endpoint reads the whole page here.
+    """
+    records = products.read(fields)
+    for record in records:
+        # Replace many2one tuples with {id, name} objects
+        for key, value in record.items():
+            if isinstance(value, (list, tuple)) and len(value) == 2 and isinstance(value[0], int):
+                record[key] = {"id": value[0], "name": value[1]}
+            # bytes (image) -> skip in JSON, use dedicated image URL instead
+            if isinstance(value, bytes):
+                record[key] = None
+    return records
+
+
 def _serialize_product(product, fields):
-    """Read a product recordset into a plain dict safe for JSON."""
-    vals = product.read(fields)
-    if not vals:
-        return None
-    record = vals[0]
-    # Replace many2one tuples with {id, name} objects
-    for key, value in record.items():
-        if isinstance(value, (list, tuple)) and len(value) == 2 and isinstance(value[0], int):
-            record[key] = {"id": value[0], "name": value[1]}
-        # bytes (image) -> skip in JSON, use dedicated image URL instead
-        if isinstance(value, bytes):
-            record[key] = None
-    return record
+    """Read a single product into a plain dict safe for JSON."""
+    records = _serialize_products(product, fields)
+    return records[0] if records else None
 
 
 def _normalize_seo(data):
@@ -1214,12 +1243,26 @@ class GroveHeadlessAPI(http.Controller):
         # page's variants in one `_bom_find` and slice it per card below.
         page_phantom_boms = _phantom_kit_boms(products.product_variant_ids)
 
+        # One read for the whole page, not one per card. bin_size makes
+        # image_128 come back as its size ("1.2 Kb") from ir.attachment, never
+        # the bytes: the card only needs to know whether an image exists. The
+        # per-card read loaded and base64-encoded every thumbnail (~300 KB each,
+        # 7.9 MB for the 26-card nursery grid) only to drop it: ~196 ms of the
+        # request on prod vs ~9 ms batched (odoo-products-latency-warning,
+        # 2026-11-03). The serializer nulls the size like it nulled the bytes,
+        # so take presence from the cache that read just filled (no query).
+        sized = products.with_context(bin_size=True)
+        rows = {row["id"]: row for row in _serialize_products(sized, PRODUCT_LIST_FIELDS)}
+        has_image = {p.id: bool(p.image_128) for p in sized}
+
         items = []
         for product in products:
-            data = _serialize_product(product, PRODUCT_LIST_FIELDS)
+            data = rows.get(product.id)
             if data:
                 _normalize_seo(data)
-                data["image_url"] = _image_url("product.template", product, "image_128")
+                data["image_url"] = (
+                    f"/web/image/product.template/{product.id}/image_128" if has_image[product.id] else None
+                )
                 data["slug"] = data.pop("grove_slug", "") or ""
                 data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
                 if has_stock_field:
@@ -2331,7 +2374,7 @@ class GroveHeadlessAPI(http.Controller):
                     for v in printify
                 ]
                 try:
-                    shipping_amount = _printify_quote_cached(line_items, _printify_address({}, ship_to, dest))
+                    shipping_amount = _printify_quote_cached(line_items, _printify_quote_address(ship_to, dest))
                 except printify_client.PrintifyError:
                     return _json_response({"error": PRINTIFY_SHIPPING_UNAVAILABLE}, status=503)
 
@@ -2961,19 +3004,31 @@ class GroveHeadlessAPI(http.Controller):
         requires the POST to succeed) and never reveals whether the contact
         exists for a bad one.
 
-        A GET on the same URI (older clients open the ``List-Unsubscribe`` URI
-        in a browser instead of doing one-click) is non-destructive by HTTP
-        contract: it returns the preference state so the storefront can render a
-        confirm screen rather than silently unsubscribing on a link preview.
+        A GET on the same URI (older clients, and every human who clicks the
+        link in the email body, open it in a browser rather than doing a
+        machine one-click POST) is non-destructive by HTTP contract. A browser
+        (``Accept: text/html``) is served a minimal confirm page — the email,
+        the current list state, and a button that POSTs back here to actually
+        unsubscribe (GOL-3808); a programmatic client without ``text/html`` gets
+        the JSON preference state as before.
         """
+        wants_html = _wants_html(request.httprequest)
         contact = _newsletter_contact_from_token(request.env, kwargs.get("c"), kwargs.get("t"))
         if contact is None:
+            if wants_html:
+                return _html_response(
+                    _newsletter_error_page("This unsubscribe link is invalid or has expired."), status=400
+                )
             return _json_response({"error": "invalid or expired link"}, status=400)
         if request.httprequest.method == "GET":
+            if wants_html:
+                return _html_response(_newsletter_unsubscribe_page(request.env, contact))
             return _json_response(_newsletter_preferences_state(request.env, contact))
         contact.sudo().subscription_ids.write({"opt_out": True})
         if contact.email_normalized:
             request.env["mail.blacklist"].sudo()._add(contact.email_normalized)
+        if wants_html:
+            return _html_response(_newsletter_unsubscribed_page(request.env, contact))
         return _json_response({"ok": True, "unsubscribed": True})
 
     @http.route(
@@ -2992,29 +3047,59 @@ class GroveHeadlessAPI(http.Controller):
              return the same shape. Unsubscribing from every list also blacklists
              the email; re-subscribing to any list lifts the blacklist (the
              recipient is asking for mail again).
+
+        A browser (``Accept: text/html``) is served a self-contained HTML page
+        instead of JSON (GOL-3808): GET renders a per-list checkbox form that
+        POSTs back here as ``application/x-www-form-urlencoded``; the JSON body
+        shape above is still honoured for programmatic callers.
         """
+        wants_html = _wants_html(request.httprequest)
         if request.httprequest.method == "GET":
             contact = _newsletter_contact_from_token(request.env, kwargs.get("c"), kwargs.get("t"))
             if contact is None:
+                if wants_html:
+                    return _html_response(
+                        _newsletter_error_page("This preferences link is invalid or has expired."), status=400
+                    )
                 return _json_response({"error": "invalid or expired link"}, status=400)
+            if wants_html:
+                return _html_response(_newsletter_preferences_page(request.env, contact))
             return _json_response(_newsletter_preferences_state(request.env, contact))
 
-        try:
-            payload = json.loads(request.httprequest.data or "{}")
-        except json.JSONDecodeError:
-            return _json_response({"error": "Invalid JSON body"}, status=400)
-        if not isinstance(payload, dict):
-            return _json_response({"error": "Invalid JSON body"}, status=400)
-        contact = _newsletter_contact_from_token(request.env, payload.get("c"), payload.get("t"))
+        # POST: an HTML form submits url-encoded fields (parsed into kwargs by
+        # Odoo); a programmatic caller sends a JSON body we read off the request.
+        is_form = not (request.httprequest.content_type or "").startswith("application/json")
+        if is_form:
+            raw_id, token = kwargs.get("c"), kwargs.get("t")
+            shown = [k for k in (kwargs.get("keys") or "").split(",") if k in NEWSLETTER_LIST_KEYS]
+            # An unchecked checkbox is simply absent from the submission, so the
+            # hidden ``keys`` field tells us the full universe of lists on the
+            # form and we read each one's presence as its desired state.
+            desired = {key: bool(kwargs.get(f"list_{key}")) for key in shown}
+        else:
+            try:
+                payload = json.loads(request.httprequest.data or "{}")
+            except json.JSONDecodeError:
+                return _json_response({"error": "Invalid JSON body"}, status=400)
+            if not isinstance(payload, dict):
+                return _json_response({"error": "Invalid JSON body"}, status=400)
+            raw_id, token, desired = payload.get("c"), payload.get("t"), payload.get("lists")
+
+        contact = _newsletter_contact_from_token(request.env, raw_id, token)
         if contact is None:
+            if wants_html:
+                return _html_response(
+                    _newsletter_error_page("This preferences link is invalid or has expired."), status=400
+                )
             return _json_response({"error": "invalid or expired link"}, status=400)
-        desired = payload.get("lists")
         if not isinstance(desired, dict):
             return _json_response({"error": "lists must be an object of {key: bool}"}, status=400)
         for key in desired:
             if key not in NEWSLETTER_LIST_KEYS:
                 return _json_response({"error": f"unknown list key: {key!r}"}, status=400)
         _apply_newsletter_preferences(request.env, contact, desired)
+        if wants_html:
+            return _html_response(_newsletter_preferences_page(request.env, contact, saved=True))
         return _json_response(_newsletter_preferences_state(request.env, contact))
 
     # ── Capture: CRM leads + back-in-stock (2026-10-15 hotfix) ───────────
@@ -3056,7 +3141,8 @@ class GroveHeadlessAPI(http.Controller):
         if created:
             _notify_discord(
                 f":seedling: New {capture_leads.LEAD_KINDS[clean['kind']]} lead ({company.name}): "
-                f"{lead.name} <{clean['email']}>"
+                f"{lead.name} <{clean['email']}>",
+                channel="sales",
             )
         return _json_response({"lead_id": lead.id, "partner_id": partner.id, "created": created})
 
@@ -3116,7 +3202,18 @@ class GroveHeadlessAPI(http.Controller):
                 return _json_response({"error": "Variant not found"}, status=404)
 
         partner = _upsert_capture_partner(request.env, company, email, name[:MAX_NAME])
+        is_new_request = any(partner not in v.stock_notification_partner_ids for v in variants)
         variants.write({"stock_notification_partner_ids": [(4, partner.id)]})
+        if is_new_request:
+            # Demand signal for sales (Josh 2026-10-30): how many people are
+            # waiting on this product across all its variants. A repeat
+            # subscribe is silent so a double-click never inflates the count.
+            waiting = len(tmpl.product_variant_ids.mapped("stock_notification_partner_ids"))
+            _notify_discord(
+                f":bell: Back-in-stock request ({company.name}): {tmpl.name}, "
+                f"{waiting} {'person' if waiting == 1 else 'people'} waiting",
+                channel="sales",
+            )
         return _json_response({"partner_id": partner.id, "variant_ids": variants.ids})
 
     # ── Shipping webhook ─────────────────────────────────────────────────
@@ -3393,6 +3490,123 @@ def _apply_newsletter_preferences(env, contact, desired):
             env["mail.blacklist"].sudo()._remove(normalized)
         else:
             env["mail.blacklist"].sudo()._add(normalized)
+
+
+# ── Newsletter: self-contained browser pages for the token-gated links ────────
+# A human who clicks the "unsubscribe" / "manage your preferences" link in the
+# welcome email lands here in a browser. These render a minimal, self-contained
+# HTML page (no storefront route, no external assets) so the visible link in the
+# email actually works without JS (GOL-3808). All dynamic values are escaped via
+# ``Markup.format``; the static CSS is pre-wrapped in ``Markup`` because it
+# contains ``{ }`` that would otherwise be read as format fields.
+_NEWSLETTER_PAGE_CSS = Markup(
+    "body{font-family:-apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif;"
+    "background:#f6f5f0;color:#2b2b2b;margin:0;padding:1.5rem;line-height:1.5}"
+    ".card{max-width:32rem;margin:2rem auto;background:#fff;border-radius:12px;"
+    "padding:1.75rem 2rem;box-shadow:0 1px 4px rgba(0,0,0,.08)}"
+    "h1{font-size:1.25rem;margin:0 0 1rem}"
+    "ul{list-style:none;padding:0;margin:1rem 0}li{padding:.35rem 0}"
+    "button{background:#3d5a3d;color:#fff;border:0;border-radius:8px;"
+    "padding:.6rem 1.1rem;font-size:1rem;cursor:pointer;margin-top:.5rem}"
+    "a{color:#3d5a3d}.muted{color:#777;font-size:.85rem}"
+)
+
+
+def _newsletter_page(title, inner):
+    """Wrap page ``inner`` (trusted markup) in a minimal HTML document."""
+    return (
+        Markup(
+            '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<meta name="robots" content="noindex"><title>'
+        )
+        + Markup(html.escape(title))
+        + Markup("</title><style>")
+        + _NEWSLETTER_PAGE_CSS
+        + Markup('</style></head><body><div class="card">')
+        + inner
+        + Markup("</div></body></html>")
+    )
+
+
+def _newsletter_error_page(message):
+    inner = Markup("<h1>Link problem</h1><p>{msg}</p>").format(msg=message)
+    return _newsletter_page("Link problem", inner)
+
+
+def _newsletter_unsubscribe_page(env, contact):
+    """GET page for the unsubscribe link: show state + a POST-back button."""
+    state = _newsletter_preferences_state(env, contact)
+    rows = Markup("").join(
+        Markup("<li>{mark} {name}</li>").format(
+            mark="✓" if row["subscribed"] else "—",
+            name=row["name"],
+        )
+        for row in state["lists"]
+    )
+    prefs_link = "/grove/api/v1/newsletter/preferences?c={c}&t={t}".format(
+        c=contact.id, t=_newsletter_token(env, contact.id)
+    )
+    inner = (
+        Markup("<h1>Unsubscribe</h1>")
+        + Markup("<p>Managing email for <strong>{email}</strong>.</p>").format(email=state["email"])
+        + Markup("<p>You're currently subscribed to:</p><ul>")
+        + rows
+        + Markup("</ul>")
+        + Markup('<form method="post" action="/grove/api/v1/newsletter/unsubscribe">')
+        + Markup('<input type="hidden" name="c" value="{c}">').format(c=str(contact.id))
+        + Markup('<input type="hidden" name="t" value="{t}">').format(t=_newsletter_token(env, contact.id))
+        + Markup('<button type="submit">Unsubscribe from everything</button></form>')
+        + Markup('<p class="muted">Prefer to keep some lists? <a href="{url}">Manage your preferences</a>.</p>').format(
+            url=prefs_link
+        )
+    )
+    return _newsletter_page("Unsubscribe", inner)
+
+
+def _newsletter_unsubscribed_page(env, contact):
+    """Confirmation page shown after the unsubscribe button POSTs back."""
+    prefs_link = "/grove/api/v1/newsletter/preferences?c={c}&t={t}".format(
+        c=contact.id, t=_newsletter_token(env, contact.id)
+    )
+    inner = (
+        Markup("<h1>You've been unsubscribed</h1>")
+        + Markup("<p><strong>{email}</strong> has been removed from all of our email.</p>").format(
+            email=contact.email or ""
+        )
+        + Markup(
+            '<p class="muted">Changed your mind? <a href="{url}">Manage your preferences</a> to resubscribe.</p>'
+        ).format(url=prefs_link)
+    )
+    return _newsletter_page("Unsubscribed", inner)
+
+
+def _newsletter_preferences_page(env, contact, saved=False):
+    """GET/POST page for the preferences link: per-list checkbox form."""
+    state = _newsletter_preferences_state(env, contact)
+    checkboxes = Markup("").join(
+        Markup('<li><label><input type="checkbox" name="list_{key}"{checked}> {name}</label></li>').format(
+            key=row["key"],
+            checked=Markup(" checked") if row["subscribed"] else Markup(""),
+            name=row["name"],
+        )
+        for row in state["lists"]
+    )
+    keys = ",".join(row["key"] for row in state["lists"])
+    saved_banner = Markup('<p class="muted">Your preferences have been saved.</p>') if saved else Markup("")
+    inner = (
+        Markup("<h1>Email preferences</h1>")
+        + saved_banner
+        + Markup("<p>Choose which emails <strong>{email}</strong> receives:</p>").format(email=state["email"])
+        + Markup('<form method="post" action="/grove/api/v1/newsletter/preferences"><ul>')
+        + checkboxes
+        + Markup("</ul>")
+        + Markup('<input type="hidden" name="c" value="{c}">').format(c=str(contact.id))
+        + Markup('<input type="hidden" name="t" value="{t}">').format(t=_newsletter_token(env, contact.id))
+        + Markup('<input type="hidden" name="keys" value="{keys}">').format(keys=keys)
+        + Markup('<button type="submit">Save preferences</button></form>')
+    )
+    return _newsletter_page("Email preferences", inner)
 
 
 def _send_newsletter_welcome(env, company, contact, subscribed_keys):
@@ -3701,6 +3915,28 @@ def _printify_address(contact, shipping, state):
     }
 
 
+# Printify's shipping.json validates a complete address (first/last name,
+# address1, city, phone) and 400s otherwise, but the rate depends only on
+# country, region and ZIP. The pre-checkout quote knows just state + ZIP, so the
+# rest carry placeholders. /checkout/session always quotes with the shopper's
+# real address via _printify_address.
+_PRINTIFY_QUOTE_PLACEHOLDERS = {
+    "first_name": "Shipping",
+    "last_name": "Quote",
+    "address1": "Address pending",
+    "city": "City pending",
+    "phone": "0000000000",
+}
+
+
+def _printify_quote_address(shipping, state):
+    address = _printify_address({}, shipping, state)
+    for field, placeholder in _PRINTIFY_QUOTE_PLACEHOLDERS.items():
+        if not address[field]:
+            address[field] = placeholder
+    return address
+
+
 def _printify_line_items(order):
     return [
         {
@@ -3805,7 +4041,9 @@ def _handle_printify_event(env, event):
             return _printify_cancel_order(env, order, reason)
         if status == "on-hold":
             _printify_set_state(order, "on_hold")
-            _notify_discord(f":warning: Printify put {order.name} on hold. Check the Printify dashboard.")
+            _notify_discord(
+                f":warning: Printify put {order.name} on hold. Check the Printify dashboard.", channel="shipping"
+            )
             return "on_hold"
     return "ignored"
 
@@ -3841,7 +4079,8 @@ def _printify_cancel_order(env, order, reason):
         _printify_set_state(order, "canceled")
         _notify_discord(
             f":rotating_light: Printify cancelled {order.name} ({reason}) after it went to "
-            f"production/shipping. No auto-refund issued; review and refund by hand."
+            f"production/shipping. No auto-refund issued; review and refund by hand.",
+            channel="shipping",
         )
         return "canceled_in_production"
     paid = order.grove_checkout_status in ("paid", "deposit_paid", "settled")
@@ -3850,7 +4089,10 @@ def _printify_cancel_order(env, order, reason):
         # Checkout never completed a charge: cancel the order, nothing to refund.
         _printify_set_state(order, "canceled")
         _grove_cancel_sale_order(order)
-        _notify_discord(f":warning: Printify cancelled {order.name} ({reason}); order was unpaid, no refund needed.")
+        _notify_discord(
+            f":warning: Printify cancelled {order.name} ({reason}); order was unpaid, no refund needed.",
+            channel="shipping",
+        )
         return "canceled_unpaid"
     # The payment_intent lives in the account that charged it, so the refund must
     # use that same tenant's key (GOL-1766). The order carries its originating
@@ -3875,10 +4117,15 @@ def _printify_cancel_order(env, order, reason):
     if refunded:
         order.message_post(body=f"Printify cancelled this order ({reason}); payment refunded in full.")
         _notify_printify_cancel_customer(env, order)
-        _notify_discord(f":warning: Printify cancelled {order.name} ({reason}); full refund issued.")
+        _notify_discord(
+            f":warning: Printify cancelled {order.name} ({reason}); full refund issued.", channel="shipping"
+        )
     else:
         order.message_post(body=f"Printify cancelled this order ({reason}); refund FAILED, needs manual action.")
-        _notify_discord(f":rotating_light: Printify cancelled {order.name} ({reason}); refund FAILED, refund by hand.")
+        _notify_discord(
+            f":rotating_light: Printify cancelled {order.name} ({reason}); refund FAILED, refund by hand.",
+            channel="shipping",
+        )
     return "canceled"
 
 
@@ -6340,7 +6587,8 @@ def _handle_session_completed(env, session):
         _notify_customer_apology(env, order, names, refunded)
         _notify_discord(
             f":warning: Oversold order {order.name}: {names} — "
-            f"refund {'issued' if refunded else 'FAILED, needs manual action'}."
+            f"refund {'issued' if refunded else 'FAILED, needs manual action'}.",
+            channel="shipping",
         )
         return "refunded_oversell" if refunded else "oversell_refund_failed"
 
@@ -6368,6 +6616,7 @@ def _handle_session_completed(env, session):
     # both fulfilment types, deposit or full. Pickup orders get no label but must
     # still notify (Josh). Both are best-effort and must never fail the webhook.
     _notify_new_order(env, order, has_preorder)
+    _notify_sales_order(env, order)
     _notify_merchant_email(env, order, has_preorder)
     # Printify merch is printed and shipped by Printify with no human step
     # (GOL-3314 §6): queue the paid order for the 5-minute push cron. Best-effort
@@ -6567,16 +6816,47 @@ def _notify_customer_apology(env, order, product_names, refunded):
     )
 
 
-def _notify_discord(message):
+# Topic channels (Josh 2026-10-30): sales = leads, back-in-stock requests and
+# notable paid orders; shipping = carrier, Printify and oversell problems. Each
+# falls back to the orders webhook, then ops, so an unset topic webhook leaves
+# the alert where it landed before instead of dropping it.
+DISCORD_CHANNEL_ENV = {
+    "sales": "DISCORD_SALES_WEBHOOK_URL",
+    "shipping": "DISCORD_SHIPPING_WEBHOOK_URL",
+}
+
+
+def _discord_webhook_url(channel=None):
+    """Webhook for ``channel`` (a DISCORD_CHANNEL_ENV key, or None for the
+    orders channel), falling back to DISCORD_ORDERS_WEBHOOK_URL and then
+    DISCORD_OPS_WEBHOOK_URL. "" when none is set."""
+    env_name = DISCORD_CHANNEL_ENV.get(channel)
+    return (
+        (os.environ.get(env_name, "") if env_name else "")
+        or os.environ.get("DISCORD_ORDERS_WEBHOOK_URL", "")
+        or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+    )
+
+
+def _notify_discord(message, channel=None, env=None):
     """Best-effort order-ops ping. Order/pickup summaries go to their own
     channel (DISCORD_ORDERS_WEBHOOK_URL — Josh 2026-09-03), separate from the
-    bot-logs/observability channel CI posts to. Falls back to
-    DISCORD_OPS_WEBHOOK_URL so a missing orders webhook surfaces alerts in the
-    ops channel (visibly misrouted) instead of dropping them silently; both
-    unset, or a failed POST, never breaks webhook processing."""
-    url = os.environ.get("DISCORD_ORDERS_WEBHOOK_URL", "") or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+    bot-logs/observability channel CI posts to; ``channel`` routes sales and
+    shipping alerts to their topic channels (see ``_discord_webhook_url``).
+    Falls back to DISCORD_OPS_WEBHOOK_URL so a missing orders webhook surfaces
+    alerts in the ops channel (visibly misrouted) instead of dropping them
+    silently; all unset, or a failed POST, never breaks webhook processing.
+
+    The message is prefixed with the instance tag (``discord_tag``): ``env`` from
+    the caller (model/cron code), else the bound HTTP request's env. With
+    neither — nothing to resolve the tag against — the message posts as-is."""
+    url = _discord_webhook_url(channel)
     if not url:
         return
+    if env is None and request:
+        env = request.env
+    if env is not None:
+        message = tag_discord_message(env, message)
     try:
         # allowed_mentions parse:[] disarms every mention — a customer named
         # "@everyone"/"@here" reaching the ops channel via order alerts (GOL-1933)
@@ -6689,9 +6969,38 @@ def _notify_new_order(env, order, is_deposit):
         if _post_order_alert_card(order, context, is_deposit):
             return
         message = format_new_order_discord(is_deposit=is_deposit, **context)
-        _notify_discord(message)
+        _notify_discord(message, env=env)
     except Exception:  # noqa: BLE001 — ops alert is best-effort
         _logger.warning("New-order Discord alert failed for %s", order.name, exc_info=True)
+
+
+def _notify_sales_order(env, order):
+    """Best-effort sales-channel note for a notable paid order (Josh 2026-10-30):
+    total at or above the large-order threshold, a promo code redeemed, or the
+    planting consult added. Silent for an ordinary order; never breaks webhook
+    processing."""
+    try:
+        threshold_param = env["ir.config_parameter"].sudo().get_param("grove_headless.sales_large_order_threshold", "")
+        try:
+            threshold = float(threshold_param) if threshold_param else SALES_LARGE_ORDER_THRESHOLD
+        except ValueError:
+            threshold = SALES_LARGE_ORDER_THRESHOLD
+        reward_lines = order.order_line.filtered(lambda ln: ln.reward_id and not ln.display_type)
+        codes = promo_codes_from_line_names(reward_lines.mapped("name"))
+        message = format_sales_order_note(
+            order_ref=order.name,
+            brand=order.company_id.name or None,
+            total=order.amount_total,
+            currency=order.currency_id.name or "USD",
+            large_threshold=threshold,
+            promo_codes=codes,
+            promo_discount=-sum(reward_lines.mapped("price_subtotal")) if codes else 0.0,
+            consult=bool(order.grove_consult_requested),
+        )
+        if message:
+            _notify_discord(message, channel="sales", env=env)
+    except Exception:  # noqa: BLE001 — sales note is best-effort
+        _logger.warning("Sales Discord note failed for %s", order.name, exc_info=True)
 
 
 def _notify_merchant_email(env, order, is_deposit):
@@ -6780,6 +7089,44 @@ def _shipment_notice_key(order, status, tracking):
     return f"{status}:{','.join(numbers)}"
 
 
+# Carrier-poll stale-event suppression (GOL-3681). A carrier scan that arrives
+# for a label bought more than this many days ago — or for an order with no
+# recorded label-purchase date (the Shippo-era orders) — is a backlog catch-up,
+# not a fresh shipment: the status, the fulfilment-state move and the notice key
+# are still applied (so it can never email later) but the customer email is
+# replaced by an operator chatter note. Shipping creds go live AFTER this lands,
+# so without the rule, switching them on would email every stuck order at once
+# (incl. a "delivered" for 10-05 labels). Operator-tunable via ir.config_parameter
+# without a deploy; the constant is only the missing-row fallback.
+_CARRIER_NOTICE_MAX_AGE_PARAM = "grove_headless.carrier_notice_max_age_days"
+_CARRIER_NOTICE_MAX_AGE_DAYS_DEFAULT = 10
+
+
+def _carrier_notice_max_age_days(env):
+    """The operator-tunable stale-label cut-off in days (ir.config_parameter
+    ``grove_headless.carrier_notice_max_age_days``), falling back to the default
+    when the row is missing or unparseable/negative."""
+    raw = (
+        env["ir.config_parameter"].sudo().get_param(_CARRIER_NOTICE_MAX_AGE_PARAM, _CARRIER_NOTICE_MAX_AGE_DAYS_DEFAULT)
+    )
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return _CARRIER_NOTICE_MAX_AGE_DAYS_DEFAULT
+    return days if days >= 0 else _CARRIER_NOTICE_MAX_AGE_DAYS_DEFAULT
+
+
+def _carrier_notice_is_stale(order):
+    """True when a ``carrier_poll`` notice for this order must be suppressed: the
+    label was bought more than N days ago, or there is no recorded purchase date
+    (Shippo-era orders count as stale, per Josh's GOL-3681 ruling)."""
+    purchased_at = order.grove_label_purchased_at
+    if not purchased_at:
+        return True
+    max_age = timedelta(days=_carrier_notice_max_age_days(order.env))
+    return (fields.Datetime.now() - purchased_at) > max_age
+
+
 def _apply_delivery_status(env, order, new_status, tracking, source="shippo"):
     """Fold one carrier event (Shippo webhook, carrier poll, operator button)
     into the order: record the delivery status, advance the GOL-1981 fulfilment
@@ -6837,7 +7184,19 @@ def _apply_delivery_status(env, order, new_status, tracking, source="shippo"):
         sent = (order.grove_shipment_notices_sent or "").splitlines()
         if key not in sent:
             order.grove_shipment_notices_sent = "\n".join([*sent, key])
-            _notify_shipping_status(env, order, new_status, tracking)
+            if source == "carrier_poll" and _carrier_notice_is_stale(order):
+                # Durable catch-up rule (GOL-3681): the notice key is marked above
+                # so this scan can never email later, but a label this old is
+                # already-shipped history — tell the operator via chatter instead
+                # of emailing the customer a "shipped"/"delivered" out of the blue.
+                order.message_post(
+                    body=(
+                        f"Carrier reported “{new_status}”; customer email suppressed, "
+                        f"label older than {_carrier_notice_max_age_days(env)} days (GOL-3681)."
+                    )
+                )
+            else:
+                _notify_shipping_status(env, order, new_status, tracking)
     return True
 
 

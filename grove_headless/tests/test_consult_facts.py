@@ -115,7 +115,7 @@ class TestConsultFacts(GroveTaxFixtureMixin, TransactionCase):
 
     # ── Projections (§B) ──────────────────────────────────────────────────
     def test_projection_active_when_both_set(self):
-        # low_canopy -> understory; abundance -> long.
+        # low_canopy -> midstory; abundance -> long.
         tmpl = self._plant(
             ready=True,
             grove_layer="canopy",  # beta mapping would be overstory
@@ -123,7 +123,7 @@ class TestConsultFacts(GroveTaxFixtureMixin, TransactionCase):
             grove_syntropic_stratum="low_canopy",
             grove_succession_stage="abundance",
         )
-        self.assertEqual(tmpl.grove_planner_stratum, "understory")
+        self.assertEqual(tmpl.grove_planner_stratum, "midstory")
         self.assertEqual(tmpl.grove_succession, "long")
 
     def test_projection_stage_mapping(self):
@@ -136,12 +136,12 @@ class TestConsultFacts(GroveTaxFixtureMixin, TransactionCase):
         cases = {
             "emergent": "overstory",
             "high_canopy": "overstory",
-            "low_canopy": "understory",
-            "shrub": "understory",
-            "herbaceous": "understory",
-            "ground_cover": "understory",
-            "root_tuber": "understory",
-            "fungal": "mushroom",
+            "low_canopy": "midstory",
+            "shrub": "shrub",
+            "herbaceous": "ground",
+            "ground_cover": "ground",
+            "root_tuber": "ground",
+            "fungal": "ground",
         }
         for stratum, retail in cases.items():
             tmpl = self._plant(grove_syntropic_stratum=stratum, grove_succession_stage="placenta")

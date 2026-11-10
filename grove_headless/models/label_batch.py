@@ -27,7 +27,7 @@ import re
 from datetime import timedelta
 
 from odoo import api, fields, models
-from odoo.exceptions import UserError
+from odoo.exceptions import AccessError, UserError
 
 from .shipping_boxes import BOXES
 from .shipping_zones import box_rate, box_service_title
@@ -88,6 +88,14 @@ PRIOR_LABEL_WINDOW_DAYS = 60
 # upload's columns through to its tracking export, but the pass-through column is
 # not always named "Grove Ref", so the reconcile also detects it by VALUE pattern.
 GROVE_REF_RE = re.compile(r"^S\d+/\d+$")
+
+# A bare order number ("S00245"): the batch CSV writes it in the Order and Rubber
+# Stamp columns, and an operator can type it into Pirate Ship for a hand-bought
+# label, so the tolerant import can place a row even when it has no Grove Ref.
+ORDER_NAME_RE = re.compile(r"^S\d{3,}$")
+
+# A Pirate Ship export row whose status says the label no longer ships.
+REFUNDED_STATUS_RE = re.compile(r"refund|void|cancel", re.IGNORECASE)
 
 # Magic bytes: xlsx is a zip (PK\x03\x04); legacy .xls is an OLE2 compound file.
 _XLSX_MAGIC = b"PK\x03\x04"
@@ -432,6 +440,22 @@ class GroveLabelBatch(models.Model):
                 return ci
         return None
 
+    @staticmethod
+    def _detect_order_idx(rows):
+        """Index of the column whose values look like bare order numbers
+        (``S00245``), or None. Same at-least-half rule as ``_detect_ref_idx``."""
+        if len(rows) < 2:
+            return None
+        ncols = max((len(r) for r in rows), default=0)
+        for ci in range(ncols):
+            nonempty = [r[ci] for r in rows[1:] if ci < len(r) and r[ci]]
+            if not nonempty:
+                continue
+            hits = sum(1 for v in nonempty if ORDER_NAME_RE.match(v))
+            if hits and hits >= len(nonempty) / 2:
+                return ci
+        return None
+
     def _parse_tracking_file(self, raw_bytes, filename=None):
         """Parse a Pirate Ship *Export Tracking Data* file (CSV/.xls/.xlsx) into
         row dicts.
@@ -479,6 +503,7 @@ class GroveLabelBatch(models.Model):
         # status ("Delivered") and the label/ship date. Absent on the normal
         # tracking export — purely additive, so import_tracking (which reads by
         # named key) is unaffected.
+        i_order = self._detect_order_idx(rows)
         i_status = idx("status")
         i_date = first_idx(
             ("delivered", "date"),
@@ -492,9 +517,10 @@ class GroveLabelBatch(models.Model):
         ]
         if missing:
             raise LabelBatchError(f"Tracking file is missing required column(s): {', '.join(missing)}.")
-        if i_ref is None and i_email is None:
+        if i_ref is None and i_email is None and i_order is None:
             raise LabelBatchError(
-                "Tracking file has neither a Grove Ref nor an Email column; cannot match rows to the batch."
+                "Tracking file has neither a Grove Ref nor an Email column (nor an order number); "
+                "cannot match rows to orders."
             )
         parsed = []
         for raw in rows[1:]:
@@ -513,6 +539,7 @@ class GroveLabelBatch(models.Model):
                     "cost_raw": cell(i_cost),
                     "email": cell(i_email),
                     "recipient": cell(i_recipient),
+                    "order": cell(i_order),
                     "status": cell(i_status),
                     "date": cell(i_date),
                 }
@@ -577,7 +604,15 @@ class GroveLabelBatch(models.Model):
         if filename:
             self.tracking_import = base64.b64encode(raw_bytes)
             self.tracking_import_filename = filename
+        return self._reconcile_rows(parsed, strict=True)
 
+    def _reconcile_rows(self, parsed, strict=True):
+        """Match parsed export rows to this batch's lines and write the complete
+        orders. ``strict`` (the runner endpoint, ``import_tracking``) raises on
+        the first problem and writes nothing. Non-strict (the operator's tolerant
+        import) writes every order whose rows are all clean and returns the rest
+        in ``errors``; an order touched by any bad row is held back whole."""
+        self.ensure_one()
         lines_by_ref = {line.grove_ref: line for line in self.line_ids}
         # Email fallback index (spec §B1, 2026-09-15 field report): lowercased
         # recipient email → the batch lines carrying it. Used ONLY for rows that
@@ -592,6 +627,7 @@ class GroveLabelBatch(models.Model):
             if key:
                 lines_by_email[key] = lines_by_email.get(key, empty_lines) | line
         errors = []
+        bad_orders = set()  # orders a bad row touched: held back whole in non-strict mode
         seen_refs = set()
         claimed = set()  # line ids already matched by an earlier import row
         clean = []  # (row, line, cost, carrier_key, service_token, via_email)
@@ -601,6 +637,8 @@ class GroveLabelBatch(models.Model):
             if ref:
                 if ref in seen_refs:
                     errors.append(f"{ref}: appears more than once in the import")
+                    if ref in lines_by_ref:
+                        bad_orders.add(lines_by_ref[ref].order_id.id)
                     continue
                 seen_refs.add(ref)
                 line = lines_by_ref.get(ref)
@@ -628,6 +666,7 @@ class GroveLabelBatch(models.Model):
                 via_email = True
             if line.id in claimed:
                 errors.append(f"{line.grove_ref}: matched by more than one import row")
+                bad_orders.add(line.order_id.id)
                 continue
             if not self.env["grove.label.batch"]._is_valid_tracking(row["tracking"]):
                 errors.append(f"{line.grove_ref}: invalid tracking number {row['tracking']!r}")
@@ -653,6 +692,8 @@ class GroveLabelBatch(models.Model):
         for order, entries in rows_by_order.items():
             batch_line_refs = {bl.grove_ref for bl in self.line_ids.filtered(lambda x: x.order_id == order)}
             got_refs = {ln.grove_ref for (ln, _c, _ca, _s, _r, _v) in entries}
+            if order.id in bad_orders:
+                continue
             if order.grove_tracking_numbers:
                 # Idempotent re-import: this order was already reconciled — skip
                 # every one of its rows, never re-write (spec: refuses to re-write
@@ -669,7 +710,7 @@ class GroveLabelBatch(models.Model):
                 continue
             orders_to_write.append((order, entries))
 
-        if errors:
+        if errors and strict:
             raise LabelBatchError(
                 "Tracking import rejected; nothing written. " + "; ".join(errors),
                 refs=[e.split(":")[0] for e in errors],
@@ -772,6 +813,8 @@ class GroveLabelBatch(models.Model):
                 batch_vals["notes"] = (self.notes + "\n" + note) if self.notes else note
             self.write(batch_vals)
         return {
+            "orders": [o.name for o, _e in orders_to_write],
+            "errors": errors,
             "orders_advanced": orders_advanced,
             "skipped_already_tracked": skipped_already,
             "total": round(newly_total, 2),
@@ -787,6 +830,207 @@ class GroveLabelBatch(models.Model):
         from .shippo_client import is_valid_tracking
 
         return is_valid_tracking(value)
+
+    # ── Tolerant operator import (any Pirate Ship export) ────────────────────
+    @api.model
+    def _order_with_tracking(self, company, tracking):
+        """The order in ``company`` that already carries ``tracking`` as one of
+        its boxes, or an empty recordset."""
+        Order = self.env["sale.order"].sudo().with_company(company)
+        if not tracking:
+            return Order.browse()
+        candidates = Order.search(
+            [("company_id", "=", company.id), ("grove_tracking_numbers", "ilike", tracking)],
+        )
+        return candidates.filtered(lambda o: tracking in (o.grove_tracking_numbers or "").split())[:1]
+
+    @api.model
+    def _resolve_loose_order(self, row, company):
+        """Place an export row that is not part of the open batch on an order.
+
+        Order number first (from a Grove Ref ``S00245/1`` or a bare ``S00245``
+        column), then recipient email when it points at exactly ONE ship order
+        still on the label/ship path. Returns ``(order, via_email, problem)``."""
+        Order = self.env["sale.order"].sudo().with_company(company)
+        name = None
+        if row.get("ref") and GROVE_REF_RE.match(row["ref"]):
+            name = row["ref"].split("/")[0]
+        elif row.get("order") and ORDER_NAME_RE.match(row["order"]):
+            name = row["order"]
+        if name:
+            order = Order.search([("company_id", "=", company.id), ("name", "=", name)], limit=1)
+            return (order, False, None) if order else (None, False, f"no order {name} in Odoo")
+        email = (row.get("email") or "").strip().lower()
+        if not email:
+            return None, False, "no order number or email to match on"
+        candidates = Order.search(
+            [
+                ("company_id", "=", company.id),
+                ("grove_fulfillment", "=", "ship"),
+                ("grove_fulfillment_stage", "in", ("awaiting_label", "wave_assigned", "label_purchased", "shipped")),
+                "|",
+                ("partner_id.email", "=ilike", email),
+                ("partner_shipping_id.email", "=ilike", email),
+            ]
+        )
+        if not candidates:
+            return None, False, f"no open shipping order for {email}"
+        if len(candidates) > 1:
+            names = ", ".join(sorted(candidates.mapped("name")))
+            return None, False, f"{email} matches {names}; record this label on the right order by hand"
+        return candidates, True, None
+
+    @api.model
+    def _flag_refunded_row(self, row, company, summary):
+        """A refunded/voided label in the export. If an order still carries it,
+        stop the carrier poll (that label will never move) and say so once on
+        the order. The tracking stays visible; the operator buys a new label
+        (which the next import records as a replacement) or cancels."""
+        tracking = row["tracking"]
+        order = self._order_with_tracking(company, tracking)
+        if not order:
+            return
+        marker = f"refunded in Pirate Ship: {tracking}"
+        already = (
+            self.env["mail.message"]
+            .sudo()
+            .search_count([("model", "=", "sale.order"), ("res_id", "=", order.id), ("body", "ilike", marker)])
+        )
+        if not already:
+            order.grove_carrier_poll_stopped = True
+            order.message_post(
+                body=(
+                    f"⚠️ Label {marker}. Tracking stopped for it. Buy a new label (the next "
+                    f"Pirate Ship import records it as the replacement) or cancel the order."
+                )
+            )
+        summary["refunded"].append(f"{order.name}: label {tracking} was refunded; needs a new label or a cancel")
+
+    @api.model
+    def _import_loose_rows(self, rows, company, summary):
+        """Record rows that are not part of the open batch: a first label on an
+        order awaiting one, or a replacement on an order that already has one.
+        Anything that cannot be placed safely goes to ``summary["review"]``."""
+        by_order = {}
+        for row in rows:
+            who = row.get("recipient") or row.get("email") or row.get("order") or row.get("ref") or row["tracking"]
+            if not self._is_valid_tracking(row["tracking"]):
+                summary["review"].append(f"{who}: invalid tracking number {row['tracking']!r}")
+                continue
+            carrier_key, service_token = _carrier_token(row["carrier_raw"])
+            if not carrier_key:
+                summary["review"].append(f"{who}: unrecognised carrier {row['carrier_raw']!r}")
+                continue
+            try:
+                cost = round(float((row["cost_raw"] or "0").replace("$", "").replace(",", "")), 2)
+            except (TypeError, ValueError):
+                summary["review"].append(f"{who}: non-numeric cost {row['cost_raw']!r}")
+                continue
+            order, via_email, problem = self._resolve_loose_order(row, company)
+            if not order:
+                summary["review"].append(f"{who} ({row['tracking']}): {problem}")
+                continue
+            by_order.setdefault(order, []).append((row, carrier_key, service_token, cost, via_email))
+        for order, entries in by_order.items():
+            if len(entries) > 1:
+                tracks = ", ".join(e[0]["tracking"] for e in entries)
+                summary["review"].append(
+                    f"{order.name}: {len(entries)} labels in this file ({tracks}); record the right one by hand"
+                )
+                continue
+            row, carrier_key, service_token, cost, via_email = entries[0]
+            try:
+                with self.env.cr.savepoint():
+                    if order.grove_tracking_numbers:
+                        old = order.grove_tracking_numbers.replace("\n", ", ")
+                        if order.action_grove_replace_label(
+                            row["tracking"],
+                            carrier=carrier_key,
+                            actual_cost=cost,
+                            service=service_token,
+                            source="Pirate Ship import",
+                        ):
+                            summary["replaced"].append(f"{order.name}: {old} → {row['tracking']}")
+                    else:
+                        order.action_grove_record_hand_label(
+                            row["tracking"], carrier=carrier_key, actual_cost=cost, service=service_token
+                        )
+                        summary["labelled"].append(order.name)
+                    if via_email:
+                        summary["manual_review"].append(order.name)
+                        order.message_post(
+                            body=(
+                                f"⚠️ Label {row['tracking']} matched to this order by EMAIL from a Pirate Ship "
+                                f"import (no order number in the row). Check it belongs to this order."
+                            )
+                        )
+            except UserError as exc:
+                summary["review"].append(str(exc))
+
+    @api.model
+    def import_pirateship_file(self, raw_bytes, filename=None, company=None):
+        """The operator's import: take ANY Pirate Ship export (.xlsx/.xls/.csv)
+        and record everything that can be placed safely, instead of rejecting
+        the whole file over one stray row.
+
+        * rows for the open batch go through the batch reconcile (non-strict:
+          a bad row holds back only its own order);
+        * a row for an order awaiting a label records it (the single-order path,
+          no batch needed);
+        * a new tracking number on an order that already has one replaces it;
+        * a tracking number already on an order is skipped (re-import is safe);
+        * a refunded/voided row flags the order still carrying that label;
+        * everything else is listed in ``review`` and nothing is written for it.
+
+        Returns ``{labelled, replaced, refunded, already, review, warnings,
+        manual_review}``. Raises ``LabelBatchError`` only when the file itself
+        is unreadable or lacks the tracking/carrier/cost columns, or
+        ``AccessError`` for a user limited to their own orders: the lookups run
+        as sudo so the import can place any row in the company."""
+        if not self.env.is_superuser() and not self.env.user.has_group("sales_team.group_sale_salesman_all_leads"):
+            raise AccessError("Importing a Pirate Ship export needs access to all sales orders.")
+        company = company or self.env.company
+        parsed = self.browse()._parse_tracking_file(raw_bytes, filename=filename)
+        summary = {
+            "labelled": [],
+            "replaced": [],
+            "refunded": [],
+            "already": 0,
+            "review": [],
+            "warnings": [],
+            "manual_review": [],
+        }
+        batch = self._open_batch(company)
+        batch_refs = set(batch.line_ids.mapped("grove_ref")) if batch else set()
+        batch_emails = {(e or "").strip().lower() for e in batch.line_ids.mapped("email")} if batch else set()
+        batch_rows, loose_rows, refund_rows = [], [], []
+        for row in parsed:
+            if REFUNDED_STATUS_RE.search(row.get("status") or ""):
+                refund_rows.append(row)
+                continue
+            if row["tracking"] and self._order_with_tracking(company, row["tracking"]):
+                summary["already"] += 1
+                continue
+            email = (row.get("email") or "").strip().lower()
+            if batch and (row["ref"] in batch_refs or (not row["ref"] and email and email in batch_emails)):
+                batch_rows.append(row)
+            else:
+                loose_rows.append(row)
+        if batch_rows:
+            result = batch._reconcile_rows(batch_rows, strict=False)
+            summary["labelled"].extend(result["orders"])
+            summary["review"].extend(result["errors"])
+            summary["warnings"].extend(result["warnings"])
+            summary["manual_review"].extend(result["manual_review"])
+            summary["already"] += result["skipped_already_tracked"]
+            if filename:
+                batch.write({"tracking_import": base64.b64encode(raw_bytes), "tracking_import_filename": filename})
+        self._import_loose_rows(loose_rows, company, summary)
+        # Refunds last, so a refund row and its replacement in the same file end
+        # on the replacement instead of flagging a label that was just swapped.
+        for row in refund_rows:
+            self._flag_refunded_row(row, company, summary)
+        return summary
 
     # ── UI actions (manual path — always available, spec §B1) ───────────────
     def action_export_csv(self):

@@ -130,6 +130,7 @@ class TestListingAudit(GroveTaxFixtureMixin, TransactionCase):
 
     def test_cron_posts_one_discord_message(self):
         self._published_incomplete_plant(name="Post Apple")
+        self.env["ir.config_parameter"].sudo().set_param("web.base.url", "https://odoo.example.test")
         with (
             patch.dict(os.environ, {"DISCORD_OPS_WEBHOOK_URL": "https://discord.example/hook"}),
             patch("odoo.addons.grove_headless.models.product_template.requests") as mock_requests,
@@ -139,6 +140,11 @@ class TestListingAudit(GroveTaxFixtureMixin, TransactionCase):
         _, kwargs = mock_requests.post.call_args
         self.assertIn("content", kwargs["json"])
         self.assertIn("Post Apple", kwargs["json"]["content"])
+        # The post names its sender: prod, QA and a restored copy share one webhook.
+        self.assertTrue(
+            kwargs["json"]["content"].startswith("[odoo.example.test] 1 published listing(s) incomplete: "),
+            kwargs["json"]["content"],
+        )
 
     def test_cron_no_post_when_webhook_unset(self):
         self._published_incomplete_plant(name="Silent Apple")

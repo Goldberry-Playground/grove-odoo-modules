@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Native Discord scheduled-events sync (GOL-3832, phase D). -->
+<!-- noupdate="1" (same rationale as calendar_digest_cron.xml): the seeded
+     nextcall is a first-run seed, not a schedule to re-apply on every upgrade.
+     Under the default noupdate="0" every `-u grove_calendar` would rewrite the
+     live ir.cron row's nextcall back to the seed. With noupdate="1" an upgrade
+     leaves the running row alone; the seed applies only on a fresh install. -->
+<odoo noupdate="1">
+    <record id="ir_cron_sync_discord_events" model="ir.cron">
+        <field name="name">Grove: sync native Discord events</field>
+        <field name="model_id" ref="model_grove_calendar_discord"/>
+        <field name="state">code</field>
+        <field name="code">model._cron_sync_discord_events()</field>
+        <field name="interval_number">15</field>
+        <field name="interval_type">minutes</field>
+        <!-- First-run seed in the past so the first tick fires promptly; Odoo then
+             advances by the 15-minute interval. The sync itself is a no-op (one
+             INFO log) until DISCORD_BOT_TOKEN and DISCORD_GUILD_ID are set, so it
+             is harmless to run on QA/prod before the credentials land. -->
+        <field name="nextcall">2026-09-07 12:00:00</field>
+        <!-- NB: ir.cron.doall was removed in Odoo 17+; setting it fails module
+             load with "Invalid field 'doall'" on Odoo 19. -->
+        <field name="active" eval="True"/>
+    </record>
+</odoo>

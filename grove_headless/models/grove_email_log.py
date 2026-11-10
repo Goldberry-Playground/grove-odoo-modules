@@ -18,6 +18,7 @@ import requests
 from odoo import api, fields, models
 
 from . import mailgun_gateway
+from .discord_tag import tag_discord_message
 
 _logger = logging.getLogger(__name__)
 
@@ -217,13 +218,17 @@ class GroveEmailLog(models.Model):
 
         Guarded by ``alerted`` so a retry or a later same-status event never
         double-pings. Best-effort — a missing webhook or a failed POST never
-        breaks webhook processing. Prefers the ops channel (this is an
-        observability alert, not an order summary), falling back to the orders
-        webhook so a missing ops URL still surfaces somewhere."""
+        breaks webhook processing. Goes to the support channel (a customer
+        missed an email; Josh 2026-10-30), falling back to ops and then the
+        orders webhook so a missing URL still surfaces somewhere."""
         self.ensure_one()
         if self.alerted:
             return False
-        url = os.environ.get("DISCORD_OPS_WEBHOOK_URL", "") or os.environ.get("DISCORD_ORDERS_WEBHOOK_URL", "")
+        url = (
+            os.environ.get("DISCORD_SUPPORT_WEBHOOK_URL", "")
+            or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+            or os.environ.get("DISCORD_ORDERS_WEBHOOK_URL", "")
+        )
         self.write({"alerted": True})
         if not url:
             return False
@@ -237,6 +242,7 @@ class GroveEmailLog(models.Model):
             f":warning: Customer email **{label}** for {order_ref} "
             f"({dict(_KIND_SELECTION).get(self.kind, self.kind)}, email log #{self.id})"
         )
+        message = tag_discord_message(self.env, message)
         try:
             requests.post(url, json={"content": message[:2000]}, timeout=10)
         except Exception:  # noqa: BLE001 — alert is best-effort

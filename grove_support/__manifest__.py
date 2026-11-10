@@ -1,6 +1,6 @@
 {
     "name": "Grove Support Chat",
-    "version": "19.0.1.1.1",
+    "version": "19.0.1.2.0",
     "category": "Website/Live Chat",
     "summary": "Livechat glue: partner match, crm.lead, recent-orders note, Discord ping",
     "description": """
@@ -16,10 +16,11 @@
              checkout (grove_headless controllers/main.py ~1571).
           2. Lead creation — one crm.lead per chat, tagged `livechat`, linked to
              the partner, with a transcript deep-link.
-          3. Recent-orders note — a one-line internal note (never relayed to the
-             visitor) with the partner's 3 most recent orders.
-          4. Discord ping — a best-effort ops ping on chat start via the existing
-             DISCORD_OPS_WEBHOOK_URL.
+          3. Recent-orders note — a one-line internal note on the lead's
+             chatter (never in the chat the visitor sees) with the partner's 3
+             most recent orders.
+          4. Discord ping — a best-effort ping on chat start via
+             DISCORD_SUPPORT_WEBHOOK_URL (falls back to DISCORD_OPS_WEBHOOK_URL).
 
         Non-goals (ratified): no customer-facing order-status lookup, no AI
         operator, no Chatwoot bridge, no other brands, newsletter capture
@@ -44,6 +45,16 @@
     "data": [
         "views/im_livechat_channel_views.xml",
     ],
+    # Two JS patches on the livechat embed bundle (the storefronts load the
+    # cors flavour, which includes assets_embed_core): stop a second send during
+    # the temporary->saved thread swap from opening a duplicate conversation,
+    # and empty the text box after each send once that swap has happened.
+    "assets": {
+        "im_livechat.assets_embed_core": [
+            "grove_support/static/src/embed/livechat_service_patch.js",
+            "grove_support/static/src/embed/composer_patch.js",
+        ],
+    },
     "installable": True,
     "application": False,
     "auto_install": False,

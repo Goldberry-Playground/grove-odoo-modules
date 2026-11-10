@@ -16,6 +16,7 @@ from odoo.exceptions import UserError, ValidationError
 from ..services.plant_data import mapping as plant_mapping
 from ..services.plant_data.usda import USDAProvider
 from . import printify_client, printify_sync
+from .discord_tag import tag_discord_message
 
 _logger = logging.getLogger(__name__)
 
@@ -955,13 +956,22 @@ class ProductTemplate(models.Model):
         "Required for planner-ready when the layer is Fungal.",
     )
     grove_planner_stratum = fields.Selection(
-        [("overstory", "Overstory"), ("understory", "Understory"), ("mushroom", "Mushroom")],
+        [
+            ("overstory", "Overstory"),
+            ("midstory", "Midstory"),
+            ("shrub", "Shrub"),
+            ("ground", "Ground"),
+        ],
         string="Planner stratum",
         compute="_compute_grove_planner_stratum",
         store=True,
-        help="Derived from the Food Forest Layer by the fixed mapping in the "
-        "planner spec §A.1 (canopy→overstory; understory/shrub/vine/ground→"
-        "understory; fungal→mushroom). Computed and stored, not edited directly.",
+        help="Derived from the Food Forest Layer by the fixed mapping (Josh "
+        "2026-11-06, four layers as the planting reads top-down): canopy→"
+        "overstory; understory→midstory; shrub→shrub; ground/vine/fungal→ground. "
+        "Vines live in the ground stratum for now (the layer still records "
+        "'vine', so a vine stratum later is a one-line split). Ginseng slips, "
+        "black cohosh, ferns, wildflowers and mushroom spawn are all ground. "
+        "Computed and stored, not edited directly.",
     )
     grove_planner_flagged = fields.Boolean(
         string="Needs review (planner)",
@@ -1075,23 +1085,26 @@ class ProductTemplate(models.Model):
     # leaves the stratum blank.
     _GROVE_STRATUM_BY_LAYER = {
         "canopy": "overstory",
-        "understory": "understory",
-        "shrub": "understory",
-        "vine": "understory",
-        "ground": "understory",
-        "fungal": "mushroom",
+        "understory": "midstory",
+        "shrub": "shrub",
+        "vine": "ground",
+        "ground": "ground",
+        "fungal": "ground",
     }
 
-    # Consultant eight-value stratum → retail three-value stratum (GOL-3574 §B).
+    # Consultant eight-value stratum → retail four-value planner stratum
+    # (GOL-3574 §B, re-mapped onto the four strata from #393, which follow the
+    # Food Forest Layer mapping: low canopy reads as midstory, and everything
+    # at or below herbaceous, fungal included, reads as ground).
     _GROVE_STRATUM_BY_SYNTROPIC = {
         "emergent": "overstory",
         "high_canopy": "overstory",
-        "low_canopy": "understory",
-        "shrub": "understory",
-        "herbaceous": "understory",
-        "ground_cover": "understory",
-        "root_tuber": "understory",
-        "fungal": "mushroom",
+        "low_canopy": "midstory",
+        "shrub": "shrub",
+        "herbaceous": "ground",
+        "ground_cover": "ground",
+        "root_tuber": "ground",
+        "fungal": "ground",
     }
 
     # Consultant four-value succession stage → retail three-value word (§B).
@@ -2080,7 +2093,7 @@ class ProductTemplate(models.Model):
         if not url:
             _logger.info("listing-content audit: DISCORD_OPS_WEBHOOK_URL unset — skipping Discord post")
             return
-        text = self._grove_audit_discord_text(products, planner=planner, consult=consult)
+        text = tag_discord_message(self.env, self._grove_audit_discord_text(products, planner=planner, consult=consult))
         try:
             requests.post(url, json={"content": text[:2000]}, timeout=10)
         except Exception:

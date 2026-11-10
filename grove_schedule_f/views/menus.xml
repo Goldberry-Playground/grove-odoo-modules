@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <menuitem id="menu_grove_schedule_f_root" name="Schedule F" parent="account.menu_finance" sequence="60"/>
+    <menuitem id="menu_grove_bank_lines_to_review" name="Bank lines to review"
+              parent="menu_grove_schedule_f_root" action="action_bank_lines_to_review" sequence="15"/>
+    <menuitem id="menu_grove_schedule_f_by_line" name="Schedule F by line"
+              parent="menu_grove_schedule_f_root" action="action_schedule_f_cashlines" sequence="10"/>
+    <menuitem id="menu_grove_unpaid_at_year_end" name="Unpaid at year end"
+              parent="menu_grove_schedule_f_root" action="action_unpaid_at_year_end" sequence="20"/>
+    <menuitem id="menu_grove_uncategorized_bank_lines" name="Uncategorized bank lines"
+              parent="menu_grove_schedule_f_root" action="action_uncategorized_bank_lines" sequence="30"/>
+    <menuitem id="menu_grove_month_mirrors" name="Month mirrors"
+              parent="menu_grove_schedule_f_root" action="action_grove_mirror_run" sequence="40"/>
+    <menuitem id="menu_grove_close_notes" name="Close notes"
+              parent="menu_grove_schedule_f_root" action="action_grove_close_note" sequence="50"/>
+</odoo>

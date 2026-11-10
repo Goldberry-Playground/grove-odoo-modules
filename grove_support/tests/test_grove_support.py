@@ -43,6 +43,12 @@ class GroveSupportCase(TransactionCase):
             }
         )
 
+    def _make_lead(self, partner):
+        return self.env["crm.lead"].create({"name": "Livechat lead", "partner_id": partner.id})
+
+    def _orders_notes(self, record):
+        return record.message_ids.filtered(lambda m: "Recent orders" in (m.body or ""))
+
     # ── Job 1: partner match (checkout discipline) ───────────────────────
 
     def test_match_reuses_existing_partner_as_is(self):
@@ -124,12 +130,12 @@ class GroveSupportCase(TransactionCase):
             )
         oldest = orders[0]  # base + 0 days -> excluded from the top 3
         channel = self._make_channel()
-        channel._grove_support_post_recent_orders(partner, self.company)
+        lead = self._make_lead(partner)
+        channel._grove_support_post_recent_orders(lead, partner, self.company)
 
-        note = channel.message_ids.filtered(
-            lambda m: m.subtype_id == self.env.ref("mail.mt_note") and "Recent orders" in (m.body or "")
-        )
-        self.assertEqual(len(note), 1, "exactly one recent-orders note should be posted")
+        note = self._orders_notes(lead).filtered(lambda m: m.subtype_id == self.env.ref("mail.mt_note"))
+        self.assertEqual(len(note), 1, "exactly one recent-orders note should be posted on the lead")
+        self.assertEqual(note.author_id, self.env.ref("base.partner_root"))
         body = note.body
         for recent in orders[1:]:
             self.assertIn(recent.name, body)
@@ -140,8 +146,9 @@ class GroveSupportCase(TransactionCase):
             {"name": "No Orders", "email": "noorders@example.com", "company_id": self.company.id}
         )
         channel = self._make_channel()
-        channel._grove_support_post_recent_orders(partner, self.company)
-        note = channel.message_ids.filtered(lambda m: "Recent orders" in (m.body or ""))
+        lead = self._make_lead(partner)
+        channel._grove_support_post_recent_orders(lead, partner, self.company)
+        note = self._orders_notes(lead)
         self.assertEqual(len(note), 1)
         self.assertIn("none on file", note.body)
 
@@ -162,10 +169,31 @@ class GroveSupportCase(TransactionCase):
         # email_normalize lowercases + strips before the partner is matched.
         self.assertEqual(partner.email, "chat@example.com")
         self.assertIn("livechat", lead.tag_ids.mapped("name"))
-        self.assertTrue(
-            channel.message_ids.filtered(lambda m: "Recent orders" in (m.body or "")),
-            "a recent-orders note should be posted",
+        self.assertTrue(self._orders_notes(lead), "a recent-orders note should be posted on the lead")
+
+    def test_orders_never_posted_into_visitor_channel(self):
+        """Regression guard (2026-10-28 leak): the visitor is a member of the
+        livechat channel and sees every message in it, mt_note included. Order
+        history must never be posted there — the email that selects the partner
+        is unverified chat input, so anyone could pull a customer's orders."""
+        partner = self.env["res.partner"].create(
+            {"name": "Victim", "email": "victim@example.com", "company_id": self.company.id}
         )
+        order = self.env["sale.order"].create({"partner_id": partner.id, "company_id": self.company.id})
+        channel = self._make_channel()
+        with patch.object(
+            type(channel),
+            "_chatbot_find_customer_values_in_messages",
+            return_value={"email_from": "victim@example.com"},
+        ):
+            channel._grove_support_process_chat()
+
+        self.assertFalse(self._orders_notes(channel), "order history leaked into the visitor's chat")
+        self.assertFalse(
+            channel.message_ids.filtered(lambda m: order.name in (m.body or "")),
+            "an order reference leaked into the visitor's chat",
+        )
+        self.assertIn(order.name, self._orders_notes(channel.grove_support_lead_id).body)
 
     def test_process_chat_is_idempotent(self):
         channel = self._make_channel()
@@ -342,11 +370,60 @@ class GroveSupportCase(TransactionCase):
     # ── Job 4: Discord chat-start ping ───────────────────────────────────
 
     def test_chat_start_pings_discord_for_livechat(self):
+        self.env["ir.config_parameter"].sudo().set_param("web.base.url", "https://odoo.example.test")
         with patch.object(gs_channel, "notify_discord") as mock_notify:
             self._make_channel()
         mock_notify.assert_called_once()
+        # The ping names its sender (shared ops webhook across prod/QA/copies).
+        self.assertEqual(mock_notify.call_args.kwargs.get("env_tag"), "[odoo.example.test]")
+
+    def test_notify_discord_prefixes_env_tag(self):
+        from odoo.addons.grove_support.models import discord as gs_discord
+
+        with (
+            patch.dict("os.environ", {"DISCORD_OPS_WEBHOOK_URL": "https://d/ops"}, clear=True),
+            patch.object(gs_discord.requests, "post") as post,
+        ):
+            gs_discord.notify_discord("hello", env_tag="[odoo.example.test]")
+        self.assertEqual(post.call_args[1]["json"]["content"], "[odoo.example.test] hello")
+        self.assertEqual(post.call_args[1]["json"]["allowed_mentions"], {"parse": []})
+
+    def test_chat_start_prefers_support_webhook_over_ops(self):
+        from odoo.addons.grove_support.models import discord as gs_discord
+
+        env = {"DISCORD_SUPPORT_WEBHOOK_URL": "https://d/support", "DISCORD_OPS_WEBHOOK_URL": "https://d/ops"}
+        with patch.dict("os.environ", env, clear=True), patch.object(gs_discord.requests, "post") as post:
+            gs_discord.notify_discord("hello")
+        self.assertEqual(post.call_args[0][0], "https://d/support")
+        with (
+            patch.dict("os.environ", {"DISCORD_OPS_WEBHOOK_URL": "https://d/ops"}, clear=True),
+            patch.object(gs_discord.requests, "post") as post,
+        ):
+            gs_discord.notify_discord("hello")
+        self.assertEqual(post.call_args[0][0], "https://d/ops")
 
     def test_chat_start_does_not_ping_for_non_livechat(self):
         with patch.object(gs_channel, "notify_discord") as mock_notify:
             self.env["discuss.channel"].create({"name": "team room", "channel_type": "channel"})
         mock_notify.assert_not_called()
+
+    # ── Duplicate-chat fix: livechat_service_patch.js ships in the embed ──
+
+    def test_widget_patches_are_in_both_embed_bundles(self):
+        """Both widget patches must reach the widget the storefronts load.
+        /im_livechat/assets_embed.js serves ``assets_embed_cors`` cross-origin
+        (the storefronts) and ``assets_embed_external`` otherwise; both include
+        ``assets_embed_core``, where the manifest registers the patches. The JS
+        behaviour itself was verified in a browser against a cross-origin page
+        (second send after ~5 s: two channels without the persist patch, one
+        with) and on prod (text box left holding the sent text without the
+        composer patch, empty with it)."""
+        patch_urls = (
+            "/grove_support/static/src/embed/livechat_service_patch.js",
+            "/grove_support/static/src/embed/composer_patch.js",
+        )
+        for bundle in ("im_livechat.assets_embed_cors", "im_livechat.assets_embed_external"):
+            files, _external = self.env["ir.qweb"]._get_asset_content(bundle)
+            urls = [f["url"] for f in files]
+            for patch_url in patch_urls:
+                self.assertIn(patch_url, urls, f"{bundle} is missing {patch_url}")

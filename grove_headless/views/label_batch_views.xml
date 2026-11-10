@@ -30,11 +30,14 @@
         <field name="name">grove.label.batch.import.form</field>
         <field name="model">grove.label.batch.import</field>
         <field name="arch" type="xml">
-            <form string="Import Pirate Ship tracking">
+            <form string="Import Pirate Ship export">
+                <p class="text-muted">Upload the spreadsheet exactly as Pirate Ship exports it.
+                   Odoo records every label it can match to an order, swaps in reprinted or
+                   re-bought labels, flags refunded ones, and lists anything it could not match.</p>
                 <group>
-                    <field name="batch_id" readonly="1" />
+                    <field name="batch_id" readonly="1" invisible="not batch_id" />
                     <field name="data" filename="filename"
-                           string="Export Tracking Data CSV" />
+                           string="Pirate Ship export (.xlsx or .csv)" />
                     <field name="filename" invisible="1" />
                 </group>
                 <footer>
@@ -47,7 +50,7 @@
     </record>
 
     <record id="action_grove_label_batch_import" model="ir.actions.act_window">
-        <field name="name">Import Pirate Ship tracking</field>
+        <field name="name">Import Pirate Ship export</field>
         <field name="res_model">grove.label.batch.import</field>
         <field name="view_mode">form</field>
         <field name="target">new</field>
@@ -62,7 +65,7 @@
                     <button name="action_export_csv" type="object" string="Export Pirate Ship batch"
                             class="btn-primary" invisible="state not in ('open', 'exported')" />
                     <button name="%(action_grove_label_batch_import)d" type="action"
-                            string="Import Pirate Ship tracking"
+                            string="Import Pirate Ship export"
                             invisible="state == 'cancelled'" context="{'active_id': id}" />
                     <button name="action_cancel" type="object" string="Cancel batch"
                             confirm="Release these orders back to the label pool?"
@@ -146,6 +149,15 @@
         parent="sale.sale_menu_root"
         action="action_grove_label_batch"
         sequence="90"
+    />
+
+    <menuitem
+        id="menu_grove_pirateship_import"
+        name="Import Pirate Ship export"
+        parent="sale.sale_menu_root"
+        action="action_grove_label_batch_import"
+        groups="sales_team.group_sale_salesman_all_leads"
+        sequence="91"
     />
 
 </odoo>

@@ -6,3 +6,5 @@ __pycache__/
 .idea/
 *.egg-info/
 scripts/rate_check/out/
+.oca/
+.superpowers/
