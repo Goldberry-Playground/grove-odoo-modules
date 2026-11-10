@@ -36,4 +36,21 @@
             storefront description + care guide (grove-content-drafter routine, GOL-2384).</field>
     </record>
 
+    <!--
+        Nursery Staff (GOL-3549, planner winter beta spec B.7)
+        ======================================================
+        The human gate on the planner learning loop: reviews proposals,
+        suggestions, disputes and saved plans, and runs the staff-only
+        "Approve as guild" server action (grove.planner.plan). Implies
+        base.group_user so a staff member is a proper internal user; the planner
+        models' ACLs below grant this group write/create/unlink while every
+        other internal user gets read-only. Josh adds Wesley and himself to it.
+    -->
+    <record id="group_nursery_staff" model="res.groups">
+        <field name="name">Nursery Staff</field>
+        <field name="implied_ids" eval="[(4, ref('base.group_user'))]" />
+        <field name="comment">Nursery staff: review and act on the planner learning loop
+            (proposals, suggestions, disputes, saved plans) and approve guilds (GOL-3549).</field>
+    </record>
+
 </odoo>
