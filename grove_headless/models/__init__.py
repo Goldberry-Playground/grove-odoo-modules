@@ -25,6 +25,7 @@ from . import (
     product_product,  # noqa: F401
     product_public_category,  # noqa: F401  department tree metadata (GOL-2744)
     product_template,  # noqa: F401
+    product_template_attribute_value,  # noqa: F401  price_extra → product.availability (2026-11-09)
     sale_order,  # noqa: F401
     sale_order_ops,  # noqa: F401  order lanes + holds (Discord order operations)
     seed_season,  # noqa: F401  pure seed pre-order season resolver (GOL-3257), no ORM models

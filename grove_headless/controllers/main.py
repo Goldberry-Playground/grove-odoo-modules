@@ -1076,7 +1076,7 @@ def _seed_season_payload(product):
     }
 
 
-def _structure_variant(variant, template_rootstock=""):
+def _structure_variant(variant, template_rootstock="", pool_qty=None, tree_counts=None):
     """Structured variant entry: axes parsed into fields, not display-name strings.
 
     Reads ``product_template_attribute_value_ids`` (the full per-variant
@@ -1089,6 +1089,12 @@ def _structure_variant(variant, template_rootstock=""):
     surfaced a blank ``cultivar`` for every such product (GOL-2014). The
     attribute-value field still excludes ``no_variant`` axes (e.g. a metadata
     Rootstock line), so the ``_template_rootstock`` fallback below is unaffected.
+
+    ``pool_qty`` (a ``grove_shared_pool_qty_map("qty_available")`` result) and
+    ``tree_counts`` (a ``promotions.variant_tree_counts`` result) let the detail
+    resolve the whole template in batched reads instead of a sibling scan and a
+    BoM search per variant. Omit them and this variant is resolved on its own,
+    to the same values.
     """
     axis = {v.attribute_id.name: v.name for v in variant.product_template_attribute_value_ids}
     return {
@@ -1109,7 +1115,9 @@ def _structure_variant(variant, template_rootstock=""):
         # Shared-pool availability (GOL-2031 peat & bagged): a Bareroot variant
         # ships the potted stock too (de-potted + bagged at packing), so the
         # PDP must not show "sold out" while its potted sibling sits at 30.
-        "qty_available": variant.grove_shared_pool_qty("qty_available"),
+        "qty_available": (
+            pool_qty[variant.id] if pool_qty is not None else variant.grove_shared_pool_qty("qty_available")
+        ),
         "shipping_tier": variant.grove_effective_shipping_tier,
         # Seed pre-order "Pack size" axis (GOL-3257 §5): the display value sits
         # beside cultivar/format/rootstock ("" when the product has no Pack size
@@ -1122,7 +1130,7 @@ def _structure_variant(variant, template_rootstock=""):
         # the bundle's BoM tree count (Remembrance Grove = 5), 0 for supplies,
         # gift cards and services. The storefront sums tree_count × qty across
         # the cart for the volume-tier nudge; a missing field hides the nudge.
-        "tree_count": promotions.variant_tree_count(variant),
+        "tree_count": (tree_counts[variant.id] if tree_counts is not None else promotions.variant_tree_count(variant)),
     }
 
 
@@ -1351,10 +1359,17 @@ class GroveHeadlessAPI(http.Controller):
             "min_long_edge": GROVE_MIN_IMAGE_LONG_EDGE,
         }
         template_rootstock = _template_rootstock(product)
-        data["variants"] = [_structure_variant(v, template_rootstock) for v in _ordered_variants(product)]
+        # Resolve the per-variant BoM and shared-pool reads for the whole template
+        # up front: per variant they cost two queries and a sibling scan each,
+        # which put an 84-variant apple at 206 queries against 42 for two variants.
+        variants = _ordered_variants(product)
+        phantom_boms = _phantom_kit_boms(product.product_variant_ids)
+        pool_qty = variants.grove_shared_pool_qty_map("qty_available")
+        tree_counts = promotions.variant_tree_counts(variants, phantom_boms)
+        data["variants"] = [_structure_variant(v, template_rootstock, pool_qty, tree_counts) for v in variants]
         data["facts"] = _serialize_facts(product)
         # GOL-2587 fulfillment/compliance flags (see product_list).
-        data.update(_fulfillment_flags(product))
+        data.update(_fulfillment_flags(product, phantom_boms))
         # Storefront marketing description now lives in description_ecommerce
         # (GOL-2382); expose it as description_html (raw HTML — grove-sites
         # sanitizes on render). description_sale stays in the payload above until

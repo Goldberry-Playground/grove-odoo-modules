@@ -254,8 +254,10 @@ class ProductTemplate(models.Model):
     # card — so snapshot before the write and let grove.publish.event emit a
     # `product.availability` webhook if the state actually crossed. qty_available
     # is deliberately NOT here: on-hand never changes via a template write, it
-    # crosses through stock.quant (see stock_quant.py).
-    _GROVE_AVAILABILITY_FIELDS = frozenset({"sale_ok", "website_published", "is_published", "active"})
+    # crosses through stock.quant (see stock_quant.py). list_price is here so a
+    # price change reaches the storefront caches within seconds (2026-11-09);
+    # variant price_extra is hooked on product.template.attribute.value.
+    _GROVE_AVAILABILITY_FIELDS = frozenset({"sale_ok", "website_published", "is_published", "active", "list_price"})
 
     # Planner-relevant fields whose value is served in the planner catalog feed
     # (GOL-3548 §A.3). A write to any of them moves the catalog, so it bumps the

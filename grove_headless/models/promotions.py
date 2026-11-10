@@ -38,15 +38,27 @@ SHIPPING_PRODUCT_CODE = "GROVE-SHIP"
 # ── qualifying "tree" counting ───────────────────────────────────────────────
 
 
-def is_qualifying_plant(product):
+# "Not passed" marker for ``plants_root``: None already means "the Plants root
+# does not exist", which callers resolving it once must be able to pass through.
+_RESOLVE = object()
+
+
+def _plants_root(env):
+    return env.ref("grove_headless.categ_plants", raise_if_not_found=False)
+
+
+def is_qualifying_plant(product, plants_root=_RESOLVE):
     """A nursery plant unit: a consumable product categorised under the Plants
     root (``grove_headless.categ_plants``). Supplies, gift cards and services are
-    never plants; bundles are exempt (they count via their components, below)."""
+    never plants; bundles are exempt (they count via their components, below).
+
+    ``plants_root`` lets a caller checking many products resolve the root once:
+    ``env.ref`` runs an ``exists()`` query on every call."""
     tmpl = product.product_tmpl_id
     if tmpl.type != "consu":
         return False
-    env = product.env
-    plants_root = env.ref("grove_headless.categ_plants", raise_if_not_found=False)
+    if plants_root is _RESOLVE:
+        plants_root = _plants_root(product.env)
     categ = tmpl.categ_id
     if not plants_root or not categ or not categ.parent_path or not plants_root.parent_path:
         return False
@@ -56,16 +68,23 @@ def is_qualifying_plant(product):
     return categ.parent_path.startswith(plants_root.parent_path)
 
 
-def _bundle_tree_count(env, variant):
+def _bundle_tree_count(env, variant, phantom_boms=None, plants_root=_RESOLVE):
     """Component tree count of one unit of a phantom-BOM bundle: the total
     qualifying-plant component units in its exploded BOM. 0 when ``variant`` is
     not a bundle (no phantom BOM) — the caller then treats it as a standalone
     line. Best-effort: a BOM/registry hiccup logs and counts 0 rather than
-    breaking checkout."""
+    breaking checkout.
+
+    ``phantom_boms`` is an already-resolved ``{variant: bom}`` map (one batched
+    ``_bom_find``) covering ``variant``; omit it and this variant is searched on
+    its own. ``plants_root``: see ``is_qualifying_plant``."""
     if "mrp.bom" not in env.registry:
         return 0
     try:
-        bom = env["mrp.bom"].sudo()._bom_find(variant, bom_type="phantom").get(variant)
+        if phantom_boms is None:
+            bom = env["mrp.bom"].sudo()._bom_find(variant, bom_type="phantom").get(variant)
+        else:
+            bom = phantom_boms.get(variant)
         if not bom:
             return 0
         _boms, exploded = bom.explode(variant, 1)
@@ -74,7 +93,7 @@ def _bundle_tree_count(env, variant):
         return 0
     total = 0
     for bom_line, line_data in exploded:
-        if is_qualifying_plant(bom_line.product_id):
+        if is_qualifying_plant(bom_line.product_id, plants_root):
             total += int(line_data.get("qty") or bom_line.product_qty or 0)
     return total
 
@@ -112,6 +131,26 @@ def variant_tree_count(variant):
     if per_unit:
         return per_unit
     return 1 if is_qualifying_plant(variant) else 0
+
+
+def variant_tree_counts(variants, phantom_boms=None):
+    """``{variant id: variant_tree_count(variant)}`` for a recordset, in batched reads.
+
+    The product detail serializes every variant of a template (84 for the
+    apple). Per variant, ``variant_tree_count`` runs its own phantom-BoM search
+    and an ``env.ref`` existence check; here the BoMs come from one batched
+    ``_bom_find`` (or the caller's already-resolved ``phantom_boms`` map) and the
+    Plants root is resolved once. Same rule, same counts.
+    """
+    env = variants.env
+    if phantom_boms is None and "mrp.bom" in env.registry:
+        phantom_boms = env["mrp.bom"].sudo()._bom_find(variants, bom_type="phantom")
+    plants_root = _plants_root(env)
+    counts = {}
+    for variant in variants:
+        per_unit = _bundle_tree_count(env, variant, phantom_boms, plants_root)
+        counts[variant.id] = per_unit or (1 if is_qualifying_plant(variant, plants_root) else 0)
+    return counts
 
 
 # ── automatic volume-tier feed (GET /promotions/auto) ────────────────────────

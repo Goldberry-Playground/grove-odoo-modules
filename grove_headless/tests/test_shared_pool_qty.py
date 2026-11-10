@@ -111,6 +111,22 @@ class TestSharedPoolQty(GroveTaxFixtureMixin, TransactionCase):
         self._stock(tmpl.product_variant_id, 7)
         self.assertEqual(tmpl.product_variant_id.grove_shared_pool_qty("qty_available"), 7)
 
+    def test_pool_map_matches_per_variant_reads(self):
+        # The detail reads the whole template through grove_shared_pool_qty_map;
+        # it must give every variant exactly what grove_shared_pool_qty gives.
+        tmpl = self._template([self.c_meader.id, self.c_early.id])
+        tmpl.grove_shipping_tier = "bareroot"
+        self._stock(self._variant(tmpl, "Potted", "Meader"), 30)
+        self._stock(self._variant(tmpl, "Bareroot", "Meader"), 5)
+        self._stock(self._variant(tmpl, "Potted", "Early Golden"), 12)
+        variants = tmpl.product_variant_ids
+        for field in ("qty_available", "free_qty"):
+            expected = {v.id: v.grove_shared_pool_qty(field) for v in variants}
+            self.assertEqual(variants.grove_shared_pool_qty_map(field), expected)
+        self.assertEqual(
+            variants.grove_shared_pool_qty_map("qty_available")[self._variant(tmpl, "Bareroot", "Meader").id], 35
+        )
+
     # GOL-2517: the grid card's live stock signal. Before this the list payload
     # carried no availability, so /shop read "In stock" forever after a sellout.
     def test_list_in_stock_true_when_any_variant_stocked(self):
