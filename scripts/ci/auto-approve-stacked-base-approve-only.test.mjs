@@ -129,7 +129,7 @@ case "\${1:-} \${2:-}" in
   "api "*)
     case "\${2:-}" in
       *check-runs*) emit '{"check_runs":[{"name":"agent-review/ada","status":"completed","conclusion":"success"}]}' ;;
-      *reviews*)    emit '[]' ;;
+      *reviews*)    emit "\${FAKE_REVIEWS:-[]}" ;;
       *actions/runs*) emit '{"total_count":1,"workflow_runs":[{"name":"CI","status":"completed","conclusion":"success","created_at":"2026-10-20T00:00:00Z"}]}' ;;
       *) emit '{}' ;;
     esac ;;
@@ -140,7 +140,7 @@ exit 0
 `;
 const FAKE_SLEEP = "#!/usr/bin/env bash\nexit 0\n";
 
-function runStep({ base, author = "app/agenticos-developer", defaultBranch = "main" }) {
+function runStep({ base, author = "app/agenticos-developer", defaultBranch = "main", reviews = "[]" }) {
   const dir = mkdtempSync(join(tmpdir(), "auto-approve-stacked-"));
   const bin = join(dir, "bin");
   const state = join(dir, "state");
@@ -173,6 +173,7 @@ function runStep({ base, author = "app/agenticos-developer", defaultBranch = "ma
       FAKE_FILE: UNPROTECTED_FILE,
       FAKE_HEAD: HEAD,
       FAKE_BASE: base,
+      FAKE_REVIEWS: reviews,
     },
   });
   const calls = readFileSync(log, "utf8").split("\n").filter(Boolean);
@@ -248,6 +249,44 @@ check("stacked MAINTAINER PR: approve-only path unchanged (no merge, no notice n
   assert(r.status === 0, `exit ${r.status}\n${r.stdout}\n${r.stderr}`);
   assert(approvals(r.calls).length === 1, `approve calls: ${JSON.stringify(approvals(r.calls))}`);
   assert(merges(r.calls).length === 0, `maintainer PR must never be merged by the bot: ${JSON.stringify(merges(r.calls))}`);
+});
+
+// ── Approve-once keys off the head SHA, not "ever approved" (GOL-3914) ───────
+// The old guard counted ANY github-actions[bot] APPROVED review ever left on
+// the PR. A review left on an older commit is stale (the head move dismisses it
+// for the merge gate), so it must NOT suppress a fresh approval on the new head
+// — that wedged PRs like grove-odoo-modules#378 (approval on 900bca5, head now
+// 7984772) into REVIEW_REQUIRED with every check green. A genuine approval
+// already on the CURRENT head must still prevent a duplicate.
+const botReview = (commitId) =>
+  JSON.stringify([{ user: { login: "github-actions[bot]" }, state: "APPROVED", commit_id: commitId }]);
+const OLD_SHA = "900bca5c554fa6713161e483ef09f2d9c0357c9d";
+
+check("stale bot approval on an OLDER commit does not suppress a fresh approval (GOL-3914)", () => {
+  const r = runStep({ base: "main", reviews: botReview(OLD_SHA) });
+  assert(r.status === 0, `exit ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert(
+    approvals(r.calls).length === 1,
+    `a bot approval on an old SHA must not block a fresh one; approve calls: ${JSON.stringify(approvals(r.calls))}`,
+  );
+});
+
+check("a bot approval already on the CURRENT head is not duplicated", () => {
+  const r = runStep({ base: "main", reviews: botReview(HEAD) });
+  assert(r.status === 0, `exit ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert(
+    approvals(r.calls).length === 0,
+    `a current-head bot approval must suppress a duplicate; approve calls: ${JSON.stringify(approvals(r.calls))}`,
+  );
+});
+
+check("HEAD_SHA is resolved on the maintainer + unprotected-path branch (set -u safe)", () => {
+  // This path runs neither the agent-review gate nor the maintainer
+  // protected-path gate, so HEAD_SHA was previously unset when the approve-once
+  // check read it — an unbound-variable abort under `set -u`.
+  const r = runStep({ base: "main", author: "EngineeringMoonBear" });
+  assert(r.status === 0, `exit ${r.status}\n${r.stdout}\n${r.stderr}`);
+  assert(approvals(r.calls).length === 1, `approve calls: ${JSON.stringify(approvals(r.calls))}`);
 });
 
 if (failures > 0) {
