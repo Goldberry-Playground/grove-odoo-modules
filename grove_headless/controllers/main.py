@@ -1,4 +1,3 @@
-import hmac
 import html
 import json
 import logging
@@ -55,7 +54,7 @@ from ..models.seed_season import (
     seed_cart_refusal,
     seed_season,
 )
-from ..models.shipment_email import NOTIFY_STATUSES, delivery_status_from_webhook, shipment_notice_copy
+from ..models.shipment_email import NOTIFY_STATUSES, shipment_notice_copy
 from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
 from ..models.shipping_calendar import (
     LEAFED_WINDOW,
@@ -82,7 +81,6 @@ from ..models.shipping_zones import (
     unshippable_reason,
     zone_for_state,
 )
-from ..models.shippo_client import is_valid_tracking
 from .product_domain import build_product_domain, company_domain, slugify, zone_response
 
 # Grove has sales-tax nexus only in West Virginia, so the WV 6% state tax (the
@@ -3158,64 +3156,6 @@ class GroveHeadlessAPI(http.Controller):
                 channel="sales",
             )
         return _json_response({"partner_id": partner.id, "variant_ids": variants.ids})
-
-    # ── Shipping webhook ─────────────────────────────────────────────────
-
-    @http.route(
-        "/grove/api/v1/shipping/webhook",
-        type="http",
-        auth="public",
-        methods=["POST"],
-        csrf=False,
-    )
-    def shipping_webhook(self, **kwargs):
-        """Handle Shippo tracking-status webhooks.
-
-        Uses type="http" (not "json") so that Shippo receives the correct HTTP
-        status codes: errors return 4xx, success returns 200. With type="json"
-        (JSON-RPC dispatcher), all responses — including exceptions — are wrapped
-        in HTTP 200, preventing Shippo from detecting failures and retrying.
-
-        Auth: token presented either as the `token` URL query parameter (the
-        only mechanism Shippo supports — register the webhook as
-        `.../shipping/webhook?token=<GROVE_SHIPPO_WEBHOOK_TOKEN>`) or as an
-        `X-Grove-Webhook-Token` request header (non-Shippo callers).
-        The token is compared with `hmac.compare_digest` to prevent timing-oracle
-        attacks. GROVE_SHIPPO_WEBHOOK_TOKEN must be set in the server environment.
-        """
-        try:
-            payload = json.loads(request.httprequest.get_data() or b"{}")
-        except (json.JSONDecodeError, ValueError):
-            return _json_response({"error": "bad json"}, status=400)
-
-        # Shippo CANNOT send custom request headers. Its only webhook security
-        # options are a self-generated token in the URL query string, an inbound
-        # IP allowlist, or HMAC (provisioned by their solutions team on request,
-        # up to 10 business days). The header-only check below was therefore
-        # unsatisfiable in production and 403'd every real delivery — verified
-        # live against prod 2026-08-27. Read ?token= first (the Shippo path) and
-        # keep the header for any non-Shippo caller already using it.
-        expected = os.environ.get("GROVE_SHIPPO_WEBHOOK_TOKEN", "")
-        token = request.httprequest.args.get("token", "") or request.httprequest.headers.get(
-            "X-Grove-Webhook-Token", ""
-        )
-        if not expected or not hmac.compare_digest(token, expected):
-            return _json_response({"error": "forbidden"}, status=403)
-
-        data = payload.get("data") or {}
-        tracking = data.get("tracking_number")
-        # Substatus-aware (Josh 2026-09-09): Shippo keeps status=TRANSIT while
-        # substatus.code goes out_for_delivery; the helper promotes it so the
-        # out-for-delivery notice can actually fire.
-        new_status = delivery_status_from_webhook(data.get("tracking_status"))
-        if not (tracking and new_status):
-            return _json_response({"ok": True, "matched": 0})
-        if not is_valid_tracking(tracking):
-            return _json_response({"ok": True, "matched": 0})
-        orders = request.env["sale.order"].sudo().search([("grove_tracking_numbers", "like", tracking)])
-        for order in orders:
-            _apply_delivery_status(request.env, order, new_status, tracking, source="shippo")
-        return _json_response({"ok": True, "matched": len(orders)})
 
 
 def _resolve_waitlist_dept_names(env, interests):

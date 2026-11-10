@@ -487,44 +487,9 @@ curl -s 'http://localhost:8069/grove/api/v1/shipping/options?zip=28801&state=NC&
 
 `ships_now` is `true` only when today falls inside a valid ship window for the destination USDA zone. `next_wave` is `null` for potted-tier requests. `defer_to` is an ISO date string (or `null`) indicating the earliest eligible ship date. `per_tree_rate` is `null` when the destination state is outside the 31 green states (compliance gate).
 
-### Shipping Webhook (Shippo tracking updates) — RETIRED
+### Shipping Webhook (Shippo tracking updates) — REMOVED
 
-> **Retired.** Shippo is no longer used. Pirate Ship is the only label and money channel, and tracking moves to the carrier-tracking poll (`models/carrier_tracking.py`). Do not register this endpoint with Shippo or set `GROVE_SHIPPO_WEBHOOK_TOKEN` on a new server. The route is still in `controllers/main.py` until it is deleted under the Pirate Ship fulfilment spec (`docs/superpowers/specs/2026-09-09-pirateship-fulfillment-design.md`, "Retire Shippo"). The reference below is kept for history.
-
-```
-POST /grove/api/v1/shipping/webhook
-Auth: X-Grove-Webhook-Token header
-Content-Type: application/json
-```
-
-Receives Shippo tracking-status push events and updates matching `sale.order` records. Configure this URL in the Shippo dashboard webhook settings with a custom `X-Grove-Webhook-Token` header value that matches the `GROVE_SHIPPO_WEBHOOK_TOKEN` environment variable on the Odoo server.
-
-**Auth:** The token is compared with `hmac.compare_digest` to prevent timing-oracle attacks. Requests with a missing or wrong token receive `{"error": "forbidden"}` with no status-code distinction (avoids endpoint enumeration).
-
-**Request Body (Shippo format):**
-
-```json
-{
-  "event": "track_updated",
-  "data": {
-    "tracking_number": "1Z999AA10123456784",
-    "tracking_status": {
-      "status": "TRANSIT"
-    }
-  }
-}
-```
-
-**Response:**
-
-```json
-{
-  "ok": true,
-  "matched": 1
-}
-```
-
-`matched` is the count of `sale.order` records whose `grove_tracking_numbers` field contained the incoming tracking number and were updated. Unrecognized tracking numbers or malformed payloads return `{"ok": true, "matched": 0}` — no error raised on unknown events.
+> **Removed (GOL-2302).** The `POST /grove/api/v1/shipping/webhook` route and its `GROVE_SHIPPO_WEBHOOK_TOKEN` auth check have been deleted. Shippo is no longer used: Pirate Ship is the only label and money channel, and shipped/delivered tracking is sourced directly by the carrier-tracking poll (`models/carrier_tracking.py`, UPS Track + USPS Tracking v3). The webhook was retired after the carrier poll ran one full prod delivery cycle (GOL-2296). Do not re-add the route or set `GROVE_SHIPPO_WEBHOOK_TOKEN` on any server. `shippo_client.py` is kept for the outbound label/rate path only.
 
 ## Seeder Scripts
 
@@ -663,7 +628,7 @@ from . import controllers
 - Version format: `19.0.X.Y.Z` (Odoo major . module major . minor . patch)
 - License: `LGPL-3`
 - Routes use `/grove/api/v1/` prefix
-- Auth: `none` (health), `public` for storefront read endpoints (products, cart get/post, order get, `/shipping/options`, `/shipping/webhook`), `bearer` for write endpoints that mutate Odoo records on behalf of an authenticated BFF (`POST /orders`); webhook auth uses `X-Grove-Webhook-Token` header + `hmac.compare_digest` rather than Odoo auth
+- Auth: `none` (health), `public` for storefront read endpoints (products, cart get/post, order get, `/shipping/options`), `bearer` for write endpoints that mutate Odoo records on behalf of an authenticated BFF (`POST /orders`)
 - Company isolation: always scope queries by `request.website.company_id`
 - Return JSON via `_json_response()` helper — not Odoo's JSON-RPC wrapper
 - Define explicit field lists (`PRODUCT_LIST_FIELDS`) — never `read()` without fields
