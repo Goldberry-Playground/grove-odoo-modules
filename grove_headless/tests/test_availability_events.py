@@ -308,3 +308,39 @@ class TestAvailabilityEvents(GroveTaxFixtureMixin, TransactionCase):
         emitted = sum(len(self._availability_events(t)) for t in templates)
         self.assertEqual(emitted, 2)
         self.assertEqual(len(fake.calls), 2)
+
+    def test_uom_context_does_not_emit(self):
+        """A noter carrying a `uom` context must not make the flush see a price
+        change: lst_price depends on that context, the signature must not."""
+        template = self._make_variant_template("Pear 'Seckel'")
+        self._reset_buffer()
+        dozen = self.env.ref("uom.product_uom_dozen")
+        self.assertNotEqual(dozen, template.uom_id)
+
+        fake = _FakePost()
+        with self._patch_env(), self._patch_post(fake):
+            # The write hooks pass `self`, which carries the caller's context.
+            self.Event.note_availability_candidates(template.with_context(uom=dozen.id))
+            self._flush()  # default context, nothing actually changed
+
+        self.assertFalse(self._availability_events(template))
+        self.assertEqual(len(fake.calls), 0)
+
+    def test_signature_failure_does_not_break_write(self):
+        template = self._make_product("Quince").product_tmpl_id
+        self._reset_buffer()
+
+        def boom(*args, **kwargs):
+            raise RuntimeError("signature exploded")
+
+        with (
+            mock.patch.object(type(self.Event), "_availability_signature", boom),
+            self.assertLogs(grove_publish_event.__name__, level="ERROR") as logs,
+        ):
+            template.write({"list_price": 31.0})  # must not raise
+
+        self.assertIn(str(template.id), logs.output[0])
+
+        self.assertEqual(template.list_price, 31.0)
+        self._flush()  # nothing noted → no-op
+        self.assertFalse(self._availability_events(template))

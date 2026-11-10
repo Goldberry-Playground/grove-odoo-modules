@@ -154,7 +154,7 @@ class GrovePublishEvent(models.Model):
     #   * in stock          (qty_available > 0, read in the product's company)
     #   * sale_ok           (purchasable vs "Coming soon")
     #   * website_published  (present vs absent on /shop)
-    #   * list_price + each variant's lst_price (storefront shared cache,
+    #   * list_price + each variant's price_extra (storefront shared cache,
     #     2026-11-09: a price change must reach the storefronts within seconds;
     #     the receiver already flushes product + catalog on this event)
     # The stock.quant, product.template and product.template.attribute.value
@@ -168,14 +168,17 @@ class GrovePublishEvent(models.Model):
     @api.model
     def _availability_signature(self, templates):
         """{template_id: (in_stock, sale_ok, website_published, list_price,
-        sorted variant lst_prices)} for `templates`.
+        sorted variant price_extras)} for `templates`.
 
-        Read in each template's own company so the stock boolean and variant
-        prices match what that tenant's storefront sees. Variant `lst_price` =
-        template `list_price` + the variant's attribute-value `price_extra`, so a
-        price_extra edit moves the signature without touching the template.
-        sudo: this runs from low-level stock hooks that may not carry catalog
-        read rights, and none of these values are sensitive.
+        Read in each template's own company so the stock boolean matches what
+        that tenant's storefront sees. Variant price is `lst_price` = template
+        `list_price` + the variant's `price_extra`, so (list_price, price_extras)
+        moves exactly when a variant price does. We read price_extra rather than
+        lst_price on purpose: lst_price depends on the `uom` context, so a noter
+        and the flush running under different contexts would see different
+        units and emit spuriously. sudo: this runs from low-level stock hooks
+        that may not carry catalog read rights, and none of these values are
+        sensitive.
         """
         signature = {}
         for template in templates.sudo():
@@ -186,7 +189,7 @@ class GrovePublishEvent(models.Model):
                 bool(template.sale_ok),
                 bool(template.website_published),
                 template.list_price,
-                tuple(sorted(scoped.product_variant_ids.mapped("lst_price"))),
+                tuple(sorted(scoped.product_variant_ids.mapped("price_extra"))),
             )
         return signature
 
@@ -206,7 +209,16 @@ class GrovePublishEvent(models.Model):
         before = data.setdefault(_AVAIL_BEFORE_KEY, {})
         missing = templates.filtered(lambda t: t.id not in before)
         if missing:
-            before.update(self._availability_signature(missing))
+            # Never raise into the user's write: a signature failure only costs
+            # the storefront signal (it falls back to the ISR window).
+            try:
+                before.update(self._availability_signature(missing))
+            except Exception:
+                _logger.exception(
+                    "product.availability: could not snapshot templates %s; skipping the storefront signal",
+                    missing.ids,
+                )
+                return
         if not data.get(_AVAIL_REGISTERED_KEY):
             data[_AVAIL_REGISTERED_KEY] = True
             # Flush at commit so a rolled-back stock change emits nothing, and so
@@ -230,7 +242,7 @@ class GrovePublishEvent(models.Model):
         # The stock / price write already happened; drop the cached computes so
         # the after-signature reflects the new on-hand quantity and prices.
         templates.invalidate_recordset(["qty_available"])
-        templates.product_variant_ids.invalidate_recordset(["price_extra", "lst_price"])
+        templates.product_variant_ids.invalidate_recordset(["price_extra"])
         after = self._availability_signature(templates)
         changed = [t for t in templates if after.get(t.id, before[t.id]) != before[t.id]]
         for index, template in enumerate(changed):

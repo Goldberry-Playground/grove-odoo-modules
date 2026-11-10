@@ -32,7 +32,9 @@ stock" for up to a minute after a sellout. The boundaries:
 - `website_published` flips (present vs absent on `/shop`);
 - a price changes (storefront shared cache, 2026-11-09): the template
   `list_price`, or any variant's `lst_price` (= `list_price` + the variant's
-  attribute-value `price_extra`, read in the template's company). A
+  attribute-value `price_extra`; the signature compares `list_price` and the
+  variants' `price_extra`, which is equivalent and independent of the `uom`
+  context). A
   `price_extra` edit on `product.template.attribute.value` notes the affected
   template before the write. Writing the current price emits nothing.
 
