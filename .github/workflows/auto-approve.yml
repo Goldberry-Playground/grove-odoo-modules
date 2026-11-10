@@ -447,11 +447,18 @@ jobs:
               done
           }
 
-          # Approve once (don't stack duplicate approvals on re-runs).
+          # Approve once per head SHA (don't stack duplicate approvals on
+          # re-runs). Count ONLY a bot APPROVED review whose commit_id is the
+          # PR's CURRENT head SHA: a bot approval left on an older commit is
+          # stale — the head move dismisses it for the merge gate — so it must
+          # NOT suppress a fresh approval on the new head. The old bare
+          # "ever approved?" check wedged PRs whose head advanced after a bot
+          # approval (e.g. #378: Oct approval on 900bca5, head now 7984772:
+          # every run logged "already approved" and skipped). (GOL-3914)
           ALREADY=$(gh api "repos/$REPO/pulls/$PR/reviews" \
-            -q '[.[] | select(.user.login=="github-actions[bot]" and .state=="APPROVED")] | length')
+            --jq "[.[] | select(.user.login==\"github-actions[bot]\" and .state==\"APPROVED\" and .commit_id==\"$HEAD_SHA\")] | length")
           if [ "${ALREADY:-0}" -gt 0 ]; then
-            echo "PR #$PR already approved by github-actions[bot]."
+            echo "PR #$PR already approved by github-actions[bot] on current head $HEAD_SHA."
           else
             gh pr review "$PR" --repo "$REPO" --approve --body \
               "Auto-approved by github-actions[bot]: CI (all required status checks) passed. This identity is distinct from the PR author, so it satisfies the review requirement without self-approval. Functional required status checks (incl. protected-paths-guard) still gate the merge. (GOL-308 / GOL-644 / GOL-1854)"
