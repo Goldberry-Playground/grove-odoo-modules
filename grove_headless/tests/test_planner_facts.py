@@ -231,6 +231,7 @@ class TestPlannerFacts(GroveTaxFixtureMixin, TransactionCase):
 
     def test_cron_posts_planner_section(self):
         self._plant(ready=False, name="Cron Gap Apple")  # complete listing, not ready
+        self.env["ir.config_parameter"].sudo().set_param("web.base.url", "https://odoo.example.test")
         with (
             patch.dict(os.environ, {"DISCORD_OPS_WEBHOOK_URL": "https://discord.example/hook"}),
             patch("odoo.addons.grove_headless.models.product_template.requests") as mock_requests,
@@ -241,6 +242,10 @@ class TestPlannerFacts(GroveTaxFixtureMixin, TransactionCase):
         _, kwargs = mock_requests.post.call_args
         self.assertIn("not planner-ready", kwargs["json"]["content"])
         self.assertIn("Cron Gap Apple", kwargs["json"]["content"])
+        self.assertTrue(
+            kwargs["json"]["content"].startswith("[odoo.example.test] 1 published plant(s) not planner-ready: "),
+            kwargs["json"]["content"],
+        )
 
     # ── Parser rules (pure unit cases) ────────────────────────────────────
     def test_parse_years_to_fruit_min(self):

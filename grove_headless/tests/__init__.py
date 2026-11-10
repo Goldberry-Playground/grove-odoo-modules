@@ -22,6 +22,7 @@ from . import (
     test_consult_line,  # noqa: F401
     test_content_draft_request,  # noqa: F401
     test_detail_serialization,  # noqa: F401
+    test_discord_env_tag,  # noqa: F401  Discord posts name their sending instance
     test_effective_shipping_tier,  # noqa: F401
     test_enrich_job,  # noqa: F401
     test_enrich_status,  # noqa: F401
@@ -41,6 +42,7 @@ from . import (
     test_order_digest,  # noqa: F401
     test_order_rollup,  # noqa: F401
     test_pickup_settlement,  # noqa: F401
+    test_pirateship_import,  # noqa: F401
     test_planner_catalog,  # noqa: F401
     test_planner_facts,  # noqa: F401
     test_plant_compliance,  # noqa: F401

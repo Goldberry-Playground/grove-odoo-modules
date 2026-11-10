@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- The Discord publish switch on the admin Users form (GOL-3830). The field
+         itself is restricted to base.group_system, so it is visible and editable
+         only to admins; the Settings > Users form is already admin-only. Placed
+         next to the timezone preference so it reads as a per-user setting. -->
+    <record id="view_users_form_grove_discord_publisher" model="ir.ui.view">
+        <field name="name">res.users.form.grove.discord.publisher</field>
+        <field name="model">res.users</field>
+        <field name="inherit_id" ref="base.view_users_form"/>
+        <field name="arch" type="xml">
+            <field name="tz" position="after">
+                <field name="grove_discord_publisher"/>
+            </field>
+        </field>
+    </record>
+</odoo>

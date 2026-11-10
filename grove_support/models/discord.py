@@ -10,10 +10,23 @@ monkeypatchable seam in tests.
 
 import logging
 import os
+from urllib.parse import urlsplit
 
 import requests
 
 _logger = logging.getLogger(__name__)
+
+
+def env_tag(base_url, dbname):
+    """``[host]`` of ``base_url`` (``web.base.url``), else ``[db:<dbname>]``.
+
+    Prod, QA and any restored copy post through the same ops webhook, so every
+    message names the instance that sent it (same rule as grove_headless
+    ``discord_tag.env_tag_from``; duplicated here because grove_support must not
+    import grove_headless).
+    """
+    host = urlsplit(base_url or "").netloc
+    return f"[{host}]" if host else f"[db:{dbname}]"
 
 
 def format_chat_start(*, brand=None, visitor=None):
@@ -23,10 +36,11 @@ def format_chat_start(*, brand=None, visitor=None):
     return f"\U0001f4ac New support chat started{where}: {who}"
 
 
-def notify_discord(message):
+def notify_discord(message, env_tag=None):
     """POST ``message`` to ``DISCORD_SUPPORT_WEBHOOK_URL`` (the support channel,
     Josh 2026-10-30), falling back to ``DISCORD_OPS_WEBHOOK_URL`` so an unset
-    support webhook keeps the ping where it landed before.
+    support webhook keeps the ping where it landed before. ``env_tag`` (see
+    :func:`env_tag`) is prefixed so the channel shows which instance posted.
 
     Best-effort: a missing URL or a failed request is logged and swallowed,
     never raised to the caller. ``allowed_mentions`` is disarmed so a visitor
@@ -36,6 +50,8 @@ def notify_discord(message):
     url = os.environ.get("DISCORD_SUPPORT_WEBHOOK_URL", "") or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
     if not url:
         return
+    if env_tag:
+        message = f"{env_tag} {message}"
     try:
         requests.post(
             url,

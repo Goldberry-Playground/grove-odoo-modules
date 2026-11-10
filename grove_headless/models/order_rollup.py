@@ -14,6 +14,7 @@ import requests
 from odoo import api, fields, models
 
 from . import order_digest as od
+from .discord_tag import tag_discord_message
 from .mail_from import resolve_mail_from
 from .shipping_calendar import _next_wave, usda_zone_for_zip
 
@@ -243,6 +244,7 @@ class SaleOrderRollup(models.AbstractModel):
         url = os.environ.get("DISCORD_ORDERS_WEBHOOK_URL", "") or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
         if not url:
             return
+        text_body = tag_discord_message(self.env, text_body)
         try:
             requests.post(url, json={"content": text_body[:2000]}, timeout=10)
         except Exception:

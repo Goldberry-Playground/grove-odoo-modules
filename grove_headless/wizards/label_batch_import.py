@@ -1,11 +1,13 @@
-"""Manual "Import Pirate Ship tracking" wizard (GOL-2271, spec §B1).
+"""Operator "Import Pirate Ship export" wizard.
 
-The manual path must always exist and use the SAME reconcile code as the runner:
-this wizard just uploads the *Export Tracking Data* CSV and calls
-``grove.label.batch.import_tracking`` — identical to what the
-``/labels/batch/<id>/tracking`` endpoint runs. A validation failure raises
-``LabelBatchError`` (a ``UserError``), which Odoo shows in the wizard dialog with
-the offending refs, and nothing is written.
+Upload ANY Pirate Ship export (.xlsx, .xls or .csv) and Odoo records every row
+it can place: labels for the open batch, single hand-bought labels, replacement
+labels for reprints, and refund flags. Rows it cannot place are listed in the
+result and nothing is written for them, so one stray row no longer bounces the
+whole file (``grove.label.batch.import_pirateship_file``).
+
+The automated runner keeps the strict all-or-nothing reconcile on the
+``/labels/batch/<id>/tracking`` endpoint (``import_tracking``).
 """
 
 import base64
@@ -13,51 +15,53 @@ import base64
 from odoo import fields, models
 
 
+def _default_batch(self):
+    if self.env.context.get("active_model") == "grove.label.batch":
+        return self.env.context.get("active_id")
+    return False
+
+
 class GroveLabelBatchImport(models.TransientModel):
     _name = "grove.label.batch.import"
-    _description = "Import Pirate Ship tracking into a label batch"
+    _description = "Import a Pirate Ship export"
 
-    batch_id = fields.Many2one(
-        "grove.label.batch",
-        required=True,
-        default=lambda self: self.env.context.get("active_id"),
-    )
-    data = fields.Binary(string="Tracking CSV", required=True)
+    batch_id = fields.Many2one("grove.label.batch", default=_default_batch)
+    data = fields.Binary(string="Pirate Ship export", required=True)
     filename = fields.Char()
 
     def action_import(self):
         self.ensure_one()
         raw = base64.b64decode(self.data)
-        result = self.batch_id.import_tracking(raw, filename=self.filename or "tracking.csv")
-        message = (
-            f"{result['orders_advanced']} order(s) advanced, "
-            f"{result['skipped_already_tracked']} already-tracked skipped, "
-            f"${result['total']:.2f} reconciled."
+        company = self.batch_id.company_id or self.env.company
+        result = self.env["grove.label.batch"].import_pirateship_file(
+            raw, filename=self.filename or "pirateship-export", company=company
         )
-        manual_review = result.get("manual_review") or []
-        batch_warnings = result.get("warnings") or []
-        notify_type = "success"
-        sticky = False
-        if manual_review:
-            # Matched on recipient email, not the Grove Ref round-trip: keep the
-            # dialog sticky and yellow so the operator actually reviews it.
-            message += f" ⚠️ {len(manual_review)} row(s) matched by EMAIL — verify: {', '.join(manual_review)}."
-            notify_type = "warning"
-            sticky = True
-        if batch_warnings:
-            # Already-labelled cross-check (GOL-3083): a recipient we just advanced
-            # also has a recent recorded label elsewhere — surface it loudly.
-            message += " ⚠️ " + " ".join(batch_warnings)
-            notify_type = "warning"
-            sticky = True
+        parts = []
+        if result["labelled"]:
+            parts.append(f"Labelled: {', '.join(result['labelled'])}.")
+        if result["replaced"]:
+            parts.append(f"Replaced: {'; '.join(result['replaced'])}.")
+        if result["already"]:
+            parts.append(f"{result['already']} row(s) already recorded.")
+        if result["refunded"]:
+            parts.append(f"⚠️ Refunded: {'; '.join(result['refunded'])}.")
+        if result["manual_review"]:
+            parts.append(f"⚠️ Matched by email, check: {', '.join(result['manual_review'])}.")
+        if result["warnings"]:
+            parts.append("⚠️ " + " ".join(result["warnings"]))
+        if result["review"]:
+            parts.append(f"⚠️ Not imported ({len(result['review'])}): " + "; ".join(result["review"]))
+        if not parts:
+            parts.append("Nothing to import in this file.")
+        needs_eyes = any(result[k] for k in ("refunded", "manual_review", "warnings", "review"))
         return {
             "type": "ir.actions.client",
             "tag": "display_notification",
             "params": {
-                "title": self.batch_id.name,
-                "message": message,
-                "type": notify_type,
-                "sticky": sticky,
+                "title": "Pirate Ship import",
+                "message": " ".join(parts),
+                "type": "warning" if needs_eyes else "success",
+                "sticky": needs_eyes,
                 "next": {"type": "ir.actions.act_window_close"},
             },
         }

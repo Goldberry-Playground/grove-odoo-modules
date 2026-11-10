@@ -35,6 +35,15 @@ sys.modules.setdefault("grove_schedule_f", _stub_pkg("grove_schedule_f", _sf_dir
 sys.modules.setdefault("grove_schedule_f.models", _stub_pkg("grove_schedule_f.models", os.path.join(_sf_dir, "models")))
 sys.modules.setdefault("grove_schedule_f.tests", _stub_pkg("grove_schedule_f.tests", os.path.join(_sf_dir, "tests")))
 
+# Same for grove_calendar (its real __init__ imports Odoo models). The pure
+# formatter test (test_discord_format) loads discord_format.py by file path, so
+# it does not need the package import; the stub just stops pytest from executing
+# the real __init__ chain during collection.
+_gc_dir = os.path.join(_ROOT, "grove_calendar")
+sys.modules.setdefault("grove_calendar", _stub_pkg("grove_calendar", _gc_dir))
+sys.modules.setdefault("grove_calendar.models", _stub_pkg("grove_calendar.models", os.path.join(_gc_dir, "models")))
+sys.modules.setdefault("grove_calendar.tests", _stub_pkg("grove_calendar.tests", os.path.join(_gc_dir, "tests")))
+
 # The files below need a real Odoo runtime (TransactionCase etc.). They run
 # under Odoo's --test-enable runner, not pytest — exclude them from pytest
 # collection entirely so the odoo stubs above can't give them a confusing
@@ -75,12 +84,14 @@ collect_ignore_glob = [
     "grove_headless/tests/test_ship_wave_hand_label.py",
     "grove_headless/tests/test_label_batch.py",
     "grove_headless/tests/test_label_reconcile.py",
+    "grove_headless/tests/test_pirateship_import.py",
     "grove_headless/tests/test_carrier_tracking_cron.py",
     "grove_headless/tests/test_carrier_closeout.py",
     "grove_headless/tests/test_poller_lifecycle.py",
     "grove_headless/tests/test_order_rollup.py",
     "grove_headless/tests/test_listing_gate.py",
     "grove_headless/tests/test_listing_audit.py",
+    "grove_headless/tests/test_discord_env_tag.py",
     "grove_headless/tests/test_planner_catalog.py",
     "grove_headless/tests/test_planner_facts.py",
     "grove_headless/tests/test_planner_roles.py",
@@ -107,4 +118,12 @@ collect_ignore_glob = [
     "grove_schedule_f/tests/test_import_dedupe.py",
     "grove_schedule_f/tests/test_mirror.py",
     "grove_schedule_f/tests/test_proposals.py",
+    # grove_calendar Odoo-runtime (TransactionCase) tests — run under the Odoo
+    # install-smoke-test, not pytest. The pure formatter test stays collected.
+    "grove_calendar/tests/test_grove_public_domain.py",
+    "grove_calendar/tests/test_digest_cron.py",
+    "grove_calendar/tests/test_discord_events_cron.py",
+    "grove_calendar/tests/test_discord_exceptions.py",
+    "grove_calendar/tests/test_grove_website_domain.py",
+    "grove_calendar/tests/test_events_feed_route.py",
 ]

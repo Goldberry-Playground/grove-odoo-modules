@@ -18,6 +18,7 @@ import requests
 from odoo import api, fields, models
 
 from . import mailgun_gateway
+from .discord_tag import tag_discord_message
 
 _logger = logging.getLogger(__name__)
 
@@ -241,6 +242,7 @@ class GroveEmailLog(models.Model):
             f":warning: Customer email **{label}** for {order_ref} "
             f"({dict(_KIND_SELECTION).get(self.kind, self.kind)}, email log #{self.id})"
         )
+        message = tag_discord_message(self.env, message)
         try:
             requests.post(url, json={"content": message[:2000]}, timeout=10)
         except Exception:  # noqa: BLE001 — alert is best-effort

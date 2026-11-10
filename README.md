@@ -57,6 +57,7 @@ Each React website sends an `X-Grove-Tenant` header. The `grove_headless` module
 |--------|---------|---------|--------|
 | `grove_headless` | 19.0.1.93.0 | REST API + multi-tenant routing + nursery potting-batch workflow + shipping zone engine | Active |
 | `grove_support` | 19.0.1.2.0 | Livechat glue: partner match, `crm.lead` per chat, recent-orders internal note, Discord ping (GOL-2022) | Active |
+| `grove_calendar` | 19.0.1.0.0 | Public `calendar.event` to Discord: weekly "Coming up" webhook digest, Monday 12:00 UTC (GOL-3830) | Active |
 | `web_dark_mode` | 19.0.1.0.0 | Vendored OCA `web_dark_mode`: dark mode for the Odoo backend (AGPL-3) | Vendored |
 
 Versions are the `version` key in each module's `__manifest__.py`.
