@@ -150,11 +150,15 @@ class GrovePublishEvent(models.Model):
         return self._emit(product_tmpl, EVENT_GUIDE_PUBLISH)
 
     # ── Availability transitions (GOL-1896) ────────────────────────────
-    # Storefront availability is three storefront-visible booleans:
+    # Storefront availability is three storefront-visible booleans plus price:
     #   * in stock          (qty_available > 0, read in the product's company)
     #   * sale_ok           (purchasable vs "Coming soon")
     #   * website_published  (present vs absent on /shop)
-    # The stock.quant and product.template write hooks call
+    #   * list_price + each variant's lst_price (storefront shared cache,
+    #     2026-11-09: a price change must reach the storefronts within seconds;
+    #     the receiver already flushes product + catalog on this event)
+    # The stock.quant, product.template and product.template.attribute.value
+    # (price_extra) write hooks call
     # `note_availability_candidates` with the pre-mutation state; a single
     # transaction-commit flush emits `product.availability` for the templates
     # that actually crossed a boundary. Emitting on the *transition* (not every
@@ -163,12 +167,15 @@ class GrovePublishEvent(models.Model):
     # that changed, computed earliest→final state.
     @api.model
     def _availability_signature(self, templates):
-        """{template_id: (in_stock, sale_ok, website_published)} for `templates`.
+        """{template_id: (in_stock, sale_ok, website_published, list_price,
+        sorted variant lst_prices)} for `templates`.
 
-        Read in each template's own company so the boolean matches what that
-        tenant's storefront sees. sudo: this runs from low-level stock hooks that
-        may not carry catalog read rights, and the availability booleans are not
-        sensitive.
+        Read in each template's own company so the stock boolean and variant
+        prices match what that tenant's storefront sees. Variant `lst_price` =
+        template `list_price` + the variant's attribute-value `price_extra`, so a
+        price_extra edit moves the signature without touching the template.
+        sudo: this runs from low-level stock hooks that may not carry catalog
+        read rights, and none of these values are sensitive.
         """
         signature = {}
         for template in templates.sudo():
@@ -178,6 +185,8 @@ class GrovePublishEvent(models.Model):
                 (scoped.qty_available or 0.0) > 0.0,
                 bool(template.sale_ok),
                 bool(template.website_published),
+                template.list_price,
+                tuple(sorted(scoped.product_variant_ids.mapped("lst_price"))),
             )
         return signature
 
@@ -218,9 +227,10 @@ class GrovePublishEvent(models.Model):
         if not before:
             return
         templates = self.env["product.template"].browse(sorted(before)).exists()
-        # The stock write already happened; drop the cached compute so the
-        # after-signature reflects the new on-hand quantity.
+        # The stock / price write already happened; drop the cached computes so
+        # the after-signature reflects the new on-hand quantity and prices.
         templates.invalidate_recordset(["qty_available"])
+        templates.product_variant_ids.invalidate_recordset(["price_extra", "lst_price"])
         after = self._availability_signature(templates)
         changed = [t for t in templates if after.get(t.id, before[t.id]) != before[t.id]]
         for index, template in enumerate(changed):

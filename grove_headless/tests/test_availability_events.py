@@ -228,3 +228,83 @@ class TestAvailabilityEvents(GroveTaxFixtureMixin, TransactionCase):
         emitted = sum(len(self._availability_events(p.product_tmpl_id)) for p in products)
         self.assertEqual(emitted, 2)  # capped: the 3rd degrades to the ISR window
         self.assertEqual(len(fake.calls), 2)
+
+    # ── price transitions (storefront shared cache, 2026-11-09) ──────────
+    # Josh ruled price changes must reach the storefronts within seconds; the
+    # storefront already flushes product + catalog on any product.availability,
+    # so a price change rides the same event, dedupe and cap.
+    def _make_variant_template(self, name):
+        size = self.env["product.attribute"].create({"name": f"Size ({name})"})
+        small, large = self.env["product.attribute.value"].create(
+            [{"name": "Small", "attribute_id": size.id}, {"name": "Large", "attribute_id": size.id}]
+        )
+        return self.env["product.template"].create(
+            {
+                "name": name,
+                "type": "consu",
+                "is_storable": True,
+                "list_price": 25.0,
+                "attribute_line_ids": [(0, 0, {"attribute_id": size.id, "value_ids": [(6, 0, [small.id, large.id])]})],
+            }
+        )
+
+    def test_list_price_change_emits_once(self):
+        template = self._make_product("Apple 'Liberty'").product_tmpl_id
+        self._reset_buffer()
+
+        fake = _FakePost()
+        with self._patch_env(), self._patch_post(fake):
+            template.write({"list_price": 30.0})
+            self._flush()
+
+        events = self._availability_events(template)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events.state, "delivered")
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(fake.calls[0]["headers"][grove_publish.EVENT_HEADER], AVAILABILITY)
+
+    def test_variant_price_extra_change_emits(self):
+        template = self._make_variant_template("Fig 'Chicago Hardy'")
+        self.assertEqual(len(template.product_variant_ids), 2)
+        ptav = template.attribute_line_ids.product_template_value_ids[:1]
+        self._reset_buffer()
+
+        fake = _FakePost()
+        with self._patch_env(), self._patch_post(fake):
+            ptav.write({"price_extra": 5.0})
+            self._flush()
+
+        self.assertEqual(len(self._availability_events(template)), 1)
+        self.assertEqual(len(fake.calls), 1)
+
+    def test_same_price_write_emits_nothing(self):
+        template = self._make_product("Plum 'Methley'").product_tmpl_id
+        self._reset_buffer()
+
+        fake = _FakePost()
+        with self._patch_env(), self._patch_post(fake):
+            template.write({"list_price": template.list_price})
+            self._flush()
+
+        self.assertFalse(self._availability_events(template))
+        self.assertEqual(len(fake.calls), 0)
+
+    def test_bulk_reprice_respects_cap(self):
+        templates = self.env["product.template"].browse(
+            [self._make_product(f"Reprice {i}").product_tmpl_id.id for i in range(3)]
+        )
+        self._reset_buffer()
+
+        fake = _FakePost()
+        # Shrink the cap so the test stays fast; 3 templates > cap of 2.
+        with (
+            mock.patch.object(grove_publish_event, "_AVAILABILITY_EMIT_CAP", 2),
+            self._patch_env(),
+            self._patch_post(fake),
+        ):
+            templates.write({"list_price": 40.0})
+            self._flush()
+
+        emitted = sum(len(self._availability_events(t)) for t in templates)
+        self.assertEqual(emitted, 2)
+        self.assertEqual(len(fake.calls), 2)
