@@ -57,6 +57,7 @@ def test_lane():
     assert lane_for("pickup", False, "spring") == "none"
     assert lane_for("ship", True, False) == "none"
 
+
 def test_parse_hold_date():
     today = date(2026, 10, 20)
     assert parse_hold_date("Oct 25", today) == date(2026, 10, 25)
@@ -67,9 +68,11 @@ def test_parse_hold_date():
         with self.assertRaises(ValueError):
             parse_hold_date(bad, today)
 
+
 def test_suggest_is_later_of_dormancy_and_zone():
     assert suggest_hold_date(date(2026, 9, 1), date(2026, 10, 15), date(2026, 11, 9)) == date(2026, 11, 9)
     assert suggest_hold_date(date(2026, 9, 1), date(2026, 10, 15), None) == date(2026, 10, 15)
+
 
 def test_clean_tracking_and_cost():
     assert clean_tracking(" 1Z999 AA1 0123456784\n") == "1Z999AA10123456784"
