@@ -344,3 +344,33 @@ class TestAvailabilityEvents(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(template.list_price, 31.0)
         self._flush()  # nothing noted → no-op
         self.assertFalse(self._availability_events(template))
+
+    def test_flush_signature_failure_does_not_break_write(self):
+        template = self._make_product("Medlar").product_tmpl_id
+        self._reset_buffer()
+        fake = _FakePost()
+        with self._patch_env(), self._patch_post(fake):
+            self.Event.note_availability_candidates(template)
+
+            def boom(*args, **kwargs):
+                raise RuntimeError("after-signature exploded")
+
+            with (
+                mock.patch.object(type(self.Event), "_availability_signature", boom),
+                self.assertLogs(grove_publish_event.__name__, level="ERROR") as logs,
+            ):
+                self._flush()  # must not raise (it runs in a precommit hook)
+
+        self.assertIn(str(template.id), logs.output[0])
+        self.assertFalse(self._availability_events(template))
+        self.assertEqual(len(fake.calls), 0)
+
+    def test_automatic_emit_uses_short_timeout(self):
+        product = self._make_product("Jujube")
+        self._stock_then_reset(product, 5)
+        fake = _FakePost()
+        with self._patch_env(), self._patch_post(fake):
+            self._add_stock(product, -5)
+            self._flush()
+        self.assertEqual(len(fake.calls), 1)
+        self.assertEqual(fake.calls[0]["timeout"], 3)

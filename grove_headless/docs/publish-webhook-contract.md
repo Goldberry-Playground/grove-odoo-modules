@@ -43,6 +43,14 @@ flushes the product and the catalog on any `product.availability`, so no
 receiver change is needed, and a bulk reprice shares the same per-transaction
 dedupe and `_AVAILABILITY_EMIT_CAP`.
 
+Not signalled: adding or removing variants, and pricelist-only price changes
+(website pricelist rules that leave `list_price` / `price_extra` untouched). These
+do not emit; storefronts pick them up when their cache window expires (at most
+600s).
+
+Automatic emits use a short 3s delivery timeout (they run at commit behind a
+user's write); the manual `guide.publish` action keeps the 10s timeout.
+
 Emitted on the **transition**, coalesced to **one event per template per
 transaction** (earliest→final state) and flushed at commit, so a multi-line
 order that sells out three species produces three events, not thirty, and a

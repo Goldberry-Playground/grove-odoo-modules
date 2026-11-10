@@ -74,6 +74,7 @@ class TestPublishEvent(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(len(fake.calls), 1)
         call = fake.calls[0]
         self.assertEqual(call["url"], WEBHOOK_ENV["GROVE_PUBLISH_WEBHOOK_URL_GOLDBERRY"])
+        self.assertEqual(call["timeout"], 10)  # manual publish keeps the long timeout
 
         # The signature we sent verifies against the tenant secret over the raw
         # bytes on the wire — the whole point of the contract.

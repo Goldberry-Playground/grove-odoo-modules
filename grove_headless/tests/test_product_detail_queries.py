@@ -1,7 +1,7 @@
 """The product detail must not cost a query per variant.
 
 Prod (2026-11-10) served ``/grove/api/v1/products/3`` (apple, 84 variants) in
-0.8-0.9s while few-variant products took 0.3-0.4s. A local profile of an
+0.8-1.1s while few-variant products took 0.3-0.4s. A local profile of an
 apple-shaped template (42 cultivars x Potted/Bareroot, a Rootstock metadata line)
 put the detail at 206 queries against 42 for two variants: each variant's
 ``tree_count`` ran its own phantom-BoM search (two queries a variant), and each
