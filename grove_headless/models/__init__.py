@@ -26,10 +26,12 @@ from . import (
     product_public_category,  # noqa: F401  department tree metadata (GOL-2744)
     product_template,  # noqa: F401
     sale_order,  # noqa: F401
+    sale_order_ops,  # noqa: F401  order lanes + holds (Discord order operations)
     seed_season,  # noqa: F401  pure seed pre-order season resolver (GOL-3257), no ORM models
     shipping_zones,  # noqa: F401  pure rate engine (GOL-15), no ORM models
     stock_picking,  # noqa: F401  fulfilment badge on transfers (GOL-1933 follow-up)
     stock_quant,  # noqa: F401  on-hand → product.availability webhook (GOL-1896)
     stripe_gateway,  # noqa: F401  pure Stripe REST client (GOL-642), no ORM models
     website,  # noqa: F401
+    zone_alert,  # noqa: F401  spring zone warnings already sent
 )

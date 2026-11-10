@@ -9,13 +9,28 @@ from odoo.tools import config
 from . import carrier_tracking, printify_client, promotions, shippo_client
 from .shipment_email import normalize_carrier
 from .shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
-from .shipping_calendar import merge_calendar_override, preorder_waves, usda_zone_for_zip
+from .shipping_calendar import (
+    USDA_ZONE_SELECTION,
+    merge_calendar_override,
+    preorder_waves,
+    spring_build_window,
+    usda_zone_for_zip,
+)
 from .shipping_zones import pack_for_state, unshippable_reason
 
 _logger = logging.getLogger(__name__)
 
 # How long an anonymous headless-API cart may sit before the autovacuum deletes it.
 GROVE_API_CART_TTL = timedelta(days=1)
+
+
+# Backward moves, accepted only when a caller passes allow_backward=True. Only
+# Label refunded does. Kept out of _GROVE_TRANSITIONS so no forward path (wave
+# assignment, webhooks) can walk a labelled order back.
+_GROVE_BACKWARD_TRANSITIONS = {
+    "awaiting_label": ("label_purchased",),
+    "wave_assigned": ("label_purchased",),
+}
 
 
 class SaleOrder(models.Model):
@@ -460,7 +475,7 @@ class SaleOrder(models.Model):
     # so groups read "Zone 5" and sort by the declared 2..10 order — "Zone 10"
     # after "Zone 9", never the lexical "10 < 2" a Char would give.
     grove_usda_zone = fields.Selection(
-        selection=[(str(z), f"Zone {z}") for z in range(2, 11)],
+        selection=USDA_ZONE_SELECTION,
         string="USDA Zone",
         compute="_compute_grove_usda_zone",
         store=True,
@@ -560,6 +575,8 @@ class SaleOrder(models.Model):
     # Terminal states — an order here is no longer outstanding and no further
     # transition is legal.
     _GROVE_TERMINAL_STATES = ("delivered", "collected", "cancelled")
+    # The plants have left the farm, so a hold can no longer defer the balance.
+    _GROVE_OUT_THE_DOOR_STAGES = ("shipped", "delivered", "collected")
     # Which prior states each transition may legally advance FROM. A transition
     # requested from any other state is rejected (logged, no write) so a stray
     # signal can never skip the machine (e.g. delivered before shipped).
@@ -610,7 +627,7 @@ class SaleOrder(models.Model):
             return "awaiting_label"
         return "awaiting_payment"
 
-    def _grove_advance_state(self, target, *, source="operator", operator=None, note=None):
+    def _grove_advance_state(self, target, *, source="operator", operator=None, note=None, allow_backward=False):
         """Advance the fulfilment watermark to ``target`` if the transition is
         legal from the current stage. Returns True only when the state actually
         moved, so callers (Discord signal, Shippo webhook) are idempotent across
@@ -624,6 +641,8 @@ class SaleOrder(models.Model):
         if current == target:
             return False  # idempotent: already there
         allowed = self._GROVE_TRANSITIONS.get(target, ())
+        if allow_backward:
+            allowed = (*allowed, *_GROVE_BACKWARD_TRANSITIONS.get(target, ()))
         if current not in allowed:
             _logger.warning(
                 "Rejected fulfilment transition %s -> %s on %s (source=%s): not a legal move from %s.",
@@ -839,6 +858,27 @@ class SaleOrder(models.Model):
         )
         return True
 
+    def _grove_other_order_with_tracking(self, tracking):
+        """The first other live order in this company carrying exactly this tracking
+        number, or an empty recordset. Matched per number, so a number that merely
+        contains this one does not count. A cancelled order's label is dead, so it
+        does not count either; Odoo's own cancel leaves the Grove stage as it was,
+        which is why both are excluded."""
+        self.ensure_one()
+        return (
+            self.sudo()
+            .search(
+                [
+                    ("id", "!=", self.id),
+                    ("company_id", "=", self.company_id.id),
+                    ("state", "!=", "cancel"),
+                    ("grove_fulfillment_stage", "!=", "cancelled"),
+                    ("grove_tracking_numbers", "ilike", tracking),
+                ]
+            )
+            .filtered(lambda o: tracking in (o.grove_tracking_numbers or "").split())[:1]
+        )
+
     def action_grove_replace_label(
         self, tracking_number, carrier=None, actual_cost=None, service=None, source="hand_label"
     ):
@@ -869,13 +909,9 @@ class SaleOrder(models.Model):
         current = (self.grove_tracking_numbers or "").split()
         if current == [tracking]:
             return False
-        other = (
-            self.sudo()
-            .search([("id", "!=", self.id), ("grove_tracking_numbers", "ilike", tracking)])
-            .filtered(lambda o: tracking in (o.grove_tracking_numbers or "").split())
-        )
+        other = self._grove_other_order_with_tracking(tracking)
         if other:
-            raise UserError(f"{self.name}: {tracking} is already the label on {other[0].name}.")
+            raise UserError(f"{self.name}: {tracking} is already the label on {other.name}.")
         carrier_key = self._grove_infer_carrier(tracking, fallback=carrier)
         if not carrier_key:
             raise UserError(f"{self.name}: could not determine the carrier for {tracking!r}; pick UPS or USPS.")
@@ -994,12 +1030,54 @@ class SaleOrder(models.Model):
         flow never depends on Discord being wired: the canonical GOL-1981 shipped
         transition + ship-time settlement (GOL-2053) + exactly one branded
         shipment email. Deferred import breaks the controller→models load cycle,
-        mirroring ``_grove_settle_at_ship``. Returns ``_operator_mark_shipped``'s
+        mirroring ``_grove_settle_at_ship``. Refuses (``UserError``) an order that
+        would ship with no tracking number, the same rule the endpoint enforces;
+        an order the shipped transition would not move still falls through to its
+        no-op. Returns ``_operator_mark_shipped``'s
         ``{"newly_shipped": bool, "settlement": <status> | None}``."""
         self.ensure_one()
         from ..controllers.main import _operator_mark_shipped
 
+        if self._grove_ship_needs_tracking():
+            raise UserError(f"{self.name} has no tracking number. Record its label first, then mark it shipped.")
         return _operator_mark_shipped(self.env, self, actor=operator, source="operator")
+
+    def _grove_ship_needs_tracking(self):
+        """True when marking this order shipped would really move it to shipped
+        but it has no tracking number. Pickup and every stage the transition
+        ignores stay no-ops."""
+        self.ensure_one()
+        return (
+            self.grove_fulfillment != "pickup"
+            and self.grove_fulfillment_stage in self._GROVE_TRANSITIONS["shipped"]
+            and not (self.grove_tracking_numbers or "").strip()
+        )
+
+    def _grove_mark_selection_shipped(self, operator=None):
+        """Entry for the Odoo "Mark shipped" server action on a multi-selection.
+
+        Checks every order before any ships. Each ship charges and emails, and a
+        ``UserError`` part way through would roll the whole request back, losing
+        the record of charges that really happened and re-sending the email on a
+        re-run. So anything the loop would raise on refuses the selection up front
+        in one ``UserError`` naming every order. Returns one
+        ``_grove_mark_shipped_and_settle`` result per order."""
+        problems = []
+        for order in self:
+            # An order the shipped transition would not move stays a no-op below.
+            would_ship = order.grove_fulfillment_stage in self._GROVE_TRANSITIONS["shipped"]
+            if order._grove_consult_compliance_missing():
+                problems.append(f"{order.name}: its compliance check is not recorded")
+            elif would_ship and order.state == "cancel":
+                problems.append(f"{order.name}: it is cancelled")
+            elif would_ship and order.grove_hold_until:
+                until = order.grove_hold_until
+                problems.append(f"{order.name}: on hold until {until:%b} {until.day}, {until.year}")
+            elif order._grove_ship_needs_tracking():
+                problems.append(f"{order.name}: no tracking number")
+        if problems:
+            raise UserError("Nothing was marked shipped. Fix these orders first:\n" + "\n".join(problems))
+        return [order._grove_mark_shipped_and_settle(operator=operator) for order in self]
 
     def grove_should_send_shipment_email(self):
         """Predicate the Phase 3 shipment notification consumes: a shipment
@@ -1037,7 +1115,7 @@ class SaleOrder(models.Model):
         with self.env.registry.cursor() as cr:
             self.with_env(self.env(cr=cr)).write(vals)
 
-    def _wave_hold_reason(self, today):
+    def _wave_hold_reason(self, today, ignore_ship_window=False):
         """Why a chosen-wave pre-order cannot get a label on ``today``, else None.
 
         Only orders with a stored ``grove_ship_wave`` and a known zone are held
@@ -1045,7 +1123,11 @@ class SaleOrder(models.Model):
         ``today`` is inside the chosen wave's ship window for the order's zone,
         using the same admin calendar override as checkout. When the hold cannot
         be computed (no zone, or the zone is missing from the calendar) this
-        returns None and the dormancy check in the caller is the fallback."""
+        returns None and the dormancy check in the caller is the fallback.
+
+        ``ignore_ship_window`` is the spring batch build's 5-day allowance: a
+        spring order is not held while ``today`` is inside its zone's
+        ``spring_build_window``. Only that build passes it."""
         self.ensure_one()
         if not self.grove_ship_wave or not self.grove_usda_zone:
             return None
@@ -1064,6 +1146,10 @@ class SaleOrder(models.Model):
         wave = next((w for w in waves if w["wave"] == self.grove_ship_wave), None)
         if wave is None:
             return None
+        if ignore_ship_window and self.grove_ship_wave == "spring":
+            date_open, date_close = spring_build_window(int(self.grove_usda_zone), today, calendar)
+            if date_open <= today <= date_close:
+                return None
         (sm, sd), (em, ed) = wave["ship_window"]
         t = (today.month, today.day)
         inside = (sm, sd) <= t <= (em, ed) if (sm, sd) <= (em, ed) else t >= (sm, sd) or t <= (em, ed)
@@ -1074,7 +1160,7 @@ class SaleOrder(models.Model):
             f"{sm}/{sd} to {em}/{ed} for zone {self.grove_usda_zone}; no label until then."
         )
 
-    def _grove_pack_for_label(self):
+    def _grove_pack_for_label(self, ignore_ship_window=False):
         """Carrier-neutral shipment plan for ONE order: ``(address, plan, mode)``.
 
         The eligibility gate (preorder wave still closed → skip those lines;
@@ -1087,7 +1173,12 @@ class SaleOrder(models.Model):
         builder catches that to SKIP the order, the Shippo action re-raises it to
         the operator. ``address`` is Shippo-shaped (``street1``/``street2``/``zip``)
         because ``build_shipment_payload`` consumes it verbatim; the batch CSV
-        builder maps those keys to its own column names."""
+        builder maps those keys to its own column names.
+
+        ``ignore_ship_window`` is passed only by the spring batch build, once the
+        build is inside the zone's ``spring_build_window``: the wave then counts
+        as open up to 5 days before its ship start. Single-order paths never
+        pass it."""
         self.ensure_one()
         # Preorder lines owe no label UNTIL their ship wave opens.
         # grove_preorder_variant_ids is the permanent order-time record of
@@ -1099,10 +1190,16 @@ class SaleOrder(models.Model):
         # preorder lines only while the wave is still closed; once it is open
         # they pack.
         skip_preorder_ids = (
-            set() if self.grove_fulfillment_stage == "wave_assigned" else self._preorder_variant_id_set()
+            set()
+            if ignore_ship_window or self.grove_fulfillment_stage == "wave_assigned"
+            else self._preorder_variant_id_set()
         )
         today = fields.Date.context_today(self)
-        wave_hold = self._wave_hold_reason(today) if self.grove_fulfillment_stage != "wave_assigned" else None
+        wave_hold = (
+            self._wave_hold_reason(today, ignore_ship_window=ignore_ship_window)
+            if self.grove_fulfillment_stage != "wave_assigned"
+            else None
+        )
         if wave_hold:
             raise UserError(f"{self.name}: {wave_hold}")
         partner = self.partner_shipping_id
@@ -1568,13 +1665,24 @@ class SaleOrder(models.Model):
         Settles one order per committed transaction so a crash on order N never
         rolls back the successful settlements of 1..N-1 — and the row lock inside
         ``settle_order_at_ship`` makes a cron retry safe to run concurrently with a
-        manual ``Retry settlement`` on the same order (GOL-3011)."""
+        manual ``Retry settlement`` on the same order (GOL-3011). A cancelled order is
+        never retried. A held order is left out until it has shipped: a hold never
+        charges anything by itself, but it must not strand the balance on plants the
+        customer already has."""
         max_retries = int(self.env["ir.config_parameter"].sudo().get_param("grove_headless.settlement_max_retries", 3))
         stuck = self.sudo().search(
             [
                 ("grove_checkout_status", "in", ("settlement_failed", "settlement_error")),
                 ("grove_settlement_attempts", "<", max_retries),
                 ("grove_settlement_needs_customer", "=", False),
+                # Odoo's own cancel leaves the Grove stage alone, so check both.
+                ("state", "!=", "cancel"),
+                ("grove_fulfillment_stage", "!=", "cancelled"),
+                # A hold never charges before the order ships; the retry picks it
+                # up once released. Once the plants are gone an old hold is moot.
+                "|",
+                ("grove_hold_until", "=", False),
+                ("grove_fulfillment_stage", "in", self._GROVE_OUT_THE_DOOR_STAGES),
             ]
         )
         now = fields.Datetime.now()

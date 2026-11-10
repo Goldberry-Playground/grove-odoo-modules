@@ -18,6 +18,7 @@ from . import (
     test_checkout_quote,  # noqa: F401
     test_checkout_ship_wave,  # noqa: F401
     test_consult_compliance_gate,  # noqa: F401
+    test_consult_facts,  # noqa: F401
     test_consult_line,  # noqa: F401
     test_content_draft_request,  # noqa: F401
     test_detail_serialization,  # noqa: F401
@@ -32,14 +33,24 @@ from . import (
     test_html_field_tracking,  # noqa: F401
     test_kit_boms,  # noqa: F401
     test_label_batch,  # noqa: F401
+    test_label_batch_zones,  # noqa: F401
     test_label_reconcile,  # noqa: F401
     test_listing_audit,  # noqa: F401
     test_listing_gate,  # noqa: F401
     test_mark_shipped,  # noqa: F401
+    test_mark_shipped_tracking,  # noqa: F401
     test_migration_relink_xmlids,  # noqa: F401
     test_newsletter_subscribe,  # noqa: F401
+    test_order_card_refresh,  # noqa: F401
     test_order_digest,  # noqa: F401
+    test_order_hold_nudge,  # noqa: F401
+    test_order_holds,  # noqa: F401
+    test_order_label_refunded_move,  # noqa: F401
+    test_order_lanes,  # noqa: F401
+    test_order_ops_api,  # noqa: F401
+    test_order_ops_views,  # noqa: F401
     test_order_rollup,  # noqa: F401
+    test_order_route_access,  # noqa: F401
     test_pickup_settlement,  # noqa: F401
     test_pirateship_import,  # noqa: F401
     test_planner_catalog,  # noqa: F401
@@ -80,4 +91,6 @@ from . import (
     test_usda_zone,  # noqa: F401
     test_usda_zone_filters,  # noqa: F401
     test_wv_taxes,  # noqa: F401
+    test_zone_alerts,  # noqa: F401
+    test_zone_late_and_markall,  # noqa: F401
 )
