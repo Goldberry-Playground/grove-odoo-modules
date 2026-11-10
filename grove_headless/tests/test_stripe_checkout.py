@@ -1812,7 +1812,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         order.grove_stripe_session_id = "cs_disc"
         pings = []
         orig = grove_main._notify_discord
-        grove_main._notify_discord = lambda message, channel=None: pings.append(message)
+        grove_main._notify_discord = lambda message, channel=None, env=None: pings.append(message)
         try:
             with mute_logger("odoo.addons.mail.models.mail_mail"):
                 result = grove_main._handle_session_completed(self.env, {"id": "cs_disc", "payment_intent": "pi_disc"})
@@ -1839,7 +1839,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         order.grove_preorder_variant_ids = str(self.product.id)
         pings = []
         orig = grove_main._notify_discord
-        grove_main._notify_discord = lambda message, channel=None: pings.append(message)
+        grove_main._notify_discord = lambda message, channel=None, env=None: pings.append(message)
         try:
             with mute_logger("odoo.addons.mail.models.mail_mail"):
                 result = grove_main._handle_session_completed(
@@ -1860,7 +1860,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         order.grove_stripe_session_id = "cs_pickup"
         pings = []
         orig = grove_main._notify_discord
-        grove_main._notify_discord = lambda message, channel=None: pings.append(message)
+        grove_main._notify_discord = lambda message, channel=None, env=None: pings.append(message)
         try:
             with mute_logger("odoo.addons.mail.models.mail_mail"):
                 grove_main._handle_session_completed(self.env, {"id": "cs_pickup", "payment_intent": "pi_pickup"})

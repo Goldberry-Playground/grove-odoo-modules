@@ -370,6 +370,7 @@ class SaleOrder(models.Model):
                 _notify_discord(
                     f":rotating_light: Printify push FAILED on {self.name} after {attempts} tries: {exc}",
                     channel="shipping",
+                    env=self.env,
                 )
             return False
 
@@ -392,6 +393,7 @@ class SaleOrder(models.Model):
             _notify_discord(
                 f":rotating_light: Printify push CRASHED on {self.name} after {attempts} tries: {exc}",
                 channel="shipping",
+                env=self.env,
             )
 
     @api.model
@@ -1858,6 +1860,7 @@ class SaleOrder(models.Model):
                     f"Tracking poll stopped for {order.name}: 30 days since the label was bought with no "
                     f"delivery scan. Please check the shipment manually.",
                     channel="shipping",
+                    env=self.env,
                 )
                 continue
 
@@ -1889,6 +1892,7 @@ class SaleOrder(models.Model):
                             f"Carrier tracking paused: {carrier_key} auth failed 3 times this run. "
                             f"Check {carrier_key}_CLIENT_ID / {carrier_key}_CLIENT_SECRET.",
                             channel="shipping",
+                            env=self.env,
                         )
                     continue
                 except Exception:  # noqa: BLE001 — one bad call never stops the sweep
@@ -1906,6 +1910,7 @@ class SaleOrder(models.Model):
                     f"Shipment exception on {order.name}: a carrier reported a delivery problem "
                     f"(tracking {order.grove_tracking_numbers or ''}). Please review.",
                     channel="shipping",
+                    env=self.env,
                 )
 
             new_status = carrier_tracking.least_advanced_status(statuses)
@@ -1959,7 +1964,7 @@ class SaleOrder(models.Model):
         today = fields.Datetime.now().date().isoformat()
         if param.get_param(self._CARRIER_HEALTH_ALERT_PARAM) == today:
             return
-        _notify_discord("\n".join(problems), channel="shipping")
+        _notify_discord("\n".join(problems), channel="shipping", env=self.env)
         param.set_param(self._CARRIER_HEALTH_ALERT_PARAM, today)
 
     def _carrier_poll_muted(self):
@@ -1991,7 +1996,9 @@ class SaleOrder(models.Model):
             f"Carrier {carrier_key} is muted (no tracking): {waiting} in-flight order(s) untracked."
             for carrier_key, waiting in sorted(muted_untracked.items())
         ]
-        _notify_discord("\n".join(["Weekly muted-carrier summary (GOL-3681):", *lines]), channel="shipping")
+        _notify_discord(
+            "\n".join(["Weekly muted-carrier summary (GOL-3681):", *lines]), channel="shipping", env=self.env
+        )
         param.set_param(self._CARRIER_MUTED_SUMMARY_PARAM, week)
 
 
