@@ -22,7 +22,7 @@ The stack is the one AgriforestryOS already runs for the home farm: farmOS is th
 - **Service tiers, not one-off fees.** The free $500-threshold consult is the entry; each step above it is a service product on the same opportunity. Reference prices are Forest Shepherd Farm's published list; ours are Josh's to set on the product records.
 - **No client portal.** Clients see nothing inside our systems. The deliverable is the export bundle: the plan PDF, the plantings, the GIS. Clients do not log; stewardship-tier logs are ours.
 - **Goal modules and practices are two axes.** Modules say what the client wants (twelve, modeled on Cultiva EcoSolutions' service lines). Practices say what goes on a piece of ground, one per area: homestead food forest, alley cropping, silvopasture, forest farming, mycoforestry, riparian buffer, windbreak and hedgerow. The consortia library is keyed by practice and site class.
-- **Machines propose, a named human accepts.** Every generated plan section is `generated` until a named person edits or approves it, and a plan cannot be approved before that. The content gate's rule that machine writes clear `grove_facts_reviewed` applies to every write here.
+- **Machines propose, a named human accepts.** Every generated plan section is `generated` until a named person edits or approves it, and a plan can be approved only once a named person has approved every section. The content gate's rule that machine writes clear `grove_facts_reviewed` applies to every write here.
 - **The retail planner is a projection of this system.** Eight strata collapse to three, four stages to three words, practices to tracks and sub-goals. Never a separate fact set.
 
 ## Non-goals (this spec)
@@ -95,7 +95,7 @@ Feed: `GET /grove/api/v1/planner/catalog?scope=consult` adds, per plant, `syntro
 
 ### C.4 `grove.consult.plan` and `grove.consult.plan.section`
 
-Plan: `lead_id`, `version`, `status` (`draft`, `approved`, `sent`, `installed`), `plan_json` (the rows and consortia, same shape as `sale.order.grove_planner_plan` extended with areas), `approved_by`, `approved_at`, `sale_order_id`. Section: `plan_id`, `module_id` (optional), `key`, `title`, `body` (text), `figures` (Json), `status` (`generated`, `edited`, `approved`), `by` (res.users), `sequence`. Constraint: a plan's status can move to `approved` only when no section is `generated`. The generator that fills them is phase 3; phase 2 ships the models, the constraint and the views so the dashboard can create a draft plan with the skeleton sections empty.
+Plan: `lead_id`, `version`, `status` (`draft`, `approved`, `sent`, `installed`), `plan_json` (the rows and consortia, same shape as `sale.order.grove_planner_plan` extended with areas), `approved_by`, `approved_at`, `sale_order_id`. Section: `plan_id`, `module_id` (optional), `key`, `title`, `body` (text), `figures` (Json), `status` (`generated`, `edited`, `approved`), `by` (res.users), `sequence`. Constraint: a plan's status can move to `approved` only when every section is `approved`. The generator that fills them is phase 3; phase 2 ships the models, the constraint and the views so the dashboard can create a draft plan with the skeleton sections empty.
 
 ### C.5 `crm.lead` extensions
 
