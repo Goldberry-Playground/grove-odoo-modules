@@ -700,6 +700,86 @@ class SaleOrder(models.Model):
         self.ensure_one()
         return self._grove_advance_state("delivered", source=source)
 
+    # Checkout statuses where the customer has paid everything they owe, so a
+    # delivered order can be locked. A settlement still in flight (deposit_paid,
+    # settlement_failed / settlement_error) keeps the order unlocked: the retry
+    # cron rewrites the shipping line, and Odoo refuses line edits on a locked
+    # order.
+    _GROVE_CLOSE_OUT_PAID_STATUSES = ("paid", "settled")
+
+    def _grove_close_out_on_carrier_event(self, status):
+        """Mirror a carrier scan onto Odoo's own records so the order closes out
+        without a human touching the delivery transfer (Josh, 2026-11-08).
+
+        * Any progress scan (shipped, out for delivery, delivered) validates the
+          order's open outgoing pickings for the quantity that is RESERVED. A
+          line with nothing reserved (a bareroot preorder with no stock in Odoo)
+          is left on a backorder rather than forced through: forcing it would
+          push stock negative and claim a tree left the farm that may still be
+          waiting for its wave. The operator sees the open backorder.
+        * A delivered scan then locks the order, but only once every outgoing
+          picking is done and the checkout is fully paid.
+
+        Best-effort and idempotent: it runs inside a savepoint, so a picking that
+        refuses to validate (lot tracking, a missing location) rolls back on its
+        own, leaves a chatter note and never undoes the delivery status or the
+        customer email that already landed. Returns a short summary string for
+        logs and tests."""
+        self.ensure_one()
+        order = self.sudo().with_company(self.company_id)
+        done_names, skipped_names = [], []
+        open_pickings = order.picking_ids.filtered(
+            lambda p: p.picking_type_code == "outgoing" and p.state not in ("done", "cancel")
+        )
+        for picking in open_pickings:
+            moves = picking.move_ids.filtered(lambda m: m.state not in ("done", "cancel"))
+            reserved = moves.filtered(lambda m: m.quantity > 0)
+            if not reserved:
+                skipped_names.append(picking.name)
+                continue
+            try:
+                with self.env.cr.savepoint():
+                    reserved.picked = True
+                    # skip_backorder: no wizard; the unreserved remainder goes
+                    # to a backorder (the default when the picking is not in
+                    # picking_ids_not_to_backorder).
+                    result = picking.with_context(skip_backorder=True, skip_sms=True).button_validate()
+                    if result is not True and picking.state != "done":
+                        raise UserError(f"validation returned {result!r}")
+                done_names.append(picking.name)
+            except Exception as exc:  # noqa: BLE001 - close-out must never fail the scan
+                _logger.warning(
+                    "Carrier close-out could not validate %s on %s", picking.name, order.name, exc_info=True
+                )
+                order.message_post(
+                    body=(
+                        f"Carrier reported “{status}”, but delivery {picking.name} could not be validated "
+                        f"automatically ({exc}). Please validate it by hand."
+                    )
+                )
+        if done_names:
+            order.message_post(
+                body=f"Carrier reported “{status}”: validated delivery {', '.join(done_names)} (reserved quantities)."
+            )
+        if skipped_names:
+            order.message_post(
+                body=(
+                    f"Carrier reported “{status}”: {', '.join(skipped_names)} has nothing reserved "
+                    f"(preorder stock not in Odoo), so it stays open for the operator."
+                )
+            )
+
+        locked = False
+        if status == "delivered" and not order.locked:
+            still_open = order.picking_ids.filtered(
+                lambda p: p.picking_type_code == "outgoing" and p.state not in ("done", "cancel")
+            )
+            if not still_open and order.grove_checkout_status in self._GROVE_CLOSE_OUT_PAID_STATUSES:
+                order.action_lock()
+                locked = True
+                order.message_post(body="Delivered and fully paid: order locked (closed out).")
+        return f"validated={done_names} skipped={skipped_names} locked={locked}"
+
     def action_grove_mark_collected(self, operator=None):
         """Terminal transition for pickup: operator confirms collection at the
         farm. Never buys a label and never emits the shipment email. Returns True
