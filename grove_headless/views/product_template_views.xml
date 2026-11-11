@@ -154,13 +154,42 @@
                         <group string="Planner (syntropic framing)" name="grove_planner_syntropy" colspan="2">
                             <group>
                                 <field name="grove_planner_role" />
-                                <field name="grove_succession" />
+                                <!-- Read-only once the consultant facts project it
+                                     (GOL-3574 §B): both Syntropic stratum and
+                                     Succession stage set. -->
+                                <field
+                                    name="grove_succession"
+                                    readonly="grove_syntropic_stratum and grove_succession_stage"
+                                />
                                 <field name="grove_planner_stratum" readonly="1" />
                             </group>
                             <group>
                                 <field name="grove_living_mulch" />
                                 <field name="grove_substrate" />
                                 <field name="grove_planner_flagged" />
+                            </group>
+                        </group>
+                        <!-- Consultant facts (GOL-3574 §B): the syntropic-design
+                             depth behind the retail planner. The eight-value
+                             stratum and four-value stage project the retail
+                             stratum/succession above once both are set; the rest
+                             feed the consult dashboard and the plan generator.
+                             "Consult ready" is computed. -->
+                        <group string="Consultant" name="grove_consultant" colspan="2">
+                            <group>
+                                <field name="grove_syntropic_stratum" />
+                                <field name="grove_succession_stage" />
+                                <field name="grove_nitrogen_fixer" />
+                                <field name="grove_mature_height_m" />
+                                <field name="grove_canopy_closure_years" />
+                                <field name="grove_coppice_tolerant" />
+                            </group>
+                            <group>
+                                <field name="grove_pruning_response" />
+                                <field name="grove_root_type" />
+                                <field name="grove_allelopathy" />
+                                <field name="grove_log_suitability" />
+                                <field name="grove_consult_ready" readonly="1" />
                             </group>
                         </group>
                         <!-- Enrichment status panel (GOL-2541): what ran, how far

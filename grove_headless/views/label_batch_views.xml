@@ -11,6 +11,7 @@
         <field name="arch" type="xml">
             <list decoration-muted="state == 'cancelled'" decoration-success="state == 'purchased'">
                 <field name="name" />
+                <field name="zone" />
                 <field name="state" widget="badge"
                        decoration-info="state == 'exported'"
                        decoration-success="state == 'purchased'" />
@@ -77,10 +78,11 @@
                     <div class="alert alert-warning" role="alert"
                          invisible="unacked_flagged_count == 0">
                         <field name="unacked_flagged_count" class="oe_inline" />
-                        row(s) look like they may already have shipped by hand (older
-                        than the acknowledgement threshold) and are held OUT of the
-                        exported CSV. Review them below and tick <b>Confirmed not already
-                        shipped</b> on any that genuinely still need a label (GOL-3083).
+                        row(s) may already have a label (older than the acknowledgement
+                        threshold, or left in an earlier batch with no label recorded) and
+                        are held OUT of the exported CSV. Review them below and tick
+                        <b>Confirmed not already shipped</b> on any that genuinely still
+                        need a label (GOL-3083).
                     </div>
                     <div class="oe_title">
                         <h1><field name="name" readonly="1" /></h1>
@@ -88,6 +90,7 @@
                     <group>
                         <group>
                             <field name="company_id" groups="base.group_multi_company" />
+                            <field name="zone" />
                             <field name="row_count" />
                             <field name="expected_total" widget="monetary" />
                             <field name="currency_id" invisible="1" />
@@ -110,6 +113,7 @@
                                     <field name="order_id" readonly="1" />
                                     <field name="box_id" readonly="1" />
                                     <field name="order_age_days" readonly="1" />
+                                    <field name="prior_batch_id" readonly="1" optional="show" />
                                     <field name="age_flagged" column_invisible="1" />
                                     <field name="age_ack" readonly="not age_flagged"
                                            string="Confirmed not already shipped" />

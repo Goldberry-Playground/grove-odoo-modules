@@ -12,14 +12,17 @@ hand with the same files and the same Odoo endpoints (see below).
 ## What it does
 
 ```
-grove-shipper run [--buy | --dry-run] [--batch <id>] [--headed]
+grove-shipper run --zone <2-10> [--buy | --dry-run] [--batch <id>] [--headed]
 ```
 
 Dry-run is the **default**. Steps:
 
-1. **pull** — `POST /grove/api/v1/labels/batch` (idempotent). Exits `0` "nothing to
-   ship" on zero rows; refuses a batch already `purchased`. Saves the CSV to
-   `out/<batch>/batch.csv`.
+1. **pull** — `POST /grove/api/v1/labels/batch` with `{"zone": ...}` (idempotent;
+   `--zone` is required, one spring zone per run). Exits `0` "nothing to ship" on
+   zero rows (`batch_id` is null then); refuses a batch already `purchased`. A zone
+   whose build window is closed gets a 409 and stops. Orders Odoo left out
+   (`skipped`, `needs_confirmation`) are logged and listed in the run summary; they
+   do not stop the run. Saves the CSV to `out/<batch>/batch.csv`.
 2. **upload** — Ship → *Upload a spreadsheet* → attach the CSV → apply the saved
    field mapping (`Grove batch v1`). Asserts every row imported with no
    address-validation flag.
@@ -72,7 +75,7 @@ session; subsequent runs reuse it. The runner never sees the password.
 
 ```
 GROVE_ODOO_BASE_URL=… GROVE_ODOO_API_KEY=… \
-  node src/cli.js run --dry-run --headed
+  node src/cli.js run --zone 6 --dry-run --headed
 ```
 
 ### One-time Pirate Ship setup (manual, by Josh)

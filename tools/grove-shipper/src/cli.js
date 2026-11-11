@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // grove-shipper — Pirate Ship label-batch runner (GOL-2271 B2).
 //
-//   grove-shipper run [--buy | --dry-run] [--batch <id>] [--headed]
+//   grove-shipper run --zone <2-10> [--buy | --dry-run] [--batch <id>] [--headed]
 //
 // Dry-run is the default: pull the batch from Odoo, upload the CSV to Pirate
 // Ship, price-check every row, and stop at the review screen with a screenshot.
@@ -16,9 +16,10 @@ import { OdooClient } from './odoo.js';
 import { committedRowsFromCsv, checkPrices } from './priceCheck.js';
 import { assertNoPirateShipCredentials, resolveBuyDecision } from './guards.js';
 import { postDiscordSummary } from './discord.js';
+import { parseZone, buildNotices, reconcileNotices } from './zoneBatch.js';
 
 function parseArgs(argv) {
-  const args = { command: argv[0], buy: false, dryRun: false, headed: false, batch: null };
+  const args = { command: argv[0], buy: false, dryRun: false, headed: false, batch: null, zone: null };
   for (let i = 1; i < argv.length; i++) {
     const a = argv[i];
     if (a === '--buy') args.buy = true;
@@ -26,6 +27,8 @@ function parseArgs(argv) {
     else if (a === '--headed') args.headed = true;
     else if (a === '--batch') args.batch = argv[++i];
     else if (a.startsWith('--batch=')) args.batch = a.slice('--batch='.length);
+    else if (a === '--zone') args.zone = argv[++i];
+    else if (a.startsWith('--zone=')) args.zone = a.slice('--zone='.length);
   }
   return args;
 }
@@ -42,11 +45,19 @@ function log(step, msg) {
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (args.command !== 'run') {
-    console.error('usage: grove-shipper run [--buy|--dry-run] [--batch <id>] [--headed]');
+    console.error('usage: grove-shipper run --zone <2-10> [--buy|--dry-run] [--batch <id>] [--headed]');
     process.exit(2);
   }
   if (args.buy && args.dryRun) {
     console.error('--buy and --dry-run are mutually exclusive');
+    process.exit(2);
+  }
+
+  let zone;
+  try {
+    zone = parseZone(args.zone);
+  } catch (err) {
+    console.error(err.message);
     process.exit(2);
   }
 
@@ -66,15 +77,17 @@ async function main() {
   const autobuy = Boolean(cfg.pirateship_autobuy);
   log('config', `autobuy=${autobuy}`);
 
-  const batch = await odoo.buildBatch();
-  log('pull', `${batch.name} (id=${batch.batch_id}) state=${batch.state} rows=${batch.rows} expected=$${Number(batch.expected_total).toFixed(2)}`);
+  const batch = await odoo.buildBatch(zone);
+  const notices = buildNotices(batch);
+  for (const notice of notices) log('pull', notice);
+  log('pull', `zone ${zone}: ${batch.name} (id=${batch.batch_id}) state=${batch.state} rows=${batch.rows} expected=$${Number(batch.expected_total).toFixed(2)}`);
 
   if (batch.state === 'purchased') {
     log('pull', 'batch already purchased — nothing to do');
     process.exit(0);
   }
   if (!batch.rows) {
-    log('pull', 'nothing to ship (0 rows)');
+    log('pull', `nothing to ship (0 rows)${batch.message ? `: ${batch.message}` : ''}`);
     process.exit(0);
   }
 
@@ -144,6 +157,10 @@ async function main() {
         problems.push(`Odoo total $${Number(recon.total).toFixed(2)} ≠ Pirate Ship total $${Number(finalTotal).toFixed(2)}`);
       }
       finalTotal = recon.total;
+      for (const notice of reconcileNotices(recon)) {
+        notices.push(notice);
+        log('reconcile', notice);
+      }
     }
   } catch (err) {
     if (err instanceof StopBeforeBuy) {
@@ -163,6 +180,7 @@ async function main() {
     batchUrl,
     mode,
     problems,
+    notices,
   });
 
   if (problems.length) {

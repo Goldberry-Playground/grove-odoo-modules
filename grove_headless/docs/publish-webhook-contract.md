@@ -17,7 +17,7 @@ for either.
 | `X-Grove-Event`        | Trigger                                                                 |
 | ---------------------- | ---------------------------------------------------------------------- |
 | `guide.publish`        | Operator clicks **Publish Guide to Storefront** (GOL-985, below).      |
-| `product.availability` | A product crosses an availability boundary (GOL-1896, see next section).|
+| `product.availability` | A product crosses an availability boundary or changes price (GOL-1896, see next section).|
 
 ## `product.availability` (GOL-1896)
 
@@ -29,7 +29,27 @@ stock" for up to a minute after a sellout. The boundaries:
   on `stock.quant`, since on-hand never flows through a `product.template`
   write;
 - `sale_ok` flips (purchasable vs "Coming soon");
-- `website_published` flips (present vs absent on `/shop`).
+- `website_published` flips (present vs absent on `/shop`);
+- a price changes (storefront shared cache, 2026-11-09): the template
+  `list_price`, or any variant's `lst_price` (= `list_price` + the variant's
+  attribute-value `price_extra`; the signature compares `list_price` and the
+  variants' `price_extra`, which is equivalent and independent of the `uom`
+  context). A
+  `price_extra` edit on `product.template.attribute.value` notes the affected
+  template before the write. Writing the current price emits nothing.
+
+Price changes reuse this event on purpose: the storefront receiver already
+flushes the product and the catalog on any `product.availability`, so no
+receiver change is needed, and a bulk reprice shares the same per-transaction
+dedupe and `_AVAILABILITY_EMIT_CAP`.
+
+Not signalled: adding or removing variants, and pricelist-only price changes
+(website pricelist rules that leave `list_price` / `price_extra` untouched). These
+do not emit; storefronts pick them up when their cache window expires (at most
+600s).
+
+Automatic emits use a short 3s delivery timeout (they run at commit behind a
+user's write); the manual `guide.publish` action keeps the 10s timeout.
 
 Emitted on the **transition**, coalesced to **one event per template per
 transaction** (earliest→final state) and flushed at commit, so a multi-line

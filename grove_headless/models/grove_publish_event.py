@@ -55,6 +55,9 @@ _RESPONSE_LIMIT = 2000
 # per transaction; anything past the cap degrades to the (shortened) `/shop` ISR
 # window rather than firing a webhook storm at the receiver.
 _AVAILABILITY_EMIT_CAP = 50
+# Automatic emits run behind a user's write (at commit): keep the webhook wait
+# short. The manual guide.publish path keeps grove_publish.DEFAULT_TIMEOUT.
+AUTO_EMIT_TIMEOUT = 3  # seconds
 
 # Transaction-scoped scratch keys on `cr.precommit.data` (cleared when the flush
 # runs, i.e. at commit — or manually in tests).
@@ -150,11 +153,15 @@ class GrovePublishEvent(models.Model):
         return self._emit(product_tmpl, EVENT_GUIDE_PUBLISH)
 
     # ── Availability transitions (GOL-1896) ────────────────────────────
-    # Storefront availability is three storefront-visible booleans:
+    # Storefront availability is three storefront-visible booleans plus price:
     #   * in stock          (qty_available > 0, read in the product's company)
     #   * sale_ok           (purchasable vs "Coming soon")
     #   * website_published  (present vs absent on /shop)
-    # The stock.quant and product.template write hooks call
+    #   * list_price + each variant's price_extra (storefront shared cache,
+    #     2026-11-09: a price change must reach the storefronts within seconds;
+    #     the receiver already flushes product + catalog on this event)
+    # The stock.quant, product.template and product.template.attribute.value
+    # (price_extra) write hooks call
     # `note_availability_candidates` with the pre-mutation state; a single
     # transaction-commit flush emits `product.availability` for the templates
     # that actually crossed a boundary. Emitting on the *transition* (not every
@@ -163,11 +170,17 @@ class GrovePublishEvent(models.Model):
     # that changed, computed earliest→final state.
     @api.model
     def _availability_signature(self, templates):
-        """{template_id: (in_stock, sale_ok, website_published)} for `templates`.
+        """{template_id: (in_stock, sale_ok, website_published, list_price,
+        sorted variant price_extras)} for `templates`.
 
-        Read in each template's own company so the boolean matches what that
-        tenant's storefront sees. sudo: this runs from low-level stock hooks that
-        may not carry catalog read rights, and the availability booleans are not
+        Read in each template's own company so the stock boolean matches what
+        that tenant's storefront sees. Variant price is `lst_price` = template
+        `list_price` + the variant's `price_extra`, so (list_price, price_extras)
+        moves exactly when a variant price does. We read price_extra rather than
+        lst_price on purpose: lst_price depends on the `uom` context, so a noter
+        and the flush running under different contexts would see different
+        units and emit spuriously. sudo: this runs from low-level stock hooks
+        that may not carry catalog read rights, and none of these values are
         sensitive.
         """
         signature = {}
@@ -178,6 +191,8 @@ class GrovePublishEvent(models.Model):
                 (scoped.qty_available or 0.0) > 0.0,
                 bool(template.sale_ok),
                 bool(template.website_published),
+                template.list_price,
+                tuple(sorted(scoped.product_variant_ids.mapped("price_extra"))),
             )
         return signature
 
@@ -197,7 +212,16 @@ class GrovePublishEvent(models.Model):
         before = data.setdefault(_AVAIL_BEFORE_KEY, {})
         missing = templates.filtered(lambda t: t.id not in before)
         if missing:
-            before.update(self._availability_signature(missing))
+            # Never raise into the user's write: a signature failure only costs
+            # the storefront signal (it falls back to the ISR window).
+            try:
+                before.update(self._availability_signature(missing))
+            except Exception:
+                _logger.exception(
+                    "product.availability: could not snapshot templates %s; skipping the storefront signal",
+                    missing.ids,
+                )
+                return
         if not data.get(_AVAIL_REGISTERED_KEY):
             data[_AVAIL_REGISTERED_KEY] = True
             # Flush at commit so a rolled-back stock change emits nothing, and so
@@ -217,11 +241,23 @@ class GrovePublishEvent(models.Model):
         data.pop(_AVAIL_REGISTERED_KEY, None)
         if not before:
             return
-        templates = self.env["product.template"].browse(sorted(before)).exists()
-        # The stock write already happened; drop the cached compute so the
-        # after-signature reflects the new on-hand quantity.
-        templates.invalidate_recordset(["qty_available"])
-        after = self._availability_signature(templates)
+        # Runs in a cr.precommit hook: an exception here aborts the commit and
+        # rolls back the user's stock/price write. Never raise; the storefront
+        # falls back to its cache window instead.
+        try:
+            templates = self.env["product.template"].browse(sorted(before)).exists()
+            # The stock / price write already happened; drop the cached computes so
+            # the after-signature reflects the new on-hand quantity and prices.
+            templates.invalidate_recordset(["qty_available"])
+            templates.product_variant_ids.invalidate_recordset(["price_extra"])
+            after = self._availability_signature(templates)
+        except Exception:
+            _logger.exception(
+                "product.availability: could not compute the after-signature for templates %s; "
+                "skipping the storefront signal",
+                sorted(before),
+            )
+            return
         changed = [t for t in templates if after.get(t.id, before[t.id]) != before[t.id]]
         for index, template in enumerate(changed):
             if index >= _AVAILABILITY_EMIT_CAP:
@@ -234,9 +270,9 @@ class GrovePublishEvent(models.Model):
                     len(changed) - _AVAILABILITY_EMIT_CAP,
                 )
                 break
-            self.sudo()._emit_safe(template, EVENT_PRODUCT_AVAILABILITY)
+            self.sudo()._emit_safe(template, EVENT_PRODUCT_AVAILABILITY, timeout=AUTO_EMIT_TIMEOUT)
 
-    def _emit_safe(self, product_tmpl, event_type):
+    def _emit_safe(self, product_tmpl, event_type, timeout=grove_publish.DEFAULT_TIMEOUT):
         """`_emit` that never raises — for automatic emits behind a user's write.
 
         A misconfigured tenant (no webhook URL/secret) or any unexpected error
@@ -245,7 +281,7 @@ class GrovePublishEvent(models.Model):
         already non-raising (see `_deliver`) and keep the row for replay.
         """
         try:
-            return self._emit(product_tmpl, event_type)
+            return self._emit(product_tmpl, event_type, timeout=timeout)
         except UserError as exc:
             _logger.info("%s emit skipped for template %s: %s", event_type, product_tmpl.id, exc)
         except Exception:  # pragma: no cover - defensive: never break the write
@@ -253,7 +289,7 @@ class GrovePublishEvent(models.Model):
         return self.browse()
 
     @api.model
-    def _emit(self, product_tmpl, event_type):
+    def _emit(self, product_tmpl, event_type, timeout=grove_publish.DEFAULT_TIMEOUT):
         product_tmpl.ensure_one()
         company = product_tmpl.company_id or self.env.company
         tenant = self._tenant_slug_for_company(company)
@@ -292,10 +328,10 @@ class GrovePublishEvent(models.Model):
                 "state": "pending",
             }
         )
-        event._deliver(url, secret, payload)
+        event._deliver(url, secret, payload, timeout=timeout)
         return event
 
-    def _deliver(self, url, secret, payload):
+    def _deliver(self, url, secret, payload, timeout=grove_publish.DEFAULT_TIMEOUT):
         """POST the payload, recording the outcome on this row. Never raises."""
         self.ensure_one()
         try:
@@ -306,6 +342,7 @@ class GrovePublishEvent(models.Model):
                 event_type=self.event_type,
                 delivery_id=self.delivery_id,
                 tenant=self.tenant or "",
+                timeout=timeout,
             )
         except grove_publish.PublishDeliveryError as exc:
             _logger.warning("publish.event %s transport failure: %s", self.delivery_id, exc)

@@ -111,6 +111,9 @@ WAVE_SCHEDULE: dict[int, dict] = {
     },
 }
 
+# The USDA zones the calendar is keyed by, as an Odoo selection.
+USDA_ZONE_SELECTION = [(str(z), f"Zone {z}") for z in range(2, 11)]
+
 # On-demand no-ship ranges (conservative launch defaults — loosen with
 # nursery-manager experience via PR). Jan+Feb is the global floor regardless.
 NO_SHIP_MONTHS = (1, 2)
@@ -248,6 +251,9 @@ def serialize_ship_options(result: dict) -> dict:
 # Global preorder-open switch dates (month, day). Fall preorder opens Aug 15;
 # spring preorder opens Nov 1.
 PREORDER_OPEN: dict[str, tuple[int, int]] = {"fall": (8, 15), "spring": (11, 1)}
+
+# A zone's spring label batch can be built this many days before its ship start.
+SPRING_BUILD_LEAD_DAYS = 5
 
 # Leafed / peat & bagged remainder — trees are leafed out at the nursery and
 # ship potted-in-peat on the normal 5-10 business-day policy. Informational for
@@ -577,6 +583,26 @@ def preorder_waves(zone, today: date, calendar: dict | None = None) -> list[dict
         entry("fall", z["fall"], fall_by, fall_open, fall_reason),
         entry("spring", z["spring"], spring_by, spring_open, spring_reason),
     ]
+
+
+def spring_build_window(zone, today: date, calendar: dict | None = None) -> tuple[date, date]:
+    """``(date_open, date_close)`` for building a zone's spring label batch.
+
+    It opens ``SPRING_BUILD_LEAD_DAYS`` before the zone's spring ship start and
+    closes on the ship end. Returns the window ``today`` is in, or else the next
+    one to come."""
+    waves = preorder_waves(zone, today, calendar)
+    start_md, end_md = next(w["ship_window"] for w in waves if w["wave"] == "spring")
+
+    def on(year, md):
+        month, day = md
+        return date(year, month, min(day, 28) if (month, day) == (2, 29) else day)
+
+    for year in range(today.year - 1, today.year + 2):
+        ship_end = on(year + 1 if end_md < start_md else year, end_md)
+        if today <= ship_end:
+            return on(year, start_md) - timedelta(days=SPRING_BUILD_LEAD_DAYS), ship_end
+    raise ValueError(f"No spring window found for zone {zone} around {today}")
 
 
 # Josh 2026-10-07: farm PICKUP pre-orders run on a fixed farm schedule for the

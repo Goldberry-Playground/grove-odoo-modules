@@ -194,6 +194,13 @@ class TestPromotions(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(promotions.variant_tree_count(self.apple), 1)
         self.assertEqual(promotions.variant_tree_count(self.mulch), 0)
         self.assertEqual(promotions.variant_tree_count(bundle), 5)
+        # The product detail passes one batched phantom-BoM map for the whole
+        # template instead of a search per variant; the counts must not change.
+        variants = bundle | self.apple | self.mulch
+        expected = {bundle.id: 5, self.apple.id: 1, self.mulch.id: 0}
+        self.assertEqual(promotions.variant_tree_counts(variants), expected)
+        boms = self.env["mrp.bom"]._bom_find(variants, bom_type="phantom")
+        self.assertEqual(promotions.variant_tree_counts(variants, boms), expected)
 
     # ── automatic tier feed ──────────────────────────────────────────────
 
