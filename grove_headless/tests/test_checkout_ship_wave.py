@@ -102,9 +102,7 @@ class TestCheckoutShipWave(GroveTaxFixtureMixin, TransactionCase):
                 ],
             }
         )
-        bareroot_variant = tmpl.product_variant_ids.filtered(
-            lambda v: v.grove_effective_shipping_tier == "bareroot"
-        )
+        bareroot_variant = tmpl.product_variant_ids.filtered(lambda v: v.grove_effective_shipping_tier == "bareroot")
         self.assertEqual(len(bareroot_variant), 1)
         # The feed resolves this plant to its Bareroot variant and advertises tier "bareroot".
         row = grove_main._serialize_planner_plant(tmpl, {}, has_stock_field=False)

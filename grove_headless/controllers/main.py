@@ -614,9 +614,7 @@ def _planner_line_variant(product, planner_tier, has_stock_field):
     nothing matches. Stock is only consulted when ``stock`` is installed
     (``has_stock_field``), mirroring the ``_list_in_stock`` guard.
     """
-    candidates = product.product_variant_ids.filtered(
-        lambda v: v.grove_effective_shipping_tier == planner_tier
-    )
+    candidates = product.product_variant_ids.filtered(lambda v: v.grove_effective_shipping_tier == planner_tier)
     if not candidates:
         return product.product_variant_id
     if has_stock_field:

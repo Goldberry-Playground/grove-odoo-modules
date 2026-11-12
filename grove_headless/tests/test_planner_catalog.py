@@ -190,9 +190,7 @@ class TestPlannerCatalogSerializer(GroveTaxFixtureMixin, TransactionCase):
         # variant, so the wave cart passes. The template field is left untouched.
         plant = self._potted_default_with_bareroot_variant()
         self.assertEqual(plant.grove_shipping_tier, "potted")  # fail-safe untouched
-        bareroot_variant = plant.product_variant_ids.filtered(
-            lambda v: v.grove_effective_shipping_tier == "bareroot"
-        )
+        bareroot_variant = plant.product_variant_ids.filtered(lambda v: v.grove_effective_shipping_tier == "bareroot")
         self.assertEqual(len(bareroot_variant), 1)
         self.assertEqual(_planner_tier(plant), "bareroot")
         row = _serialize_planner_plant(plant, {}, has_stock_field=False)
