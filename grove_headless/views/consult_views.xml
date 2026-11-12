@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Consult dashboard back-office UI (GOL-3575, spec C.2/C.4/C.5).
+     A staff-gated "Consulting" menu with the goal modules, syntropic practices,
+     design areas and plans; plus the CRM pipeline gets a consult-stage column
+     and filter so leads can be worked from the standard pipeline. There is no
+     "Nursery" app menu in grove_headless today (the planner hangs under Sales),
+     so Consulting is its own root menu restricted to the nursery-staff group. -->
+<odoo>
+
+    <!-- ── Goal modules (C.1) ─────────────────────────────────────────────── -->
+    <record id="view_grove_consult_module_list" model="ir.ui.view">
+        <field name="name">grove.consult.module.list</field>
+        <field name="model">grove.consult.module</field>
+        <field name="arch" type="xml">
+            <list string="Consult goal modules">
+                <field name="key" />
+                <field name="name" />
+                <field name="section_title" />
+                <field name="active" />
+            </list>
+        </field>
+    </record>
+
+    <record id="view_grove_consult_module_form" model="ir.ui.view">
+        <field name="name">grove.consult.module.form</field>
+        <field name="model">grove.consult.module</field>
+        <field name="arch" type="xml">
+            <form string="Consult goal module">
+                <sheet>
+                    <group>
+                        <field name="key" />
+                        <field name="name" />
+                        <field name="section_title" />
+                        <field name="active" />
+                    </group>
+                    <group string="Objective">
+                        <field name="objective" nolabel="1" />
+                    </group>
+                    <group string="Approach">
+                        <field name="approach" nolabel="1" />
+                    </group>
+                    <group string="Expected results">
+                        <field name="expected_results" nolabel="1" />
+                    </group>
+                    <group string="Section template (phase 3 generator)">
+                        <field name="section_template" nolabel="1" />
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_grove_consult_module" model="ir.actions.act_window">
+        <field name="name">Goal modules</field>
+        <field name="res_model">grove.consult.module</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- ── Practices (C.2) ────────────────────────────────────────────────── -->
+    <record id="view_grove_consult_practice_list" model="ir.ui.view">
+        <field name="name">grove.consult.practice.list</field>
+        <field name="model">grove.consult.practice</field>
+        <field name="arch" type="xml">
+            <list string="Consult practices">
+                <field name="key" />
+                <field name="name" />
+                <field name="row_spacing_m" />
+                <field name="in_row_spacing_m" />
+                <field name="retail_track" />
+            </list>
+        </field>
+    </record>
+
+    <record id="view_grove_consult_practice_form" model="ir.ui.view">
+        <field name="name">grove.consult.practice.form</field>
+        <field name="model">grove.consult.practice</field>
+        <field name="arch" type="xml">
+            <form string="Consult practice">
+                <sheet>
+                    <group>
+                        <field name="key" />
+                        <field name="name" />
+                        <field name="row_spacing_m" />
+                        <field name="in_row_spacing_m" />
+                        <field name="retail_track" />
+                        <field name="retail_subgoal" />
+                        <field name="active" />
+                    </group>
+                    <group string="Strata / infrastructure (JSON)">
+                        <field name="strata" />
+                        <field name="infrastructure_defaults" />
+                    </group>
+                    <group string="Site needs">
+                        <field name="site_needs" nolabel="1" />
+                    </group>
+                    <group string="Notes">
+                        <field name="notes" nolabel="1" />
+                    </group>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_grove_consult_practice" model="ir.actions.act_window">
+        <field name="name">Practices</field>
+        <field name="res_model">grove.consult.practice</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- ── Design areas (C.3) ─────────────────────────────────────────────── -->
+    <record id="view_grove_consult_area_list" model="ir.ui.view">
+        <field name="name">grove.consult.area.list</field>
+        <field name="model">grove.consult.area</field>
+        <field name="arch" type="xml">
+            <list string="Design areas">
+                <field name="lead_id" />
+                <field name="name" />
+                <field name="practice_id" />
+                <field name="acres" />
+                <field name="aspect" />
+            </list>
+        </field>
+    </record>
+
+    <record id="action_grove_consult_area" model="ir.actions.act_window">
+        <field name="name">Design areas</field>
+        <field name="res_model">grove.consult.area</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- ── Plans (C.4) ────────────────────────────────────────────────────── -->
+    <record id="view_grove_consult_plan_list" model="ir.ui.view">
+        <field name="name">grove.consult.plan.list</field>
+        <field name="model">grove.consult.plan</field>
+        <field name="arch" type="xml">
+            <list string="Consult plans">
+                <field name="lead_id" />
+                <field name="version" />
+                <field name="status" />
+                <field name="approved_by" />
+                <field name="approved_at" />
+            </list>
+        </field>
+    </record>
+
+    <record id="view_grove_consult_plan_form" model="ir.ui.view">
+        <field name="name">grove.consult.plan.form</field>
+        <field name="model">grove.consult.plan</field>
+        <field name="arch" type="xml">
+            <form string="Consult plan">
+                <sheet>
+                    <group>
+                        <field name="lead_id" />
+                        <field name="version" />
+                        <field name="status" />
+                        <field name="sale_order_id" />
+                        <field name="approved_by" readonly="1" />
+                        <field name="approved_at" readonly="1" />
+                    </group>
+                    <notebook>
+                        <page string="Sections">
+                            <field name="section_ids">
+                                <list>
+                                    <field name="sequence" />
+                                    <field name="key" />
+                                    <field name="title" />
+                                    <field name="module_id" />
+                                    <field name="status" />
+                                    <field name="by" />
+                                </list>
+                            </field>
+                        </page>
+                    </notebook>
+                </sheet>
+            </form>
+        </field>
+    </record>
+
+    <record id="action_grove_consult_plan" model="ir.actions.act_window">
+        <field name="name">Plans</field>
+        <field name="res_model">grove.consult.plan</field>
+        <field name="view_mode">list,form</field>
+    </record>
+
+    <!-- ── Menu (staff-gated) ─────────────────────────────────────────────── -->
+    <menuitem
+        id="menu_grove_consult_root"
+        name="Consulting"
+        groups="grove_headless.group_nursery_staff"
+        sequence="92"
+    />
+    <menuitem
+        id="menu_grove_consult_plan"
+        name="Plans"
+        parent="menu_grove_consult_root"
+        action="action_grove_consult_plan"
+        sequence="10"
+    />
+    <menuitem
+        id="menu_grove_consult_area"
+        name="Design areas"
+        parent="menu_grove_consult_root"
+        action="action_grove_consult_area"
+        sequence="20"
+    />
+    <menuitem
+        id="menu_grove_consult_module"
+        name="Goal modules"
+        parent="menu_grove_consult_root"
+        action="action_grove_consult_module"
+        sequence="30"
+    />
+    <menuitem
+        id="menu_grove_consult_practice"
+        name="Practices"
+        parent="menu_grove_consult_root"
+        action="action_grove_consult_practice"
+        sequence="40"
+    />
+
+    <!-- ── CRM pipeline: consult-stage column + filter (C.5) ───────────────── -->
+    <record id="view_crm_lead_list_consult" model="ir.ui.view">
+        <field name="name">crm.lead.list.consult</field>
+        <field name="model">crm.lead</field>
+        <field name="inherit_id" ref="crm.crm_case_tree_view_oppor" />
+        <field name="arch" type="xml">
+            <field name="stage_id" position="after">
+                <field name="grove_consult_stage" optional="show" />
+            </field>
+        </field>
+    </record>
+
+    <record id="view_crm_lead_search_consult" model="ir.ui.view">
+        <field name="name">crm.lead.search.consult</field>
+        <field name="model">crm.lead</field>
+        <field name="inherit_id" ref="crm.view_crm_case_opportunities_filter" />
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <separator />
+                <filter
+                    name="grove_consult_leads"
+                    string="Consult leads"
+                    domain="[('grove_consult_stage', '!=', False)]"
+                />
+                <filter
+                    name="group_grove_consult_stage"
+                    string="Consult stage"
+                    context="{'group_by': 'grove_consult_stage'}"
+                />
+            </xpath>
+        </field>
+    </record>
+
+</odoo>

@@ -5,6 +5,7 @@ from . import (
     consult_module,  # noqa: F401  seeded goal modules (GOL-3575, spec C.1)
     consult_plan,  # noqa: F401  consult plans + sections + C.8 snapshots (GOL-3575, spec C.4/C.8)
     consult_practice,  # noqa: F401  seeded syntropic practices (GOL-3575, spec C.2)
+    consult_travel,  # noqa: F401  pure travel estimator (GOL-3575, spec C.7), no ORM models
     crm_lead,  # noqa: F401  consult stage/step/modules/areas on crm.lead (GOL-3575, spec C.5)
     grove_email_log,  # noqa: F401  customer-email delivery log + Mailgun event apply (GOL-2903)
     grove_enrich_job,  # noqa: F401  Perenual enrich job queue + budgeted cron (GOL-2391)
