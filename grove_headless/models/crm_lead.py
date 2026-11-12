@@ -25,9 +25,7 @@ class CrmLead(models.Model):
         string="Consult stage",
         index=True,
     )
-    grove_consult_step = fields.Many2one(
-        "product.product", string="Consult step", help="The service product in use."
-    )
+    grove_consult_step = fields.Many2one("product.product", string="Consult step", help="The service product in use.")
     grove_hands_on = fields.Selection(
         [("we_install", "We install"), ("they_install", "They install"), ("plan_only", "Plan only")],
         string="Hands on",

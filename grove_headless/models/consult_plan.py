@@ -28,9 +28,7 @@ class GroveConsultPlan(models.Model):
     _description = "Grove consult plan"
     _order = "lead_id, version desc, id desc"
 
-    lead_id = fields.Many2one(
-        "crm.lead", string="Lead", required=True, index=True, ondelete="cascade"
-    )
+    lead_id = fields.Many2one("crm.lead", string="Lead", required=True, index=True, ondelete="cascade")
     version = fields.Integer(string="Version", default=1, required=True)
     status = fields.Selection(
         [("draft", "Draft"), ("approved", "Approved"), ("sent", "Sent"), ("installed", "Installed")],
@@ -103,9 +101,7 @@ class GroveConsultPlanSection(models.Model):
     _description = "Grove consult plan section"
     _order = "plan_id, sequence, id"
 
-    plan_id = fields.Many2one(
-        "grove.consult.plan", string="Plan", required=True, index=True, ondelete="cascade"
-    )
+    plan_id = fields.Many2one("grove.consult.plan", string="Plan", required=True, index=True, ondelete="cascade")
     module_id = fields.Many2one("grove.consult.module", string="Module", ondelete="set null")
     key = fields.Char(string="Key", required=True)
     title = fields.Char(string="Title")
@@ -137,9 +133,7 @@ class GroveConsultPlanSection(models.Model):
         if not internal:
             blocked = [f for f in _SNAPSHOT_FIELDS if f in vals]
             if blocked:
-                raise AccessError(
-                    _("These consult snapshot fields are read-only: %s.") % ", ".join(blocked)
-                )
+                raise AccessError(_("These consult snapshot fields are read-only: %s.") % ", ".join(blocked))
 
         if "body" in vals and not internal:
             new_body = vals.get("body")
@@ -152,11 +146,7 @@ class GroveConsultPlanSection(models.Model):
                     extra["draft_inputs"] = self.env.context.get("consult_draft_inputs") or {}
                 # An edit after sign-off demotes the section so the plan's
                 # approval constraint cannot be met by a post-approval edit.
-                if (
-                    section.status == "approved"
-                    and vals.get("status") != "approved"
-                    and new_body != section.body
-                ):
+                if section.status == "approved" and vals.get("status") != "approved" and new_body != section.body:
                     extra["status"] = "edited"
                 if extra:
                     super(GroveConsultPlanSection, section).with_context(consult_snapshot=True).write(extra)

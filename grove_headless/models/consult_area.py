@@ -13,9 +13,7 @@ class GroveConsultArea(models.Model):
     _description = "Grove consult design area"
     _order = "sequence, id"
 
-    lead_id = fields.Many2one(
-        "crm.lead", string="Lead", required=True, index=True, ondelete="cascade"
-    )
+    lead_id = fields.Many2one("crm.lead", string="Lead", required=True, index=True, ondelete="cascade")
     name = fields.Char(string="Name", required=True)
     practice_id = fields.Many2one("grove.consult.practice", string="Practice", ondelete="restrict")
     acres = fields.Float(string="Acres")
