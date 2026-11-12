@@ -31,6 +31,10 @@ class GroveConsultPractice(models.Model):
     notes = fields.Text(string="Notes")
     active = fields.Boolean(string="Active", default=True)
 
-    _sql_constraints = [
-        ("grove_consult_practice_key_uniq", "unique(key)", "A consult practice key must be unique."),
-    ]
+    # Odoo 19 dropped the `_sql_constraints` list attribute (it warns and never
+    # creates the constraint); declared with the modern `models.Constraint` so
+    # the UNIQUE is created on `-u grove_headless`.
+    _key_uniq = models.Constraint(
+        "unique(key)",
+        "A consult practice key must be unique.",
+    )
