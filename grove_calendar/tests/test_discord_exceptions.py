@@ -9,9 +9,13 @@ exception, the reversal, and the past-date pruning.
 import json
 from datetime import timedelta
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 from odoo import fields
 from odoo.tests.common import TransactionCase, tagged
+
+_UTC = ZoneInfo("UTC")
+_EASTERN = ZoneInfo("America/New_York")
 
 _POST = "odoo.addons.grove_calendar.models.calendar_discord.requests.post"
 
@@ -32,7 +36,12 @@ class GroveDiscordExceptionsCase(TransactionCase):
 
     def _series(self):
         start = self.now + timedelta(days=2)
-        weekday_flag = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[start.weekday()]
+        # Match the weekly weekday to the event-local (America/New_York) weekday
+        # of the anchor, not the naive-UTC one; otherwise the series builds no
+        # occurrence on the UTC 00:00–04:59 window and the occurrence indexing
+        # below errors (date-boundary flake).
+        local_start = start.replace(tzinfo=_UTC).astimezone(_EASTERN)
+        weekday_flag = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[local_start.weekday()]
         event = self.CalendarEvent.create(
             {
                 "name": "Grove Team Meeting",
