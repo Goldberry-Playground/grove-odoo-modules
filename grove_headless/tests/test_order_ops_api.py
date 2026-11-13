@@ -130,8 +130,14 @@ class TestOrderOpsApi(GroveTaxFixtureMixin, HttpCase):
 
     def test_snooze_route_uses_seven_days_and_ignores_body_days(self):
         order = self._held()
-        card = self._card(self._post(order, "hold/snooze", {"actor": "wes", "days": 90}))
-        expected = fields.Date.context_today(order) + timedelta(days=7)
+        # The snooze runs server-side as the bearer-auth service user whose
+        # context timezone can differ from this test env's, so recomputing
+        # ``context_today`` here would drift a day near a UTC/local boundary.
+        # Freeze the reference date for both the write and the expectation.
+        frozen = date(2026, 6, 15)
+        with mock.patch.object(fields.Date, "context_today", return_value=frozen):
+            card = self._card(self._post(order, "hold/snooze", {"actor": "wes", "days": 90}))
+        expected = frozen + timedelta(days=7)
         self.assertEqual(card["hold"]["until"], expected.isoformat())
         self.assertEqual(order.grove_hold_until, expected)
 
