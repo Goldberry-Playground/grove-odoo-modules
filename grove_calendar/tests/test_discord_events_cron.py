@@ -8,10 +8,14 @@ would. Covers the spec D test matrix for the events cron.
 
 from datetime import timedelta
 from unittest import mock
+from zoneinfo import ZoneInfo
 
 from odoo import fields
 from odoo.addons.grove_calendar.models import calendar_discord as cd
 from odoo.tests.common import TransactionCase, tagged
+
+_UTC = ZoneInfo("UTC")
+_EASTERN = ZoneInfo("America/New_York")
 
 _ENV = {
     "DISCORD_BOT_TOKEN": "bot-token",
@@ -119,7 +123,12 @@ class GroveDiscordEventsCronCase(TransactionCase):
         # and set the weekday flag that matches the start, so the recurrence maps
         # to a Discord weekly rule rather than relying on an onchange firing.
         start = self.now + timedelta(days=2)
-        weekday_flag = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[start.weekday()]
+        # The weekly weekday flag must match the event-local (America/New_York)
+        # weekday of the anchor. Deriving it from the naive-UTC start flakes on
+        # the UTC 00:00–04:59 window, when Eastern is still the prior day and
+        # Odoo then builds no weekly occurrence (no recurrence created).
+        local_start = start.replace(tzinfo=_UTC).astimezone(_EASTERN)
+        weekday_flag = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")[local_start.weekday()]
         vals = {
             "name": "Grove Team Meeting",
             "start": start,
