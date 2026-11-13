@@ -289,7 +289,9 @@ class TestConsultFeed(GroveTaxFixtureMixin, HttpCase):
         return tmpl
 
     def test_retail_feed_has_no_consult_keys(self):
-        plant = self._plant(grove_botanical_name="Diospyros virginiana")
+        # Bareroot so the plant survives GOL-3800's potted-only drop on the
+        # retail feed; this test is about scope keys, not the seasonal drop.
+        plant = self._plant(grove_botanical_name="Diospyros virginiana", grove_shipping_tier="bareroot")
         body = self.url_open("/grove/api/v1/planner/catalog").json()
         # Planner beta B (#372, GOL-3549 spec B.1) serves the retail rule table
         # as a top-level `rules` once grove.planner.rule exists; before it lands

@@ -560,23 +560,61 @@ def _planner_substitute_tmpl_id(genus, substitute_by_genus):
     return substitute_by_genus.get(compliance_genus_for(sub.botanical))
 
 
-def _planner_line_variant(product, has_stock_field):
+def _planner_tier(product):
+    """The shipping tier a planner line advertises and carts for this template (GOL-3800).
+
+    #1243's one-button cart adds every planting line with the zone's first open
+    pre-order wave, and ``_validate_ship_wave`` only lets a wave carry
+    bareroot-tier lines (a potted-tier line is refused outside ``LEAFED_WINDOW``
+    and never mixes with a bareroot line). Josh 2026-11-12: a plant that HAS an
+    active bareroot variant is sold bareroot in the planner, even when the
+    template default is the deliberate "untagged -> potted" undercharge fail-safe.
+    So the planner tier is ``"bareroot"`` whenever a bareroot variant exists, else
+    the template's own tier. The template field and the fail-safe are untouched —
+    this only changes what the feed advertises and which variant it carts, so the
+    one-button cart passes the gate. ``product_variant_ids`` is already the active
+    variants, so a bareroot variant found here is the "active bareroot variant"
+    Josh's ruling keys on.
+    """
+    if any(v.grove_effective_shipping_tier == "bareroot" for v in product.product_variant_ids):
+        return "bareroot"
+    return product.grove_shipping_tier or None
+
+
+def _planner_potted_only_dropped(product, today):
+    """True when a potted-only plant must drop out of the planner feed (GOL-3800).
+
+    A plant with no bareroot variant is potted-tier, and ``_validate_ship_wave``
+    refuses a potted line outside ``LEAFED_WINDOW`` — the planner one-button cart
+    always rides a wave, so #1243's cart would fail for it. Josh 2026-11-12 chose
+    the narrowest gom-side fix: keep potted-only plants out of the one-button cart
+    by dropping them from the feed while ``today`` is outside the leafed window
+    (they cannot ride a wave then anyway). Inside the window they stay; packaging
+    a potted/spawn line into the one-button planting is the Train #6 question
+    (GOL-3800 spawn tier, manifest GOL-3926). ``today`` mirrors the checkout gate's
+    ``_date.today()`` so the feed and the gate agree on the window boundary.
+    """
+    if _planner_tier(product) == "bareroot":
+        return False
+    start, end = LEAFED_WINDOW
+    return not (start <= (today.month, today.day) <= end)
+
+
+def _planner_line_variant(product, planner_tier, has_stock_field):
     """The ``product.product`` a planner line should add for this template.
 
     Cart lines and the checkout session key on ``product.product`` (``variant_id``),
     not on the template, so the feed resolves the variant here — otherwise the
     storefront BFF spends one ``/products/<id>`` detail call per plant just to find
     it (GOL-3524). Prefer a variant whose effective shipping tier matches the
-    template's tier (the advertised format — the Bareroot variant of a
-    bareroot-tier tree, not its pickup-only Potted sibling), and among those a
-    variant with sellable stock so the planner never adds a sold-out line. Fall
-    back to the template's default variant (``product_variant_id``) when nothing
-    matches. Stock is only consulted when ``stock`` is installed (``has_stock_field``),
-    mirroring the ``_list_in_stock`` guard.
+    plant's ``planner_tier`` (the advertised format — the Bareroot variant of a
+    plant sold bareroot in the planner, not its pickup-only Potted sibling), and
+    among those a variant with sellable stock so the planner never adds a sold-out
+    line. Fall back to the template's default variant (``product_variant_id``) when
+    nothing matches. Stock is only consulted when ``stock`` is installed
+    (``has_stock_field``), mirroring the ``_list_in_stock`` guard.
     """
-    candidates = product.product_variant_ids.filtered(
-        lambda v: v.grove_effective_shipping_tier == product.grove_shipping_tier
-    )
+    candidates = product.product_variant_ids.filtered(lambda v: v.grove_effective_shipping_tier == planner_tier)
     if not candidates:
         return product.product_variant_id
     if has_stock_field:
@@ -610,7 +648,8 @@ def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
     botanical = product.grove_botanical_name or ""
     genus = compliance_genus_for(botanical)
     blocked_states = [] if product.grove_compliance_exempt else compliance_blocked_states_for(botanical)
-    line_variant = _planner_line_variant(product, has_stock_field)
+    planner_tier = _planner_tier(product)
+    line_variant = _planner_line_variant(product, planner_tier, has_stock_field)
     variant_price = line_variant.lst_price if line_variant else None
     return {
         "id": product.id,
@@ -629,7 +668,10 @@ def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
         "price": variant_price if variant_price is not None else product.list_price,
         "variant_id": line_variant.id if line_variant else None,
         "variant_price": variant_price,
-        "tier": product.grove_shipping_tier or None,
+        # The tier the planner lane advertises (GOL-3800): "bareroot" when the
+        # plant has a bareroot variant, so the storefront's pickPlannerVariant
+        # fallback and display agree with the Bareroot ``variant_id`` carted above.
+        "tier": planner_tier,
         "pickup_only": bool(product.grove_pickup_only),
         "in_stock": _list_in_stock(product) if has_stock_field else True,
         "preorder_cap_reached": bool(product.grove_preorder_cap_reached),
@@ -1446,6 +1488,18 @@ class GroveHeadlessAPI(http.Controller):
             ("grove_shipping_tier", "!=", "seed"),
         ] + company_scope
         plants = Template.search(plant_domain, order="grove_planner_priority asc, id asc")
+
+        # Drop potted-only plants from the RETAIL feed while the date is outside
+        # the leafed window: #1243's one-button cart always rides a wave, which
+        # _validate_ship_wave refuses for a potted line out of season, so a
+        # potted-only plant can never check out through the planner cart today
+        # (GOL-3800, Josh 2026-11-12). Bareroot plants (incl. potted-default
+        # templates that have a bareroot variant) stay in and advertise tier
+        # "bareroot". The consult feed is an advisory facts feed, not a cart, so
+        # it is never wave-gated and always serves the full planner-ready catalog.
+        if scope == "retail":
+            today = _date.today()
+            plants = plants.filtered(lambda p: not _planner_potted_only_dropped(p, today))
 
         # Warm the batched preorder-cap + stock computes once for the whole page
         # so the per-plant reads below are cache hits, not N+1 (mirrors /products).

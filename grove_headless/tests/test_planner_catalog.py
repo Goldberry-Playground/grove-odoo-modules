@@ -16,9 +16,12 @@ have fast, DB-free coverage in test_plant_compliance.py / test_shipping_zones.py
 """
 
 import json
+from datetime import date
 
 from odoo.addons.grove_headless.controllers.main import (
     FOOD_FOREST_PACKAGES_CATEGORY,
+    _planner_potted_only_dropped,
+    _planner_tier,
     _serialize_planner_plant,
 )
 from odoo.addons.grove_headless.models.plant_compliance import REGULATED_STATES
@@ -161,6 +164,60 @@ class TestPlannerCatalogSerializer(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(row["variant_price"], 35.0)
         self.assertEqual(row["price"], 35.0)
 
+    def _potted_default_with_bareroot_variant(self, **overrides):
+        # A plant whose TEMPLATE tier is the "untagged -> potted" default but
+        # that carries a Bareroot Format variant — the prod shape of American
+        # Hazelnut 84, Black Walnut 87, etc. (GOL-3800).
+        fmt = self.env["product.attribute"].create({"name": "Format", "create_variant": "always"})
+        v_potted = self.env["product.attribute.value"].create({"name": "Potted", "attribute_id": fmt.id})
+        v_bareroot = self.env["product.attribute.value"].create({"name": "Bareroot", "attribute_id": fmt.id})
+        vals = {
+            "grove_botanical_name": "Corylus americana",
+            "grove_shipping_tier": "potted",
+            "list_price": 30.0,
+            "attribute_line_ids": [
+                (0, 0, {"attribute_id": fmt.id, "value_ids": [(6, 0, [v_potted.id, v_bareroot.id])]})
+            ],
+        }
+        vals.update(overrides)
+        return self._plant(**vals)
+
+    def test_potted_default_with_bareroot_variant_advertises_bareroot(self):
+        # GOL-3800: #1243's one-button cart adds the feed's variant with the
+        # zone's open wave, and the gate refuses a potted line on a wave. A
+        # potted-DEFAULT template that has a Bareroot variant is sold bareroot in
+        # the planner: the feed advertises tier "bareroot" and carts the Bareroot
+        # variant, so the wave cart passes. The template field is left untouched.
+        plant = self._potted_default_with_bareroot_variant()
+        self.assertEqual(plant.grove_shipping_tier, "potted")  # fail-safe untouched
+        bareroot_variant = plant.product_variant_ids.filtered(lambda v: v.grove_effective_shipping_tier == "bareroot")
+        self.assertEqual(len(bareroot_variant), 1)
+        self.assertEqual(_planner_tier(plant), "bareroot")
+        row = _serialize_planner_plant(plant, {}, has_stock_field=False)
+        self.assertEqual(row["tier"], "bareroot")
+        self.assertEqual(row["variant_id"], bareroot_variant.id)
+
+    def test_potted_only_plant_keeps_potted_tier(self):
+        # A plant with no Bareroot variant (prod: Allegheny Chinquapin 29) stays
+        # potted-tier in the feed — the drop rule, not a tier flip, keeps it out
+        # of the one-button cart.
+        plant = self._plant(grove_botanical_name="Castanea pumila", grove_shipping_tier="potted")
+        self.assertEqual(_planner_tier(plant), "potted")
+        self.assertEqual(_serialize_planner_plant(plant, {}, has_stock_field=False)["tier"], "potted")
+
+    def test_potted_only_dropped_outside_leafed_window_only(self):
+        # A potted-only plant drops from the feed outside LEAFED_WINDOW (it can
+        # never ride a wave then) and stays inside it; a plant with a Bareroot
+        # variant is never dropped (GOL-3800, Josh 2026-11-12).
+        potted_only = self._plant(grove_botanical_name="Castanea pumila", grove_shipping_tier="potted")
+        has_bareroot = self._potted_default_with_bareroot_variant()
+        nov = date(2026, 11, 22)  # outside May 1 – Oct 15
+        jun = date(2026, 6, 1)  # inside
+        self.assertTrue(_planner_potted_only_dropped(potted_only, nov))
+        self.assertFalse(_planner_potted_only_dropped(potted_only, jun))
+        self.assertFalse(_planner_potted_only_dropped(has_bareroot, nov))
+        self.assertFalse(_planner_potted_only_dropped(has_bareroot, jun))
+
     def test_substitute_id_resolves_via_genus_map(self):
         chestnut = self._plant(grove_botanical_name="Castanea mollissima")
         row = _serialize_planner_plant(chestnut, {"carya": 4242}, has_stock_field=False)
@@ -184,6 +241,11 @@ class TestPlannerCatalogFeed(GroveTaxFixtureMixin, HttpCase):
             "type": "consu",
             "categ_id": self.trees.id,
             "company_id": self.company.id,
+            # Planner-ready plants are bareroot pre-orders; a bareroot tier keeps
+            # the browse fixtures out of GOL-3800's seasonal potted-only drop (an
+            # untagged/potted-only plant leaves the retail feed outside the
+            # leafed window). Tests that need a potted or untagged plant override.
+            "grove_shipping_tier": "bareroot",
         }
         vals.update(_COMPLETE_VALS)
         if ready:
