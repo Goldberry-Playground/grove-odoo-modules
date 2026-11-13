@@ -1489,15 +1489,17 @@ class GroveHeadlessAPI(http.Controller):
         ] + company_scope
         plants = Template.search(plant_domain, order="grove_planner_priority asc, id asc")
 
-        # Drop potted-only plants from the feed while the date is outside the
-        # leafed window: #1243's one-button cart always rides a wave, which
+        # Drop potted-only plants from the RETAIL feed while the date is outside
+        # the leafed window: #1243's one-button cart always rides a wave, which
         # _validate_ship_wave refuses for a potted line out of season, so a
-        # potted-only plant can never check out through the planner today
+        # potted-only plant can never check out through the planner cart today
         # (GOL-3800, Josh 2026-11-12). Bareroot plants (incl. potted-default
         # templates that have a bareroot variant) stay in and advertise tier
-        # "bareroot".
-        today = _date.today()
-        plants = plants.filtered(lambda p: not _planner_potted_only_dropped(p, today))
+        # "bareroot". The consult feed is an advisory facts feed, not a cart, so
+        # it is never wave-gated and always serves the full planner-ready catalog.
+        if scope == "retail":
+            today = _date.today()
+            plants = plants.filtered(lambda p: not _planner_potted_only_dropped(p, today))
 
         # Warm the batched preorder-cap + stock computes once for the whole page
         # so the per-plant reads below are cache hits, not N+1 (mirrors /products).

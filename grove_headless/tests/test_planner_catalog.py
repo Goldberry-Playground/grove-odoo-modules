@@ -241,6 +241,11 @@ class TestPlannerCatalogFeed(GroveTaxFixtureMixin, HttpCase):
             "type": "consu",
             "categ_id": self.trees.id,
             "company_id": self.company.id,
+            # Planner-ready plants are bareroot pre-orders; a bareroot tier keeps
+            # the browse fixtures out of GOL-3800's seasonal potted-only drop (an
+            # untagged/potted-only plant leaves the retail feed outside the
+            # leafed window). Tests that need a potted or untagged plant override.
+            "grove_shipping_tier": "bareroot",
         }
         vals.update(_COMPLETE_VALS)
         if ready:
