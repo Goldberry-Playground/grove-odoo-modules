@@ -82,6 +82,48 @@ class TestCheckoutShipWave(GroveTaxFixtureMixin, TransactionCase):
             "Potted trees are sold through Oct 15. Choose a bareroot pre-order.",
         )
 
+    def test_planner_bareroot_variant_of_potted_default_passes_wave(self):
+        # GOL-3800 acceptance: #1243's one-button planner cart adds the feed's
+        # resolved variant with the zone's first open wave. A planner plant whose
+        # TEMPLATE defaults to potted but that carries a Bareroot variant (prod:
+        # American Hazelnut 84, Black Walnut 87, ...) must resolve to its Bareroot
+        # variant so the wave cart passes the gate OUTSIDE the leafed window.
+        fmt = self.env["product.attribute"].create({"name": "Format", "create_variant": "always"})
+        v_potted = self.env["product.attribute.value"].create({"name": "Potted", "attribute_id": fmt.id})
+        v_bareroot = self.env["product.attribute.value"].create({"name": "Bareroot", "attribute_id": fmt.id})
+        tmpl = self.env["product.template"].create(
+            {
+                "name": "Hazelnut (potted default + bareroot variant)",
+                "type": "consu",
+                "grove_shipping_tier": "potted",
+                "list_price": 30.0,
+                "attribute_line_ids": [
+                    (0, 0, {"attribute_id": fmt.id, "value_ids": [(6, 0, [v_potted.id, v_bareroot.id])]})
+                ],
+            }
+        )
+        bareroot_variant = tmpl.product_variant_ids.filtered(lambda v: v.grove_effective_shipping_tier == "bareroot")
+        self.assertEqual(len(bareroot_variant), 1)
+        # The feed resolves this plant to its Bareroot variant and advertises tier "bareroot".
+        row = grove_main._serialize_planner_plant(tmpl, {}, has_stock_field=False)
+        self.assertEqual(row["tier"], "bareroot")
+        self.assertEqual(row["variant_id"], bareroot_variant.id)
+        # The planner-shaped wave cart (that Bareroot variant + a bareroot-only
+        # plant, one ship_wave) passes with a November date.
+        products = [bareroot_variant, self.bareroot]
+        error, wave = grove_main._validate_ship_wave(
+            self.env,
+            self._payload(products, "ship", ship_wave="spring"),
+            [mock.Mock(display_type=False, product_id=p) for p in products],
+            "ship",
+            ZONE8_ZIP,
+            date(2026, 11, 22),
+            self.company,
+            website=self._website(),
+        )
+        self.assertIsNone(error)
+        self.assertEqual(wave, "spring")
+
     # ── tenant scope (M1): nursery only ─────────────────────────────────
 
     def test_tenant_websites_resolve(self):
