@@ -1,4 +1,5 @@
 from . import (
+    consult,  # noqa: F401  staff consult routes /grove/api/v1/consult/* (GOL-3575, spec C.7)
     mailgun_webhook,  # noqa: F401  Mailgun delivery-event receiver (GOL-2903)
     main,  # noqa: F401
     order_ops,  # noqa: F401  Discord order action routes

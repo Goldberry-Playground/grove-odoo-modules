@@ -21,6 +21,10 @@ from . import (
     test_consult_compliance_gate,  # noqa: F401
     test_consult_facts,  # noqa: F401
     test_consult_line,  # noqa: F401
+    test_consult_models,  # noqa: F401
+    test_consult_products,  # noqa: F401
+    test_consult_routes,  # noqa: F401
+    test_consult_travel,  # noqa: F401
     test_content_draft_request,  # noqa: F401
     test_detail_serialization,  # noqa: F401
     test_discord_env_tag,  # noqa: F401  Discord posts name their sending instance

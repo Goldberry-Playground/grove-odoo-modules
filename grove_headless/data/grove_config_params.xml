@@ -112,6 +112,19 @@
         <field name="value">True</field>
     </record>
 
+    <!-- Consult routes kill switch (GOL-3575 spec C.7). The whole
+         /grove/api/v1/consult/* surface (pipeline, lead, modules, practices,
+         travel, plan/section) returns 503 when this is off. Default False — the
+         consult phase is not live, so the surface stays dark in production until
+         the consult dashboard ships (Train #6+); flip to True in Settings /
+         Technical / System Parameters to turn it on without a deploy (the kill
+         switch is the requirement, so the default is never a code constant).
+         noupdate="1" so the operator value survives module upgrades. -->
+    <record id="consult_enabled_param" model="ir.config_parameter">
+        <field name="key">grove_headless.consult_enabled</field>
+        <field name="value">False</field>
+    </record>
+
     <!-- Carrier-poll stale-label cut-off in days (GOL-3681). A UPS/USPS poll
          event for a label bought more than this many days ago (or for an order
          with no recorded label-purchase date) still applies the status and marks

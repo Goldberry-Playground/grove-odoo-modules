@@ -1,0 +1,173 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Consult service menu products (GOL-3575, spec C.6).
+
+     All company 3 (At The Grove Nursery), sale_ok, website_published False,
+     grove_gate_exempt True, no tax. type="service", so none counts as a tree for
+     the deposit rule, the bundle tree count, the box plan or compliance — every
+     tree-counting path filters on storable products, which a service is not
+     (same reasoning as product_planting_consult; asserted in
+     test_consult_products.py).
+
+     Prices are reference values from the public list; Josh edits them on the
+     records. noupdate="1" so a module upgrade never resets those edits.
+
+     product_planting_consult (the $500-threshold entry) already exists in
+     data/consult_product.xml and is not redefined here. -->
+<odoo noupdate="1">
+    <record id="consult_strategy_hour" model="product.template">
+        <field name="name">Strategy session, per hour</field>
+        <field name="type">service</field>
+        <field name="list_price">100.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">Strategy session, per hour. Two-hour minimum in person.</field>
+    </record>
+    <record id="consult_basemaps" model="product.template">
+        <field name="name">Basemaps for a strategy session</field>
+        <field name="type">service</field>
+        <field name="list_price">150.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">Basemaps prepared for a strategy session. Credited against a plan.</field>
+    </record>
+    <record id="consult_plan" model="product.template">
+        <field name="name">Whole-property plan</field>
+        <field name="type">service</field>
+        <field name="list_price">800.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">Whole-property plan. Fixed on the quote after the visit.</field>
+    </record>
+    <record id="consult_workbook" model="product.template">
+        <field name="name">Implementation workbook</field>
+        <field name="type">service</field>
+        <field name="list_price">2000.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">Implementation workbook. Replaces the plan fee.</field>
+    </record>
+    <record id="install_labor_day" model="product.template">
+        <field name="name">Installation labor, per day</field>
+        <field name="type">service</field>
+        <field name="list_price">0.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">Installation labor, per day. Bid per project.</field>
+    </record>
+    <record id="steward_visit" model="product.template">
+        <field name="name">Stewardship visit</field>
+        <field name="type">service</field>
+        <field name="list_price">0.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">A single stewardship visit.</field>
+    </record>
+    <record id="steward_year" model="product.template">
+        <field name="name">Stewardship year</field>
+        <field name="type">service</field>
+        <field name="list_price">0.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">A year of stewardship visits.</field>
+    </record>
+    <record id="consult_hour" model="product.template">
+        <field name="name">Consulting, per hour</field>
+        <field name="type">service</field>
+        <field name="list_price">100.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">Consulting, per hour. For extras beyond the menu.</field>
+    </record>
+    <record id="graft_topwork" model="product.template">
+        <field name="name">Top-working established trees</field>
+        <field name="type">service</field>
+        <field name="list_price">0.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">Top-working established trees. Case by case.</field>
+    </record>
+    <record id="willow_structure" model="product.template">
+        <field name="name">Living willow structure</field>
+        <field name="type">service</field>
+        <field name="list_price">0.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">Living willow structure. Case by case.</field>
+    </record>
+    <record id="travel_mile" model="product.template">
+        <field name="name">Travel, per mile round trip</field>
+        <field name="type">service</field>
+        <field name="list_price">0.76</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">Travel, per mile round trip. IRS rate; update yearly.</field>
+    </record>
+    <record id="travel_hour" model="product.template">
+        <field name="name">Travel, outbound beyond the first hour</field>
+        <field name="type">service</field>
+        <field name="list_price">100.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">Travel, outbound beyond the first hour.</field>
+    </record>
+    <record id="travel_night" model="product.template">
+        <field name="name">Overnight allowance</field>
+        <field name="type">service</field>
+        <field name="list_price">0.0</field>
+        <field name="sale_ok" eval="True" />
+        <field name="purchase_ok" eval="False" />
+        <field name="website_published" eval="False" />
+        <field name="grove_gate_exempt" eval="True" />
+        <field name="company_id" ref="company_nursery" />
+        <field name="taxes_id" eval="[(6, 0, [])]" />
+        <field name="description_sale">Overnight allowance. Confirmed in writing.</field>
+    </record>
+</odoo>
