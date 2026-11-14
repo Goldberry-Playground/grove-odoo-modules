@@ -18,7 +18,6 @@ they are documented in the PR body.
 """
 
 import json
-import logging
 
 from odoo import http
 from odoo.exceptions import AccessError, UserError, ValidationError
@@ -26,8 +25,6 @@ from odoo.http import request
 
 from ..models import consult_travel
 from .main import _farm_pickup_zip, _json_response
-
-_logger = logging.getLogger(__name__)
 
 CONSULT_ENABLED_PARAM = "grove_headless.consult_enabled"
 
