@@ -589,27 +589,62 @@ class TestStripeCustomer(unittest.TestCase):
 
 
 class TestStripeTaxCalculation(unittest.TestCase):
+    # GOODS only — shipping rides ``shipping_cost``, never a line item (GOL-3992).
     LINES = [
         {"amount": 5000, "reference": "tree", "tax_code": sg.TAX_CODE_GOODS, "quantity": 2},
-        {"amount": 900, "reference": "ship", "tax_code": sg.TAX_CODE_SHIPPING},
     ]
+    SHIPPING = {"amount": 900, "tax_code": sg.TAX_CODE_SHIPPING}
     ADDR = {"line1": "1 Elm", "city": "Charleston", "state": "WV", "postal_code": "25301", "country": "US"}
 
     def test_calculation_posts_lines_and_address(self):
         post = mock.Mock(return_value=_ok(200, {"id": "taxcalc_1", "tax_amount_exclusive": 354}))
-        out = sg.create_tax_calculation("sk", line_items=self.LINES, address=self.ADDR, post=post)
+        out = sg.create_tax_calculation(
+            "sk", line_items=self.LINES, shipping_cost=self.SHIPPING, address=self.ADDR, post=post
+        )
         self.assertEqual(out["id"], "taxcalc_1")
         data = post.call_args.kwargs["data"]
         self.assertEqual(data["currency"], "usd")
         self.assertEqual(data["line_items[0][amount]"], 5000)
         self.assertEqual(data["line_items[0][tax_code]"], "txcd_99999999")
         self.assertEqual(data["line_items[0][tax_behavior]"], "exclusive")
-        self.assertEqual(data["line_items[1][tax_code]"], "txcd_92010001")
         self.assertEqual(data["customer_details[address][state]"], "WV")
         self.assertEqual(data["customer_details[address_source]"], "shipping")
         self.assertTrue(post.call_args.args[0].endswith("/v1/tax/calculations"))
 
-    def test_calculation_missing_lines_raises(self):
+    def test_shipping_goes_through_shipping_cost_not_a_line_item(self):
+        """GOL-3992: shipping must post under shipping_cost[...] — Stripe rejects
+        the shipping tax code on a line item. This test fails if any line_items
+        entry carries the shipping tax code."""
+        post = mock.Mock(return_value=_ok(200, {"id": "taxcalc_1", "tax_amount_exclusive": 354}))
+        sg.create_tax_calculation(
+            "sk", line_items=self.LINES, shipping_cost=self.SHIPPING, address=self.ADDR, post=post
+        )
+        data = post.call_args.kwargs["data"]
+        # Shipping carried as shipping_cost, tax-exclusive, with the shipping code.
+        self.assertEqual(data["shipping_cost[amount]"], 900)
+        self.assertEqual(data["shipping_cost[tax_code]"], sg.TAX_CODE_SHIPPING)
+        self.assertEqual(data["shipping_cost[tax_behavior]"], "exclusive")
+        # No line_items entry may carry the shipping tax code — the bug (GOL-3992).
+        shipping_on_a_line = [k for k, v in data.items() if k.startswith("line_items[") and v == sg.TAX_CODE_SHIPPING]
+        self.assertEqual(shipping_on_a_line, [], f"shipping tax code leaked onto a line item: {shipping_on_a_line}")
+
+    def test_shipping_cost_defaults_tax_code_to_shipping(self):
+        post = mock.Mock(return_value=_ok(200, {"id": "taxcalc_1"}))
+        sg.create_tax_calculation(
+            "sk", line_items=self.LINES, shipping_cost={"amount": 500}, address=self.ADDR, post=post
+        )
+        self.assertEqual(post.call_args.kwargs["data"]["shipping_cost[tax_code]"], sg.TAX_CODE_SHIPPING)
+
+    def test_calculation_shipping_only_is_allowed(self):
+        """A calc with only shipping (no goods) still posts — e.g. the goods
+        already settled and only the real shipping remains."""
+        post = mock.Mock(return_value=_ok(200, {"id": "taxcalc_1"}))
+        sg.create_tax_calculation("sk", line_items=[], shipping_cost=self.SHIPPING, address=self.ADDR, post=post)
+        data = post.call_args.kwargs["data"]
+        self.assertEqual(data["shipping_cost[amount]"], 900)
+        self.assertNotIn("line_items[0][amount]", data)
+
+    def test_calculation_missing_lines_and_shipping_raises(self):
         with self.assertRaises(sg.StripeError):
             sg.create_tax_calculation("sk", line_items=[], address=self.ADDR, post=mock.Mock())
 

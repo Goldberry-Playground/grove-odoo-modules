@@ -1513,6 +1513,58 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(captured["payment_method"], "pm_test")
         self.assertTrue(captured["idempotency_key"].startswith("grove-settle-"))
 
+    def test_settlement_tax_calc_sends_shipping_as_shipping_cost(self):
+        """GOL-3992: the ship-time tax calc must pass the shipping line through
+        ``shipping_cost``, not as a ``line_items`` entry carrying the shipping tax
+        code — Stripe rejects that and every settlement silently fell back to Odoo
+        tax. The base (goods + shipping) is unchanged, so the balance still nets
+        out to the same amount."""
+        order = self._settleable_order()
+
+        # Goods-only line items; shipping lifted into shipping_cost.
+        line_items = grove_main._settlement_tax_line_items(order)
+        shipping_cost = grove_main._settlement_shipping_cost(order)
+        ship_codes_on_lines = [li for li in line_items if li["tax_code"] == stripe_gateway.TAX_CODE_SHIPPING]
+        self.assertEqual(ship_codes_on_lines, [], "shipping tax code leaked onto a settlement line item")
+        self.assertIsNotNone(shipping_cost)
+        self.assertEqual(shipping_cost["tax_code"], stripe_gateway.TAX_CODE_SHIPPING)
+        # $15 actual shipping + $2.50 S&H fee = $17.50 → 1750 cents.
+        self.assertEqual(shipping_cost["amount"], stripe_gateway.to_cents(17.50))
+
+        captured = {}
+
+        def fake_calc(secret_key, **kwargs):
+            captured.update(kwargs)
+            return {
+                "id": "taxcalc_t",
+                "tax_amount_exclusive": 390,
+                "tax_breakdown": [{"jurisdiction": {"display_name": "West Virginia"}, "amount": 390}],
+            }
+
+        with (
+            mock.patch.object(grove_main, "_stripe_tax_enabled", return_value=True),
+            mock.patch.object(stripe_gateway, "create_tax_calculation", side_effect=fake_calc),
+            mock.patch.object(stripe_gateway, "create_tax_transaction", return_value={"id": "taxtxn_t"}),
+            mock.patch.object(
+                stripe_gateway, "create_payment_intent", return_value={"id": "pi_x", "status": "succeeded"}
+            ),
+            mock.patch.dict("os.environ", {"stripe_test_secret_key": "sk_test"}, clear=False),
+        ):
+            result = grove_main.settle_order_at_ship(self.env, order)
+
+        self.assertEqual(result, "settled")
+        # The gateway saw shipping ONLY via shipping_cost, and no goods line carried
+        # the shipping tax code.
+        self.assertEqual(captured["shipping_cost"]["tax_code"], stripe_gateway.TAX_CODE_SHIPPING)
+        self.assertEqual(captured["shipping_cost"]["amount"], stripe_gateway.to_cents(17.50))
+        self.assertTrue(
+            all(li["tax_code"] != stripe_gateway.TAX_CODE_SHIPPING for li in captured["line_items"]),
+            "shipping tax code must never appear in the calc line_items (GOL-3992)",
+        )
+        # Base + Stripe tax still folds in shipping: Stripe recorded the $3.90 tax.
+        self.assertEqual(order.grove_stripe_tax_amount, 3.90)
+        self.assertIn("West Virginia", order.grove_stripe_tax_jurisdictions or "")
+
     def test_settlement_is_idempotent_once_settled(self):
         """A retried ship on an already-settled order never charges again."""
         order = self._settleable_order()
