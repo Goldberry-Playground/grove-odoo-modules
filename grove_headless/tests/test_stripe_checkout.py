@@ -1528,8 +1528,9 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(ship_codes_on_lines, [], "shipping tax code leaked onto a settlement line item")
         self.assertIsNotNone(shipping_cost)
         self.assertEqual(shipping_cost["tax_code"], stripe_gateway.TAX_CODE_SHIPPING)
-        # $15 actual shipping + $2.50 S&H fee = $17.50 → 1750 cents.
-        self.assertEqual(shipping_cost["amount"], stripe_gateway.to_cents(17.50))
+        # No amount check here: the shipping line still carries the QUOTED price
+        # until settle_order_at_ship rewrites it to actual cost + S&H. The amount
+        # Stripe actually receives is asserted on the captured call below.
 
         captured = {}
 
@@ -1556,6 +1557,7 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         # The gateway saw shipping ONLY via shipping_cost, and no goods line carried
         # the shipping tax code.
         self.assertEqual(captured["shipping_cost"]["tax_code"], stripe_gateway.TAX_CODE_SHIPPING)
+        # $15 actual shipping + $2.50 S&H fee = $17.50 → 1750 cents.
         self.assertEqual(captured["shipping_cost"]["amount"], stripe_gateway.to_cents(17.50))
         self.assertTrue(
             all(li["tax_code"] != stripe_gateway.TAX_CODE_SHIPPING for li in captured["line_items"]),
