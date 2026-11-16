@@ -215,13 +215,32 @@ def build_session_params(
     Sales-tax handling (GOL-2568, Josh ruling 2026-09-29): when
     ``automatic_tax`` is True, Stripe Tax computes destination tax on the session
     (``automatic_tax[enabled]=true``) and we NO LONGER pass a "Sales tax" line —
-    each goods/shipping line carries its own tax code and stays tax-exclusive.
+    each goods line carries its own tax code and stays tax-exclusive.
     The ship-to lives on a Stripe Customer we build from the order's address, so
     ``customer`` is passed with ``customer_update[shipping]=auto`` (never
     ``shipping_address_collection`` — no double entry). ``customer`` and
     ``customer_email`` are mutually exclusive in Stripe, so ``customer`` wins
     when both are given.
+
+    Shipping (GOL-3994): with ``automatic_tax`` on, a shipping-kind line is NOT a
+    ``line_items`` entry — Stripe Tax taxes shipping through
+    ``shipping_options[].shipping_rate_data`` (which carries ``tax_behavior`` +
+    ``tax_code``). The shipping tax code (txcd_92010001) on a product line is the
+    same construct Stripe rejects on ``/v1/tax/calculations`` (GOL-3992), and on a
+    Checkout Session it belongs in the shipping section, not as a product line. So
+    any ``{"kind": "shipping"}`` line is routed into ``shipping_options``; a single
+    fixed-amount option is auto-applied and added to the session total, so the math
+    is unchanged. With ``automatic_tax`` OFF (deposit / rollback path) shipping
+    stays a plain line item exactly as before — no tax code is attached either way.
     """
+    # Only split shipping out when Stripe Tax is on; the tax-off path keeps the
+    # byte-identical pre-GOL-2568 behaviour (shipping is a plain untaxed line).
+    if automatic_tax:
+        product_lines = [li for li in line_items if li.get("kind") != "shipping"]
+        shipping_lines = [li for li in line_items if li.get("kind") == "shipping"]
+    else:
+        product_lines = line_items
+        shipping_lines = []
     nested = {
         "mode": "payment",
         "success_url": success_url,
@@ -231,11 +250,32 @@ def build_session_params(
                 "price_data": _price_data(li, tax_enabled=automatic_tax),
                 "quantity": int(li.get("quantity", 1)),
             }
-            for li in line_items
+            for li in product_lines
         ],
     }
     if automatic_tax:
         nested["automatic_tax"] = {"enabled": True}
+    if shipping_lines:
+        # One fixed-amount shipping rate per shipping line. The storefront emits a
+        # single GROVE-SHIP line, so this is normally one option — Checkout
+        # auto-selects a lone option and adds it to the total. tax_behavior
+        # =exclusive matches the tax-exclusive goods lines; tax_code lets Stripe
+        # apply each destination state's shipping-taxability rule.
+        nested["shipping_options"] = [
+            {
+                "shipping_rate_data": {
+                    "display_name": li["name"],
+                    "type": "fixed_amount",
+                    "fixed_amount": {
+                        "amount": int(li["amount_cents"]) * int(li.get("quantity", 1)),
+                        "currency": CURRENCY,
+                    },
+                    "tax_behavior": "exclusive",
+                    "tax_code": li.get("tax_code", TAX_CODE_SHIPPING),
+                },
+            }
+            for li in shipping_lines
+        ]
     if discount_coupon_id:
         nested["discounts"] = [{"coupon": discount_coupon_id}]
     if customer:
