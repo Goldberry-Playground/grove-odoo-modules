@@ -61,10 +61,12 @@ Usage
     DST_ODOO_URL=https://odoo.qa.gatheringatthegrove.com DST_ODOO_PASSWORD=<qa-key> \\
     python3 scripts/copy_product_images.py
     # `bundles` expands to BUNDLE_TEMPLATE_IDS; any comma list of ids works
-    # (TEMPLATE_IDS=22,132). Id matching is only safe where SRC and DEST share
-    # an origin (QA was cut from prod), so each id is cross-checked by NAME on
-    # both sides and refused on mismatch; an `AAA QA E2E ` fixture is refused
-    # outright. SKUS and TEMPLATE_IDS may be combined.
+    # (TEMPLATE_IDS=22,132). The ids are SOURCE ids. DEST uses the same id only
+    # when it carries the same NAME there; otherwise (GOL-3793: QA was re-seeded,
+    # Mountain Mama is 132 on prod and 350 on QA) the DEST template is found by
+    # exact name within the company, and must be exactly one. No match is
+    # reported and skipped; an `AAA QA E2E ` fixture is refused outright.
+    # SKUS and TEMPLATE_IDS may be combined.
 
 Exit codes: 0 ok (even with per-SKU MISSING — those are reported, not fatal),
 1 auth/config failure or an unexpected write error.
@@ -99,9 +101,9 @@ BLOCKED_SKUS = {"E2E-BAREROOT-INSTOCK", "E2E-POTTED-INSTOCK"}
 # ...and by name, for the id path (the fixtures carry no stable id across envs).
 BLOCKED_NAME_PREFIX = "AAA QA E2E "
 
-# GOL-3785: the nursery bundle templates (no SKU on either side; same ids on
-# prod and QA because QA was cut from prod). These are the home-page lead-seller
-# candidates whose missing QA photo the Train #4 gate caught.
+# GOL-3785: the nursery bundle templates (no SKU on either side). These are PROD
+# ids — the home-page lead-seller candidates whose missing QA photo the Train #4
+# gate caught. QA does not share them (GOL-3793), so DEST falls back to name.
 BUNDLE_TEMPLATE_IDS: tuple[int, ...] = (
     22,  # Chestnut Grove (5-Tree Native Bundle)
     132,  # Mountain Mama Package (5-Tree Appalachian Mix)
@@ -211,22 +213,51 @@ def template_name(odoo: Odoo, tid: int, company_id: int) -> str | None:
     return rows[0]["name"] if rows else None
 
 
-def resolve_template_by_id(src: Odoo, dst: Odoo, tid: int, src_company: int, dst_company: int) -> str | None:
-    """Accept template ``tid`` for copying only when it names the same product on
-    both sides. Returns the report label, or None (reason printed) to skip."""
+def template_ids_named(odoo: Odoo, name: str, company_id: int) -> list[int]:
+    """Template ids in the company whose name equals ``name`` (same_template_name)."""
+    rows = odoo.call(
+        "product.template",
+        "search_read",
+        [[("name", "ilike", name), ("company_id", "in", [company_id, False])]],
+        {"fields": ["name"]},
+    )
+    return sorted(r["id"] for r in rows if same_template_name(r["name"], name))
+
+
+def resolve_template_by_id(
+    src: Odoo, dst: Odoo, tid: int, src_company: int, dst_company: int
+) -> tuple[str, int] | None:
+    """Resolve SOURCE template ``tid`` to the DEST template naming the same product.
+
+    DEST is ``tid`` itself when the name agrees there, else the one template of
+    that exact name in the DEST company (ids differ once an env is re-seeded).
+    Returns (report label, dest template id), or None (reason printed) to skip.
+    """
     src_name = template_name(src, tid, src_company)
-    dst_name = template_name(dst, tid, dst_company)
-    if src_name is None or dst_name is None:
-        side = src.label if src_name is None else dst.label
-        print(f"  MISSING  #{tid}: no template with that id in [{side}]")
-        return None
-    if not same_template_name(src_name, dst_name):
-        print(f"  MISMATCH #{tid}: name differs — [{src.label}] '{src_name}' vs [{dst.label}] '{dst_name}' — refusing")
+    if src_name is None:
+        print(f"  MISSING  #{tid}: no template with that id in [{src.label}]")
         return None
     if src_name.startswith(BLOCKED_NAME_PREFIX):
         print(f"  BLOCKED  #{tid}: '{src_name}' is an E2E runner fixture — never propagated")
         return None
-    return f"#{tid} {src_name}"
+    label = f"#{tid} {src_name}"
+    dst_name = template_name(dst, tid, dst_company)
+    if same_template_name(src_name, dst_name):
+        return label, tid
+    named = template_ids_named(dst, src_name, dst_company)
+    if len(named) == 1:
+        print(f"  MATCHED  #{tid}: by name -> [{dst.label}] template {named[0]} ('{src_name}')")
+        return label, named[0]
+    if len(named) > 1:
+        print(f"  AMBIGUOUS #{tid}: '{src_name}' names templates {named} in [{dst.label}] — refusing to guess")
+    elif dst_name is None:
+        print(f"  MISSING  #{tid}: no template with that id or name ('{src_name}') in [{dst.label}]")
+    else:
+        print(
+            f"  MISMATCH #{tid}: name differs — [{src.label}] '{src_name}' vs [{dst.label}] '{dst_name}', "
+            f"and no [{dst.label}] template has the source name — refusing"
+        )
+    return None
 
 
 def company_id_of(odoo: Odoo) -> int:
@@ -335,11 +366,11 @@ def main() -> None:
             continue
         targets.append((sku, src_tmpl, dst_tmpl))
     for tid in template_ids:
-        label = resolve_template_by_id(src, dst, tid, src_company, dst_company)
-        if label is None:
+        resolved = resolve_template_by_id(src, dst, tid, src_company, dst_company)
+        if resolved is None:
             n_missing += 1
             continue
-        targets.append((label, tid, tid))
+        targets.append((resolved[0], tid, resolved[1]))
     for label, src_tmpl, dst_tmpl in targets:
         lines = [copy_hero(src, dst, label, src_tmpl, dst_tmpl, dst_ctx)]
         lines += copy_gallery(src, dst, label, src_tmpl, dst_tmpl, dst_ctx)

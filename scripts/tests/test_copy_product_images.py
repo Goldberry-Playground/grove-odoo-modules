@@ -5,7 +5,8 @@ The SKU path is I/O all the way down; what is new and silent-when-wrong is the
 id selector: a typo in ``TEMPLATE_IDS`` must be a hard error (never a quietly
 narrower set), ``bundles`` must expand to the five nursery bundle templates, and
 the name guard must refuse an id that names a different product on the two
-sides — ids are only trustworthy because QA was cut from prod.
+sides. GOL-3793: QA no longer shares prod's ids, so a source id whose name is
+absent at that id on DEST falls back to exactly one DEST template of that name.
 """
 
 import importlib.util
@@ -64,37 +65,71 @@ class _FakeOdoo:
     def call(self, model, method, args, kwargs=None):
         assert (model, method) == ("product.template", "search_read")
         domain = args[0]
-        tid = next(v for f, _, v in domain if f == "id")
-        name = self._names.get(tid)
-        return [{"id": tid, "name": name}] if name else []
+        tid = next((v for f, _, v in domain if f == "id"), None)
+        if tid is not None:
+            name = self._names.get(tid)
+            return [{"id": tid, "name": name}] if name else []
+        needle = next(v for f, op, v in domain if f == "name" and op == "ilike").casefold()
+        return [{"id": i, "name": n} for i, n in self._names.items() if needle in n.casefold()]
 
 
 class TestResolveTemplateById(unittest.TestCase):
     def _resolve(self, src_names, dst_names, tid):
         buf = io.StringIO()
         with redirect_stdout(buf):
-            label = mod.resolve_template_by_id(_FakeOdoo("SRC", src_names), _FakeOdoo("DST", dst_names), tid, 9, 9)
-        return label, buf.getvalue()
+            got = mod.resolve_template_by_id(_FakeOdoo("SRC", src_names), _FakeOdoo("DST", dst_names), tid, 9, 9)
+        return got, buf.getvalue()
 
     def test_same_name_both_sides_is_accepted_with_a_readable_label(self):
-        label, out = self._resolve({132: "Mountain Mama Package"}, {132: "Mountain Mama Package"}, 132)
-        self.assertEqual(label, "#132 Mountain Mama Package")
+        got, out = self._resolve({132: "Mountain Mama Package"}, {132: "Mountain Mama Package"}, 132)
+        self.assertEqual(got, ("#132 Mountain Mama Package", 132))
         self.assertEqual(out, "")
 
-    def test_missing_on_either_side_is_skipped(self):
-        label, out = self._resolve({132: "Mountain Mama Package"}, {}, 132)
-        self.assertIsNone(label)
+    def test_missing_on_source_is_skipped(self):
+        got, out = self._resolve({}, {132: "Mountain Mama Package"}, 132)
+        self.assertIsNone(got)
+        self.assertIn("MISSING", out)
+        self.assertIn("[SRC]", out)
+
+    def test_missing_by_id_and_name_on_dest_is_skipped(self):
+        got, out = self._resolve({132: "Mountain Mama Package"}, {}, 132)
+        self.assertIsNone(got)
         self.assertIn("MISSING", out)
         self.assertIn("[DST]", out)
 
+    def test_different_dest_id_is_found_by_exact_name(self):
+        # GOL-3793: 132 on prod, 350 on QA; QA's 132 does not exist.
+        got, out = self._resolve({132: "Mountain Mama Package"}, {350: "mountain mama package"}, 132)
+        self.assertEqual(got, ("#132 Mountain Mama Package", 350))
+        self.assertIn("MATCHED", out)
+        self.assertIn("350", out)
+
+    def test_name_fallback_wins_over_a_different_product_at_the_same_id(self):
+        got, _ = self._resolve({132: "Mountain Mama Package"}, {132: "Sticker", 350: "Mountain Mama Package"}, 132)
+        self.assertEqual(got, ("#132 Mountain Mama Package", 350))
+
+    def test_name_fallback_needs_the_whole_name(self):
+        # A substring hit ("Chestnut Grove Canvas Tote") is not the bundle.
+        got, out = self._resolve({22: "Chestnut Grove"}, {176: "Chestnut Grove Canvas Tote"}, 22)
+        self.assertIsNone(got)
+        self.assertIn("MISSING", out)
+
+    def test_two_dest_templates_of_the_name_are_refused(self):
+        got, out = self._resolve(
+            {132: "Mountain Mama Package"}, {350: "Mountain Mama Package", 351: "Mountain Mama Package"}, 132
+        )
+        self.assertIsNone(got)
+        self.assertIn("AMBIGUOUS", out)
+        self.assertIn("[350, 351]", out)
+
     def test_name_mismatch_is_refused(self):
-        label, out = self._resolve({135: "At the Grove Food Forest (50)"}, {135: "Centennial Food Forest (100)"}, 135)
-        self.assertIsNone(label)
+        got, out = self._resolve({135: "At the Grove Food Forest (50)"}, {135: "Centennial Food Forest (100)"}, 135)
+        self.assertIsNone(got)
         self.assertIn("MISMATCH", out)
 
     def test_e2e_fixture_is_blocked_by_name(self):
-        label, out = self._resolve({900: "AAA QA E2E Potted"}, {900: "AAA QA E2E Potted"}, 900)
-        self.assertIsNone(label)
+        got, out = self._resolve({900: "AAA QA E2E Potted"}, {900: "AAA QA E2E Potted"}, 900)
+        self.assertIsNone(got)
         self.assertIn("BLOCKED", out)
 
 
