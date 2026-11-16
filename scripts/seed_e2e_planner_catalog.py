@@ -47,13 +47,21 @@ Six plants spanning the strata an open-ground food-forest plan draws from —
 canopy, understory, shrub, ground cover and vine — each a real WV zone-6 species
 with honest facts, split across ``anchor``/``companion`` roles and
 ``fast``/``mid``/``long`` succession so the planner has a diverse set to build a
-layered plan from. They are **left unstocked** on purpose: the planner feed keeps
-out-of-stock plants ("notify me"), so stock is irrelevant to feed membership, and
-an unstocked fixture renders "Reserve"/"Notify" (not an enabled "Add to Cart"),
-so it never shifts which product the checkout suite's ``findProductByCta`` picks.
-``company_id`` is pinned to the nursery company so the fixtures scope to the
-nursery tenant feed and never leak onto the farm/GGG storefronts
-(``company_domain``).
+layered plan from. Each is **stocked and priced** (GOL-4003): the planner engine
+builds only from *available* plants (grove-sites ``plan.ts`` ``available()`` =
+``in_stock && !preorder_cap_reached``), so an unstocked fixture sits in the feed
+but drops to the "notify" map and the plan comes back **empty** — exactly the
+10/10 spec failure GOL-4003 reported. Stock (``E2E_PLANNER_QTY`` on hand via
+``is_storable`` + a quant) makes the feed serve ``in_stock: true``; a non-$0
+``E2E_PLANNER_PRICE`` carts a priced line. ``company_id`` is pinned to the nursery
+company so the fixtures scope to the nursery tenant feed and never leak onto the
+farm/GGG storefronts (``company_domain``).
+
+Because these are now genuinely-buyable "Add to cart" cards, the grove-sites e2e
+suite is taught to ignore them by name (``QA Planner Fixture — …``) so they never
+shift the checkout suite's ``findProductByCta`` pick / deterministic cart totals,
+nor the ``qa-photos`` catalog check (they carry no image by design). See
+grove-sites ``apps/nursery/e2e/helpers.ts`` + ``qa-helpers.ts`` (GOL-4003).
 
 Determinism / idempotency
 -------------------------
@@ -63,8 +71,9 @@ is rewritten) rather than duplicated. Safe to run on every QA bring-up.
 
 Prod safety
 -----------
-This publishes synthetic "QA Planner Fixture — …" plants into a live storefront
-catalog. Two guards (identical to ``seed_e2e_test_inventory.py``):
+This publishes synthetic "QA Planner Fixture — …" plants — now **stocked and
+buyable** — into a live storefront catalog. Two guards (identical to
+``seed_e2e_test_inventory.py``):
 
 * **Dry run is the DEFAULT** (opt-out) — reports the plan, writes nothing. A live
   run requires an explicit ``DRY_RUN=0``.
@@ -89,9 +98,16 @@ Usage
 Knobs (env, all optional):
     DRY_RUN                default "1" (dry)   set "0" for a LIVE run (opt-out)
     COMPANY_NAME           default "At The Grove Nursery"
+    E2E_PLANNER_QTY        default "500"       on-hand stock per fixture. Deep so a
+                                               20-tree plan + the two planner specs
+                                               adding it to a cart on every run never
+                                               drain a fixture to out-of-stock.
+    E2E_PLANNER_PRICE      default "42.00"     list_price (USD) per fixture, so the
+                                               planner carts a priced (non-$0) line.
     E2E_PLANNER_FEED_URL   default "" (skip)   storefront /api/planner/catalog URL;
                                                when set, probed after the seed and a
-                                               plants:0 answer FAILS the run.
+                                               plants:0 — OR any fixture row served
+                                               in_stock:false — FAILS the run.
 
 Flags (argv):
     --force-i-know-this-is-not-qa   allow a LIVE run against a non-QA target
@@ -117,6 +133,20 @@ ODOO_PASSWORD = os.getenv("ODOO_PASSWORD")
 DRY_RUN = os.getenv("DRY_RUN", "1") != "0"
 
 COMPANY_NAME = os.getenv("COMPANY_NAME", "At The Grove Nursery")
+
+# Sellable stock + a non-$0 price make each fixture a plant the planner engine can
+# actually BUILD a plan from (GOL-4003). The planner engine's ``available()``
+# (grove-sites packages/planner/src/plan.ts) = ``in_stock && !preorder_cap_reached``;
+# an out-of-stock plant goes to the "notify" map and the pool is empty, so the plan
+# comes back ``empty`` even though the feed carries the row. So the fixtures must be
+# stocked. ``E2E_PLANNER_QTY`` is deep (a 20-tree plan draws a handful of each of
+# six species, and the two planner specs then add the whole plan to a cart on every
+# run) so repeated gate runs never drain a fixture to out-of-stock and silently
+# re-empty the plan. ``E2E_PLANNER_PRICE`` gives every line a real, non-$0 price so
+# the planner's add-to-cart lands a priced line (a $0 list_price otherwise carts a
+# $0 line).
+E2E_PLANNER_QTY = int(os.getenv("E2E_PLANNER_QTY", "500"))
+E2E_PLANNER_PRICE = float(os.getenv("E2E_PLANNER_PRICE", "42.00"))
 
 # Optional post-seed verification through the real storefront BFF (the GOL-3999
 # done-criterion made executable). Empty = skip; set it and a plants:0 answer FAILS.
@@ -309,15 +339,24 @@ def planner_fixture_vals(spec: dict, company_id: int) -> dict:
     retail feed keeps the plant year-round (it drops *potted-only* plants outside
     the leafed window, GOL-3800) and so the ``!= "seed"`` filter keeps it.
     ``company_id`` scopes it to the nursery tenant feed.
+
+    ``is_storable`` is True so Odoo tracks on-hand for the fixture — the caller
+    then stocks the single variant (``apply_stock``) so the feed serves
+    ``in_stock: true`` and the planner engine builds from it instead of dropping
+    it to "notify" (GOL-4003). ``list_price`` is a real, non-$0 price so the
+    planner add-to-cart carts a priced line.
     """
     vals: dict = {
         "name": spec["name"],
         "default_code": spec["sku"],
         "type": "consu",
+        # Inventory-tracked goods, so qty_available is real and the feed's
+        # _list_in_stock (any variant qty_available > 0) can read True (GOL-4003).
+        "is_storable": True,
         "sale_ok": True,
         "purchase_ok": False,
         "is_published": True,
-        "list_price": 0.0,
+        "list_price": E2E_PLANNER_PRICE,
         "company_id": company_id,
         # Bareroot tier so the plant stays in the RETAIL planner feed year-round.
         # The retail feed drops *potted-only* plants outside LEAFED_WINDOW
@@ -419,7 +458,82 @@ def resolve_company_id(models, uid) -> int:
     return rows[0]["id"]
 
 
-def seed_fixture(models, uid, ctx, company_id: int, spec: dict) -> int | None:
+def resolve_stock_location(models, uid, company_id: int) -> int:
+    """The nursery warehouse's lot_stock_id, where fixture on-hand lands."""
+    wh = call(
+        models,
+        uid,
+        "stock.warehouse",
+        "search_read",
+        [[("company_id", "=", company_id)]],
+        {"fields": ["lot_stock_id"], "limit": 1},
+    )
+    if not wh:
+        fail(f"No warehouse for company {company_id}")
+    return wh[0]["lot_stock_id"][0]
+
+
+def apply_stock(models, uid, ctx, variant_id: int, location_id: int, qty: float) -> None:
+    """Idempotently set on-hand ``qty`` for ``variant_id`` at ``location_id``.
+
+    Mirrors ``seed_e2e_test_inventory.apply_stock``: look up the existing quant and
+    WRITE ``inventory_quantity`` to the fixed target (converges regardless of prior
+    test churn) rather than blind-creating, then apply. The write carries
+    ``inventory_mode`` context or Odoo's quant access rule rejects it.
+    ``action_apply_inventory`` returns None, which the XML-RPC marshaller rejects,
+    so it goes over JSON-RPC.
+    """
+    quant = call(
+        models,
+        uid,
+        "stock.quant",
+        "search",
+        [[("product_id", "=", variant_id), ("location_id", "=", location_id)]],
+        {"limit": 1, "context": ctx["context"]},
+    )
+    if quant:
+        quant_id = quant[0]
+        call(
+            models,
+            uid,
+            "stock.quant",
+            "write",
+            [[quant_id], {"inventory_quantity": qty}],
+            {"context": {"inventory_mode": True, **ctx["context"]}},
+        )
+    else:
+        quant_id = call(
+            models,
+            uid,
+            "stock.quant",
+            "create",
+            [{"product_id": variant_id, "location_id": location_id, "inventory_quantity": qty}],
+            {"context": {"inventory_mode": True, **ctx["context"]}},
+        )
+    payload = {
+        "jsonrpc": "2.0",
+        "method": "call",
+        "params": {
+            "service": "object",
+            "method": "execute_kw",
+            "args": [ODOO_DB, uid, ODOO_PASSWORD, "stock.quant", "action_apply_inventory", [[quant_id]], ctx],
+        },
+    }
+    resp = _json.loads(
+        _ureq.urlopen(
+            _ureq.Request(
+                f"{ODOO_URL}/jsonrpc",
+                data=_json.dumps(payload).encode(),
+                headers={"Content-Type": "application/json"},
+            ),
+            timeout=30,
+        ).read()
+    )
+    if resp.get("error"):
+        fail(f"action_apply_inventory jsonrpc error: {resp['error']}")
+
+
+def seed_fixture(models, uid, ctx, company_id: int, stock_location_id: int, spec: dict) -> int | None:
     """Create or reconcile one planner-ready fixture template, keyed by default_code."""
     sku = spec["sku"]
     print(f"\n════ Fixture: {sku!r} ({spec['layer']}/{spec['role']}/{spec['succession']}) ════")
@@ -436,17 +550,54 @@ def seed_fixture(models, uid, ctx, company_id: int, spec: dict) -> int | None:
     if existing:
         tmpl_id = existing[0]
         if DRY_RUN:
-            print(f"  = fixture exists (id={tmpl_id}); would reconcile {len(vals)} field(s) to planner-ready")
+            print(
+                f"  = fixture exists (id={tmpl_id}); would reconcile {len(vals)} field(s) to "
+                f"planner-ready and stock {E2E_PLANNER_QTY} on hand @ ${E2E_PLANNER_PRICE:.2f}"
+            )
             return tmpl_id
         call(models, uid, "product.template", "write", [[tmpl_id], vals], ctx)
         print(f"  ~ reconciled fixture (id={tmpl_id}) to planner-ready")
-        return _report_ready(models, uid, tmpl_id)
-    if DRY_RUN:
-        print(f"  + WOULD CREATE planner-ready fixture {spec['name']!r}")
+    elif DRY_RUN:
+        print(
+            f"  + WOULD CREATE planner-ready fixture {spec['name']!r}, stocked "
+            f"{E2E_PLANNER_QTY} on hand @ ${E2E_PLANNER_PRICE:.2f}"
+        )
         return None
-    tmpl_id = call(models, uid, "product.template", "create", [vals], ctx)
-    print(f"  + created fixture (id={tmpl_id})")
+    else:
+        tmpl_id = call(models, uid, "product.template", "create", [vals], ctx)
+        print(f"  + created fixture (id={tmpl_id})")
+
+    _stock_single_variant(models, uid, ctx, stock_location_id, tmpl_id, sku)
     return _report_ready(models, uid, tmpl_id)
+
+
+def _stock_single_variant(models, uid, ctx, stock_location_id: int, tmpl_id: int, sku: str) -> None:
+    """Stock the fixture's one variant to ``E2E_PLANNER_QTY`` on hand (GOL-4003).
+
+    These fixtures carry no variant axis, so a template has exactly one variant;
+    stocking it makes ``qty_available > 0`` → the feed serves ``in_stock: true``
+    and the planner engine builds from it. Fails loudly if the variant did not end
+    up on hand, so an unstocked fixture can never slip through as a green seed.
+    """
+    variants = call(
+        models,
+        uid,
+        "product.product",
+        "search_read",
+        [[("product_tmpl_id", "=", tmpl_id)]],
+        {"fields": ["id", "qty_available"]},
+    )
+    if len(variants) != 1:
+        fail(f"fixture {sku!r} (id={tmpl_id}) has {len(variants)} variants, expected exactly 1: {variants}")
+    variant_id = variants[0]["id"]
+    apply_stock(models, uid, ctx, variant_id, stock_location_id, float(E2E_PLANNER_QTY))
+    on_hand = call(models, uid, "product.product", "read", [[variant_id], ["qty_available"]])[0]["qty_available"]
+    print(f"    stock: variant id={variant_id} on hand = {on_hand} @ location {stock_location_id}")
+    if on_hand < 1:
+        fail(
+            f"fixture {sku!r} (id={tmpl_id}, variant {variant_id}) is still 0 on hand after apply — "
+            "the feed would serve in_stock:false and the planner would drop it to 'notify' (GOL-4003)."
+        )
 
 
 def _report_ready(models, uid, tmpl_id: int) -> int:
@@ -480,20 +631,46 @@ def verify_feed() -> None:
             body = _json.loads(resp.read())
     except Exception as exc:  # noqa: BLE001 - any failure here must be loud
         fail(f"planner feed probe against {E2E_PLANNER_FEED_URL} failed: {exc}")
-    plants = len(body.get("plants") or [])
+    rows = body.get("plants") or []
+    plants = len(rows)
     print(
         f"  source={body.get('source')} plants={plants} bundles={len(body.get('bundles') or [])} "
         f"catalog_version={body.get('catalog_version')}"
     )
     if not plants:
         fail("planner feed still returns plants:0 after seeding — fixtures not visible to the nursery tenant.")
-    print(f"  OK: feed carries {plants} planner-ready plant(s).")
+
+    # in_stock readback (GOL-4003): a fixture row that the feed serves OUT OF STOCK
+    # goes to the planner's "notify" map, not its buildable pool — the plan then
+    # comes back empty even though the row is present. Check it right next to the
+    # plants:0 guard so this fails at SEED time, not later in a red e2e run.
+    fixture_rows = [r for r in rows if str(r.get("name") or "").startswith("QA Planner Fixture")]
+    oos = [r for r in fixture_rows if not r.get("in_stock")]
+    in_stock = [r for r in fixture_rows if r.get("in_stock")]
+    print(
+        f"  fixtures in feed={len(fixture_rows)}  in_stock={len(in_stock)}  "
+        f"out_of_stock={len(oos)}  (checked row.in_stock)"
+    )
+    if not fixture_rows:
+        fail(
+            "planner feed carries plants but none are the QA Planner Fixture rows — "
+            "the seed did not publish to the nursery tenant feed."
+        )
+    if oos:
+        names = ", ".join(sorted(str(r.get("name")) for r in oos))
+        fail(
+            f"planner feed serves {len(oos)} fixture row(s) with in_stock:false ({names}). "
+            "The planner engine only builds from in-stock plants (plan.ts available()), so these "
+            "would drop to 'notify' and the plan would be empty — stock them (GOL-4003)."
+        )
+    print(f"  OK: feed carries {plants} planner-ready plant(s), all {len(in_stock)} fixture(s) in_stock.")
 
 
 def main() -> None:
     guard_environment()
     models, uid = authenticate()
     company_id = resolve_company_id(models, uid)
+    stock_location_id = resolve_stock_location(models, uid, company_id)
     ctx = {"context": {"allowed_company_ids": [company_id], "company_id": company_id}}
     print(f"\n── Seed planner-catalog fixtures ── company={COMPANY_NAME!r} (id={company_id})")
     if DRY_RUN:
@@ -501,7 +678,7 @@ def main() -> None:
 
     ready = 0
     for spec in FIXTURES:
-        tid = seed_fixture(models, uid, ctx, company_id, spec)
+        tid = seed_fixture(models, uid, ctx, company_id, stock_location_id, spec)
         if tid and not DRY_RUN:
             ready += 1
 

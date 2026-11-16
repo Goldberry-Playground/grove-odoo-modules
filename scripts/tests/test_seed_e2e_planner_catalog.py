@@ -100,6 +100,15 @@ class TestFixtureIsPlannerReady(unittest.TestCase):
             # instead of dropping it outside the leafed window (GOL-3800).
             self.assertEqual(v.get("grove_shipping_tier"), "bareroot", sku)
 
+    def test_stockable_and_priced(self):
+        # GOL-4003: the planner engine builds only from in-stock plants, so each
+        # fixture must be inventory-tracked (is_storable, so the caller's quant
+        # gives it real on-hand) and carry a non-$0 price (so the planner carts a
+        # priced line, not a $0 one).
+        for sku, v in self.all_vals:
+            self.assertTrue(v.get("is_storable"), sku)
+            self.assertGreater(v.get("list_price") or 0, 0, sku)
+
     def test_required_growing_facts_all_set(self):
         for sku, v in self.all_vals:
             for name, kind in _REQUIRED_FACTS:
