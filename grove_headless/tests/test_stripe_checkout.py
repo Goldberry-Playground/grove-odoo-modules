@@ -1521,6 +1521,11 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         out to the same amount."""
         order = self._settleable_order()
 
+        # The fixture's GROVE-SHIP line still carries the $12.50 checkout estimate;
+        # settlement rewrites it to actual + S&H before the tax calc, so do the
+        # same here before reading the helpers directly.
+        grove_main._recompute_ship_total(self.env, order)
+
         # Goods-only line items; shipping lifted into shipping_cost.
         line_items = grove_main._settlement_tax_line_items(order)
         shipping_cost = grove_main._settlement_shipping_cost(order)
