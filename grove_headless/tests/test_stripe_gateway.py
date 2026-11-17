@@ -142,6 +142,59 @@ class TestSessionParams(unittest.TestCase):
         params = sg.build_session_params(line_items=self.LINES, success_url="a", cancel_url="b")
         self.assertNotIn("discounts[0][coupon]", params)
 
+    # ── GOL-3994: shipping via shipping_options, not a taxed line item ─────────
+    TAX_LINES = [
+        {"name": "Pawpaw", "amount_cents": 2500, "quantity": 2, "kind": "goods", "tax_code": sg.TAX_CODE_GOODS},
+        {"name": "Shipping", "amount_cents": 900, "quantity": 1, "kind": "shipping", "tax_code": sg.TAX_CODE_SHIPPING},
+    ]
+
+    def test_shipping_routes_to_shipping_options_when_tax_on(self):
+        """With automatic_tax on, the shipping-kind line must be a
+        shipping_options[0][shipping_rate_data] entry — fixed_amount, tax-exclusive,
+        carrying the shipping tax code — and must NOT appear as a product line
+        item. This is the GOL-3994 regression guard."""
+        params = sg.build_session_params(line_items=self.TAX_LINES, success_url="a", cancel_url="b", automatic_tax=True)
+        # Goods stay a line item; shipping is lifted out.
+        self.assertEqual(params["line_items[0][price_data][product_data][name]"], "Pawpaw")
+        self.assertEqual(params["line_items[0][price_data][product_data][tax_code]"], sg.TAX_CODE_GOODS)
+        self.assertNotIn("line_items[1][price_data][unit_amount]", params)
+        # Shipping rides shipping_options, fixed-amount + tax-exclusive + the code.
+        self.assertEqual(params["shipping_options[0][shipping_rate_data][display_name]"], "Shipping")
+        self.assertEqual(params["shipping_options[0][shipping_rate_data][type]"], "fixed_amount")
+        self.assertEqual(params["shipping_options[0][shipping_rate_data][fixed_amount][amount]"], 900)
+        self.assertEqual(params["shipping_options[0][shipping_rate_data][fixed_amount][currency]"], "usd")
+        self.assertEqual(params["shipping_options[0][shipping_rate_data][tax_behavior]"], "exclusive")
+        self.assertEqual(params["shipping_options[0][shipping_rate_data][tax_code]"], sg.TAX_CODE_SHIPPING)
+
+    def test_shipping_tax_code_never_on_a_line_item_when_tax_on(self):
+        """No line_items entry may carry the shipping tax code when automatic_tax
+        is on — that is the construct Stripe rejects (GOL-3992/GOL-3994)."""
+        params = sg.build_session_params(line_items=self.TAX_LINES, success_url="a", cancel_url="b", automatic_tax=True)
+        leaked = [k for k, v in params.items() if k.startswith("line_items[") and v == sg.TAX_CODE_SHIPPING]
+        self.assertEqual(leaked, [], f"shipping tax code leaked onto a line item: {leaked}")
+
+    def test_shipping_stays_a_line_item_when_tax_off(self):
+        """Tax OFF (deposit / rollback path) is byte-identical to before: shipping
+        stays a plain line item and no shipping_options is emitted."""
+        params = sg.build_session_params(line_items=self.TAX_LINES, success_url="a", cancel_url="b")
+        self.assertEqual(params["line_items[1][price_data][product_data][name]"], "Shipping")
+        self.assertEqual(params["line_items[1][price_data][unit_amount]"], 900)
+        # No tax code on the line (tax off) and no shipping_options at all.
+        self.assertNotIn("line_items[1][price_data][product_data][tax_code]", params)
+        self.assertNotIn("shipping_options[0][shipping_rate_data][display_name]", params)
+
+    def test_shipping_option_amount_scales_with_quantity(self):
+        """A shipping line with quantity > 1 folds qty into the fixed_amount — the
+        total still equals amount_cents × quantity (charged_cents parity)."""
+        lines = [
+            {"name": "Pawpaw", "amount_cents": 2500, "quantity": 1, "kind": "goods"},
+            {"name": "Shipping", "amount_cents": 900, "quantity": 2, "kind": "shipping"},
+        ]
+        params = sg.build_session_params(line_items=lines, success_url="a", cancel_url="b", automatic_tax=True)
+        self.assertEqual(params["shipping_options[0][shipping_rate_data][fixed_amount][amount]"], 1800)
+        # Default tax code applied when the line omits one.
+        self.assertEqual(params["shipping_options[0][shipping_rate_data][tax_code]"], sg.TAX_CODE_SHIPPING)
+
 
 class TestCreateSession(unittest.TestCase):
     LINES = [{"name": "Pawpaw", "amount_cents": 2500, "quantity": 1}]
