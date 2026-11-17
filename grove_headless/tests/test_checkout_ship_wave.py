@@ -269,9 +269,7 @@ class TestCheckoutShipWave(GroveTaxFixtureMixin, TransactionCase):
     # ── repeat-buyer ship-to settlement address (GOL-4007) ────────────────────
 
     def _us_state(self, code):
-        return self.env["res.country.state"].search(
-            [("country_id.code", "=", "US"), ("code", "=", code)], limit=1
-        )
+        return self.env["res.country.state"].search([("country_id.code", "=", "US"), ("code", "=", code)], limit=1)
 
     def test_repeat_buyer_ships_and_settles_against_this_checkouts_ship_to(self):
         # A returning customer is reused by email and never mutated from a public
