@@ -830,6 +830,49 @@ class TestStripeCheckout(GroveTaxFixtureMixin, TransactionCase):
         # PRE-TAX DUE TODAY = 70 - 10 + 22 = 82; Stripe adds tax on top.
         self.assertEqual(charged, stripe_gateway.to_cents(82.0))
 
+    def test_checkout_session_sends_shipping_via_shipping_options(self):
+        """GOL-3994: the full-charge ship Checkout Session must carry shipping
+        through shipping_options, not as a taxed line item. The controller's
+        display array (Review & pay summary) still lists Shipping with its tax
+        code (unchanged), but what is POSTed to Stripe routes shipping into
+        shipping_options[0][shipping_rate_data] and never onto a line item. The
+        pre-tax total (goods + shipping) is unchanged, so charged_cents parity
+        holds."""
+        tax = self._wv_state_tax()
+        pear = self._taxed_plant("Pear (Magness, Potted)", 35.0, tax)
+        self._set_stock(pear, 5)
+        order = self._order_with(pear, 2)  # 2 x $35 = $70 goods
+        self._add_taxed_shipping(order, 22.0, tax)
+
+        line_items, _, charged = grove_main._build_stripe_line_items(order, today=self.BEFORE_CUTOVER, tax_enabled=True)
+        # Display array is unchanged: shipping is still a line with its tax code.
+        shipping = next(li for li in line_items if li["kind"] == "shipping")
+        self.assertEqual(shipping["tax_code"], stripe_gateway.TAX_CODE_SHIPPING)
+        self.assertEqual(charged, stripe_gateway.to_cents(92.0))  # 70 goods + 22 shipping
+
+        resp = mock.Mock(status_code=200, json=lambda: {"id": "cs_1", "url": "https://pay/x", "payment_intent": "pi_1"})
+        post = mock.Mock(return_value=resp)
+        stripe_gateway.create_checkout_session(
+            "sk_test",
+            line_items=line_items,
+            success_url="a",
+            cancel_url="b",
+            customer="cus_1",
+            automatic_tax=True,
+            post=post,
+        )
+        data = post.call_args.kwargs["data"]
+        # Shipping went to shipping_options, not a line item.
+        self.assertEqual(data["shipping_options[0][shipping_rate_data][type]"], "fixed_amount")
+        self.assertEqual(data["shipping_options[0][shipping_rate_data][fixed_amount][amount]"], 2200)
+        self.assertEqual(data["shipping_options[0][shipping_rate_data][tax_behavior]"], "exclusive")
+        self.assertEqual(data["shipping_options[0][shipping_rate_data][tax_code]"], stripe_gateway.TAX_CODE_SHIPPING)
+        # No line item carries the shipping tax code — the bug (GOL-3992/3994).
+        leaked = [k for k, v in data.items() if k.startswith("line_items[") and v == stripe_gateway.TAX_CODE_SHIPPING]
+        self.assertEqual(leaked, [], f"shipping tax code leaked onto a line item: {leaked}")
+        # automatic_tax still enabled for the session.
+        self.assertEqual(data["automatic_tax[enabled]"], "true")
+
     def test_percent_tier_single_line_and_label(self):
         """An automatic percent volume tier also collapses to ONE pre-tax line,
         labelled `Volume discount 10%`, worth 10% of the goods subtotal
