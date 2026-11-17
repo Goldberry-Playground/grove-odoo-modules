@@ -6035,22 +6035,22 @@ def _recompute_ship_total(env, order):
 
 
 def _settlement_tax_line_items(order):
-    """Stripe Tax calc line items for the ship-time settlement (GOL-2568).
+    """Stripe Tax calc GOODS line items for the ship-time settlement (GOL-2568).
 
-    Each goods line at its pre-tax subtotal plus the ACTUAL shipping line (its
-    price_unit was already rewritten to grove_actual_shipping_cost), tagged with
-    Stripe tax codes, so ``/v1/tax/calculations`` returns the same destination
-    tax Stripe would have charged on a Checkout Session. Reward/discount lines
-    are excluded — a deposit cart carries no promo (rejected upstream)."""
+    Each goods line at its pre-tax subtotal, tagged with its Stripe tax code, so
+    ``/v1/tax/calculations`` returns the same destination tax Stripe would have
+    charged on a Checkout Session. The ACTUAL shipping line is NOT returned here
+    — Stripe rejects the shipping tax code on a ``line_items`` entry, so it rides
+    ``create_tax_calculation``'s ``shipping_cost`` param instead (GOL-3992, see
+    ``_settlement_shipping_cost``). Reward/discount lines are excluded — a deposit
+    cart carries no promo (rejected upstream)."""
     items = []
     for line in order.order_line:
         if line.display_type or not line.product_id or line.reward_id:
             continue
         product = line.product_id
         if product.default_code == SHIPPING_PRODUCT_CODE:
-            code = stripe_gateway.TAX_CODE_SHIPPING
-        else:
-            code = _stripe_tax_code_for(product)
+            continue  # shipping goes through shipping_cost, never a line item (GOL-3992)
         amount = stripe_gateway.to_cents(line.price_subtotal)  # whole-line, pre-tax
         if amount <= 0:
             continue
@@ -6058,11 +6058,32 @@ def _settlement_tax_line_items(order):
             {
                 "amount": amount,
                 "reference": product.default_code or f"line-{line.id}",
-                "tax_code": code,
+                "tax_code": _stripe_tax_code_for(product),
                 "quantity": 1,
             }
         )
     return items
+
+
+def _settlement_shipping_cost(order):
+    """The ACTUAL shipping line as a Stripe Tax ``shipping_cost`` (GOL-3992).
+
+    ``/v1/tax/calculations`` takes shipping only through ``shipping_cost[amount]``
+    / ``shipping_cost[tax_code]`` — the shipping tax code (txcd_92010001) is
+    rejected on a ``line_items`` entry, which silently sent every settlement back
+    to Odoo's fallback tax (GOL-3992). The shipping line's price_unit was already
+    rewritten to grove_actual_shipping_cost + S&H fee upstream. Returns
+    {"amount": cents, "tax_code": TAX_CODE_SHIPPING} for the first positive
+    shipping line, or None when the order has none (e.g. a pickup order)."""
+    for line in order.order_line:
+        if line.display_type or not line.product_id or line.reward_id:
+            continue
+        if line.product_id.default_code != SHIPPING_PRODUCT_CODE:
+            continue
+        amount = stripe_gateway.to_cents(line.price_subtotal)  # whole-line, pre-tax
+        if amount > 0:
+            return {"amount": amount, "tax_code": stripe_gateway.TAX_CODE_SHIPPING}
+    return None
 
 
 def _resolve_saved_card(secret_key, order):
@@ -6400,11 +6421,13 @@ def settle_order_at_ship(env, order):
     # the deposit — byte-identical to the pre-GOL-2568 settlement.
     tax_calc = None
     tax_line_items = _settlement_tax_line_items(order)
-    if _stripe_tax_enabled(order) and secret_key and tax_line_items:
+    tax_shipping_cost = _settlement_shipping_cost(order)
+    if _stripe_tax_enabled(order) and secret_key and (tax_line_items or tax_shipping_cost):
         try:
             tax_calc = stripe_gateway.create_tax_calculation(
                 secret_key,
                 line_items=tax_line_items,
+                shipping_cost=tax_shipping_cost,
                 address=_stripe_ship_address(env, order),
             )
         except Exception as exc:  # noqa: BLE001 — tax calc is best-effort; a gateway/network error must not break settlement
@@ -6425,7 +6448,11 @@ def settle_order_at_ship(env, order):
             )
 
     if tax_calc:
+        # Base = goods line_items + the shipping_cost that now rides its own param
+        # (GOL-3992); tax_amount_exclusive already covers both goods and shipping.
         base_cents = sum(int(li["amount"]) * int(li.get("quantity", 1)) for li in tax_line_items)
+        if tax_shipping_cost:
+            base_cents += int(tax_shipping_cost["amount"])
         stripe_tax_cents = int(tax_calc.get("tax_amount_exclusive") or 0)
         order.write(
             {

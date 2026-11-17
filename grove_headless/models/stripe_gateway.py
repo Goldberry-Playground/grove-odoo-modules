@@ -609,6 +609,7 @@ def create_tax_calculation(
     address,
     address_source="shipping",
     customer=None,
+    shipping_cost=None,
     post=requests.post,
     timeout=DEFAULT_TIMEOUT,
 ):
@@ -616,17 +617,31 @@ def create_tax_calculation(
 
     ``line_items`` is a list of {"amount": cents, "reference": str,
     "tax_code": str, "quantity": int?} (amounts tax-exclusive, matching
-    checkout). ``address`` is {"line1","city","state","postal_code","country"}.
+    checkout) — GOODS only. ``address`` is
+    {"line1","city","state","postal_code","country"}.
+
+    Shipping must NOT be a line item: Stripe rejects the shipping tax code on a
+    ``line_items`` entry ("The shipping tax code txcd_92010001 cannot be used on
+    a line item"). Pass it through ``shipping_cost`` instead — a dict
+    {"amount": cents, "tax_code": str?} that becomes ``shipping_cost[amount]`` /
+    ``shipping_cost[tax_code]`` (tax-exclusive). The returned
+    ``tax_amount_exclusive`` and top-level ``tax_breakdown`` already fold in the
+    shipping tax, and ``create_from_calculation`` carries the shipping line into
+    the recorded transaction automatically (GOL-3992).
+
     Returns the parsed calculation dict — ``id``, ``tax_amount_exclusive`` (total
-    tax in cents), and ``tax_breakdown``/``tax_summary`` for the jurisdictions.
-    Raises StripeError on non-2xx."""
+    tax in cents, goods + shipping), and ``tax_breakdown``/``tax_summary`` for the
+    jurisdictions. Raises StripeError on non-2xx."""
     if not secret_key:
         raise StripeError("Stripe secret key is not configured")
-    if not line_items:
+    if not line_items and not shipping_cost:
         raise StripeError("cannot compute tax with no line items")
     nested = {
         "currency": CURRENCY,
-        "line_items": [
+        "customer_details": {"address": address, "address_source": address_source},
+    }
+    if line_items:
+        nested["line_items"] = [
             {
                 "amount": int(li["amount"]),
                 "reference": li["reference"],
@@ -635,9 +650,13 @@ def create_tax_calculation(
                 "quantity": int(li.get("quantity", 1)),
             }
             for li in line_items
-        ],
-        "customer_details": {"address": address, "address_source": address_source},
-    }
+        ]
+    if shipping_cost:
+        nested["shipping_cost"] = {
+            "amount": int(shipping_cost["amount"]),
+            "tax_code": shipping_cost.get("tax_code", TAX_CODE_SHIPPING),
+            "tax_behavior": "exclusive",
+        }
     if customer:
         nested["customer"] = customer
     resp = post(
