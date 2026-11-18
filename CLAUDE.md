@@ -4,7 +4,7 @@ Custom Odoo 19 modules for the Gather at the Grove multi-tenant ecosystem.
 
 ## Architecture
 
-This repo is deployed to production via **git-sync** — a sidecar container in the odoocker stack that clones this repo to `/workspace/current`. Odoo includes that path in `addons_path`, so module changes take effect without rebuilding the Docker image.
+This repo is deployed to production via **git-sync** — a sidecar container in the odoocker stack that clones this repo to `/workspace/current`. Odoo includes that path in `addons_path`, so module changes take effect without rebuilding the Docker image. Production git-sync is pinned to a commit SHA (odoocker `custom_modules_ref`), not `main`: a merge here reaches prod only through the release train's Leg B promote.
 
 ## Module Conventions
 
@@ -17,7 +17,7 @@ This repo is deployed to production via **git-sync** — a sidecar container in 
 ## API Controller Patterns
 
 - Routes use `/grove/api/v1/` prefix for all headless endpoints
-- Auth: `public` for storefront (products, cart), `bearer` for authenticated (orders)
+- Auth: `public` for storefront reads (products, cart, shipping), `bearer` for writes and ops (orders, checkout, labels, leads, newsletter subscribe)
 - Company isolation: always use `request.website.company_id` or `request.env.company`
 - Return plain JSON via `_json_response()` helper (not Odoo's JSON-RPC wrapper)
 - Field selection: define explicit field lists (e.g., `PRODUCT_LIST_FIELDS`) — never return `*`
