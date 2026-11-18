@@ -4673,6 +4673,47 @@ def _consult_variant_id_for_quote(website, env):
     return consult_tmpl.sudo().with_company(website.company_id).product_variant_id.id or None
 
 
+def _attach_ship_delivery_partner(env, Partner, order, parent_partner, contact, shipping, dest, company):
+    """Point ``order.partner_shipping_id`` at a per-checkout delivery contact (GOL-4007).
+
+    ``_create_draft_order`` reuses an existing partner by email without mutating
+    its stored address (deliberate: a public POST must never rewrite a customer
+    record). For a repeat buyer that leaves ``partner_shipping_id`` on the
+    partner's OLD address, so ship-time tax settlement — ``_stripe_ship_address``
+    and ``_apply_destination_tax``, which both read ``partner_shipping_id`` —
+    would tax the order against the first order's state instead of THIS
+    checkout's ship-to. Give every shippable order a dedicated ``delivery`` child
+    built from the checkout payload, the same fix the Printify branch already
+    applies (GOL-3314).
+
+    ``dest`` is the canonical 2-letter destination state code the caller's
+    ship-to gate already validated. US + that state are forced explicitly so the
+    ship partner carries the correct nexus state even when the payload omitted
+    ``shipping.country`` (otherwise ``_partner_vals_from_payload`` can't resolve
+    ``state_id`` and settlement would fall back to the default WV tax).
+    """
+    vals = _partner_vals_from_payload(env, contact, shipping)
+    us_country = env["res.country"].sudo().search([("code", "=", "US")], limit=1)
+    if us_country:
+        vals["country_id"] = us_country.id
+        dest_state = (
+            env["res.country.state"].sudo().search([("country_id", "=", us_country.id), ("code", "=", dest)], limit=1)
+            if dest
+            else env["res.country.state"].sudo().browse()
+        )
+        vals["state_id"] = dest_state.id if dest_state else False
+    delivery = Partner.create(
+        {
+            **vals,
+            "parent_id": parent_partner.id,
+            "type": "delivery",
+            "company_id": company.id,
+        }
+    )
+    order.partner_shipping_id = delivery.id
+    return delivery
+
+
 def _create_draft_order(website, env, payload, discount_out=None):
     """Build a draft sale.order from a posted cart payload.
 
@@ -4967,31 +5008,10 @@ def _create_draft_order(website, env, payload, discount_out=None):
         # shirt would otherwise auto-ship to their OLD saved address. Printify
         # fulfilment is fully automatic — no human re-checks the address — so we
         # attach a dedicated delivery contact built from the checkout payload and
-        # point the order's shipping partner at it (GOL-3314 review 2026-10-14).
-        # The destination gate above already refused a missing/out-of-region state.
-        us_country = env["res.country"].sudo().search([("code", "=", "US")], limit=1)
-        dest_state = (
-            env["res.country.state"].sudo().search([("country_id", "=", us_country.id), ("code", "=", dest)], limit=1)
-            if us_country
-            else env["res.country.state"].sudo().browse()
-        )
-        delivery = Partner.create(
-            {
-                "name": contact.get("name"),
-                "email": contact.get("email"),
-                "phone": contact.get("phone") or False,
-                "street": shipping.get("street") or False,
-                "street2": shipping.get("street2") or False,
-                "city": shipping.get("city") or False,
-                "zip": shipping.get("zip") or False,
-                "country_id": us_country.id if us_country else False,
-                "state_id": dest_state.id if dest_state else False,
-                "parent_id": partner.id,
-                "type": "delivery",
-                "company_id": current_company.id,
-            }
-        )
-        order.partner_shipping_id = delivery.id
+        # point the order's shipping partner at it (GOL-3314 review 2026-10-14;
+        # generalized to every ship order in GOL-4007). The destination gate above
+        # already refused a missing/out-of-region state.
+        _attach_ship_delivery_partner(env, Partner, order, partner, contact, shipping, dest, current_company)
         try:
             printify_charge = _printify_quote(
                 _printify_line_items(order), _printify_address(payload.get("contact") or {}, shipping, dest)
@@ -5180,6 +5200,17 @@ def _create_draft_order(website, env, payload, discount_out=None):
                     dest,
                     exc_info=True,
                 )
+
+    # Ship-to delivery contact (GOL-4007): a shippable order settles tax at ship
+    # time against order.partner_shipping_id, so it must carry THIS checkout's
+    # ship-to — not a repeat buyer's stored first address, which
+    # _create_draft_order deliberately never overwrites. The Printify branch
+    # attached its own delivery child above; do the same for every other ship
+    # order (nursery trees and seeds) so settlement taxes the right state.
+    if is_ship_to and not is_printify:
+        _attach_ship_delivery_partner(
+            env, Partner, order, partner, contact, shipping, canonical_state_code(ship_state), current_company
+        )
 
     # Apply the per-box 32-state shipping charge (Box Engine v2). Rates load
     # from data/shipping_rates.json (models/shipping_zones.py) and are
