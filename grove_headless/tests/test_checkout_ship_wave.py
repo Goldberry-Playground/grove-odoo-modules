@@ -281,6 +281,12 @@ class TestCheckoutShipWave(GroveTaxFixtureMixin, TransactionCase):
         # (GOL-4007), the same fix the Printify branch already applies.
         website = self._website()
         company = website.company_id
+        # OH is a regulated state (GOL-2132 carve-out frontier), so a bareroot
+        # line with an empty botanical name fail-safe-blocks the ship into OH.
+        # This test is about the ship-to settlement address, not the compliance
+        # gate: give the plant a parseable, unrestricted genus (pawpaw has no
+        # carve-out rule → ships everywhere on the green list, OH included).
+        self.bareroot.product_tmpl_id.grove_botanical_name = "Asimina triloba"
         wv = self._us_state("WV")
         stored = self.env["res.partner"].create(
             {
