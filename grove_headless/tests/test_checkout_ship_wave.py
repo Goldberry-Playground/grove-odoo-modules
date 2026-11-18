@@ -265,3 +265,57 @@ class TestCheckoutShipWave(GroveTaxFixtureMixin, TransactionCase):
             self._create(self._payload([self.bareroot], "ship", zip_code="00000", ship_wave="fall"), date(2026, 10, 7)),
             "We could not find a planting zone for that ZIP code.",
         )
+
+    # ── repeat-buyer ship-to settlement address (GOL-4007) ────────────────────
+
+    def _us_state(self, code):
+        return self.env["res.country.state"].search([("country_id.code", "=", "US"), ("code", "=", code)], limit=1)
+
+    def test_repeat_buyer_ships_and_settles_against_this_checkouts_ship_to(self):
+        # A returning customer is reused by email and never mutated from a public
+        # POST (security), so the order's partner_shipping_id would otherwise stay
+        # on their FIRST order's stored address. Ship-time tax settlement reads
+        # partner_shipping_id (_stripe_ship_address and the flag-off
+        # partner_shipping_id.state_id.code path), so it must carry THIS
+        # checkout's ship-to — a dedicated delivery child built from the payload
+        # (GOL-4007), the same fix the Printify branch already applies.
+        website = self._website()
+        company = website.company_id
+        wv = self._us_state("WV")
+        stored = self.env["res.partner"].create(
+            {
+                "name": "Wave Test",
+                "email": "wave@example.com",
+                "phone": "3045550000",
+                "company_id": company.id,
+                "street": "7 Old Holler",
+                "city": "Summersville",
+                "zip": "26651",
+                "state_id": wv.id,
+                "country_id": wv.country_id.id,
+            }
+        )
+        payload = {
+            "contact": {"name": "Wave Test", "email": "wave@example.com", "phone": "3045551212"},
+            "items": [{"variant_id": self.bareroot.id, "quantity": 1}],
+            "fulfillment": "ship",
+            "shipping": {"street": "2 New Rd", "city": "Marietta", "state": "OH", "zip": "45750", "country": "US"},
+        }
+        order, error = self._create(payload, date(2026, 11, 22))
+        self.assertIsNone(error)
+        # Repeat buyer reused, main record untouched.
+        self.assertEqual(order.partner_id, stored)
+        self.assertEqual(stored.state_id.code, "WV")
+        self.assertEqual(stored.street, "7 Old Holler")
+        # Ship-to is a per-checkout delivery child carrying the OH address.
+        ship = order.partner_shipping_id
+        self.assertNotEqual(ship, stored)
+        self.assertEqual(ship.type, "delivery")
+        self.assertEqual(ship.parent_id, stored)
+        self.assertEqual(ship.zip, "45750")
+        self.assertEqual(ship.state_id.code, "OH")
+        # Settlement reads partner_shipping_id: both the Stripe calc address and
+        # the flag-off state code must be OH, not the stored WV first address.
+        self.assertEqual(order.grove_fulfillment, "ship")
+        self.assertEqual(grove_main._stripe_ship_address(self.env, order).get("state"), "OH")
+        self.assertEqual(order.partner_shipping_id.state_id.code, "OH")
