@@ -1,6 +1,6 @@
 {
     "name": "Grove Calendar",
-    "version": "19.0.1.2.0",
+    "version": "19.0.1.3.0",
     "category": "Marketing/Calendar",
     "summary": "Public calendar events to Discord: weekly 'This week at the Grove' digest (GOL-3830)",
     "description": """
@@ -52,8 +52,10 @@
     # Additive only: a cron (AbstractModel, no table/ACL), form-view inherits
     # exposing the read-only Discord group and the admin publish switch. The new
     # fields live on existing models (calendar.event, calendar.recurrence,
-    # res.users), so no new ACL is needed.
+    # res.users). The one new table is grove.calendar.discord.slot (per-weekday
+    # Discord bookkeeping for a split weekly series), readable by admins only.
     "data": [
+        "security/ir.model.access.csv",
         "data/calendar_event_type_data.xml",
         "data/calendar_digest_cron.xml",
         "data/calendar_discord_cron.xml",

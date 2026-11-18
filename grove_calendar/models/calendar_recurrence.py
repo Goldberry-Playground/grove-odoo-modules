@@ -54,9 +54,9 @@ class CalendarRecurrence(models.Model):
         readonly=True,
         copy=False,
         help=(
-            "ISO date of the last ops warning that this series repeats in a way "
+            "ISO date of the ops warning that this series repeats in a way "
             "Discord cannot express (phase D, spec D.3). Dedupes the warning to "
-            "once per series per day."
+            "once per series."
         ),
     )
 
@@ -78,4 +78,7 @@ class CalendarRecurrence(models.Model):
         for recurrence in self:
             if recurrence.discord_event_id:
                 discord._delete_discord_event(recurrence.discord_event_id)
+        # A split series keeps one Discord event per weekday on slot rows; the DB
+        # cascade would drop them without their unlink hook, so remove them here.
+        self.env["grove.calendar.discord.slot"].sudo().search([("recurrence_id", "in", self.ids)]).unlink()
         return super().unlink()

@@ -154,7 +154,8 @@ Odoo's `calendar.recurrence` holds `rrule_type`, `interval`, the seven weekday b
 | daily, interval 1 | `frequency 3, by_weekday [0..6]` |
 | monthly, interval 1, `month_by = 'day'`, `byday` in 1..4 | `frequency 1, by_n_weekday [{n, day}]` |
 | yearly, interval 1 | `frequency 0, by_month [m], by_month_day [d]` from the representative |
-| anything else: weekly with several weekdays or interval 3+, monthly by date, monthly last-weekday (`byday -1`), any interval above 1 outside weekly, daily on a subset other than weekdays | **fallback**: no rule; one Discord event for the representative occurrence only, re-created for the next one once it ends; one WARNING line to `DISCORD_OPS_WEBHOOK_URL` per series per day: "`<name>` repeats in a way Discord cannot express; posting one occurrence at a time." |
+| weekly, interval 1 or 2, on 2 or 3 weekdays | **split**: one Discord series per weekday, each `frequency: 2` with that one `by_weekday`, anchored on that weekday's next occurrence and tracked on a `grove.calendar.discord.slot` row (marker `odoo:grove.calendar.discord.slot:<id>`); no ops warning, no exception alerts |
+| anything else: weekly on 4+ weekdays or interval 3+, monthly by date, monthly last-weekday (`byday -1`), any interval above 1 outside weekly, daily on a subset other than weekdays | **fallback**: no rule; one Discord event for the representative occurrence only, re-created for the next one once it ends; one WARNING line to `DISCORD_OPS_WEBHOOK_URL` per series (once, not daily): "`<name>` repeats in a way Discord cannot express; posting one occurrence at a time." |
 
 Series end: Discord will not let an application set `count` or `end`, so a repeating Discord event runs until deleted. When an Odoo series has no future occurrence left (count reached, `until` passed, or all remaining occurrences made private), the sweep deletes its Discord event.
 

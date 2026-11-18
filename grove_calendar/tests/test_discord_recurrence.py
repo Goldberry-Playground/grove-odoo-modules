@@ -202,5 +202,38 @@ class ExpectedOccurrences(unittest.TestCase):
         self.assertEqual(occ, [])
 
 
+class WeeklySplit(unittest.TestCase):
+    """A weekly rule on several weekdays splits into one Discord rule per weekday."""
+
+    def test_biweekly_two_weekdays_splits_per_weekday(self):
+        # The series that prompted this: every 2 weeks on Friday and Saturday.
+        rules = dr.split_weekly_rules(_rec(rrule_type="weekly", interval=2, fri=True, sat=True))
+        self.assertEqual(
+            rules,
+            [
+                (4, {"frequency": dr.FREQ_WEEKLY, "interval": 2, "by_weekday": [4]}),
+                (5, {"frequency": dr.FREQ_WEEKLY, "interval": 2, "by_weekday": [5]}),
+            ],
+        )
+
+    def test_three_weekdays_is_the_most_that_splits(self):
+        rules = dr.split_weekly_rules(_rec(rrule_type="weekly", interval=1, mon=True, wed=True, fri=True))
+        self.assertEqual([day for day, _rule in rules], [0, 2, 4])
+
+    def test_four_weekdays_does_not_split(self):
+        rec = _rec(rrule_type="weekly", interval=1, mon=True, tue=True, wed=True, thu=True)
+        self.assertEqual(dr.split_weekly_rules(rec), [])
+
+    def test_single_weekday_does_not_split(self):
+        # One weekday is a plain series (build_recurrence_rule), not a split.
+        self.assertEqual(dr.split_weekly_rules(_rec(rrule_type="weekly", interval=1, tue=True)), [])
+
+    def test_interval_3_does_not_split(self):
+        self.assertEqual(dr.split_weekly_rules(_rec(rrule_type="weekly", interval=3, fri=True, sat=True)), [])
+
+    def test_non_weekly_does_not_split(self):
+        self.assertEqual(dr.split_weekly_rules(_rec(rrule_type="daily", interval=1, fri=True, sat=True)), [])
+
+
 if __name__ == "__main__":
     unittest.main()
