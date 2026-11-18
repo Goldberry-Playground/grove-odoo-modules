@@ -17,8 +17,10 @@ or ``end``:
     MONTHLY   : exactly one ``by_n_weekday`` {n: 1..5, day}
     YEARLY    : one ``by_month`` and one ``by_month_day``
 
-Anything Odoo can express that Discord cannot (weekly on several weekdays,
-monthly by date, monthly last-weekday, any interval above 1 outside weekly,
+A weekly rule on a few weekdays is split into one Discord series per weekday
+(:func:`split_weekly_rules`). Anything else Odoo can express that Discord cannot
+(weekly on more than ``MAX_SPLIT_WEEKDAYS`` weekdays or interval 3+, monthly by
+date, monthly last-weekday, any interval above 1 outside weekly,
 daily every N>1 days) returns ``None`` so the caller falls back to posting one
 occurrence at a time (spec section 3).
 
@@ -122,6 +124,31 @@ def build_recurrence_rule(rec, start_dt):
         }
 
     return None
+
+
+# A weekly rule on more weekdays than this is not split (one Discord event per
+# weekday would flood the events list); it stays a one-at-a-time fallback.
+MAX_SPLIT_WEEKDAYS = 3
+
+
+def split_weekly_rules(rec):
+    """Per-weekday Discord rules for a weekly *rec* set on several weekdays.
+
+    Discord's WEEKLY rule takes exactly one weekday, so "every 2 weeks on Friday
+    and Saturday" has no single-event form. It is, however, exactly two series
+    Discord *can* express (biweekly Friday, biweekly Saturday). Returns a list of
+    ``(weekday, rule)`` pairs (weekday Monday 0 .. Sunday 6, ascending), one per
+    set weekday, for a weekly rule with interval 1 or 2 on 2..MAX_SPLIT_WEEKDAYS
+    weekdays. Anything else returns ``[]``: a single weekday is a plain series
+    (:func:`build_recurrence_rule`), and the rest stay fallbacks.
+    """
+    if rec.get("rrule_type") != "weekly":
+        return []
+    interval = int(rec.get("interval") or 1)
+    days = _set_weekdays(rec)
+    if interval not in (1, 2) or not 2 <= len(days) <= MAX_SPLIT_WEEKDAYS:
+        return []
+    return [(day, {"frequency": FREQ_WEEKLY, "interval": interval, "by_weekday": [day]}) for day in days]
 
 
 def _nth_weekday_of_month(year, month, weekday, n):

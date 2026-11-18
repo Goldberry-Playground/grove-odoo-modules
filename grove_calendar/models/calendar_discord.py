@@ -210,13 +210,15 @@ class GroveCalendarDiscord(models.AbstractModel):
             if recurrence in seen_recurrences:
                 continue
             seen_recurrences |= recurrence
-            unit = self._series_unit(recurrence, rooms, now, horizon)
-            if unit:
-                units.append(unit)
+            units.extend(self._series_units(recurrence, rooms, now, horizon))
         return units
 
-    def _representative(self, recurrence, now, horizon):
-        """The series' next occurrence not yet started and still public/in-window."""
+    def _representative(self, recurrence, now, horizon, weekday=None, tz=None):
+        """The series' next occurrence not yet started and still public/in-window.
+
+        With *weekday* (Monday 0 .. Sunday 6, local to *tz*), only occurrences
+        falling on that weekday count — the anchor of one split-series weekday.
+        """
         occurrences = recurrence.calendar_event_ids.filtered(
             lambda e: (
                 e.active
@@ -224,33 +226,67 @@ class GroveCalendarDiscord(models.AbstractModel):
                 and e.user_id.grove_discord_publisher
                 and e.start
                 and now < e.start <= horizon
+                and (weekday is None or self._to_local_naive(e.start, tz).weekday() == weekday)
             )
         )
         return occurrences.sorted("start")[:1]
 
-    def _series_unit(self, recurrence, rooms, now, horizon):
+    def _series_units(self, recurrence, rooms, now, horizon):
+        """The sync units for one public series: usually one, several when split."""
         representative = self._representative(recurrence, now, horizon)
         if not representative:
-            return None
-        rule = drec.build_recurrence_rule(self._recurrence_dict(recurrence), representative.start)
+            return []
+        rec = self._recurrence_dict(recurrence)
+        rule = drec.build_recurrence_rule(rec, representative.start)
         if rule is None:
+            split = drec.split_weekly_rules(rec)
+            if split:
+                # Several weekdays: one Discord series per weekday.
+                return self._split_units(recurrence, split, rooms, now, horizon)
             # Discord cannot express this pattern: fall back to one occurrence at a
             # time, keyed on the representative occurrence event, and warn ops once.
             self._warn_fallback(recurrence)
-            return self._event_unit(representative, rooms)
+            unit = self._event_unit(representative, rooms)
+            return [unit] if unit else []
         marker = f"{_MARKER_PREFIX}calendar.recurrence:{recurrence.id}"
         payload = self._build_payload(representative, rooms, marker, recurrence_rule=rule)
         if payload is None:
-            return None
-        return {
-            "record": recurrence,
-            "marker": marker,
-            "payload": payload,
-            "hash": self._payload_hash(payload),
-            # Carried for exception detection (spec D.7); absent on one-offs and
-            # fallbacks, which have no series exceptions.
-            "series": {"recurrence": recurrence, "representative": representative},
-        }
+            return []
+        return [
+            {
+                "record": recurrence,
+                "marker": marker,
+                "payload": payload,
+                "hash": self._payload_hash(payload),
+                # Carried for exception detection (spec D.7); absent on one-offs,
+                # fallbacks and split series, which get no exception alerts.
+                "series": {"recurrence": recurrence, "representative": representative},
+            }
+        ]
+
+    def _split_units(self, recurrence, split, rooms, now, horizon):
+        """One unit per weekday of a weekly series set on several weekdays.
+
+        Each weekday is its own Discord series, anchored on that weekday's next
+        occurrence (so a biweekly rule keeps the right fortnight) and tracked on a
+        ``grove.calendar.discord.slot`` row. The weekday is read in the series'
+        own timezone, the one Odoo's weekday flags are expressed in.
+        """
+        Slot = self.env["grove.calendar.discord.slot"].sudo()
+        tz = ZoneInfo(recurrence.event_tz) if recurrence.event_tz else _EASTERN
+        slots = {s.weekday: s for s in Slot.search([("recurrence_id", "=", recurrence.id)])}
+        units = []
+        for weekday, rule in split:
+            representative = self._representative(recurrence, now, horizon, weekday=weekday, tz=tz)
+            if not representative:
+                continue
+            slot = slots.get(weekday) or Slot.create({"recurrence_id": recurrence.id, "weekday": weekday})
+            marker = f"{_MARKER_PREFIX}{Slot._name}:{slot.id}"
+            payload = self._build_payload(representative, rooms, marker, recurrence_rule=rule)
+            if payload is None:
+                continue
+            units.append({"record": slot, "marker": marker, "payload": payload, "hash": self._payload_hash(payload)})
+        return units
 
     def _event_unit(self, event, rooms):
         marker = f"{_MARKER_PREFIX}calendar.event:{event.id}"
@@ -418,11 +454,14 @@ class GroveCalendarDiscord(models.AbstractModel):
             record.write({"discord_event_id": False, "discord_payload_hash": False})
 
     def _warn_fallback(self, recurrence):
-        """One WARNING to the ops webhook per fallback series per day (spec D.3)."""
-        today = fields.Date.context_today(self)
-        stamp = today.isoformat()
-        if recurrence.discord_fallback_warned == stamp:
-            return  # already warned today for this series.
+        """One WARNING to the ops webhook per fallback series, ever (spec D.3).
+
+        The pattern does not change from day to day, so a daily repeat is noise.
+        The stamp is the date of that one warning.
+        """
+        if recurrence.discord_fallback_warned:
+            return  # already warned for this series.
+        stamp = fields.Date.context_today(self).isoformat()
         url = os.environ.get("DISCORD_OPS_WEBHOOK_URL", "").strip()
         name = recurrence.name or "A recurring event"
         message = f"⚠️ `{name}` repeats in a way Discord cannot express; posting one occurrence at a time."

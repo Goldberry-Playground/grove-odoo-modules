@@ -17,6 +17,8 @@ from odoo.tests.common import TransactionCase, tagged
 _UTC = ZoneInfo("UTC")
 _EASTERN = ZoneInfo("America/New_York")
 
+_POST = "odoo.addons.grove_calendar.models.calendar_discord.requests.post"
+
 _ENV = {
     "DISCORD_BOT_TOKEN": "bot-token",
     "DISCORD_GUILD_ID": "9999",
@@ -276,3 +278,81 @@ class GroveDiscordEventsCronCase(TransactionCase):
         self._run()
         self.assertEqual(self.fake.count("create"), 1)
         self.assertEqual(self.fake.count("patch"), 0)
+
+    # ------------------------------------------------- multi-weekday series
+    def _two_day_series(self, **over):
+        """A weekly series on two consecutive weekdays (the anchor's and the next)."""
+        flags = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+        start = self.now + timedelta(days=2)
+        local_weekday = start.replace(tzinfo=_UTC).astimezone(_EASTERN).weekday()
+        vals = {flags[(local_weekday + 1) % 7]: True}
+        vals.update(over)
+        return self._series(**vals), local_weekday
+
+    def _run_with_ops_webhook(self):
+        env = dict(_ENV, DISCORD_OPS_WEBHOOK_URL="https://discord.test/ops")
+        with mock.patch(_POST) as post:
+            self._run(env=env)
+        return post
+
+    def test_two_weekday_series_is_one_discord_series_per_weekday(self):
+        event, local_weekday = self._two_day_series(interval=2)
+        post = self._run_with_ops_webhook()
+        creates = [c[1] for c in self.fake.calls if c[0] == "create"]
+        self.assertEqual(len(creates), 2)
+        for payload in creates:
+            self.assertEqual(payload["recurrence_rule"]["frequency"], cd.drec.FREQ_WEEKLY)
+            self.assertEqual(payload["recurrence_rule"]["interval"], 2)
+            self.assertEqual(payload["recurrence_rule"]["start"], payload["scheduled_start_time"])
+            self.assertIn("odoo:grove.calendar.discord.slot:", payload["description"])
+        self.assertEqual(
+            sorted(p["recurrence_rule"]["by_weekday"] for p in creates),
+            sorted([[local_weekday], [(local_weekday + 1) % 7]]),
+        )
+        # Each weekday's series starts on its own next occurrence.
+        self.assertEqual(len({p["scheduled_start_time"] for p in creates}), 2)
+        # Published natively, so there is nothing to warn ops about.
+        post.assert_not_called()
+        self.assertFalse(event.recurrence_id.discord_fallback_warned)
+
+    def test_two_weekday_series_second_run_is_noop(self):
+        self._two_day_series()
+        self._run()
+        self._run()
+        self.assertEqual(self.fake.count("create"), 2)
+        self.assertEqual(self.fake.count("patch"), 0)
+        self.assertEqual(self.fake.count("delete"), 0)
+
+    def test_split_events_deleted_when_series_becomes_private(self):
+        event, _weekday = self._two_day_series()
+        self._run()
+        event.recurrence_id.calendar_event_ids.write({"privacy": "private"})
+        self._run()
+        self.assertEqual(self.fake.count("delete"), 2)
+        self.assertEqual(self.fake.events, [])
+
+    def test_removing_split_slots_deletes_their_discord_events(self):
+        event, _weekday = self._two_day_series()
+        self._run()
+        slots = self.env["grove.calendar.discord.slot"].search([("recurrence_id", "=", event.recurrence_id.id)])
+        event_ids = slots.mapped("discord_event_id")
+        self.assertEqual(len(event_ids), 2)
+        with mock.patch.dict("os.environ", _ENV, clear=True):
+            with mock.patch.object(type(self.sync), "_discord_client", return_value=self.fake):
+                slots.unlink()
+        for event_id in event_ids:
+            self.assertIn(("delete", event_id), self.fake.calls)
+
+    # ------------------------------------------------------------ fallbacks
+    def test_inexpressible_series_warns_ops_once_ever(self):
+        # Every 3 weeks: no Discord rule and nothing to split, so one occurrence
+        # at a time. Ops hears about it on the first run only, not once a day.
+        event = self._series(interval=3)
+        first = self._run_with_ops_webhook()
+        self.assertEqual(first.call_count, 1)
+        self.assertEqual(self.fake.count("create"), 1)
+        self.assertNotIn("recurrence_rule", self.fake.calls[-1][1])
+        # A later day: the stamp is from an earlier date, and it still stays quiet.
+        event.recurrence_id.discord_fallback_warned = "2026-01-01"
+        later = self._run_with_ops_webhook()
+        later.assert_not_called()
