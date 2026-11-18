@@ -35,7 +35,7 @@ Custom Odoo 19 modules powering the **Gather at the Grove** multi-tenant ecosyst
            ▼                  ▼                  ▼
 ┌─────────────────────────────────────────────────────────────┐
 │                  grove_headless API                          │
-│   /grove/api/v1/*  (auth=public, orders POST=bearer)         │
+│   /grove/api/v1/*  (public reads; writes + ops = bearer)     │
 │                                                             │
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐      │
 │  │ Products API  │  │  Cart API    │  │ Health Check │      │
@@ -55,24 +55,25 @@ Each React website sends an `X-Grove-Tenant` header. The `grove_headless` module
 
 | Module | Version | Purpose | Status |
 |--------|---------|---------|--------|
-| `grove_headless` | 19.0.1.93.0 | REST API + multi-tenant routing + nursery potting-batch workflow + shipping zone engine | Active |
+| `grove_headless` | 19.0.1.109.0 | REST API + multi-tenant routing + nursery potting-batch workflow + shipping zone engine | Active |
 | `grove_support` | 19.0.1.2.0 | Livechat glue: partner match, `crm.lead` per chat, recent-orders internal note, Discord ping (GOL-2022) | Active |
-| `grove_calendar` | 19.0.1.0.0 | Public `calendar.event` to Discord: weekly "Coming up" webhook digest, Monday 12:00 UTC (GOL-3830) | Active |
+| `grove_calendar` | 19.0.1.2.0 | Public `calendar.event` to Discord: weekly "Coming up" webhook digest, Monday 12:00 UTC, plus native Discord scheduled events (`models/calendar_discord.py`) and the public `GET /grove/api/v1/events` feed (GOL-3830) | Active |
+| `grove_schedule_f` | 19.0.1.0.0 | Schedule F books for the farm and nursery (see `grove_schedule_f/README.md`). Depends on the OCA addons `account_reconcile_oca` and `account_statement_import_sheet_file`, which must be on the Odoo addons path | Active |
 | `web_dark_mode` | 19.0.1.0.0 | Vendored OCA `web_dark_mode`: dark mode for the Odoo backend (AGPL-3) | Vendored |
 
-Versions are the `version` key in each module's `__manifest__.py`.
+Versions are the `version` key in each module's `__manifest__.py` on `main`. Production runs a pinned commit, not `main`: as of 2026-11-18 that is tag `prod-pin-2026-11-18-v19.0.1.106.2` (`grove_headless` 19.0.1.106.2). The live pin is `custom_modules_ref` in odoocker `infra/terraform/environments/production/variables.tf`.
 
 ### grove_headless
 
-**Depends on:** `base`, `account`, `website_sale`, `website`, `mrp`, `stock`
+**Depends on:** `base`, `account`, `website_sale`, `website`, `sale_loyalty`, `crm`, `website_sale_stock`, `mrp`, `stock`, `sale_stock`, `point_of_sale`, `pos_sale`, `mass_mailing`
 
 **What it does:**
 
-- Exposes 9 JSON API endpoints under `/grove/api/v1/`: health, products list/detail, cart get/add, order create, order detail (token-gated), shipping options (public), shipping webhook (Shippo tracking)
-- Implements a 5-zone × 2-tier (bareroot/potted) shipping rate engine over 31 green states; rates live in `data/shipping_rates.json` (maintained by the daily rate-checker — see `scripts/rate_check/`)
-- Adds `grove_shipping_tier` (selection: bareroot/potted) to `product.template`; order creation applies per-line tier×qty shipping charges via `compute_order_shipping`; fail-safe: no rate → no shipping line (never a guessed charge)
+- Exposes the JSON API under `/grove/api/v1/` (41 routes in `grove_headless` plus `GET /events` from `grove_calendar` at the 2026-11-18 prod pin; see the [route index](#route-index)). The Shippo tracking webhook was removed (GOL-2302); see "Shipping Webhook — REMOVED" below
+- Implements a 5-zone, per-box shipping rate engine (Box Engine v2) over 32 green destinations (31 states plus DC); rates live in `data/shipping_rates.json` as one row per zone and carton (`p24x10x4`, `p24x10x6`), shared by both tiers, and are maintained by the rate-checker (manual dispatch, see `scripts/rate_check/`). Each rate is the Pirate Ship least-cost ground label cost plus the flat $2.50 handling
+- Adds `grove_shipping_tier` (selection: bareroot/potted) to `product.template`; order creation packs the cart into boxes and charges the sum of the packed-box zone rates via `compute_order_shipping`; fail-safe: no rate → no shipping line (never a guessed charge)
 - ZIP→USDA-zone lookup via vendored PHZM 2023 matrix (`data/zip_usda_zone.csv`) drives wave-schedule and freeze-window calendar logic in `models/shipping_calendar.py`
-- Adds a "Buy Shipping Labels" server action on `sale.order` (one least-cost ground label per tree box via Shippo — UPS Ground vs USPS Ground Advantage, transit-guarded, cheapest wins per box, GOL-1906; two-pass validate-then-buy; partial purchases persisted with status `partial_purchase`); tracks labels, delivery status and the carrier/service actually shipped via `grove_tracking_numbers`, `grove_label_urls`, `grove_shipping_carriers`, `grove_shipping_services`, `grove_delivery_status`
+- Label purchase and money go through **Pirate Ship** (the label-batch flow: `models/label_batch.py`, `/labels/*` and `/label-batches/*` routes). The older "Buy Shipping Labels" server action on `sale.order` is still in the code but superseded (GOL-2271) and needs `SHIPPO_API_KEY` to run (one least-cost ground label per tree box via Shippo — UPS Ground vs USPS Ground Advantage, transit-guarded, cheapest wins per box, GOL-1906; two-pass validate-then-buy; partial purchases persisted with status `partial_purchase`); tracks labels, delivery status and the carrier/service actually shipped via `grove_tracking_numbers`, `grove_label_urls`, `grove_shipping_carriers`, `grove_shipping_services`, `grove_delivery_status`
 - Adds custom fields to `product.template`: `grove_featured` (Boolean), `grove_seo_description` (Text, translatable), `grove_slug` (Char, indexed), `grove_shipping_tier` (Selection)
 - Overrides `website.get_current_website()` to resolve tenants via `X-Grove-Tenant` header
 - Extends the product form view with a "Grove Headless" tab for the custom fields
@@ -87,7 +88,7 @@ Versions are the `version` key in each module's `__manifest__.py`.
 | Odoo | 19.0 | Community or Enterprise |
 | Python | 3.12+ | Odoo 19 requirement |
 | PostgreSQL | 15+ | Via Odoo's database |
-| Odoo modules | `base`, `account`, `website`, `website_sale`, `mrp`, `stock` | Must be installed before `grove_headless` |
+| Odoo modules | `base`, `account`, `website`, `website_sale`, `sale_loyalty`, `crm`, `website_sale_stock`, `mrp`, `stock`, `sale_stock`, `point_of_sale`, `pos_sale`, `mass_mailing` | `grove_headless` dependencies (installed with it) |
 | Ruff | Latest | For linting (development only) |
 
 ## Installation
@@ -97,10 +98,10 @@ Versions are the `version` key in each module's `__manifest__.py`.
 The [odoocker-goldberrygrove](https://github.com/Goldberry-Playground/odoocker-goldberrygrove) stack includes a `custom-modules-sync` container that automatically clones this repo to `/workspace/current`. Odoo's `addons_path` includes that directory.
 
 ```
-Push to main → GitHub webhook → git-sync pulls → /workspace/current updated → Odoo reads new code
+Push to main → git-sync pulls → /workspace/current updated → Odoo reads new code   (QA default only)
 ```
 
-Polling interval: 30 seconds (webhook overrides for instant sync).
+**Production does not follow `main`.** Prod git-sync is pinned to a 40-char commit SHA (`custom_modules_ref` in odoocker, GOL-892), so a merge here reaches prod only through the release train's Leg B promote (`scripts/prod-modules-promote.sh` in odoocker, see its `docs/RUNBOOK-release-train.md`). QA floats `main` by default and is pinned to the freeze SHA during a train window.
 
 After sync, install/upgrade the module:
 
@@ -179,6 +180,33 @@ Each website must be linked to its corresponding company. If the website name do
 ## API Reference
 
 All endpoints return JSON. Tenant context is set via the `X-Grove-Tenant` header.
+
+### Route index
+
+Every route registered at the 2026-11-18 prod pin (`32321e4d`, `controllers/*.py`). Only the first eight are documented in detail below; for the rest the controller docstring is the reference.
+
+| Method | Path (under `/grove/api/v1`) | Auth |
+|--------|------------------------------|------|
+| GET | `/health` | none |
+| GET | `/products`, `/products/<id>` | public |
+| GET, POST | `/cart` | public |
+| POST | `/orders` | bearer |
+| GET | `/orders/<id>` | public (token-gated) |
+| GET | `/shipping/options`, `/shipping/rates`, `/zone` | public |
+| GET | `/catalog/nav`, `/promotions/auto` | public |
+| POST | `/products/<id>/notify-restock` | bearer |
+| POST | `/checkout/quote`, `/checkout/promo/preview`, `/checkout/session` | bearer |
+| POST | `/stripe/webhook`, `/printify/webhook`, `/mailgun/webhook` | public (signature-verified in the handler) |
+| POST | `/leads`, `/newsletter/subscribe` | bearer |
+| GET, POST | `/newsletter/preferences`, `/newsletter/unsubscribe` | public |
+| GET | `/labels/config` | bearer |
+| POST | `/labels/batch`, `/labels/batch/<batch_id>/tracking`, `/label-batches/<batch_id>/mark-shipped` | bearer |
+| POST | `/orders/<id>/assign-wave`, `/mark-shipped`, `/mark-collected`, `/label-refunded`, `/move`, `/hold`, `/hold/release`, `/hold/snooze` | bearer |
+| GET | `/planner/catalog` | public |
+| POST | `/planner/signal`, `/planner/suggest`, `/planner/save`, `/planner/propose`, `/planner/dispute` | public |
+| GET | `/events` (`grove_calendar`) | public |
+
+On `main` only (not on prod until Train #6): the nine `/consult/*` routes (`/consult/lead`, `/consult/lead/<id>`, `/consult/lead/<id>/plan`, `/consult/lead/<id>/plan/<version>/section/<key>`, `/consult/lead/<id>/stage`, `/consult/modules`, `/consult/pipeline`, `/consult/practices`, `/consult/travel`).
 
 ### Health Check
 
@@ -485,11 +513,11 @@ curl -s 'http://localhost:8069/grove/api/v1/shipping/options?zip=28801&state=NC&
 }
 ```
 
-`ships_now` is `true` only when today falls inside a valid ship window for the destination USDA zone. `next_wave` is `null` for potted-tier requests. `defer_to` is an ISO date string (or `null`) indicating the earliest eligible ship date. `per_tree_rate` is `null` when the destination state is outside the 31 green states (compliance gate).
+`ships_now` is `true` only when today falls inside a valid ship window for the destination USDA zone. `next_wave` is `null` for potted-tier requests. `defer_to` is an ISO date string (or `null`) indicating the earliest eligible ship date. `per_tree_rate` is the cheapest single-unit shipment for the tier; it is `null` for `fulfillment=pickup` and when the destination state is outside the 32 green destinations (compliance gate). The response also carries `packing_mode` and, for bareroot, `fulfillment`.
 
 ### Shipping Webhook (Shippo tracking updates) — REMOVED
 
-> **Removed (GOL-2302).** The `POST /grove/api/v1/shipping/webhook` route and its `GROVE_SHIPPO_WEBHOOK_TOKEN` auth check have been deleted. Shippo is no longer used: Pirate Ship is the only label and money channel, and shipped/delivered tracking is sourced directly by the carrier-tracking poll (`models/carrier_tracking.py`, UPS Track + USPS Tracking v3). The webhook was retired after the carrier poll ran one full prod delivery cycle (GOL-2296). Do not re-add the route or set `GROVE_SHIPPO_WEBHOOK_TOKEN` on any server. `shippo_client.py` is kept for the outbound label/rate path only.
+> **Removed (GOL-2302).** The `POST /grove/api/v1/shipping/webhook` route and its `GROVE_SHIPPO_WEBHOOK_TOKEN` auth check have been deleted. Shippo no longer sends us tracking: Pirate Ship is the only label and money channel, and shipped/delivered tracking is sourced directly by the carrier-tracking poll (`models/carrier_tracking.py`, UPS Track + USPS Tracking v3). The webhook was retired after the carrier poll ran one full prod delivery cycle (GOL-2296). Do not re-add the route or set `GROVE_SHIPPO_WEBHOOK_TOKEN` on any server. `shippo_client.py` is kept for the outbound label/rate path only.
 
 ## Seeder Scripts
 
@@ -498,8 +526,6 @@ Operational helpers in `scripts/` for bootstrapping a fresh tenant. Each script 
 | Script | What it seeds |
 |--------|--------------|
 | `import_grove_catalog.py` | **Real per-tenant product catalogs** from `scripts/catalogs/<tenant>.csv`. Handles goldberry / ggg / nursery in one script, uploads product photos, wires `grove_headless` fields (slug, featured, SEO). See [`scripts/catalogs/README.md`](./scripts/catalogs/README.md). |
-| `import_nursery_catalog.py` | *(legacy, nursery-only)* Superseded by `import_grove_catalog.py`; kept until first successful generic run. |
-| `seed_sample_products.py` | *(legacy)* 5 representative Goldberry demo products. Superseded by `import_grove_catalog.py` with a real `goldberry.csv`. |
 | `seed_payment_journals.py` | Cash, Card, Check, Online Payment, Invoice (Net 30) journals |
 | `seed_sales_teams.py` | Farmer's Market, Direct to Nursery, Online sales teams |
 | `seed_e2e_test_inventory.py` | **QA Playwright E2E test-inventory fixtures** (GOL-1148 + GOL-1154 + GOL-2464/GOL-2463). THREE idempotent single-Format, in-stock products so the nursery checkout suite's `findProductByCta("Add to Cart")` finds purchasable lines on first paint: a **Potted-only pickup** fixture (`E2E-POTTED-INSTOCK`), a **Bareroot-only shippable** fixture (`E2E-BAREROOT-INSTOCK`, needed by the `@stripe` ship-flow specs since a potted line 400s on ship), and a **Plants-categorised shippable** fixture (`E2E-PLANTS-INSTOCK`) that `is_qualifying_plant()` counts, so the promo/volume-tier specs can earn a tier without putting the other two under Plants and shifting every deterministic gate total. Real dual-format products default to Bareroot (0 on hand in preorder season) and render "Reserve", so the suite otherwise sees zero Add-to-Cart CTAs. Knobs: `FIXTURE` (`potted`/`bareroot`/`plants`/all) / `E2E_PRICE` / `E2E_QTY` / `E2E_PLANTS_QTY` (deeper, so tier runs can't drain it into a deposit cart) / `E2E_TREE_LENGTH` / `E2E_TIERS_URL` + `E2E_TIERS_QTY` (post-seed `/api/cart/tiers` probe; `qualifyingUnits: 0` fails the run). |
@@ -513,7 +539,7 @@ ODOO_URL=http://localhost:8069 \
 ODOO_DB=Goldberry \
 ODOO_USER=josh@goldberrygrove.farm \
 ODOO_PASSWORD=*** \
-python3 scripts/seed_sample_products.py
+python3 scripts/seed_payment_journals.py
 ```
 
 The Ghost script uses `GHOST_URL`, `GHOST_ADMIN_EMAIL`, `GHOST_ADMIN_PASSWORD` instead.
@@ -526,29 +552,34 @@ The Ghost script uses `GHOST_URL`, `GHOST_ADMIN_EMAIL`, `GHOST_ADMIN_PASSWORD` i
 grove-odoo-modules/
 ├── grove_headless/
 │   ├── __init__.py              # Root package init
-│   ├── __manifest__.py          # Odoo module manifest (19.0.1.5.0)
+│   ├── __manifest__.py          # Odoo module manifest (version = see Modules table)
 │   ├── controllers/
 │   │   ├── __init__.py
-│   │   └── main.py              # All API endpoints (products, cart, orders, shipping)
+│   │   ├── main.py              # Storefront + checkout + label endpoints
+│   │   ├── order_ops.py         # Order operations (hold, move, label-refunded, batch mark-shipped)
+│   │   ├── planner.py           # Planner signal/suggest/save/propose/dispute
+│   │   └── mailgun_webhook.py   # Mailgun event webhook
 │   ├── models/
 │   │   ├── __init__.py
 │   │   ├── product_template.py  # Custom fields (grove_featured, grove_seo_description,
 │   │   │                        #   grove_slug, grove_shipping_tier)
 │   │   ├── website.py           # Tenant resolution override
 │   │   ├── potting_batch.py     # grove.potting.batch nursery workflow model
-│   │   ├── sale_order.py        # Shippo label purchase server action + tracking fields
-│   │   ├── shipping_zones.py    # 5-zone × 2-tier rate engine (loads data/shipping_rates.json)
+│   │   ├── sale_order.py        # Order fields, settlement, legacy Shippo label action (superseded, GOL-2271)
+│   │   ├── shipping_zones.py    # 5-zone per-box rate engine (loads data/shipping_rates.json)
+│   │   ├── label_batch.py       # Pirate Ship label batches (the label + money channel)
+│   │   ├── carrier_tracking.py  # Carrier tracking poll (replaced the Shippo webhook)
 │   │   ├── shipping_calendar.py # Wave schedule + freeze windows + ship_options()
-│   │   └── shippo_client.py     # Shippo API client (label purchase, tracking validation)
+│   │   └── shippo_client.py     # Shippo API client (legacy label action; tracking-number validation)
 │   ├── data/
 │   │   ├── grove_companies.xml          # 3 companies + 3 websites bootstrap
 │   │   ├── grove_product_categories.xml # Trees / Shrubs / Mixed
 │   │   ├── grove_product_attributes.xml # Size + Container attributes
 │   │   ├── grove_taxes.xml              # WV state 6% + municipal 1%
 │   │   ├── grove_sequences.xml          # Sequence registry (potting batch refs, etc.)
-│   │   ├── shipping_rates.json          # Zone × tier rates (maintained by rate-checker)
+│   │   ├── shipping_rates.json          # Zone × box rates (maintained by rate-checker)
 │   │   ├── shipping_actions.xml         # "Buy Shipping Labels" server action
-│   │   └── zip_usda_zone.csv            # PHZM 2023 ZIP→USDA-zone matrix (~15k rows, 31-state trim)
+│   │   └── zip_usda_zone.csv            # PHZM 2023 ZIP→USDA-zone matrix (~15k rows, green-state trim)
 │   ├── docs/
 │   │   └── shipping-zones.md    # Live system reference for the shipping engine
 │   ├── security/
@@ -567,8 +598,11 @@ grove-odoo-modules/
 │       ├── test_shippo_client.py
 │       ├── test_tenant_routing.py
 │       └── test_wv_taxes.py
+├── grove_support/               # Livechat glue (see grove_support/docs/)
+├── grove_calendar/              # Calendar events to Discord + GET /grove/api/v1/events
+├── grove_schedule_f/            # Schedule F books (see grove_schedule_f/README.md)
+├── web_dark_mode/               # Vendored OCA module
 ├── scripts/                     # Idempotent operational seeders + rate tooling (XML-RPC / HTTP)
-│   ├── seed_sample_products.py
 │   ├── seed_payment_journals.py
 │   ├── seed_sales_teams.py
 │   ├── seed_kit_boms.py              # Kit BOMs for bundled nursery products
@@ -721,12 +755,12 @@ for p in pathlib.Path('.').rglob('__manifest__.py'):
     assert 'name' in m and 'version' in m and m.get('installable'), f'{p} failed validation'
     print(f'  ✓ {m[\"name\"]} ({m[\"version\"]})')
 "
-# Expected output: ✓ Grove Headless API (19.0.1.5.0)
+# Expected output: one ✓ line per module, e.g. ✓ Grove Headless API (<version>)
 ```
 
 ## CI Pipeline
 
-Runs on every push and PR to `main`. Three jobs:
+Runs on every push and PR to `main` (and in the merge queue). The three jobs below are the original core; `ci.yml` also runs actionlint, a secrets scan, pip-audit, pure-Python unit tests, XML data validation and an Odoo 19 install + test job:
 
 | Job | What it checks |
 |-----|---------------|
