@@ -209,7 +209,7 @@ def _available_fields(model, fields):
     return [f for f in fields if f in model._fields]
 
 
-def _list_in_stock(product):
+def _list_in_stock(product, pool_qty=None):
     """Live stock signal for a grid card (GOL-2517).
 
     ``True`` when any variant has sellable on-hand quantity. Pool-aware — reads
@@ -218,8 +218,16 @@ def _list_in_stock(product):
     stock but stocked potted siblings is not falsely shown sold out. Caller
     guards on the ``stock`` module being installed; invoke on a
     ``with_company()`` record so ``qty_available`` reads the right company.
+
+    ``pool_qty`` (a page-level ``grove_shared_pool_qty_map("qty_available")``
+    result) lets the list resolve every card off one batched map instead of a
+    per-variant sibling rescan — the quadratic the detail path already removed
+    (GOL-3933). Omit it and the card resolves on its own, to the same value.
     """
-    return any(v.grove_shared_pool_qty("qty_available") > 0 for v in product.product_variant_ids)
+    variants = product.product_variant_ids
+    if pool_qty is not None:
+        return any(pool_qty.get(v.id, 0) > 0 for v in variants)
+    return any(v.grove_shared_pool_qty("qty_available") > 0 for v in variants)
 
 
 def _json_response(data, status=200, headers=None):
@@ -433,6 +441,89 @@ def _image_url(model, record, size):
     return f"/web/image/{model}/{record.id}/{size}" if record[size] else None
 
 
+def _image_unique_map(model, records):
+    """``{record_id: image_unique}`` for a recordset, in one attachment search.
+
+    ``image_unique`` is a per-photo cache key the storefront appends to every
+    ``/web/image`` URL (``?unique=…``) so a replaced photo gets a fresh URL
+    instead of serving stale bytes for the 31-day image cache (GOL-3950). It is
+    also the token the pre-encoder (GOL-3926 part C) names each encoded file by.
+
+    The value is the checksum of the record's stored image ir.attachment — the
+    same bytes ``/web/image`` serves and the key Odoo's own route caches on —
+    falling back to the record's ``write_date`` when a stored image has no
+    checksum. The stored field is ``image_1920`` for ``image.mixin`` records
+    (product.template, product.image) but ``image_variant_1920`` for a
+    ``product.product`` variant's own photo. A variant with no own photo serves
+    the *template's* image, so we key those on the template's ``image_1920``
+    attachment: a bare variant ``write_date`` never moves when the shared photo
+    is replaced.
+
+    Only records that actually carry an image get a key, so the key set matches
+    the one ``_image_url`` emits a URL for (an imageless record → no URL, no
+    unique). Image fields are always attachment-backed, so the attachment's
+    existence is the presence signal — no image bytes are read. One search across
+    the whole recordset keeps the list and planner feeds from an N+1.
+    """
+    if not records:
+        return {}
+    attachments = records.env["ir.attachment"].sudo()
+
+    def _checksums(res_model, res_field, res_ids):
+        if not res_ids:
+            return {}
+        return {
+            att.res_id: att.checksum
+            for att in attachments.search(
+                [
+                    ("res_model", "=", res_model),
+                    ("res_field", "=", res_field),
+                    ("res_id", "in", list(res_ids)),
+                ]
+            )
+        }
+
+    # product.product stores its own photo under image_variant_1920; image.mixin
+    # records (product.template, product.image) store it under image_1920.
+    own_field = "image_variant_1920" if model == "product.product" else "image_1920"
+    own = _checksums(model, own_field, records.ids)
+    # Variants falling back to the template image: key on the template's photo.
+    tmpl = {}
+    if model == "product.product":
+        missing = records.filtered(lambda r: r.id not in own)
+        tmpl_ids = missing.mapped("product_tmpl_id")
+        tmpl = _checksums("product.template", "image_1920", tmpl_ids.ids)
+
+    def _write_date_token(record):
+        return fields.Datetime.to_string(record.write_date) if record.write_date else None
+
+    tokens = {}
+    for record in records:
+        if record.id in own:
+            tokens[record.id] = own[record.id] or _write_date_token(record)
+        elif model == "product.product" and record.product_tmpl_id.id in tmpl:
+            tmpl_rec = record.product_tmpl_id
+            tokens[record.id] = tmpl[tmpl_rec.id] or _write_date_token(tmpl_rec)
+        # else: no stored image anywhere -> no key (pairs with a null URL).
+    return tokens
+
+
+def _image_unique(model, record):
+    """``image_unique`` for a single record, or None when it has no image.
+
+    See :func:`_image_unique_map`. For a hot path over many records, call the map
+    once rather than this per row.
+    """
+    return _image_unique_map(model, record).get(record.id)
+
+
+# Sentinel for "image_unique not supplied" so a serializer can tell an explicit
+# ``None`` (a known imageless record, from a batched map) apart from an omitted
+# argument (resolve it on my own). A bare ``None`` default can't make that
+# distinction, and recomputing on every imageless row would defeat the batching.
+_UNSET = object()
+
+
 def _serialize_products(products, fields):
     """Read a product recordset into plain dicts safe for JSON, in ONE batched read.
 
@@ -635,7 +726,7 @@ def _planner_is_nitrogen_fixer(product):
     return bool(product.grove_nitrogen_fixer)
 
 
-def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
+def _serialize_planner_plant(product, substitute_by_genus, has_stock_field, image_unique=None):
     """One plant row for the planner catalog feed (GOL-3379 §B).
 
     Blank conventions mirror ``_serialize_facts``: integers to ``None`` at 0,
@@ -703,6 +794,9 @@ def _serialize_planner_plant(product, substitute_by_genus, has_stock_field):
         "blocked_states": blocked_states,
         "substitute_id": _planner_substitute_tmpl_id(genus, substitute_by_genus),
         "image": _image_url("product.template", product, "image_512"),
+        # Cache-busting token for the image above (GOL-3950); the feed resolves it
+        # once for the whole page (see planner_catalog) to avoid an N+1.
+        "image_unique": image_unique,
     }
 
 
@@ -1131,7 +1225,7 @@ def _seed_season_payload(product):
     }
 
 
-def _structure_variant(variant, template_rootstock="", pool_qty=None, tree_counts=None):
+def _structure_variant(variant, template_rootstock="", pool_qty=None, tree_counts=None, image_unique=_UNSET):
     """Structured variant entry: axes parsed into fields, not display-name strings.
 
     Reads ``product_template_attribute_value_ids`` (the full per-variant
@@ -1181,6 +1275,11 @@ def _structure_variant(variant, template_rootstock="", pool_qty=None, tree_count
         "pack_size": axis.get("Pack size", ""),
         "pack_lb": variant.grove_seed_pack_lb or 0.0,
         "image_url": _image_url("product.product", variant, "image_128"),
+        # Cache-busting token for image_url (GOL-3950). Passed in so the detail
+        # resolves the whole variant set in one attachment search; computed on its
+        # own (keyed on the template photo for a variant with no own image) when
+        # omitted. None when the variant has no image.
+        "image_unique": _image_unique("product.product", variant) if image_unique is _UNSET else image_unique,
         # Qualifying-tree count for one unit (GOL-2439): 1 for a nursery plant,
         # the bundle's BoM tree count (Remembrance Grove = 5), 0 for supplies,
         # gift cards and services. The storefront sums tree_count × qty across
@@ -1211,7 +1310,13 @@ def _ordered_variants(product):
 
 
 def _serialize_images(product):
-    """Gallery list: template hero first, then eCommerce media images."""
+    """Gallery list: template hero first, then eCommerce media images.
+
+    Every entry carries ``image_unique`` (GOL-3950) — the per-photo cache key the
+    storefront appends to both ``url`` and ``thumb_url``. The hero is keyed on the
+    template photo; each media image on its own (``product.image``) photo, resolved
+    in one batched attachment search.
+    """
     images = []
     if product.image_1920:
         images.append(
@@ -1219,14 +1324,17 @@ def _serialize_images(product):
                 "id": 0,
                 "url": f"/web/image/product.template/{product.id}/image_1024",
                 "thumb_url": f"/web/image/product.template/{product.id}/image_256",
+                "image_unique": _image_unique("product.template", product),
             }
         )
+    media_unique = _image_unique_map("product.image", product.product_template_image_ids)
     for media in product.product_template_image_ids:
         images.append(
             {
                 "id": media.id,
                 "url": f"/web/image/product.image/{media.id}/image_1024",
                 "thumb_url": f"/web/image/product.image/{media.id}/image_256",
+                "image_unique": media_unique.get(media.id),
             }
         )
     return images
@@ -1313,8 +1421,16 @@ class GroveHeadlessAPI(http.Controller):
         # Warm qty_available across every variant on the page in one batch to
         # keep the per-card read a cache hit rather than an N+1.
         has_stock_field = "qty_available" in request.env["product.product"]._fields
+        page_pool_qty = None
         if has_stock_field:
             products.product_variant_ids.mapped("qty_available")
+            # GOL-3933: _list_in_stock(product) called grove_shared_pool_qty per
+            # variant — the per-variant sibling rescan (plus an attribute read a
+            # variant) the detail path already replaced with the batched map. On
+            # prod's multi-variant catalog that was the slow tail of the card
+            # loop (~326 ms vs ~17 ms local). Resolve the whole page's pool once
+            # so the per-card stock check is a dict lookup, not a quadratic scan.
+            page_pool_qty = products.product_variant_ids.grove_shared_pool_qty_map("qty_available")
 
         # Same batching reason as the two warms above, with one wrinkle: the
         # phantom-BoM lookup behind ships_all_green_states (GOL-2988) is a live
@@ -1333,6 +1449,9 @@ class GroveHeadlessAPI(http.Controller):
         sized = products.with_context(bin_size=True)
         rows = {row["id"]: row for row in _serialize_products(sized, PRODUCT_LIST_FIELDS)}
         has_image = {p.id: bool(p.image_128) for p in sized}
+        # One attachment search for the whole page's cache-busting tokens (GOL-3950),
+        # same anti-N+1 reason as the reads above.
+        image_unique = _image_unique_map("product.template", products)
 
         items = []
         for product in products:
@@ -1342,10 +1461,11 @@ class GroveHeadlessAPI(http.Controller):
                 data["image_url"] = (
                     f"/web/image/product.template/{product.id}/image_128" if has_image[product.id] else None
                 )
+                data["image_unique"] = image_unique.get(product.id)
                 data["slug"] = data.pop("grove_slug", "") or ""
                 data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
                 if has_stock_field:
-                    data["in_stock"] = _list_in_stock(product)
+                    data["in_stock"] = _list_in_stock(product, page_pool_qty)
                 data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
                 data["categories"] = [
                     {"id": c.id, "name": c.name, "slug": _category_slug(c)} for c in product.public_categ_ids
@@ -1404,10 +1524,14 @@ class GroveHeadlessAPI(http.Controller):
         # grove_guide_ready is set (GATH-130). Must run after the raw read.
         _gate_guide_fields(product, data)
         data["image_url"] = _image_url("product.template", product, "image_1920")
+        # Cache-busting token for the hero photo (GOL-3950), paired with image_url
+        # and reused inside the image block below.
+        data["image_unique"] = _image_unique("product.template", product)
         # Stored-photo resolution (GOL-837) so content owners / audit tooling can
         # see which products serve a below-minimum source and need re-shooting.
         data["image"] = {
             "url": data["image_url"],
+            "unique": data["image_unique"],
             "width": product.grove_image_width or None,
             "height": product.grove_image_height or None,
             "low_res": bool(product.grove_image_low_res),
@@ -1421,7 +1545,11 @@ class GroveHeadlessAPI(http.Controller):
         phantom_boms = _phantom_kit_boms(product.product_variant_ids)
         pool_qty = variants.grove_shared_pool_qty_map("qty_available")
         tree_counts = promotions.variant_tree_counts(variants, phantom_boms)
-        data["variants"] = [_structure_variant(v, template_rootstock, pool_qty, tree_counts) for v in variants]
+        variant_unique = _image_unique_map("product.product", variants)
+        data["variants"] = [
+            _structure_variant(v, template_rootstock, pool_qty, tree_counts, image_unique=variant_unique.get(v.id))
+            for v in variants
+        ]
         data["facts"] = _serialize_facts(product)
         # GOL-2587 fulfillment/compliance flags (see product_list).
         data.update(_fulfillment_flags(product, phantom_boms))
@@ -1540,7 +1668,11 @@ class GroveHeadlessAPI(http.Controller):
             if genus and genus not in substitute_by_genus:
                 substitute_by_genus[genus] = candidate.id
 
-        plant_rows = [_serialize_planner_plant(p, substitute_by_genus, has_stock_field) for p in plants]
+        plant_unique = _image_unique_map("product.template", plants)
+        plant_rows = [
+            _serialize_planner_plant(p, substitute_by_genus, has_stock_field, image_unique=plant_unique.get(p.id))
+            for p in plants
+        ]
 
         # scope=consult: merge the consultant-depth facts onto each row in order
         # (plant_rows is built from `plants` 1:1) (GOL-3574 §B).
@@ -1657,6 +1789,8 @@ class GroveHeadlessAPI(http.Controller):
         if not sale_order:
             return _json_response({"lines": [], "amount_total": 0, "currency": None})
 
+        # Cache-busting tokens for the whole cart in one attachment search (GOL-3950).
+        line_unique = _image_unique_map("product.product", sale_order.order_line.product_id)
         lines = []
         for line in sale_order.order_line:
             lines.append(
@@ -1668,6 +1802,7 @@ class GroveHeadlessAPI(http.Controller):
                     "price_unit": line.price_unit,
                     "price_subtotal": line.price_subtotal,
                     "image_url": _image_url("product.product", line.product_id, "image_128"),
+                    "image_unique": line_unique.get(line.product_id.id),
                 }
             )
 

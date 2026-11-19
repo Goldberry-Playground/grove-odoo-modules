@@ -23,7 +23,7 @@ import logging
 import os
 import uuid
 
-from odoo import _, api, fields, models
+from odoo import SUPERUSER_ID, _, api, fields, models
 from odoo.exceptions import UserError
 
 try:
@@ -224,33 +224,48 @@ class GrovePublishEvent(models.Model):
                 return
         if not data.get(_AVAIL_REGISTERED_KEY):
             data[_AVAIL_REGISTERED_KEY] = True
-            # Flush at commit so a rolled-back stock change emits nothing, and so
-            # the webhook round-trip never blocks the business logic (it runs
-            # after all SQL is staged). sudo() binds the flush to a system env —
-            # audit rows are system-owned, like the guide-publish path.
+            # Flush at commit so a rolled-back stock change emits nothing: the
+            # precommit hook stages the ledger rows and the webhook delivery is
+            # deferred to a cr.postcommit hook, so it only fires on a successful
+            # commit and reads committed data (GOL-3931). sudo() binds the flush
+            # to a system env — audit rows are system-owned, like guide.publish.
             self.env.cr.precommit.add(self.sudo()._flush_availability_events)
 
     def _flush_availability_events(self):
-        """Emit `product.availability` for every noted template that changed.
+        """Stage a `product.availability` row for every noted template that changed,
+        and schedule its webhook delivery for *after* the transaction commits.
 
         Runs once per transaction (at commit, or directly in tests). Idempotent:
         pops the scratch state, so a second call is a no-op.
+
+        Two guarantees the pre-GOL-3931 version lacked:
+          * The webhook is delivered in a `cr.postcommit` hook, not here, so the
+            storefront re-reads *committed* stock/price — never the pre-commit
+            values it would otherwise cache for up to the ISR window (GOL-3931).
+          * The after-signature read is wrapped in a SAVEPOINT, so a SQL-level
+            error in that read rolls back to the savepoint instead of leaving the
+            cursor aborted and failing the user's stock/price write.
         """
         data = self.env.cr.precommit.data
         before = data.pop(_AVAIL_BEFORE_KEY, None)
         data.pop(_AVAIL_REGISTERED_KEY, None)
         if not before:
             return
-        # Runs in a cr.precommit hook: an exception here aborts the commit and
-        # rolls back the user's stock/price write. Never raise; the storefront
-        # falls back to its cache window instead.
+        # Runs in a cr.precommit hook: a bare SQL error here would abort the
+        # cursor and roll back the user's stock/price write. The savepoint keeps
+        # such a failure local (ROLLBACK TO SAVEPOINT leaves the cursor usable),
+        # and the outer guard means we never raise — the storefront just falls
+        # back to its ISR window. flush=False: the ORM writes are already on the
+        # cursor at precommit time, and we only read here, so there is nothing to
+        # flush (and it avoids re-entering cr.precommit).
         try:
-            templates = self.env["product.template"].browse(sorted(before)).exists()
-            # The stock / price write already happened; drop the cached computes so
-            # the after-signature reflects the new on-hand quantity and prices.
-            templates.invalidate_recordset(["qty_available"])
-            templates.product_variant_ids.invalidate_recordset(["price_extra"])
-            after = self._availability_signature(templates)
+            with self.env.cr.savepoint(flush=False):
+                templates = self.env["product.template"].browse(sorted(before)).exists()
+                # The stock / price write already happened; drop the cached computes
+                # so the after-signature reflects the new on-hand quantity and prices.
+                templates.invalidate_recordset(["qty_available"])
+                templates.product_variant_ids.invalidate_recordset(["price_extra"])
+                after = self._availability_signature(templates)
         except Exception:
             _logger.exception(
                 "product.availability: could not compute the after-signature for templates %s; "
@@ -259,37 +274,76 @@ class GrovePublishEvent(models.Model):
             )
             return
         changed = [t for t in templates if after.get(t.id, before[t.id]) != before[t.id]]
-        for index, template in enumerate(changed):
-            if index >= _AVAILABILITY_EMIT_CAP:
-                _logger.warning(
-                    "product.availability: %s templates changed availability in one "
-                    "transaction; emitted the first %s and left the remaining %s to the "
-                    "/shop ISR window (GOL-1896).",
-                    len(changed),
-                    _AVAILABILITY_EMIT_CAP,
-                    len(changed) - _AVAILABILITY_EMIT_CAP,
-                )
-                break
-            self.sudo()._emit_safe(template, EVENT_PRODUCT_AVAILABILITY, timeout=AUTO_EMIT_TIMEOUT)
+        if not changed:
+            return
+        if len(changed) > _AVAILABILITY_EMIT_CAP:
+            _logger.warning(
+                "product.availability: %s templates changed availability in one "
+                "transaction; emitting the first %s and leaving the remaining %s to the "
+                "/shop ISR window (GOL-1896).",
+                len(changed),
+                _AVAILABILITY_EMIT_CAP,
+                len(changed) - _AVAILABILITY_EMIT_CAP,
+            )
+            changed = changed[:_AVAILABILITY_EMIT_CAP]
+        # Stage the ledger rows now — they commit atomically with the user's write,
+        # so a rolled-back write leaves no row and (because the commit never runs)
+        # fires no webhook. Delivery itself is deferred to post-commit below.
+        pending_ids = []
+        for template in changed:
+            event = self.sudo()._prepare_availability_event(template)
+            if event:
+                pending_ids.append(event.id)
+        if pending_ids:
+            self.sudo()._deliver_availability_after_commit(pending_ids)
 
-    def _emit_safe(self, product_tmpl, event_type, timeout=grove_publish.DEFAULT_TIMEOUT):
-        """`_emit` that never raises — for automatic emits behind a user's write.
+    def _deliver_availability_after_commit(self, event_ids):
+        """Register a `cr.postcommit` hook that delivers the staged rows.
 
-        A misconfigured tenant (no webhook URL/secret) or any unexpected error
-        must not abort or 500 the stock/template write that triggered it; the
-        storefront simply degrades to its ISR window. Delivery failures are
-        already non-raising (see `_deliver`) and keep the row for replay.
+        Mirrors sale_order_ops._grove_refresh_cards_after_commit: the HTTP calls
+        run on a cursor of their own, once the user's transaction has committed,
+        so (1) the storefront re-reads committed data and (2) a delivery failure
+        or SQL error cannot roll back the stock/price write. A row that is not
+        delivered stays `pending` in the audit ledger for `action_retry`.
+        """
+        registry = self.env.registry
+
+        def deliver():
+            try:
+                with registry.cursor() as cr:
+                    env = api.Environment(cr, SUPERUSER_ID, {})
+                    events = env["grove.publish.event"].browse(event_ids).exists()
+                    for event in events:
+                        event._deliver_row(timeout=AUTO_EMIT_TIMEOUT)
+            except Exception:  # noqa: BLE001 — rows stay pending for action_retry
+                _logger.exception("product.availability: post-commit delivery failed for %s", event_ids)
+
+        self.env.cr.postcommit.add(deliver)
+
+    def _prepare_availability_event(self, product_tmpl):
+        """Create a `pending` product.availability ledger row (no delivery yet).
+
+        Never raises into the user's write: a misconfigured tenant just means the
+        storefront degrades to its ISR window. Returns the created row, or an
+        empty recordset when nothing was staged.
         """
         try:
-            return self._emit(product_tmpl, event_type, timeout=timeout)
+            return self._prepare_pending_event(product_tmpl, EVENT_PRODUCT_AVAILABILITY)
         except UserError as exc:
-            _logger.info("%s emit skipped for template %s: %s", event_type, product_tmpl.id, exc)
+            _logger.info("product.availability emit skipped for template %s: %s", product_tmpl.id, exc)
         except Exception:  # pragma: no cover - defensive: never break the write
-            _logger.exception("%s emit failed for template %s", event_type, product_tmpl.id)
+            _logger.exception("product.availability prepare failed for template %s", product_tmpl.id)
         return self.browse()
 
     @api.model
-    def _emit(self, product_tmpl, event_type, timeout=grove_publish.DEFAULT_TIMEOUT):
+    def _prepare_pending_event(self, product_tmpl, event_type):
+        """Resolve tenant + webhook config, build the signed payload, and create a
+        `pending` ledger row — WITHOUT delivering it.
+
+        Split out of `_emit` so the availability path can stage the row inside the
+        user's transaction and deliver it after commit (GOL-3931). Raises
+        UserError when the tenant or webhook is not configured.
+        """
         product_tmpl.ensure_one()
         company = product_tmpl.company_id or self.env.company
         tenant = self._tenant_slug_for_company(company)
@@ -316,7 +370,7 @@ class GrovePublishEvent(models.Model):
             tenant=tenant,
             occurred_at=occurred_at,
         )
-        event = self.create(
+        return self.create(
             {
                 "delivery_id": delivery_id,
                 "event_type": event_type,
@@ -328,7 +382,41 @@ class GrovePublishEvent(models.Model):
                 "state": "pending",
             }
         )
-        event._deliver(url, secret, payload, timeout=timeout)
+
+    def _deliver_row(self, timeout=grove_publish.DEFAULT_TIMEOUT):
+        """Deliver a stored `pending`/`failed` row from its saved payload + config.
+
+        Reuses the stored `delivery_id` so the receiver's dedupe key is stable
+        (idempotent replay). Never raises: a config/transport problem just leaves
+        the row for `action_retry` or the next write. `_deliver` records the HTTP
+        outcome (delivered / failed) on the row.
+        """
+        self.ensure_one()
+        if not self.payload or not self.tenant:
+            _logger.warning("publish.event %s cannot deliver: missing payload or tenant", self.delivery_id)
+            return self
+        url, secret = self._webhook_config(self.tenant)
+        if not url or not secret:
+            _logger.info(
+                "publish.event %s delivery skipped: webhook not configured for tenant %s",
+                self.delivery_id,
+                self.tenant,
+            )
+            return self
+        self._deliver(url, secret, json.loads(self.payload), timeout=timeout)
+        return self
+
+    @api.model
+    def _emit(self, product_tmpl, event_type, timeout=grove_publish.DEFAULT_TIMEOUT):
+        """Create a pending row and deliver it synchronously (manual guide.publish).
+
+        The availability path does NOT use this — it stages via
+        `_prepare_availability_event` and delivers after commit. Serialization is
+        deterministic (grove_publish.serialize sorts keys), so delivering from the
+        stored payload signs identically to the in-memory one.
+        """
+        event = self._prepare_pending_event(product_tmpl, event_type)
+        event._deliver_row(timeout=timeout)
         return event
 
     def _deliver(self, url, secret, payload, timeout=grove_publish.DEFAULT_TIMEOUT):

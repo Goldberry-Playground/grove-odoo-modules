@@ -9,6 +9,8 @@ from odoo.addons.grove_headless.controllers.main import (
     _cultivar_count,
     _fulfillment_flags,
     _gate_guide_fields,
+    _image_unique,
+    _image_unique_map,
     _image_url,
     _normalize_seo,
     _ordered_variants,
@@ -25,6 +27,10 @@ from odoo.tests import TransactionCase, tagged
 
 # 1x1 transparent PNG.
 _PNG_1X1 = b"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+# Two distinct opaque PNGs (2x2 and 3x3), used to prove image_unique moves when the
+# stored photo is replaced (GOL-3950).
+_PNG_A = b"iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGPgEpEDIgYIBQAGTgDxOGMygQAAAABJRU5ErkJggg=="
+_PNG_B = b"iVBORw0KGgoAAAANSUhEUgAAAAMAAAADCAIAAADZSiLoAAAAEElEQVR4nGM4kWIEQQxYWAC99gxPyJ2wDQAAAABJRU5ErkJggg=="
 
 
 @tagged("post_install", "-at_install")
@@ -389,3 +395,80 @@ class TestDetailSerialization(GroveTaxFixtureMixin, TransactionCase):
             _structure_variant(variant)["image_url"],
             f"/web/image/product.product/{variant.id}/image_128",
         )
+
+    # ── image_unique: cache-busting token (GOL-3950) ────────────────────
+    def test_image_unique_null_when_no_image(self):
+        # An imageless product gets no token, so it pairs with the null image_url
+        # (the frontend appends nothing and renders its branded placeholder).
+        self.assertIsNone(_image_unique("product.template", self.tmpl))
+        self.assertNotIn(self.tmpl.id, _image_unique_map("product.template", self.tmpl))
+
+    def test_image_unique_present_and_is_attachment_checksum(self):
+        # With a photo, the token is the checksum of the stored image_1920
+        # attachment — the same key Odoo's /web/image route caches on.
+        self.tmpl.image_1920 = _PNG_A
+        attachment = (
+            self.env["ir.attachment"]
+            .sudo()
+            .search(
+                [
+                    ("res_model", "=", "product.template"),
+                    ("res_field", "=", "image_1920"),
+                    ("res_id", "=", self.tmpl.id),
+                ],
+                limit=1,
+            )
+        )
+        self.assertTrue(attachment.checksum)
+        self.assertEqual(_image_unique("product.template", self.tmpl), attachment.checksum)
+
+    def test_image_unique_changes_when_photo_replaced(self):
+        # The contract: replacing the stored photo yields a new token, so the
+        # storefront URL changes and the 31-day image cache can't serve stale
+        # bytes (GOL-3950, "done when").
+        self.tmpl.image_1920 = _PNG_A
+        before = _image_unique("product.template", self.tmpl)
+        self.assertTrue(before)
+        self.tmpl.image_1920 = _PNG_B
+        after = _image_unique("product.template", self.tmpl)
+        self.assertTrue(after)
+        self.assertNotEqual(before, after)
+
+    def test_image_unique_variant_keys_on_template_without_own_photo(self):
+        # A variant with no own photo serves the template image, so its token is
+        # the template's — a bare variant write_date would never move when the
+        # shared photo is replaced.
+        self.tmpl.image_1920 = _PNG_A
+        variant = self.tmpl.product_variant_ids[0]
+        self.assertFalse(variant.image_variant_1920)
+        self.assertEqual(
+            _image_unique("product.product", variant),
+            _image_unique("product.template", self.tmpl),
+        )
+
+    def test_image_unique_variant_keys_on_own_photo(self):
+        # A variant with its own photo keys on that photo (image_variant_1920),
+        # not the template's, so the two tokens differ.
+        self.tmpl.image_1920 = _PNG_A
+        variant = self.tmpl.product_variant_ids[0]
+        variant.image_variant_1920 = _PNG_B
+        self.assertNotEqual(
+            _image_unique("product.product", variant),
+            _image_unique("product.template", self.tmpl),
+        )
+
+    def test_structure_variant_carries_image_unique(self):
+        self.tmpl.image_1920 = _PNG_A
+        variant = self.tmpl.product_variant_ids[0]
+        data = _structure_variant(variant)
+        self.assertIn("image_unique", data)
+        self.assertEqual(data["image_unique"], _image_unique("product.product", variant))
+
+    def test_serialize_images_carry_unique(self):
+        # Hero gallery entry carries the template token; an imageless gallery is
+        # still empty.
+        self.assertEqual(_serialize_images(self.tmpl), [])
+        self.tmpl.image_1920 = _PNG_A
+        images = _serialize_images(self.tmpl)
+        self.assertEqual(images[0]["image_unique"], _image_unique("product.template", self.tmpl))
+        self.assertTrue(images[0]["image_unique"])

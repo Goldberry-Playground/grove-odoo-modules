@@ -41,6 +41,7 @@ reads blurry — there is no frontend fix.
    ```json
    "image": {
      "url": "/web/image/product.template/123/image_1920",
+     "unique": "a1b2c3…",
      "width": 600, "height": 450,
      "low_res": true,
      "min_long_edge": 1600
@@ -49,6 +50,39 @@ reads blurry — there is no frontend fix.
 
    so content owners / audit tooling can enumerate below-minimum products
    programmatically. `image_url` is retained at the top level for back-compat.
+
+## `image_unique`: the per-photo cache key (GOL-3950)
+
+Every image URL the headless API returns is a versionless `/web/image/…` path.
+Odoo serves those through a **31-day** `Cache-Control: immutable` window, so a
+replaced photo at the same path can keep serving stale bytes for weeks. To fix
+that, every image field now ships an **`image_unique`** sibling the storefront
+appends as a cache key (`…/image_1024?unique=<image_unique>`): a new photo yields
+a new token, so the URL changes and the cache can't serve the old bytes. It is
+also the name the AVIF/WebP pre-encoder (GOL-3926 part C) gives each encoded
+file.
+
+**Value.** The checksum (sha1) of the record's stored `image_1920` ir.attachment
+— the same bytes `/web/image` serves and the key Odoo's own route caches on —
+falling back to the record `write_date` when a stored image has no checksum. A
+`product.product` variant with its own photo keys on `image_variant_1920`; a
+variant with no own photo serves the template image and so keys on the template's
+`image_1920` (a bare variant `write_date` never moves when the shared photo is
+replaced). An **imageless** record carries `image_unique: null`, paired with its
+`null` URL.
+
+**Where it rides** (one per URL it versions):
+
+| Endpoint                         | Field(s) carrying `image_unique`                              |
+| -------------------------------- | ------------------------------------------------------------- |
+| `GET /products` (list)           | top-level `image_unique` (beside `image_url`)                 |
+| `GET /products/{id}` (detail)    | top-level `image_unique`; `image.unique`; each `variants[].image_unique`; each `images[].image_unique` (hero + gallery) |
+| `GET /planner/catalog`           | each `plants[].image_unique` (beside `image`)                 |
+| `GET /cart`                      | each `lines[].image_unique`                                   |
+
+Resolved in one batched `ir.attachment` search per page on the list, planner and
+cart feeds (`_image_unique_map` in `controllers/main.py`), so the version key
+costs one query, not an N+1.
 
 ## Imageless products vs low-res products
 

@@ -143,3 +143,32 @@ def zone_alert_kind(today, ship_start, ship_end):
     if ship_start <= today <= ship_end:
         return "day_of"
     return None
+
+
+def wave_window_state(window, today):
+    """Where ``today`` sits relative to a wave's ship window.
+
+    ``window`` is ``((start_month, start_day), (end_month, end_day))``. Returns:
+
+    - ``"open"`` — today is inside the window's current occurrence;
+    - ``"upcoming"`` — this calendar year's occurrence has not started yet, so the
+      window is still ahead (a legitimately-waiting pre-order);
+    - ``"passed"`` — this year's occurrence has already ended, so the next one is
+      next year and nothing will warn about the order until then.
+
+    A spring (or fall) window never wraps the new year; a wrapping window is only
+    ever ``"open"`` or ``"passed"`` (it is always either inside an occurrence or in
+    the gap between them).
+    """
+    (sm, sd), (em, ed) = window
+    start, end = (sm, sd), (em, ed)
+    t = (today.month, today.day)
+    if start <= end:
+        if start <= t <= end:
+            return "open"
+        return "upcoming" if t < start else "passed"
+    # Wrapping window (crosses the new year): open across the boundary, otherwise
+    # it sits in the gap between occurrences — treat the gap as passed.
+    if t >= start or t <= end:
+        return "open"
+    return "passed"
