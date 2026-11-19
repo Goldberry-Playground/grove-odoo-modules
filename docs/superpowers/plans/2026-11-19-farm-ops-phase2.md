@@ -201,17 +201,22 @@ def test_worker_cannot_read_account_move(self):
     with self.assertRaises(AccessError):
         self.env["account.move"].with_user(worker).search([], limit=1)
 
+
 def test_worker_cannot_read_other_peoples_timesheets(self):
     # worker sees own analytic lines, not the lead's
     ...
+
 
 def test_worker_can_read_assigned_picking_only(self):
     # assigned-to-pack picking readable; an unrelated picking not
     ...
 
+
 def test_worker_cannot_see_sale_order_or_prices(self): ...
 
+
 def test_lead_sees_crew_tasks_and_hours(self): ...
+
 
 def test_installing_groups_does_not_change_existing_user_rights(self):
     # a user with today's rights keeps them after the groups install (no implied-group side effect removes access)
@@ -246,19 +251,23 @@ def test_owner_cannot_approve_own_week(self):
     with self.assertRaisesRegex(ValidationError, "another owner-operator"):
         sheet.with_user(sheet.employee_id.user_id).action_timesheet_done()  # OCA approve action name
 
+
 def test_other_owner_can_approve(self): ...
 
+
 def test_approved_week_lines_are_locked_until_reopen(self):
-    sheet.action_timesheet_done()   # by another owner
+    sheet.action_timesheet_done()  # by another owner
     with self.assertRaises((ValidationError, UserError)):
         line.write({"unit_amount": 9.0})
-    sheet.action_grove_reopen()     # trail recorded
+    sheet.action_grove_reopen()  # trail recorded
     line.write({"unit_amount": 9.0})  # now allowed
     # reapprove requires a non-self approver again
+
 
 def test_reopen_keeps_full_trail(self):
     # message_ids / tracking carry old and new value, who and when
     ...
+
 
 def test_register_values_hours_at_21(self):
     # 10 approved hours -> amount 210.0; every member can read the register
