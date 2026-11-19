@@ -68,7 +68,7 @@ def is_qualifying_plant(product, plants_root=_RESOLVE):
     return categ.parent_path.startswith(plants_root.parent_path)
 
 
-def _bundle_tree_count(env, variant, phantom_boms=None, plants_root=_RESOLVE):
+def _bundle_tree_count(env, variant, phantom_boms=None, plants_root=_RESOLVE, exploded=None):
     """Component tree count of one unit of a phantom-BOM bundle: the total
     qualifying-plant component units in its exploded BOM. 0 when ``variant`` is
     not a bundle (no phantom BOM) — the caller then treats it as a standalone
@@ -77,20 +77,28 @@ def _bundle_tree_count(env, variant, phantom_boms=None, plants_root=_RESOLVE):
 
     ``phantom_boms`` is an already-resolved ``{variant: bom}`` map (one batched
     ``_bom_find``) covering ``variant``; omit it and this variant is searched on
-    its own. ``plants_root``: see ``is_qualifying_plant``."""
-    if "mrp.bom" not in env.registry:
-        return 0
-    try:
-        if phantom_boms is None:
-            bom = env["mrp.bom"].sudo()._bom_find(variant, bom_type="phantom").get(variant)
-        else:
-            bom = phantom_boms.get(variant)
-        if not bom:
+    its own. ``plants_root``: see ``is_qualifying_plant``.
+
+    ``exploded`` is this variant's already-computed ``bom.explode`` component
+    lines (``[(bom_line, line_data), ...]`` from ``explode_bundle_boms``). Pass it
+    to share one explode with the component-id pass instead of exploding the BoM
+    a second time per bundle (GOL-4063); an empty list is an exploded bundle with
+    no counted lines, not a missing one. Omit it and the BoM is resolved and
+    exploded here."""
+    if exploded is None:
+        if "mrp.bom" not in env.registry:
             return 0
-        _boms, exploded = bom.explode(variant, 1)
-    except Exception:  # noqa: BLE001 — never let a bundle BOM gap break the count
-        _logger.warning("GOL-2431: could not explode bundle BOM for variant %s", variant.id, exc_info=True)
-        return 0
+        try:
+            if phantom_boms is None:
+                bom = env["mrp.bom"].sudo()._bom_find(variant, bom_type="phantom").get(variant)
+            else:
+                bom = phantom_boms.get(variant)
+            if not bom:
+                return 0
+            _boms, exploded = bom.explode(variant, 1)
+        except Exception:  # noqa: BLE001 — never let a bundle BOM gap break the count
+            _logger.warning("GOL-2431: could not explode bundle BOM for variant %s", variant.id, exc_info=True)
+            return 0
     total = 0
     for bom_line, line_data in exploded:
         if is_qualifying_plant(bom_line.product_id, plants_root):
@@ -133,7 +141,36 @@ def variant_tree_count(variant):
     return 1 if is_qualifying_plant(variant) else 0
 
 
-def variant_tree_counts(variants, phantom_boms=None):
+def explode_bundle_boms(env, phantom_boms):
+    """``{variant: bom.explode component lines}`` — one ``bom.explode`` per bundle.
+
+    ``phantom_boms`` is a ``{variant: bom}`` map (``_phantom_kit_boms``). The
+    planner feed needs each bundle's exploded components twice — once for the
+    tree count, once for the component ids — so it explodes each bundle once here
+    and both passes read the result, instead of ``bom.explode`` running per bundle
+    per field (GOL-4063). This clears the residual explode-per-bundle N+1 left
+    after GOL-3932 batched the phantom-BoM *search*: ``explode`` itself issues an
+    internal sub-kit ``_bom_find`` that top-level prefetch does not satisfy.
+    Variants with no BoM are skipped (``.get`` yields ``None`` → the count/id
+    helpers take their standalone path). Best-effort: an explode hiccup logs and
+    yields ``[]`` for that bundle rather than breaking the read-only feed.
+    """
+    if "mrp.bom" not in env.registry:
+        return {}
+    explosions = {}
+    for variant, bom in phantom_boms.items():
+        if not bom:
+            continue
+        try:
+            _boms, exploded = bom.explode(variant, 1)
+        except Exception:  # noqa: BLE001 — a bundle BoM gap must not break the feed
+            _logger.warning("GOL-4063: could not explode bundle BoM for variant %s", variant.id, exc_info=True)
+            exploded = []
+        explosions[variant] = exploded
+    return explosions
+
+
+def variant_tree_counts(variants, phantom_boms=None, explosions=None):
     """``{variant id: variant_tree_count(variant)}`` for a recordset, in batched reads.
 
     The product detail serializes every variant of a template (84 for the
@@ -141,6 +178,12 @@ def variant_tree_counts(variants, phantom_boms=None):
     and an ``env.ref`` existence check; here the BoMs come from one batched
     ``_bom_find`` (or the caller's already-resolved ``phantom_boms`` map) and the
     Plants root is resolved once. Same rule, same counts.
+
+    ``explosions`` is an ``explode_bundle_boms`` result (``{variant: lines}``):
+    when a variant's exploded lines are already in it, the count reuses them
+    instead of re-exploding its BoM, so the planner feed shares one explode per
+    bundle with the component-id pass (GOL-4063). Omit it and each bundle variant
+    is exploded here.
     """
     env = variants.env
     if phantom_boms is None and "mrp.bom" in env.registry:
@@ -148,7 +191,8 @@ def variant_tree_counts(variants, phantom_boms=None):
     plants_root = _plants_root(env)
     counts = {}
     for variant in variants:
-        per_unit = _bundle_tree_count(env, variant, phantom_boms, plants_root)
+        exploded = explosions.get(variant) if explosions is not None else None
+        per_unit = _bundle_tree_count(env, variant, phantom_boms, plants_root, exploded)
         counts[variant.id] = per_unit or (1 if is_qualifying_plant(variant, plants_root) else 0)
     return counts
 

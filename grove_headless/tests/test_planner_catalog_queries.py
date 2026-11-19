@@ -6,11 +6,13 @@ Before GOL-3932 each bundle ran its own phantom-BoM search twice — once for th
 same per-variant N+1 gom#412 removed from product detail (206 → 39 queries). The
 feed now resolves every bundle's BoM once (``_phantom_kit_boms``) and its tree
 count in one batched pass (``variant_tree_counts``), then builds each row from
-memory. What still scales per bundle is the BoM explode itself — the count and
-the component ids each call ``mrp.bom.explode``, and every explode runs one
-sub-kit search over its component products — so the feed went from four
-searches a bundle to two. This test pins that shape: each extra bundle may cost
-the two explodes and nothing more.
+memory. GOL-3932 left one residual: the BoM explode itself — the count and the
+component ids each called ``mrp.bom.explode``, and every explode runs one sub-kit
+``_bom_find`` over its component products that top-level prefetch never satisfies
+— so the feed still cost two explodes a bundle. GOL-4063 explodes each bundle
+once (``explode_bundle_boms``) and both passes read the result, so each extra
+bundle now costs a single explode. This test pins that shape: each extra bundle
+may cost the one explode and nothing more.
 """
 
 import json
@@ -20,14 +22,14 @@ from odoo.tests.common import HttpCase, tagged
 
 from .common import GroveTaxFixtureMixin
 
-# What one extra bundle may cost: the sub-kit search inside each of its two BoM
-# explodes (tree count + component ids). CI measured exactly this — 22 queries
-# for 1 bundle, 34 for 7. The unbatched feed costs four a bundle (its own
-# phantom-BoM search twice on top), which this bound rejects.
-QUERIES_PER_EXTRA_BUNDLE = 2
+# What one extra bundle may cost: the sub-kit ``_bom_find`` inside its single
+# shared BoM explode (GOL-4063 collapses the count + component-id explodes into
+# one). The two-explode feed cost two a bundle, and the unbatched feed four (its
+# own phantom-BoM search twice on top) — this bound rejects both.
+QUERIES_PER_EXTRA_BUNDLE = 1
 # Room for ORM noise only (the batched BoM/line/product reads happen once for
-# the whole page) — well under the 12 queries the old N+1 adds across the six
-# extra bundles below.
+# the whole page) — kept well under the per-bundle cost of the pre-GOL-4063 feed
+# across the six extra bundles below.
 EXTRA_QUERY_ALLOWANCE = 4
 
 
@@ -94,7 +96,7 @@ class TestPlannerCatalogQueries(GroveTaxFixtureMixin, HttpCase):
         body = self._fetch()
         return self.cr.sql_log_count - before, body
 
-    def test_feed_query_count_grows_only_by_the_explodes_per_bundle(self):
+    def test_feed_query_count_grows_only_by_one_explode_per_bundle(self):
         self._bundle("Bundle 01")
         small, body = self._queries()
         self.assertEqual(len(body["bundles"]), 1)
