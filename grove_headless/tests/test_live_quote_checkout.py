@@ -92,6 +92,43 @@ class TestQuoteEventAlerts(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(icp.get_param(FLAG), "0")
 
 
+@tagged("grove_headless", "post_install", "-at_install")
+class TestLiveQuoteDiscordRouting(GroveTaxFixtureMixin, TransactionCase):
+    """The live-quote alerts post to the shipping channel, through the same
+    topic fallback chain the order pings use (GOL-4056)."""
+
+    def _post_and_capture(self, env):
+        with mock.patch.dict("os.environ", env, clear=True), mock.patch.object(
+            live_quote.requests, "post"
+        ) as post:
+            live_quote._post_discord(self.env, "2/5 (40%) fell back in the last hour")
+        return post
+
+    def test_shipping_webhook_wins_when_set(self):
+        post = self._post_and_capture(
+            {
+                "DISCORD_SHIPPING_WEBHOOK_URL": "https://d/shipping",
+                "DISCORD_ORDERS_WEBHOOK_URL": "https://d/orders",
+                "DISCORD_OPS_WEBHOOK_URL": "https://d/ops",
+            }
+        )
+        post.assert_called_once()
+        args, kwargs = post.call_args
+        self.assertEqual(args[0], "https://d/shipping")
+        # mentions disarmed and the instance tag prefixed, like the order pings.
+        self.assertEqual(kwargs["json"]["allowed_mentions"], {"parse": []})
+        self.assertIn("fell back", kwargs["json"]["content"])
+
+    def test_falls_back_to_ops_when_only_ops_set(self):
+        post = self._post_and_capture({"DISCORD_OPS_WEBHOOK_URL": "https://d/ops"})
+        post.assert_called_once()
+        self.assertEqual(post.call_args.args[0], "https://d/ops")
+
+    def test_no_post_when_no_webhook_set(self):
+        post = self._post_and_capture({})
+        post.assert_not_called()
+
+
 class _BarerootOrder(GroveTaxFixtureMixin):
     """A one-template (bareroot) order in the main company, green-state ship-to."""
 

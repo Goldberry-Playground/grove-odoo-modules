@@ -20,7 +20,6 @@ charge is the zone table byte-for-byte (spec §5, the step-1 acceptance check).
 import json
 import logging
 import math
-import os
 from datetime import timedelta
 
 import requests
@@ -56,20 +55,25 @@ def live_quotes_enabled(env) -> bool:
     return raw in _TRUTHY
 
 
-def _discord_ops_url() -> str:
-    return os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
-
-
 def _post_discord(env, text) -> None:
-    """Best-effort Discord ops post, environment-tagged. Never raises — an alert
-    must not be the reason a checkout or cron fails."""
+    """Best-effort Discord post to the shipping channel, environment-tagged. The
+    webhook resolves through the shared topic chain (DISCORD_SHIPPING_WEBHOOK_URL
+    -> DISCORD_ORDERS_WEBHOOK_URL -> DISCORD_OPS_WEBHOOK_URL), so these live-quote
+    alerts land in #grove-shipping when that webhook is set and still surface in
+    the ops channel when it is the only one configured (GOL-4056). ``parse: []``
+    disarms every mention like the order pings do. Never raises — an alert must
+    not be the reason a checkout or cron fails."""
     msg = discord_tag.tag_discord_message(env, text)
-    url = _discord_ops_url()
+    url = discord_tag.discord_webhook_url("shipping")
     if not url:
-        _logger.info("live-quote alert: DISCORD_OPS_WEBHOOK_URL unset — %s", msg)
+        _logger.info("live-quote alert: no shipping/orders/ops Discord webhook set — %s", msg)
         return
     try:
-        requests.post(url, json={"content": msg[:2000]}, timeout=10)
+        requests.post(
+            url,
+            json={"content": msg[:2000], "allowed_mentions": {"parse": []}},
+            timeout=10,
+        )
     except Exception:  # noqa: BLE001 — alerting is best-effort
         _logger.warning("live-quote alert: Discord notify failed", exc_info=True)
 

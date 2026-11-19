@@ -27,6 +27,7 @@ from ..models import (
     promotions,
     stripe_gateway,
 )
+from ..models.discord_tag import discord_webhook_url as _discord_webhook_url
 from ..models.discord_tag import tag_discord_message
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
@@ -7103,24 +7104,6 @@ def _notify_customer_apology(env, order, product_names, refunded):
 # notable paid orders; shipping = carrier, Printify and oversell problems. Each
 # falls back to the orders webhook, then ops, so an unset topic webhook leaves
 # the alert where it landed before instead of dropping it.
-DISCORD_CHANNEL_ENV = {
-    "sales": "DISCORD_SALES_WEBHOOK_URL",
-    "shipping": "DISCORD_SHIPPING_WEBHOOK_URL",
-}
-
-
-def _discord_webhook_url(channel=None):
-    """Webhook for ``channel`` (a DISCORD_CHANNEL_ENV key, or None for the
-    orders channel), falling back to DISCORD_ORDERS_WEBHOOK_URL and then
-    DISCORD_OPS_WEBHOOK_URL. "" when none is set."""
-    env_name = DISCORD_CHANNEL_ENV.get(channel)
-    return (
-        (os.environ.get(env_name, "") if env_name else "")
-        or os.environ.get("DISCORD_ORDERS_WEBHOOK_URL", "")
-        or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
-    )
-
-
 def _notify_discord(message, channel=None, env=None):
     """Best-effort order-ops ping. Order/pickup summaries go to their own
     channel (DISCORD_ORDERS_WEBHOOK_URL — Josh 2026-09-03), separate from the
