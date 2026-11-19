@@ -209,7 +209,7 @@ def _available_fields(model, fields):
     return [f for f in fields if f in model._fields]
 
 
-def _list_in_stock(product):
+def _list_in_stock(product, pool_qty=None):
     """Live stock signal for a grid card (GOL-2517).
 
     ``True`` when any variant has sellable on-hand quantity. Pool-aware — reads
@@ -218,8 +218,16 @@ def _list_in_stock(product):
     stock but stocked potted siblings is not falsely shown sold out. Caller
     guards on the ``stock`` module being installed; invoke on a
     ``with_company()`` record so ``qty_available`` reads the right company.
+
+    ``pool_qty`` (a page-level ``grove_shared_pool_qty_map("qty_available")``
+    result) lets the list resolve every card off one batched map instead of a
+    per-variant sibling rescan — the quadratic the detail path already removed
+    (GOL-3933). Omit it and the card resolves on its own, to the same value.
     """
-    return any(v.grove_shared_pool_qty("qty_available") > 0 for v in product.product_variant_ids)
+    variants = product.product_variant_ids
+    if pool_qty is not None:
+        return any(pool_qty.get(v.id, 0) > 0 for v in variants)
+    return any(v.grove_shared_pool_qty("qty_available") > 0 for v in variants)
 
 
 def _json_response(data, status=200, headers=None):
@@ -1400,8 +1408,16 @@ class GroveHeadlessAPI(http.Controller):
         # Warm qty_available across every variant on the page in one batch to
         # keep the per-card read a cache hit rather than an N+1.
         has_stock_field = "qty_available" in request.env["product.product"]._fields
+        page_pool_qty = None
         if has_stock_field:
             products.product_variant_ids.mapped("qty_available")
+            # GOL-3933: _list_in_stock(product) called grove_shared_pool_qty per
+            # variant — the per-variant sibling rescan (plus an attribute read a
+            # variant) the detail path already replaced with the batched map. On
+            # prod's multi-variant catalog that was the slow tail of the card
+            # loop (~326 ms vs ~17 ms local). Resolve the whole page's pool once
+            # so the per-card stock check is a dict lookup, not a quadratic scan.
+            page_pool_qty = products.product_variant_ids.grove_shared_pool_qty_map("qty_available")
 
         # Same batching reason as the two warms above, with one wrinkle: the
         # phantom-BoM lookup behind ships_all_green_states (GOL-2988) is a live
@@ -1436,7 +1452,7 @@ class GroveHeadlessAPI(http.Controller):
                 data["slug"] = data.pop("grove_slug", "") or ""
                 data["preorder_cap_reached"] = bool(product.grove_preorder_cap_reached)
                 if has_stock_field:
-                    data["in_stock"] = _list_in_stock(product)
+                    data["in_stock"] = _list_in_stock(product, page_pool_qty)
                 data["tags"] = [{"id": t.id, "name": t.name} for t in product.product_tag_ids]
                 data["categories"] = [
                     {"id": c.id, "name": c.name, "slug": _category_slug(c)} for c in product.public_categ_ids
