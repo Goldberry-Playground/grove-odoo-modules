@@ -1,0 +1,39 @@
+{
+  "_comment": "Recorded RatesQuery response, p24x10x4 @ 6 lb to 26651 (Summersville WV, residential). UPS carries the $3.45 Delivery Area surcharge at this rural origin-area ZIP. A non-allowlisted UPS Next Day Air rate is included to prove the allowlist filter. Transit descriptions anchored to a 2026-11-19 quote (fixture tests pin today).",
+  "data": {
+    "rates": [
+      {
+        "title": "UPS® Ground",
+        "mailClassKey": "03",
+        "carrier": {"carrierKey": "ups", "title": "UPS"},
+        "deliveryDescription": "Estimated delivery Wednesday 11/25 by 11:00 PM if shipped today",
+        "totalPrice": 11.83,
+        "surcharges": [{"name": "Delivery Area", "amount": 3.45}]
+      },
+      {
+        "title": "UPS® Ground Saver",
+        "mailClassKey": "93",
+        "carrier": {"carrierKey": "ups", "title": "UPS"},
+        "deliveryDescription": "Estimated delivery Friday 11/27 by 11:00 PM if shipped today",
+        "totalPrice": 12.40,
+        "surcharges": [{"name": "Delivery Area", "amount": 3.45}, {"name": "Nonstandard Length", "amount": 4.00}]
+      },
+      {
+        "title": "USPS Ground Advantage®",
+        "mailClassKey": "GroundAdvantage",
+        "carrier": {"carrierKey": "usps", "title": "USPS"},
+        "deliveryDescription": "Estimated delivery Thursday 11/26 by 9:00 PM if shipped today",
+        "totalPrice": 13.20,
+        "surcharges": [{"name": "Nonstandard Length", "amount": 5.00}]
+      },
+      {
+        "title": "UPS® Next Day Air",
+        "mailClassKey": "01",
+        "carrier": {"carrierKey": "ups", "title": "UPS"},
+        "deliveryDescription": "Estimated delivery Friday 11/20 by 10:30 AM if shipped today",
+        "totalPrice": 78.10,
+        "surcharges": []
+      }
+    ]
+  }
+}
