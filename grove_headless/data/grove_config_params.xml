@@ -29,6 +29,19 @@
         <field name="value">0</field>
     </record>
 
+    <!-- Live-ZIP checkout quotes switch (GOL-3927, spec §5), DEFAULT OFF. "0" =
+         checkout prices from the code zone table exactly as today; the live
+         Pirate Ship quote -> ZIP-area -> zone fallback chain is dormant. Flip to
+         "1" in Settings / Technical / System Parameters AFTER promote (rollout
+         step 5, Josh) to turn on live quotes without a deploy; rollback is a flip
+         back to "0". noupdate="1" so the operator value survives upgrades. A
+         retired Pirate Ship persisted query sets this back to "0" automatically
+         (live_quote.alert_query_retired). -->
+    <record id="zip_live_quotes_enabled_param" model="ir.config_parameter">
+        <field name="key">grove_headless.zip_live_quotes_enabled</field>
+        <field name="value">0</field>
+    </record>
+
     <!-- Perenual daily call budget (GOL-2391). The Fetch-facts button enqueues a
          grove.enrich.job per plant; the process_enrich_jobs cron drains them
          oldest-first, spending at most this many real Perenual HTTP calls per

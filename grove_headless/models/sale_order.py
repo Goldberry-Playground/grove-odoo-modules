@@ -67,6 +67,27 @@ class SaleOrder(models.Model):
     # and operator button all check, so a re-delivered event never re-emails.
     grove_shipment_notices_sent = fields.Text(readonly=True, copy=False)
 
+    # Which pricing level set this order's checkout shipping charge (GOL-3927,
+    # spec §5): the live Pirate Ship quote, the nightly ZIP-area table (card 2),
+    # or the code zone table (the 10-14 hotfix rates). Recorded so the label tool
+    # can show quoted-vs-purchased and the fallback rate is auditable. Unset for
+    # orders quoted before the live path shipped and for pickup/seed orders that
+    # carry no checkout quote. "zone" is what every order reads while the live
+    # flag is off — the step-1 default.
+    grove_shipping_source = fields.Selection(
+        [("live", "Live quote"), ("zip_area", "ZIP-area table"), ("zone", "Zone table")],
+        readonly=True,
+        copy=False,
+    )
+    # Why a box fell back from the live quote (the typed Pirate Ship error, e.g.
+    # "Timeout" / "Blocked" / "NoService"), de-duplicated across the order's
+    # boxes. Empty when every box was quoted live.
+    grove_shipping_fallback_reason = fields.Char(readonly=True, copy=False)
+    # Per-box quoted service + price JSON (GOL-3927): a list of
+    # {box_id, weight_lb, price, source, service, service_title}, so the label
+    # batch can pre-select the quoted service and show quoted vs purchased.
+    grove_shipping_quote_detail = fields.Text(readonly=True, copy=False)
+
     # Fulfilment intent resolved at draft creation (GOL-1057/GOL-1933). Persisted
     # so the post-purchase chain has an unambiguous source of truth instead of
     # re-inferring "did this ship?" from the presence of a shipping line: the
