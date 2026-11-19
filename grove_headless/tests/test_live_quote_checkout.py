@@ -98,9 +98,7 @@ class TestLiveQuoteDiscordRouting(GroveTaxFixtureMixin, TransactionCase):
     topic fallback chain the order pings use (GOL-4056)."""
 
     def _post_and_capture(self, env):
-        with mock.patch.dict("os.environ", env, clear=True), mock.patch.object(
-            live_quote.requests, "post"
-        ) as post:
+        with mock.patch.dict("os.environ", env, clear=True), mock.patch.object(live_quote.requests, "post") as post:
             live_quote._post_discord(self.env, "2/5 (40%) fell back in the last hour")
         return post
 
