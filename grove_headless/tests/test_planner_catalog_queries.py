@@ -38,6 +38,9 @@ class TestPlannerCatalogQueries(GroveTaxFixtureMixin, HttpCase):
         self.comp_b = self._plant("Comp Plum", "Prunus americana")
 
     def _plant(self, name, botanical):
+        # Left unpublished: the bundle's component ids and tree count come from
+        # its BoM, not the plant list, and publishing a plant needs the full
+        # listing content (the publish gate).
         return self.Template.create(
             {
                 "name": name,
@@ -46,7 +49,6 @@ class TestPlannerCatalogQueries(GroveTaxFixtureMixin, HttpCase):
                 "company_id": self.company.id,
                 "list_price": 20.0,
                 "grove_botanical_name": botanical,
-                "website_published": True,
             }
         )
 
