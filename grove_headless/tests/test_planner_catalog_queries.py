@@ -6,8 +6,11 @@ Before GOL-3932 each bundle ran its own phantom-BoM search twice — once for th
 same per-variant N+1 gom#412 removed from product detail (206 → 39 queries). The
 feed now resolves every bundle's BoM once (``_phantom_kit_boms``) and its tree
 count in one batched pass (``variant_tree_counts``), then builds each row from
-memory. This test pins that batched shape: the query count must not grow with the
-number of bundles.
+memory. What still scales per bundle is the BoM explode itself — the count and
+the component ids each call ``mrp.bom.explode``, and every explode runs one
+sub-kit search over its component products — so the feed went from four
+searches a bundle to two. This test pins that shape: each extra bundle may cost
+the two explodes and nothing more.
 """
 
 import json
@@ -17,10 +20,14 @@ from odoo.tests.common import HttpCase, tagged
 
 from .common import GroveTaxFixtureMixin
 
-# Queries a catalog with more bundles may cost over a one-bundle catalog. The
-# batched feed measured equal counts; an unbatched per-bundle serialize runs two
-# phantom-BoM searches a bundle, so this allowance leaves room for ORM noise only
-# (the batched BoM/line/product reads happen once for the whole page).
+# What one extra bundle may cost: the sub-kit search inside each of its two BoM
+# explodes (tree count + component ids). CI measured exactly this — 22 queries
+# for 1 bundle, 34 for 7. The unbatched feed costs four a bundle (its own
+# phantom-BoM search twice on top), which this bound rejects.
+QUERIES_PER_EXTRA_BUNDLE = 2
+# Room for ORM noise only (the batched BoM/line/product reads happen once for
+# the whole page) — well under the 12 queries the old N+1 adds across the six
+# extra bundles below.
 EXTRA_QUERY_ALLOWANCE = 4
 
 
@@ -97,12 +104,13 @@ class TestPlannerCatalogQueries(GroveTaxFixtureMixin, HttpCase):
         )
         self.assertEqual(body["bundles"][0]["tree_count"], 3)
 
-        for i in range(2, 8):
+        extra_bundles = 6
+        for i in range(2, 2 + extra_bundles):
             self._bundle(f"Bundle {i:02d}")
         large, body = self._queries()
-        self.assertEqual(len(body["bundles"]), 7)
+        self.assertEqual(len(body["bundles"]), 1 + extra_bundles)
         self.assertLessEqual(
             large,
-            small + EXTRA_QUERY_ALLOWANCE,
+            small + extra_bundles * QUERIES_PER_EXTRA_BUNDLE + EXTRA_QUERY_ALLOWANCE,
             f"1 bundle cost {small} queries but 7 bundles cost {large}",
         )
