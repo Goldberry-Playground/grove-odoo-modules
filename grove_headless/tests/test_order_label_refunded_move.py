@@ -145,9 +145,10 @@ class TestOrderLabelRefundedMove(GroveTaxFixtureMixin, TransactionCase):
         order = self._order(grove_ship_wave="fall", grove_checkout_status="deposit_paid")
         override = {"zones": {str(order.grove_usda_zone): {"spring": [[3, 1], [4, 15]]}}}
         self.env["ir.config_parameter"].sudo().set_param("grove_headless.shipping_calendar", json.dumps(override))
-        with patch.object(fields.Date, "context_today", return_value=date(2026, 7, 1)), patch.object(
-            type(order), "_grove_post_notice_status", return_value="ok"
-        ) as notice:
+        with (
+            patch.object(fields.Date, "context_today", return_value=date(2026, 7, 1)),
+            patch.object(type(order), "_grove_post_notice_status", return_value="ok") as notice,
+        ):
             self.assertTrue(order.action_grove_move_wave("spring", "Wes"))
         self.assertIn("ship window had closed", self._body(order))
         notice.assert_called_once()

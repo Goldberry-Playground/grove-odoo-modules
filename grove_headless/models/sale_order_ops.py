@@ -326,8 +326,7 @@ class SaleOrder(models.Model):
         ]
         if next_start:
             lines.append(
-                f"Next spring shipping for this zone starts "
-                f"{next_start:%b} {next_start.day}, {next_start.year}."
+                f"Next spring shipping for this zone starts {next_start:%b} {next_start.day}, {next_start.year}."
             )
         lines.append("Ship it now (Move to fall to label it individually), or leave it to wait for next season.")
         buttons = [{"label": "Move to fall", "style": 2, "customId": f"ord:fall:{self.id}"}]
@@ -344,9 +343,7 @@ class SaleOrder(models.Model):
             if not self._grove_spring_window_passed(today):
                 return False
             next_start = self._grove_next_spring_ship_start(today)
-            when = (
-                f" The next one opens {next_start:%b} {next_start.day}, {next_start.year}." if next_start else ""
-            )
+            when = f" The next one opens {next_start:%b} {next_start.day}, {next_start.year}." if next_start else ""
             self.message_post(
                 body=(
                     f"Heads-up: {actor} released this spring order after its ship window had closed.{when} "
