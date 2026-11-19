@@ -6,6 +6,11 @@ touches deposits. DB-backed, so listed in tests/__init__.py AND conftest.py's
 collect_ignore_glob.
 """
 
+import json
+from datetime import date
+from unittest.mock import patch
+
+from odoo import fields
 from odoo.exceptions import AccessError, UserError
 from odoo.tests import TransactionCase, new_test_user, tagged
 
@@ -134,6 +139,24 @@ class TestOrderLabelRefundedMove(GroveTaxFixtureMixin, TransactionCase):
         self.assertIn("Wes", self._body(order))
         order.action_grove_move_wave("fall", "Wes")
         self.assertEqual(order.grove_lane, "individual")
+
+    def test_move_to_spring_in_closed_window_warns(self):
+        # Moving into spring after its window has closed must warn (GOL-3937).
+        order = self._order(grove_ship_wave="fall", grove_checkout_status="deposit_paid")
+        override = {"zones": {str(order.grove_usda_zone): {"spring": [[3, 1], [4, 15]]}}}
+        self.env["ir.config_parameter"].sudo().set_param("grove_headless.shipping_calendar", json.dumps(override))
+        with patch.object(fields.Date, "context_today", return_value=date(2026, 7, 1)), patch.object(
+            type(order), "_grove_post_notice_status", return_value="ok"
+        ) as notice:
+            self.assertTrue(order.action_grove_move_wave("spring", "Wes"))
+        self.assertIn("ship window had closed", self._body(order))
+        notice.assert_called_once()
+
+    def test_move_to_fall_never_warns(self):
+        order = self._order(grove_ship_wave="spring", grove_checkout_status="deposit_paid")
+        with patch.object(type(order), "_grove_warn_window_closed") as warn:
+            order.action_grove_move_wave("fall", "Wes")
+        warn.assert_not_called()
 
     def test_move_to_same_wave_is_a_quiet_no_op(self):
         order = self._order(grove_ship_wave="spring")

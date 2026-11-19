@@ -113,3 +113,32 @@ class TestZoneAlertKind(unittest.TestCase):
 
     def test_after_the_end_is_none(self):
         self.assertIsNone(self.kind(date(2027, 4, 16)))
+
+
+class TestWaveWindowState(unittest.TestCase):
+    # A non-wrapping spring window: Mar 1 through Apr 15.
+    SPRING = ((3, 1), (4, 15))
+
+    def state(self, today):
+        return ol.wave_window_state(self.SPRING, today)
+
+    def test_inside_the_window_is_open(self):
+        self.assertEqual(self.state(date(2027, 3, 1)), "open")
+        self.assertEqual(self.state(date(2027, 3, 20)), "open")
+        self.assertEqual(self.state(date(2027, 4, 15)), "open")
+
+    def test_before_this_years_start_is_upcoming(self):
+        self.assertEqual(self.state(date(2027, 1, 10)), "upcoming")
+        self.assertEqual(self.state(date(2027, 2, 28)), "upcoming")
+
+    def test_after_this_years_end_is_passed(self):
+        self.assertEqual(self.state(date(2027, 4, 16)), "passed")
+        self.assertEqual(self.state(date(2027, 7, 1)), "passed")
+        # Late in the year the window is long gone: still "passed", not "upcoming".
+        self.assertEqual(self.state(date(2027, 12, 1)), "passed")
+
+    def test_wrapping_window_is_open_across_the_boundary_else_passed(self):
+        winter = ((12, 1), (2, 15))
+        self.assertEqual(ol.wave_window_state(winter, date(2027, 12, 20)), "open")
+        self.assertEqual(ol.wave_window_state(winter, date(2027, 1, 20)), "open")
+        self.assertEqual(ol.wave_window_state(winter, date(2027, 6, 1)), "passed")
