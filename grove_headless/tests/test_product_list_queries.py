@@ -108,9 +108,7 @@ class TestProductListQueries(GroveTaxFixtureMixin, HttpCase):
         self._variant_template("List Apple", 10)  # 20 variants each
         self._variant_template("List Cherry", 10)
         many, body = self._queries()
-        self.assertEqual(
-            len([p for p in body["results"] if p["name"].startswith("List ")]), 4
-        )
+        self.assertEqual(len([p for p in body["results"] if p["name"].startswith("List ")]), 4)
         # EXTRA_QUERY_ALLOWANCE mirrors the detail query test: a per-variant read
         # adds at least one query per extra variant (36 here), so 2 leaves room
         # for ORM noise only.
