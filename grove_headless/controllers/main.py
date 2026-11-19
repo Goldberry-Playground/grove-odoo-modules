@@ -836,7 +836,7 @@ def _planner_rules_for_scope(env, scope):
     return env["grove.planner.rule"].sudo().rules_for_scope(scope)
 
 
-def _bundle_component_ids(env, variant, phantom_boms=None):
+def _bundle_component_ids(env, variant, phantom_boms=None, exploded=None):
     """Component template ids of a phantom-BoM bundle, repeated per unit qty.
 
     e.g. a Mountain Mama kit of 2× template 93, 2× 91, 1× 133 -> ``[93, 93, 91,
@@ -848,20 +848,27 @@ def _bundle_component_ids(env, variant, phantom_boms=None):
     ``phantom_boms`` is an already-resolved ``{variant: bom}`` map (one batched
     ``_bom_find`` over every bundle variant, GOL-3932) covering ``variant``; omit
     it and this variant is searched on its own.
+
+    ``exploded`` is this variant's already-computed ``bom.explode`` component
+    lines (``promotions.explode_bundle_boms``). Pass it to share one explode with
+    the tree-count pass instead of exploding the BoM a second time per bundle
+    (GOL-4063); an empty list is an exploded bundle with no components, not a
+    missing one. Omit it and the BoM is resolved and exploded here.
     """
-    if "mrp.bom" not in env.registry:
-        return []
-    if phantom_boms is None:
-        bom = env["mrp.bom"].sudo()._bom_find(variant, bom_type="phantom").get(variant)
-    else:
-        bom = phantom_boms.get(variant)
-    if not bom:
-        return []
-    try:
-        _boms, exploded = bom.explode(variant, 1)
-    except Exception:  # noqa: BLE001 — a bundle BoM gap must not break the feed
-        _logger.warning("GOL-3379: could not explode bundle BoM for variant %s", variant.id, exc_info=True)
-        return []
+    if exploded is None:
+        if "mrp.bom" not in env.registry:
+            return []
+        if phantom_boms is None:
+            bom = env["mrp.bom"].sudo()._bom_find(variant, bom_type="phantom").get(variant)
+        else:
+            bom = phantom_boms.get(variant)
+        if not bom:
+            return []
+        try:
+            _boms, exploded = bom.explode(variant, 1)
+        except Exception:  # noqa: BLE001 — a bundle BoM gap must not break the feed
+            _logger.warning("GOL-3379: could not explode bundle BoM for variant %s", variant.id, exc_info=True)
+            return []
     component_ids = []
     for bom_line, line_data in exploded:
         qty = int(line_data.get("qty") or bom_line.product_qty or 0)
@@ -870,7 +877,7 @@ def _bundle_component_ids(env, variant, phantom_boms=None):
     return component_ids
 
 
-def _serialize_planner_bundle(env, template, tree_counts=None, phantom_boms=None):
+def _serialize_planner_bundle(env, template, tree_counts=None, phantom_boms=None, explosions=None):
     """One bundle row for the planner catalog feed (GOL-3379 §B).
 
     ``tree_count`` is the existing promo-engine count (``variant_tree_count``),
@@ -881,10 +888,14 @@ def _serialize_planner_bundle(env, template, tree_counts=None, phantom_boms=None
     ``phantom_boms`` (a ``{variant: bom}`` map) let the feed resolve every
     bundle's BoM once up front and serve the count and components from memory
     instead of a phantom-BoM search per bundle (GOL-3932, mirroring gom#412's
-    product-detail fix). Omit both and each bundle resolves itself.
+    product-detail fix). ``explosions`` (a ``promotions.explode_bundle_boms``
+    result) goes one further: the component ids read this bundle's already-exploded
+    lines rather than re-exploding its BoM, so the row costs no explode of its own
+    (GOL-4063). Omit them and each bundle resolves and explodes itself.
     """
     variant = template.product_variant_id
     variant_price = variant.lst_price if variant else None
+    exploded = explosions.get(variant) if explosions is not None else None
     return {
         "id": template.id,
         "slug": template.grove_slug or "",
@@ -894,7 +905,7 @@ def _serialize_planner_bundle(env, template, tree_counts=None, phantom_boms=None
         "price": variant_price if variant_price is not None else template.list_price,
         "variant_id": variant.id if variant else None,
         "variant_price": variant_price,
-        "component_ids": _bundle_component_ids(env, variant, phantom_boms),
+        "component_ids": _bundle_component_ids(env, variant, phantom_boms, exploded),
         "consult_built": bool(template.grove_consult_built),
         "tree_count": (tree_counts[variant.id] if tree_counts is not None else promotions.variant_tree_count(variant)),
     }
@@ -1693,16 +1704,21 @@ class GroveHeadlessAPI(http.Controller):
                 [("website_published", "=", True), ("public_categ_ids", "in", ff_category.ids)] + company_scope,
                 order="id asc",
             )
-            # Resolve every bundle's phantom BoM and tree count in one batched
-            # pass, then build each row from memory — otherwise each bundle runs
-            # its own phantom-BoM search twice (one for the count, one for the
-            # component ids), the same N+1 gom#412 removed from product detail
-            # (GOL-3932). _serialize_planner_bundle reads the default variant, so
-            # batch over `product_variant_id` (the exact variants it serializes).
+            # Resolve every bundle's phantom BoM, explode it once, and compute its
+            # tree count in one batched pass, then build each row from memory —
+            # otherwise each bundle runs its own phantom-BoM search twice and
+            # explodes its BoM twice (once for the count, once for the component
+            # ids). GOL-3932 batched the search; explode_bundle_boms makes the
+            # explode flat too (GOL-4063). _serialize_planner_bundle reads the
+            # default variant, so batch over `product_variant_id` (the exact
+            # variants it serializes).
             bundle_variants = bundles.product_variant_id
             phantom_boms = _phantom_kit_boms(bundle_variants)
-            tree_counts = promotions.variant_tree_counts(bundle_variants, phantom_boms)
-            bundle_rows = [_serialize_planner_bundle(request.env, b, tree_counts, phantom_boms) for b in bundles]
+            explosions = promotions.explode_bundle_boms(request.env, phantom_boms)
+            tree_counts = promotions.variant_tree_counts(bundle_variants, phantom_boms, explosions)
+            bundle_rows = [
+                _serialize_planner_bundle(request.env, b, tree_counts, phantom_boms, explosions) for b in bundles
+            ]
 
         body = {
             "generated_at": _datetime.now(_timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
