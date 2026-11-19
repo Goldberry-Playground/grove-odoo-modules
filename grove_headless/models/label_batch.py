@@ -363,11 +363,20 @@ class GroveLabelBatch(models.Model):
             packed_orders |= order
         if acked_refs:
             self.line_ids.filtered(lambda ln: ln.grove_ref in acked_refs).age_ack = True
+        # A rebuild over an already-exported batch may be releasing an order whose
+        # label was already bought from that export (GOL-3934): carry the same
+        # "refund it in Pirate Ship" warning the wave-move release path shows, so
+        # it reaches both the chatter and the Discord card (the skipped list).
+        refund_warning = self._grove_refund_warning()
         for order in (previous_orders - packed_orders).filtered(lambda o: o.grove_label_batch_id == self):
             order.grove_label_batch_id = False
-            order.message_post(body=f"Order released from {self.name}: a rebuild no longer includes it.")
+            order.message_post(
+                body=f"Order released from {self.name}: a rebuild no longer includes it.{refund_warning}"
+            )
             if order not in failed_orders:
-                skipped.append(f"{order.name}: released from {self.name}; it no longer qualifies for this batch")
+                skipped.append(
+                    f"{order.name}: released from {self.name}; it no longer qualifies for this batch.{refund_warning}"
+                )
         packed_orders.write({"grove_label_batch_id": self.id})
         self.order_ids = [(6, 0, packed_orders.ids)]
         unconfirmed = self.line_ids.filtered(lambda ln: ln.prior_batch_id and not ln.age_ack)
@@ -1139,6 +1148,18 @@ class GroveLabelBatch(models.Model):
     def _cancelled_reason(self, order):
         """Why an import did not record a label on a cancelled order."""
         return f"{order.name}: cancelled; no label recorded and nothing charged"
+
+    def _grove_refund_warning(self):
+        """Suffix warning an operator about a label that may already have been
+        bought when an order leaves this batch. Empty unless the batch has been
+        ``exported`` (a CSV went to Pirate Ship); shared by the wave-move release
+        path and the rebuild release path (GOL-3934)."""
+        self.ensure_one()
+        return (
+            " If its label was already bought from that export, refund it in Pirate Ship."
+            if self.state == "exported"
+            else ""
+        )
 
     @api.model
     def _left_spring_reason(self, order):

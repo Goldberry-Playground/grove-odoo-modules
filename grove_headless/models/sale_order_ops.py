@@ -262,6 +262,8 @@ class SaleOrder(models.Model):
         self.message_post(body=f"{actor} moved this order from {old} to {wave}.")
         if wave == "fall":
             self._grove_release_from_unbought_batch()
+        else:
+            self._grove_relink_to_open_batch()
         return True
 
     def _grove_release_from_unbought_batch(self):
@@ -274,12 +276,42 @@ class SaleOrder(models.Model):
             return
         self.sudo().write({"grove_label_batch_id": False})
         batch.sudo().write({"order_ids": [(3, self.id)]})
-        bought = (
-            " If its label was already bought from that export, refund it in Pirate Ship."
-            if batch.state == "exported"
-            else ""
+        self.message_post(
+            body=f"Order released from {batch.name}: it left the spring lane.{batch._grove_refund_warning()}"
         )
-        self.message_post(body=f"Order released from {batch.name}: it left the spring lane.{bought}")
+
+    def _grove_relink_to_open_batch(self):
+        """An order returning to the spring lane picks its batch row back up.
+
+        A fall move released it from its zone's open/exported batch
+        (``_grove_release_from_unbought_batch``) but deliberately left its row on
+        the batch. Without this, a fall→spring round trip with no rebuild in
+        between would leave the order back in the spring lane but unlinked while
+        its row lingers — a CSV export would ship it with no batch link to
+        reconcile against (GOL-3934). Re-link only when its row is still on that
+        batch; a rebuild since the move drops the row and re-packs the order on
+        its own, so there is nothing to restore."""
+        if self.grove_label_batch_id:
+            return
+        line = (
+            self.env["grove.label.batch.line"]
+            .sudo()
+            .search(
+                [
+                    ("order_id", "=", self.id),
+                    ("batch_id.company_id", "=", self.company_id.id),
+                    ("batch_id.zone", "=", self.grove_usda_zone),
+                    ("batch_id.state", "in", ("open", "exported")),
+                ],
+                limit=1,
+            )
+        )
+        batch = line.batch_id
+        if not batch:
+            return
+        self.sudo().write({"grove_label_batch_id": batch.id})
+        batch.sudo().write({"order_ids": [(4, self.id)]})
+        self.message_post(body=f"Order re-linked to {batch.name}: it returned to the spring lane.")
 
     def _grove_needs_wave_for_ship(self):
         return self.grove_fulfillment_stage == "deposit_paid" and self.grove_ship_wave == "fall"
