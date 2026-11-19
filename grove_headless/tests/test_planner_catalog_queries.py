@@ -94,7 +94,7 @@ class TestPlannerCatalogQueries(GroveTaxFixtureMixin, HttpCase):
         body = self._fetch()
         return self.cr.sql_log_count - before, body
 
-    def test_feed_query_count_does_not_grow_with_bundle_count(self):
+    def test_feed_query_count_grows_only_by_the_explodes_per_bundle(self):
         self._bundle("Bundle 01")
         small, body = self._queries()
         self.assertEqual(len(body["bundles"]), 1)
