@@ -1,6 +1,6 @@
 {
     "name": "Grove Headless API",
-    "version": "19.0.1.110.0",
+    "version": "19.0.1.111.0",
     "category": "Website",
     "summary": "JSON API endpoints for headless storefronts in the Grove ecosystem",
     "description": """
@@ -117,3 +117,4 @@
     # on fresh install. The migrations/ scripts do the same on -u upgrade.
     "post_init_hook": "post_init_hook",
 }
+
