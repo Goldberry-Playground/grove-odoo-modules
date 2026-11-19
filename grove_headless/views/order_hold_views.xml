@@ -42,6 +42,8 @@
             <xpath expr="//search" position="inside">
                 <separator />
                 <filter name="grove_on_hold" string="On hold" domain="[('grove_hold_until', '!=', False)]" />
+                <filter name="grove_card_needs_person" string="Card needs a person"
+                        domain="[('grove_card_needs_person', '=', True)]" />
                 <filter name="group_grove_lane" string="Lane" context="{'group_by': 'grove_lane'}" />
             </xpath>
         </field>
@@ -59,6 +61,8 @@
                 <field name="grove_hold_until" readonly="1" invisible="not grove_hold_until" />
                 <field name="grove_hold_reason" readonly="1" invisible="not grove_hold_until" />
                 <field name="grove_hold_set_by" readonly="1" invisible="not grove_hold_until" />
+                <field name="grove_card_needs_person" readonly="1" invisible="not grove_card_needs_person"
+                       string="Card needs a person" />
             </xpath>
         </field>
     </record>
