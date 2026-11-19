@@ -66,6 +66,60 @@ class TestProductListQueries(GroveTaxFixtureMixin, HttpCase):
         # Equal, not "close": any per-card query is an N+1 that scales with the grid.
         self.assertEqual(large, small, f"2 cards cost {small} queries but 8 cards cost {large}")
 
+    def _variant_template(self, name, cultivars):
+        """A card with a Cultivar x Bareroot/Potted variant grid and a shared pool.
+
+        Mirrors the apple/pear shape prod serves: each Bareroot variant's live
+        stock signal reads its potted sibling's pool. ``_list_in_stock`` ran that
+        lookup per variant (GOL-3933), so this is the fixture that exercises the
+        per-variant work the batched map removes.
+        """
+        A = self.env["product.attribute"]
+        V = self.env["product.attribute.value"]
+        cultivar = A.create({"name": f"{name} Cultivar", "create_variant": "always"})
+        fmt = A.create({"name": f"{name} Format", "create_variant": "always"})
+        formats = V.create([{"name": n, "attribute_id": fmt.id} for n in ("Potted", "Bareroot")])
+        values = V.create([{"name": f"{name} {i:02d}", "attribute_id": cultivar.id} for i in range(cultivars)])
+        return self.env["product.template"].create(
+            {
+                "name": name,
+                "type": "consu",
+                "website_published": True,
+                "sale_ok": True,
+                "list_price": 35.0,
+                "company_id": self.company.id,
+                "grove_shipping_tier": "bareroot",
+                "image_1920": self.image,
+                "attribute_line_ids": [
+                    (0, 0, {"attribute_id": cultivar.id, "value_ids": [(6, 0, values.ids)]}),
+                    (0, 0, {"attribute_id": fmt.id, "value_ids": [(6, 0, formats.ids)]}),
+                ],
+            }
+        )
+
+    def test_query_count_does_not_grow_with_variants_per_card(self):
+        # GOL-3933: the slow tail of the card loop on prod was per-variant work
+        # (the shared-pool stock scan, the cultivar/attribute reads), not per
+        # card. Two few-variant cards vs two many-variant cards must cost the
+        # same request queries, not one-per-extra-variant.
+        self._variant_template("List Pear", 1)  # 2 variants each
+        self._variant_template("List Plum", 1)
+        few, _ = self._queries()
+        self._variant_template("List Apple", 10)  # 20 variants each
+        self._variant_template("List Cherry", 10)
+        many, body = self._queries()
+        self.assertEqual(
+            len([p for p in body["results"] if p["name"].startswith("List ")]), 4
+        )
+        # EXTRA_QUERY_ALLOWANCE mirrors the detail query test: a per-variant read
+        # adds at least one query per extra variant (36 here), so 2 leaves room
+        # for ORM noise only.
+        self.assertLessEqual(
+            many,
+            few + 2,
+            f"few-variant page cost {few} queries, many-variant page cost {many}",
+        )
+
     def test_image_fields_keep_their_shape(self):
         with_image = self._add_products(1, 0)
         without_image = self.env["product.template"].create(
