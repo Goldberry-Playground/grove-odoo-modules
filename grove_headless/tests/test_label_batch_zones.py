@@ -223,6 +223,87 @@ class TestLabelBatchZones(GroveTaxFixtureMixin, TransactionCase):
         self.assertEqual(batch.order_ids, kept)
         self.assertEqual(moved.grove_label_batch_id, other)
 
+    def test_rebuild_cancelling_an_exported_batch_warns_to_refund_a_bought_label(self):
+        # GOL-3934: all orders held since the export -> the batch is cancelled.
+        # A label may already have been bought from the exported CSV, so the
+        # release must carry the "refund in Pirate Ship" warning (chatter + card).
+        order = self._order()
+        batch = self._build()["batch"]
+        self.assertEqual(batch.state, "exported")
+        with self._on(INSIDE_WINDOW):
+            order.action_grove_set_hold(INSIDE_WINDOW + timedelta(days=30), "Customer away", "Josh")
+        result = self._build()
+        self.assertFalse(result["batch"])
+        self.assertEqual(batch.state, "cancelled")
+        self.assertFalse(order.grove_label_batch_id)
+        self.assertTrue(
+            any("refund it in Pirate Ship" in body for body in order.message_ids.mapped("body")),
+            order.message_ids.mapped("body"),
+        )
+
+    def test_rebuild_over_exported_batch_warns_on_the_card_for_a_dropped_order(self):
+        # GOL-3934: a rebuild that keeps some orders but drops one still exported
+        # it (a label could be bought), so the warning reaches the Discord card
+        # (the skipped list and the batch notes) as well as the chatter.
+        kept, dropped = self._order(), self._order()
+        batch = self._build()["batch"]
+        self.assertEqual(batch.state, "exported")
+        with self._on(INSIDE_WINDOW):
+            dropped.action_grove_set_hold(INSIDE_WINDOW + timedelta(days=30), "Customer away", "Josh")
+        result = self._build()
+        self.assertEqual(result["batch"], batch)
+        self.assertFalse(dropped.grove_label_batch_id)
+        self.assertTrue(
+            any("refund it in Pirate Ship" in s for s in result["skipped"]), result["skipped"]
+        )
+        self.assertIn("refund it in Pirate Ship", batch.notes)
+        self.assertTrue(
+            any("refund it in Pirate Ship" in body for body in dropped.message_ids.mapped("body"))
+        )
+        # The kept order neither drops out nor gets a spurious refund warning.
+        self.assertEqual(batch.order_ids, kept)
+        self.assertFalse(any("refund it in Pirate Ship" in body for body in kept.message_ids.mapped("body")))
+
+    def test_move_back_to_spring_relinks_the_lingering_batch_row(self):
+        # GOL-3934: spring -> fall releases the link but leaves the row on the
+        # batch; fall -> spring without a rebuild in between must restore the link
+        # rather than leave the order stranded in the spring lane with no batch.
+        order = self._order()
+        batch = self._build()["batch"]
+        self.assertEqual(order.grove_label_batch_id, batch)
+        self.assertEqual(batch.line_ids.order_id, order)
+
+        with self._on(INSIDE_WINDOW):
+            order.action_grove_move_wave("fall", "Wes")
+        self.assertFalse(order.grove_label_batch_id)
+        self.assertEqual(batch.line_ids.order_id, order)  # the row lingers
+        self.assertNotIn(order, batch.order_ids)
+
+        with self._on(INSIDE_WINDOW):
+            order.action_grove_move_wave("spring", "Wes")
+        self.assertEqual(order.grove_label_batch_id, batch)
+        self.assertIn(order, batch.order_ids)
+        self.assertTrue(
+            any("re-linked to " + batch.name in body for body in order.message_ids.mapped("body")),
+            order.message_ids.mapped("body"),
+        )
+
+    def test_move_back_to_spring_after_a_rebuild_does_not_relink(self):
+        # GOL-3934: once a rebuild drops the released order's row, there is nothing
+        # to restore; the order re-joins only when a later build re-packs it.
+        order, other = self._order(), self._order()
+        batch = self._build()["batch"]
+        with self._on(INSIDE_WINDOW):
+            order.action_grove_move_wave("fall", "Wes")
+        # A rebuild (kept alive by `other`) drops the released order's lingering row.
+        self._build()
+        self.assertEqual(batch.state, "exported")
+        self.assertEqual(batch.line_ids.order_id, other)
+        with self._on(INSIDE_WINDOW):
+            order.action_grove_move_wave("spring", "Wes")
+        self.assertFalse(order.grove_label_batch_id)
+        self.assertFalse(any("re-linked" in body for body in order.message_ids.mapped("body")))
+
     def test_empty_plan_is_left_out_unchanged_and_named(self):
         order = self._order()
         with self._on(INSIDE_WINDOW, plan=[]):
