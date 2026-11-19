@@ -15,7 +15,7 @@ from odoo import SUPERUSER_ID, api, fields, models
 from odoo.exceptions import AccessError, UserError
 from odoo.tools import config
 
-from .order_lanes import clean_tracking, lane_for, suggest_hold_date, zone_alert_kind
+from .order_lanes import clean_tracking, lane_for, suggest_hold_date, wave_window_state, zone_alert_kind
 from .shipping_boxes import dormancy_window
 from .shipping_calendar import (
     SPRING_BUILD_LEAD_DAYS,
@@ -176,6 +176,7 @@ class SaleOrder(models.Model):
             }
         )
         self.message_post(body=f"{actor} released the hold.")
+        self._grove_warn_window_closed(actor)
         return True
 
     def action_grove_snooze_hold(self, actor, days=7):
@@ -264,6 +265,7 @@ class SaleOrder(models.Model):
             self._grove_release_from_unbought_batch()
         else:
             self._grove_relink_to_open_batch()
+            self._grove_warn_window_closed(actor)
         return True
 
     def _grove_release_from_unbought_batch(self):
@@ -312,6 +314,92 @@ class SaleOrder(models.Model):
         self.sudo().write({"grove_label_batch_id": batch.id})
         batch.sudo().write({"order_ids": [(4, self.id)]})
         self.message_post(body=f"Order re-linked to {batch.name}: it returned to the spring lane.")
+
+    def _grove_spring_ship_window(self, today):
+        """This order's zone spring ship window ``((sm, sd), (em, ed))``, or None
+        when the order is not a spring-lane order, has no zone, or the zone is not
+        in the shipping calendar."""
+        self.ensure_one()
+        if self.grove_lane != "spring" or not self.grove_usda_zone:
+            return None
+        from ..controllers.main import _parse_calendar_override
+
+        try:
+            calendar = merge_calendar_override(_parse_calendar_override(self.env))
+            waves = preorder_waves(int(self.grove_usda_zone), today, calendar)
+        except (KeyError, ValueError):
+            return None
+        spring = next((w for w in waves if w["wave"] == "spring"), None)
+        if not spring:
+            return None
+        (sm, sd), (em, ed) = spring["ship_window"]
+        return ((sm, sd), (em, ed))
+
+    def _grove_spring_window_passed(self, today):
+        """True when this spring order's zone ship window has already closed for the
+        current cycle, so nothing will warn about it until next season's window."""
+        window = self._grove_spring_ship_window(today)
+        return bool(window) and wave_window_state(window, today) == "passed"
+
+    def _grove_next_spring_ship_start(self, today):
+        """The date the zone's next spring shipping starts, or None if unknown."""
+        self.ensure_one()
+        if not self.grove_usda_zone:
+            return None
+        from ..controllers.main import _parse_calendar_override
+
+        try:
+            calendar = merge_calendar_override(_parse_calendar_override(self.env))
+            date_open, _ship_end = spring_build_window(int(self.grove_usda_zone), today, calendar)
+        except (KeyError, ValueError):
+            return None
+        return date_open + timedelta(days=SPRING_BUILD_LEAD_DAYS)
+
+    def _grove_window_closed_notice(self, next_start):
+        """Title, lines and buttons for a spring order released into a closed
+        ship window. ``next_start`` is the next spring ship date, or None."""
+        self.ensure_one()
+        zone = f"Zone {self.grove_usda_zone}" if self.grove_usda_zone else "no zone on file"
+        lines = [
+            f"Customer: {self.partner_id.name or 'Unknown'}",
+            f"Zone: {zone}",
+            "This spring order was released after its zone's ship window closed, so nothing "
+            "will warn about it again until next season.",
+        ]
+        if next_start:
+            lines.append(
+                f"Next spring shipping for this zone starts {next_start:%b} {next_start.day}, {next_start.year}."
+            )
+        lines.append("Ship it now (Move to fall to label it individually), or leave it to wait for next season.")
+        buttons = [{"label": "Move to fall", "style": 2, "customId": f"ord:fall:{self.id}"}]
+        return f"{self.name}: spring ship window has closed", lines, buttons
+
+    def _grove_warn_window_closed(self, actor, today=None):
+        """Post chatter and a Discord notice once when a just-released spring order's
+        ship window has already closed, so it would otherwise wait silently until
+        next season. Best-effort: never raises and never blocks the release. Returns
+        True when a warning was posted."""
+        self.ensure_one()
+        try:
+            today = today or fields.Date.context_today(self)
+            if not self._grove_spring_window_passed(today):
+                return False
+            next_start = self._grove_next_spring_ship_start(today)
+            when = f" The next one opens {next_start:%b} {next_start.day}, {next_start.year}." if next_start else ""
+            self.message_post(
+                body=(
+                    f"Heads-up: {actor} released this spring order after its ship window had closed.{when} "
+                    "Ship it now or it waits for next season."
+                )
+            )
+            title, lines, buttons = self._grove_window_closed_notice(next_start)
+            status = self._grove_post_notice_status(self.company_id, title, lines, buttons)
+            if status != "ok":
+                _logger.warning("Window-closed notice for %s was not delivered (%s)", self.name, status)
+            return True
+        except Exception:  # noqa: BLE001 — the warning must never undo a good release
+            _logger.exception("Window-closed warning failed for order %s", self.id)
+            return False
 
     def _grove_needs_wave_for_ship(self):
         return self.grove_fulfillment_stage == "deposit_paid" and self.grove_ship_wave == "fall"

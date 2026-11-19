@@ -5,6 +5,7 @@ actor. DB-backed, so listed in tests/__init__.py AND conftest.py's
 collect_ignore_glob.
 """
 
+import json
 from datetime import date, timedelta
 from unittest.mock import patch
 
@@ -152,3 +153,54 @@ class TestOrderHolds(GroveTaxFixtureMixin, TransactionCase):
         order = self._order(zip_code="33101")  # not on the zone matrix
         self.assertFalse(order.grove_usda_zone)
         self.assertEqual(self._suggest(order, date(2027, 8, 1)), date(2027, 11, 1))
+
+    # Releasing a spring order after its ship window has closed (GOL-3937): nothing
+    # else warns until next season, so the release itself must say so, once.
+
+    def _set_spring_window(self, zone, window=((3, 1), (4, 15))):
+        """Pin the zone's spring ship window via the calendar override param."""
+        (sm, sd), (em, ed) = window
+        override = {"zones": {str(zone): {"spring": [[sm, sd], [em, ed]], "spring_order_deadline": [2, 15]}}}
+        self.env["ir.config_parameter"].sudo().set_param("grove_headless.shipping_calendar", json.dumps(override))
+
+    def _release_at(self, order, today, hold_until):
+        """Hold then release the order with ``today`` frozen and the Discord notice
+        stubbed. Returns the notice mock."""
+        notice = patch.object(type(order), "_grove_post_notice_status", return_value="ok")
+        with patch.object(fields.Date, "context_today", return_value=today), notice as notice_mock:
+            order.action_grove_set_hold(hold_until, "Waiting for stock", "Ada")
+            order.action_grove_release_hold("Wes")
+        return notice_mock
+
+    def test_release_into_closed_spring_window_warns_once(self):
+        order = self._order(grove_ship_wave="spring")
+        self.assertEqual(order.grove_lane, "spring")
+        self._set_spring_window(order.grove_usda_zone)
+        notice = self._release_at(order, date(2026, 7, 1), date(2026, 8, 1))
+        body = " ".join(order.message_ids.mapped("body"))
+        self.assertEqual(body.count("ship window had closed"), 1)
+        self.assertIn("Mar 1, 2027", body)  # next spring ship start
+        notice.assert_called_once()
+        self.assertEqual(notice.call_args.args[0], order.company_id)
+
+    def test_release_into_open_spring_window_is_quiet(self):
+        order = self._order(grove_ship_wave="spring")
+        self._set_spring_window(order.grove_usda_zone)
+        notice = self._release_at(order, date(2026, 3, 20), date(2026, 3, 25))
+        self.assertNotIn("ship window had closed", " ".join(order.message_ids.mapped("body")))
+        notice.assert_not_called()
+
+    def test_release_before_spring_window_opens_is_quiet(self):
+        order = self._order(grove_ship_wave="spring")
+        self._set_spring_window(order.grove_usda_zone)
+        notice = self._release_at(order, date(2026, 1, 15), date(2026, 2, 10))
+        self.assertNotIn("ship window had closed", " ".join(order.message_ids.mapped("body")))
+        notice.assert_not_called()
+
+    def test_release_of_individual_order_never_warns(self):
+        order = self._order()  # fall/individual lane
+        self.assertEqual(order.grove_lane, "individual")
+        self._set_spring_window(order.grove_usda_zone)
+        notice = self._release_at(order, date(2026, 7, 1), date(2026, 8, 1))
+        self.assertNotIn("ship window had closed", " ".join(order.message_ids.mapped("body")))
+        notice.assert_not_called()
