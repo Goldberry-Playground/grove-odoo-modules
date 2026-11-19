@@ -90,7 +90,9 @@ class TestPlannerCatalogQueries(GroveTaxFixtureMixin, HttpCase):
         small, body = self._queries()
         self.assertEqual(len(body["bundles"]), 1)
         # Every bundle still carries the full shape built from the batched reads.
-        self.assertEqual(sorted(body["bundles"][0]["component_ids"]), sorted([self.comp_a.id, self.comp_a.id, self.comp_b.id]))
+        self.assertEqual(
+            sorted(body["bundles"][0]["component_ids"]), sorted([self.comp_a.id, self.comp_a.id, self.comp_b.id])
+        )
         self.assertEqual(body["bundles"][0]["tree_count"], 3)
 
         for i in range(2, 8):

@@ -802,9 +802,7 @@ def _serialize_planner_bundle(env, template, tree_counts=None, phantom_boms=None
         "variant_price": variant_price,
         "component_ids": _bundle_component_ids(env, variant, phantom_boms),
         "consult_built": bool(template.grove_consult_built),
-        "tree_count": (
-            tree_counts[variant.id] if tree_counts is not None else promotions.variant_tree_count(variant)
-        ),
+        "tree_count": (tree_counts[variant.id] if tree_counts is not None else promotions.variant_tree_count(variant)),
     }
 
 
@@ -1572,9 +1570,7 @@ class GroveHeadlessAPI(http.Controller):
             bundle_variants = bundles.product_variant_id
             phantom_boms = _phantom_kit_boms(bundle_variants)
             tree_counts = promotions.variant_tree_counts(bundle_variants, phantom_boms)
-            bundle_rows = [
-                _serialize_planner_bundle(request.env, b, tree_counts, phantom_boms) for b in bundles
-            ]
+            bundle_rows = [_serialize_planner_bundle(request.env, b, tree_counts, phantom_boms) for b in bundles]
 
         body = {
             "generated_at": _datetime.now(_timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
