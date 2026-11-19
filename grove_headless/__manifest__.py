@@ -117,4 +117,3 @@
     # on fresh install. The migrations/ scripts do the same on -u upgrade.
     "post_init_hook": "post_init_hook",
 }
-
