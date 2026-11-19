@@ -1,0 +1,31 @@
+{
+  "_comment": "Recorded RatesQuery response, p24x10x4 @ 6 lb to 28401 (Wilmington NC, residential). No Delivery Area surcharge at this urban ZIP. UPS Ground Saver is the cheapest allowlisted ground within the transit ceiling, so it wins over UPS Ground here. Anchored to a 2026-11-19 quote.",
+  "data": {
+    "rates": [
+      {
+        "title": "UPS® Ground",
+        "mailClassKey": "03",
+        "carrier": {"carrierKey": "ups", "title": "UPS"},
+        "deliveryDescription": "Estimated delivery Tuesday 11/24 by 11:00 PM if shipped today",
+        "totalPrice": 9.55,
+        "surcharges": []
+      },
+      {
+        "title": "UPS® Ground Saver",
+        "mailClassKey": "93",
+        "carrier": {"carrierKey": "ups", "title": "UPS"},
+        "deliveryDescription": "Estimated delivery Wednesday 11/25 by 11:00 PM if shipped today",
+        "totalPrice": 8.90,
+        "surcharges": [{"name": "Nonstandard Length", "amount": 4.00}]
+      },
+      {
+        "title": "USPS Ground Advantage®",
+        "mailClassKey": "GroundAdvantage",
+        "carrier": {"carrierKey": "usps", "title": "USPS"},
+        "deliveryDescription": "Estimated delivery Wednesday 11/25 by 9:00 PM if shipped today",
+        "totalPrice": 10.10,
+        "surcharges": [{"name": "Nonstandard Length", "amount": 5.00}]
+      }
+    ]
+  }
+}

@@ -1,0 +1,9 @@
+{
+  "_comment": "Recorded response when the persisted query hash is unknown to the endpoint (hash retired/rotated upstream). Apollo answers HTTP 200 with this GraphQL error; the client raises QueryRetired.",
+  "errors": [
+    {
+      "message": "PersistedQueryNotFound",
+      "extensions": {"code": "PERSISTED_QUERY_NOT_FOUND"}
+    }
+  ]
+}

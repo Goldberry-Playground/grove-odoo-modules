@@ -18,7 +18,16 @@ from odoo.exceptions import AccessError, UserError
 from odoo.http import Response, request
 
 from ..hooks import _get_company_wv_state_tax
-from ..models import bundle_substitution, capture_leads, printify_client, promotions, stripe_gateway
+from ..models import (
+    bundle_substitution,
+    capture_leads,
+    live_quote,
+    live_quote_chain,
+    printify_client,
+    promotions,
+    stripe_gateway,
+)
+from ..models.discord_tag import discord_webhook_url as _discord_webhook_url
 from ..models.discord_tag import tag_discord_message
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
@@ -57,7 +66,13 @@ from ..models.seed_season import (
     seed_season,
 )
 from ..models.shipment_email import NOTIFY_STATUSES, shipment_notice_copy
-from ..models.shipping_boxes import can_ship_bareroot, dormancy_window, packing_mode
+from ..models.shipping_boxes import (
+    billable_weight_lb,
+    can_ship_bareroot,
+    dormancy_window,
+    packing_mode,
+    potted_billable_weight_lb,
+)
 from ..models.shipping_calendar import (
     LEAFED_WINDOW,
     MODE_PREORDER,
@@ -76,8 +91,10 @@ from ..models.shipping_zones import (
     SEED_SHIP_EXCLUDED_STATES,
     SEED_SHIP_STATES,
     STATE_ZONE_BANDS,
+    box_rate,
     canonical_state_code,
     compute_order_shipping,
+    pack_for_state,
     rate_feed,
     single_potted_rate,
     single_tree_rate,
@@ -4053,7 +4070,12 @@ def _apply_shipping_line(env, order, shipping, company):
     ]
     if not items:
         return None
-    charge = compute_order_shipping(state, items, packing_mode(_date.today(), dormancy_window(env)))
+    mode = packing_mode(_date.today(), dormancy_window(env))
+    # Live-ZIP quotes (GOL-3927, spec §5), default off. With the flag off this
+    # branch never runs and the charge is the code zone table byte-for-byte.
+    if live_quote.live_quotes_enabled(env):
+        return _apply_live_shipping_line(env, order, shipping, state, items, mode, company)
+    charge = compute_order_shipping(state, items, mode)
     if charge is None:
         # A destination outside the 32-state green list legitimately gets no
         # shipping line. But a *green* state that still can't be priced means a
@@ -4101,6 +4123,107 @@ def _add_shipping_line(env, order, charge, state, company):
         ship_line.tax_ids = [(6, 0, wv_state.ids)]
     order.invalidate_recordset(["amount_untaxed", "amount_tax", "amount_total"])
     return charge
+
+
+def _packed_box_weight(pb, mode):
+    """Real packed billable weight (lb) of one ``PackedBox`` — what the live
+    quote is priced at (spec §5: tare + trees × lb/tree)."""
+    if pb.tier == "potted":
+        return potted_billable_weight_lb(pb.box_id, pb.count)
+    return billable_weight_lb(pb.box_id, pb.count, mode)
+
+
+def _zip_area_rate(env, dest_zip, box_id):
+    """The nightly ZIP-area table's ``highest`` for this 3-digit prefix + box, or
+    None. The model is card 2 (GOL-3928, rollout step 2); until it exists this
+    level of the chain is simply absent and the quote falls through to the zone
+    table — the step-1 behaviour."""
+    if not dest_zip or "grove.shipping.zip.rate" not in env:
+        return None
+    prefix = str(dest_zip).strip()[:3]
+    if len(prefix) < 3:
+        return None
+    row = env["grove.shipping.zip.rate"].sudo().search([("prefix", "=", prefix), ("box_id", "=", box_id)], limit=1)
+    return row.highest if row else None
+
+
+def _apply_live_shipping_line(env, order, shipping, state, items, mode, company):
+    """Price checkout shipping through the live -> ZIP-area -> zone fallback chain
+    (GOL-3927, spec §5) and record the level used on the order.
+
+    Each packed box is quoted live at its real packed weight; a miss falls back to
+    the ZIP-area table (card 2), then the code zone table. Carrier-cost only per
+    box; the flat $2.50-per-tree-order handling is added ONCE — but only when at
+    least one box was priced off a carrier-only level (live / ZIP-area), because
+    the code zone table already bakes the handling into each cell. A cart that
+    falls all the way back to the zone table therefore charges exactly the zone
+    total (never under-charges), the same number the flag-off path produces.
+
+    Fail-safe mirrors ``_apply_shipping_line``: an unpriceable cart adds no line.
+    """
+    plan = pack_for_state(state, items, mode)
+    if not plan:
+        if zone_for_state(state) is not None:
+            _logger.warning(
+                "grove_headless: live shipping line dropped for order %s to green-list state %s "
+                "(cart could not be packed/priced) — customer under-billed for shipping",
+                order.name,
+                state,
+            )
+        return None
+
+    dest_zip = (shipping or {}).get("zip")
+    resolved = []
+    for pb in plan:
+        weight_lb = _packed_box_weight(pb, mode)
+        live = live_quote.quote_box(env, dest_zip, pb.box_id, weight_lb) if dest_zip else None
+        resolved.append(
+            live_quote_chain.resolve_box(
+                pb.box_id,
+                weight_lb,
+                live=live,
+                zip_area=_zip_area_rate(env, dest_zip, pb.box_id),
+                zone=box_rate(state, pb.box_id),
+            )
+        )
+    oq = live_quote_chain.quote_boxes(resolved)
+    if oq is None:
+        if zone_for_state(state) is not None:
+            _logger.warning(
+                "grove_headless: live shipping line dropped for order %s to green-list state %s "
+                "(no rate at any chain level for one or more boxes) — customer under-billed",
+                order.name,
+                state,
+            )
+        return None
+
+    any_carrier_only = any(
+        b.source in (live_quote_chain.SOURCE_LIVE, live_quote_chain.SOURCE_ZIP_AREA) for b in oq.boxes
+    )
+    handling = _order_handling_fee(env, order) if any_carrier_only else 0.0
+    charge = round(oq.carrier_total + handling, 2)
+
+    order.sudo().write(
+        {
+            "grove_shipping_source": oq.source,
+            "grove_shipping_fallback_reason": ("; ".join(oq.fallback_reasons)[:120] or False),
+            "grove_shipping_quote_detail": json.dumps(
+                [
+                    {
+                        "box_id": b.box_id,
+                        "weight_lb": b.weight_lb,
+                        "price": b.price,
+                        "source": b.source,
+                        "service": b.service,
+                        "service_title": b.service_title,
+                    }
+                    for b in oq.boxes
+                ]
+            ),
+        }
+    )
+    env["grove.shipping.quote.event"].sudo().log_order(order, dest_zip, oq.boxes)
+    return _add_shipping_line(env, order, charge, state, company)
 
 
 # ── Printify merch checkout (spec 2026-10-13-printify-merch-design.md §5) ──
@@ -7100,24 +7223,6 @@ def _notify_customer_apology(env, order, product_names, refunded):
 # notable paid orders; shipping = carrier, Printify and oversell problems. Each
 # falls back to the orders webhook, then ops, so an unset topic webhook leaves
 # the alert where it landed before instead of dropping it.
-DISCORD_CHANNEL_ENV = {
-    "sales": "DISCORD_SALES_WEBHOOK_URL",
-    "shipping": "DISCORD_SHIPPING_WEBHOOK_URL",
-}
-
-
-def _discord_webhook_url(channel=None):
-    """Webhook for ``channel`` (a DISCORD_CHANNEL_ENV key, or None for the
-    orders channel), falling back to DISCORD_ORDERS_WEBHOOK_URL and then
-    DISCORD_OPS_WEBHOOK_URL. "" when none is set."""
-    env_name = DISCORD_CHANNEL_ENV.get(channel)
-    return (
-        (os.environ.get(env_name, "") if env_name else "")
-        or os.environ.get("DISCORD_ORDERS_WEBHOOK_URL", "")
-        or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
-    )
-
-
 def _notify_discord(message, channel=None, env=None):
     """Best-effort order-ops ping. Order/pickup summaries go to their own
     channel (DISCORD_ORDERS_WEBHOOK_URL — Josh 2026-09-03), separate from the

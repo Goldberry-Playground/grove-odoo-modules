@@ -12,9 +12,33 @@ grove_support carries its own copy because it must not import grove_headless.
 """
 
 import logging
+import os
 from urllib.parse import urlsplit
 
 _logger = logging.getLogger(__name__)
+
+# Topic-channel routing for every grove_headless Discord post. A channel key
+# (or None for the default orders channel) resolves to its own webhook and
+# otherwise falls back to the orders channel and finally the ops channel, so an
+# unset topic webhook surfaces the alert (visibly misrouted) rather than
+# dropping it. One fallback order shared by the controller and the live-quote
+# alerts (GOL-4056).
+DISCORD_CHANNEL_ENV = {
+    "sales": "DISCORD_SALES_WEBHOOK_URL",
+    "shipping": "DISCORD_SHIPPING_WEBHOOK_URL",
+}
+
+
+def discord_webhook_url(channel=None):
+    """Webhook for ``channel`` (a DISCORD_CHANNEL_ENV key, or None for the
+    orders channel), falling back to DISCORD_ORDERS_WEBHOOK_URL and then
+    DISCORD_OPS_WEBHOOK_URL. "" when none is set."""
+    env_name = DISCORD_CHANNEL_ENV.get(channel)
+    return (
+        (os.environ.get(env_name, "") if env_name else "")
+        or os.environ.get("DISCORD_ORDERS_WEBHOOK_URL", "")
+        or os.environ.get("DISCORD_OPS_WEBHOOK_URL", "")
+    )
 
 
 def env_tag_from(base_url, dbname):

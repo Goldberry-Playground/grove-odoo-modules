@@ -14,10 +14,13 @@ from . import (
     grove_publish_event,  # noqa: F401
     grove_stripe_event,  # noqa: F401
     label_batch,  # noqa: F401  Pirate Ship label batch + rows (GOL-2271)
+    live_quote,  # noqa: F401  live Pirate Ship quote cache + fallback alerts (GOL-3927)
+    live_quote_chain,  # noqa: F401  pure live→zip-area→zone chain (GOL-3927), no ORM models
     mailgun_gateway,  # noqa: F401  pure HMAC verify + event parse (GOL-2903), no ORM models
     mailing_contact,  # noqa: F401  welcome-window gate on mailing.contact (GOL-3454)
     newsletter,  # noqa: F401  pure list/tag helpers (GOL-221, GOL-3454), no ORM models
     order_rollup,  # noqa: F401  weekly order/preorder digest cron (GOL-1978)
+    pirateship_rates,  # noqa: F401  pure keyless Pirate Ship client (GOL-3927), no ORM models
     planner_evidence,  # noqa: F401  planner fact evidence / disputes (GOL-3549)
     planner_plan,  # noqa: F401  saved plans + Approve as guild (GOL-3549)
     planner_proposal,  # noqa: F401  learning-loop proposals + nightly cron (GOL-3549)
