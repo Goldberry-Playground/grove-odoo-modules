@@ -146,9 +146,16 @@ class OrderOpsController(http.Controller):
         csrf=False,
     )
     def order_label_refunded(self, order_id, **_kwargs):
-        def refund(order, _payload, actor):
+        """Body ``{"actor", "tracking"}``. ``tracking`` is the label number the
+        confirm was shown for; the action refuses when it no longer matches the
+        order's current label (a stale confirm, GOL-3936)."""
+
+        def refund(order, payload, actor):
             boxes = len((order.grove_tracking_numbers or "").split())
-            order.action_grove_label_refunded(actor)
+            tracking = payload.get("tracking")
+            # A missing/blank number means a legacy confirm with no label to check against.
+            tracking = tracking if isinstance(tracking, str) and tracking.strip() else None
+            order.action_grove_label_refunded(actor, tracking=tracking)
             return {"boxes_cleared": boxes}
 
         return self._run_order_action(order_id, refund)

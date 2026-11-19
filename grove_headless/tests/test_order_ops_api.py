@@ -178,6 +178,25 @@ class TestOrderOpsApi(GroveTaxFixtureMixin, HttpCase):
         order = self._order()
         self.assertEqual(self._post(order, "label-refunded", {"actor": "wes"}).status_code, 422)
 
+    def test_label_refunded_route_refuses_a_stale_confirm(self):
+        # The confirm carries the label it was shown for; a newer label has since
+        # replaced it, so the route refuses and leaves the newer label on the order.
+        order = self._order()
+        order.action_grove_record_hand_label(UPS, actual_cost=9.0)
+        newer = "1Z999AA10123456791"
+        order.sudo().write({"grove_tracking_numbers": newer})
+        response = self._post(order, "label-refunded", {"actor": "wes", "tracking": UPS})
+        self.assertEqual(response.status_code, 422, response.text)
+        self.assertIn("already been replaced", response.json()["error"])
+        self.assertEqual(order.grove_tracking_numbers, newer)
+
+    def test_label_refunded_route_clears_when_the_confirm_matches(self):
+        order = self._order()
+        order.action_grove_record_hand_label(UPS, actual_cost=9.0)
+        response = self._post(order, "label-refunded", {"actor": "wes", "tracking": UPS})
+        self.assertEqual(response.status_code, 200, response.text)
+        self.assertFalse(order.grove_tracking_numbers)
+
     # mark-shipped keeps its keys and adds the card
 
     def test_mark_shipped_returns_card_and_keeps_existing_keys(self):
