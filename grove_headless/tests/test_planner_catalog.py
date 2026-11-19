@@ -20,6 +20,7 @@ from datetime import date
 
 from odoo.addons.grove_headless.controllers.main import (
     FOOD_FOREST_PACKAGES_CATEGORY,
+    _image_unique_map,
     _planner_potted_only_dropped,
     _planner_tier,
     _serialize_planner_plant,
@@ -88,6 +89,21 @@ class TestPlannerCatalogSerializer(GroveTaxFixtureMixin, TransactionCase):
             row = _serialize_planner_plant(plant, {}, has_stock_field=False)
             self.assertEqual(row["blocked_states"], expected, botanical)
             self.assertEqual(row["genus"], botanical.split()[0].lower(), botanical)
+
+    def test_image_unique_passes_through_and_defaults_none(self):
+        # The feed resolves the per-page image_unique map and hands each row its
+        # token (GOL-3950); omitted, the row still carries the key as None.
+        plant = self._plant(grove_botanical_name="Malus domestica")
+        self.assertIsNone(_serialize_planner_plant(plant, {}, has_stock_field=False)["image_unique"])
+        row = _serialize_planner_plant(plant, {}, has_stock_field=False, image_unique="tok-123")
+        self.assertEqual(row["image_unique"], "tok-123")
+
+    def test_image_unique_map_resolves_plant_photo(self):
+        # 2x2 opaque PNG — any real image gives the row a non-empty token.
+        png = b"iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAEElEQVR4nGPgEpEDIgYIBQAGTgDxOGMygQAAAABJRU5ErkJggg=="
+        plant = self._plant(grove_botanical_name="Malus domestica", image_1920=png)
+        token = _image_unique_map("product.template", plant).get(plant.id)
+        self.assertTrue(token)
 
     def test_compliance_exempt_empties_blocked_states(self):
         plant = self._plant(grove_botanical_name="Castanea mollissima", grove_compliance_exempt=True)

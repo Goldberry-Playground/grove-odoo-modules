@@ -36,6 +36,10 @@ _NUDGE_MAX_FAILURES = 3
 _LATE_NAMES_SHOWN = 20
 # A card edit can wait out one Discord rate limit inside the bridge.
 _CARD_EDIT_TIMEOUT = 15
+# The refresh cron runs hourly, so this is ~a day of retries. After it, a card
+# that still will not update gives up: it stops being retried (so it can no longer
+# starve the orders behind it), moves to the needs-a-person state and alerts once.
+_CARD_REFRESH_MAX_ATTEMPTS = 24
 
 # Stages where a hold is meaningless: the order is already out the door or finished.
 # (label_purchased is deliberately allowed: a bought label can still be held.)
@@ -88,6 +92,13 @@ class SaleOrder(models.Model):
     # A label import changed this order: its card still needs editing. Set in the
     # import's transaction, cleared when the edit lands, retried by the hourly job.
     grove_card_needs_refresh = fields.Boolean(readonly=True, copy=False)
+    # Failed refresh attempts so far, counted toward _CARD_REFRESH_MAX_ATTEMPTS.
+    # The refresh search processes fewest-attempts-first so a chronic failure can
+    # never starve a fresh flag behind it; reset to 0 when an edit finally lands.
+    grove_card_refresh_attempts = fields.Integer(readonly=True, copy=False, default=0)
+    # The card could not be refreshed after the attempt cap. A person must open the
+    # order and repost its card by hand; one Discord alert has already gone out.
+    grove_card_needs_person = fields.Boolean(readonly=True, copy=False, index=True)
 
     @api.depends("grove_fulfillment", "grove_is_printify", "grove_ship_wave")
     def _compute_grove_lane(self):
@@ -253,6 +264,7 @@ class SaleOrder(models.Model):
         if wave == "fall":
             self._grove_release_from_unbought_batch()
         else:
+            self._grove_relink_to_open_batch()
             self._grove_warn_window_closed(actor)
         return True
 
@@ -266,12 +278,42 @@ class SaleOrder(models.Model):
             return
         self.sudo().write({"grove_label_batch_id": False})
         batch.sudo().write({"order_ids": [(3, self.id)]})
-        bought = (
-            " If its label was already bought from that export, refund it in Pirate Ship."
-            if batch.state == "exported"
-            else ""
+        self.message_post(
+            body=f"Order released from {batch.name}: it left the spring lane.{batch._grove_refund_warning()}"
         )
-        self.message_post(body=f"Order released from {batch.name}: it left the spring lane.{bought}")
+
+    def _grove_relink_to_open_batch(self):
+        """An order returning to the spring lane picks its batch row back up.
+
+        A fall move released it from its zone's open/exported batch
+        (``_grove_release_from_unbought_batch``) but deliberately left its row on
+        the batch. Without this, a fall→spring round trip with no rebuild in
+        between would leave the order back in the spring lane but unlinked while
+        its row lingers — a CSV export would ship it with no batch link to
+        reconcile against (GOL-3934). Re-link only when its row is still on that
+        batch; a rebuild since the move drops the row and re-packs the order on
+        its own, so there is nothing to restore."""
+        if self.grove_label_batch_id:
+            return
+        line = (
+            self.env["grove.label.batch.line"]
+            .sudo()
+            .search(
+                [
+                    ("order_id", "=", self.id),
+                    ("batch_id.company_id", "=", self.company_id.id),
+                    ("batch_id.zone", "=", self.grove_usda_zone),
+                    ("batch_id.state", "in", ("open", "exported")),
+                ],
+                limit=1,
+            )
+        )
+        batch = line.batch_id
+        if not batch:
+            return
+        self.sudo().write({"grove_label_batch_id": batch.id})
+        batch.sudo().write({"order_ids": [(4, self.id)]})
+        self.message_post(body=f"Order re-linked to {batch.name}: it returned to the spring lane.")
 
     def _grove_spring_ship_window(self, today):
         """This order's zone spring ship window ``((sm, sd), (em, ed))``, or None
@@ -920,12 +962,51 @@ class SaleOrder(models.Model):
         _logger.warning("Card refresh for %s returned %s", self.name, resp.status_code)
         return "failed"
 
+    def _grove_card_giveup_notice(self):
+        """Title, lines and buttons for the one-time "this card needs a person"
+        alert, posted when an order gives up on auto-refreshing its card."""
+        self.ensure_one()
+        title = f"{self.name}: order card needs a person"
+        lines = [
+            f"Customer: {self.partner_id.name or 'Unknown'}",
+            f"Its Discord card could not be updated after {self.grove_card_refresh_attempts} tries.",
+            "Open the order in Odoo and repost its card by hand.",
+        ]
+        return title, lines, []
+
+    def _grove_card_refresh_failed(self):
+        """Count one failed refresh attempt for this order and decide whether it has
+        given up. Returns ``True`` once the attempt cap is reached: the refresh flag
+        is cleared (so it stops being retried and can no longer starve the orders
+        behind it), the order moves to the needs-a-person state, and one Discord
+        alert is posted. Returns ``False`` while it is still within the cap, leaving
+        it flagged for the next hourly run. Never raises."""
+        self.ensure_one()
+        attempts = self.grove_card_refresh_attempts + 1
+        if attempts < _CARD_REFRESH_MAX_ATTEMPTS:
+            self.write({"grove_card_refresh_attempts": attempts})
+            return False
+        self.write(
+            {
+                "grove_card_refresh_attempts": attempts,
+                "grove_card_needs_refresh": False,
+                "grove_card_needs_person": True,
+            }
+        )
+        _logger.error("Card refresh for %s gave up after %s attempts; it needs a person", self.name, attempts)
+        title, lines, buttons = self._grove_card_giveup_notice()
+        self._grove_post_notice_status(self.company_id, title, lines, buttons)
+        return True
+
     def _grove_refresh_cards(self):
         """Edit each flagged order's card and clear its flag. An order with no
         stored message id, a card Discord has lost, or a company with no channel
-        cannot be helped by a retry, so those are logged and cleared too. Commits
-        per order and stops after a few failures in a row, leaving the rest flagged
-        for the hourly job. Must not run in a transaction that charges a card."""
+        cannot be helped by a retry, so those are logged and cleared too. A card
+        that keeps failing gives up after _CARD_REFRESH_MAX_ATTEMPTS (moved to the
+        needs-a-person state, alerted once) so it stops blocking the queue. Commits
+        per order and stops after a few still-retrying failures in a row, leaving
+        the rest flagged for the hourly job. Must not run in a transaction that
+        charges a card."""
         in_test = bool(config["test_enable"])
         failures = 0
         for order in self:
@@ -936,14 +1017,21 @@ class SaleOrder(models.Model):
                     status = "no_card"
                     _logger.warning("%s has no Discord card on record to refresh; a repost gives it one", order.name)
                 if status == "failed":
-                    failures += 1
+                    if order._grove_card_refresh_failed():
+                        # Terminal: the order left the queue. Commit the give-up and
+                        # do not count it against the still-retrying circuit breaker.
+                        failures = 0
+                        if not in_test:
+                            self.env.cr.commit()
+                    else:
+                        failures += 1
                 else:
                     failures = 0
                     if status == "gone":
                         _logger.warning("Discord no longer has the card for %s; stopped refreshing it", order.name)
                     elif status == "unmapped":
                         _logger.error("Card for %s not refreshed: its company has no order channel", order.name)
-                    order.write({"grove_card_needs_refresh": False})
+                    order.write({"grove_card_needs_refresh": False, "grove_card_refresh_attempts": 0})
                     if not in_test:
                         self.env.cr.commit()
             except Exception:  # noqa: BLE001 — keep refreshing the other cards
@@ -971,11 +1059,14 @@ class SaleOrder(models.Model):
 
     @api.model
     def _cron_grove_card_refresh(self, now=None):
-        """Hourly: retry card edits that have not landed. ``now`` is unused (the
-        hourly job passes it)."""
+        """Hourly: retry card edits that have not landed. Fewest-attempts-first so a
+        fresh flag is always served before a chronic failure that would otherwise
+        starve it, and so the circuit breaker only trips on the tail. ``now`` is
+        unused (the hourly job passes it)."""
         companies = self.env["res.company"].sudo().search([])
         self.sudo().with_context(allowed_company_ids=companies.ids).search(
-            [("grove_card_needs_refresh", "=", True)]
+            [("grove_card_needs_refresh", "=", True)],
+            order="grove_card_refresh_attempts asc, id asc",
         )._grove_refresh_cards()
 
     @api.model
