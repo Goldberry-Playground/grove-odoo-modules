@@ -253,13 +253,9 @@ class TestLabelBatchZones(GroveTaxFixtureMixin, TransactionCase):
         result = self._build()
         self.assertEqual(result["batch"], batch)
         self.assertFalse(dropped.grove_label_batch_id)
-        self.assertTrue(
-            any("refund it in Pirate Ship" in s for s in result["skipped"]), result["skipped"]
-        )
+        self.assertTrue(any("refund it in Pirate Ship" in s for s in result["skipped"]), result["skipped"])
         self.assertIn("refund it in Pirate Ship", batch.notes)
-        self.assertTrue(
-            any("refund it in Pirate Ship" in body for body in dropped.message_ids.mapped("body"))
-        )
+        self.assertTrue(any("refund it in Pirate Ship" in body for body in dropped.message_ids.mapped("body")))
         # The kept order neither drops out nor gets a spurious refund warning.
         self.assertEqual(batch.order_ids, kept)
         self.assertFalse(any("refund it in Pirate Ship" in body for body in kept.message_ids.mapped("body")))
