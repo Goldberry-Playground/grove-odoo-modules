@@ -742,7 +742,7 @@ def _planner_rules_for_scope(env, scope):
     return env["grove.planner.rule"].sudo().rules_for_scope(scope)
 
 
-def _bundle_component_ids(env, variant):
+def _bundle_component_ids(env, variant, phantom_boms=None):
     """Component template ids of a phantom-BoM bundle, repeated per unit qty.
 
     e.g. a Mountain Mama kit of 2× template 93, 2× 91, 1× 133 -> ``[93, 93, 91,
@@ -750,10 +750,17 @@ def _bundle_component_ids(env, variant):
     Empty when there is no BoM (a consult-built package, GOL-2589 seeds the real
     ones) or ``mrp`` is absent. Best-effort: a BoM explode hiccup logs and yields
     ``[]`` rather than breaking the read-only feed.
+
+    ``phantom_boms`` is an already-resolved ``{variant: bom}`` map (one batched
+    ``_bom_find`` over every bundle variant, GOL-3932) covering ``variant``; omit
+    it and this variant is searched on its own.
     """
     if "mrp.bom" not in env.registry:
         return []
-    bom = env["mrp.bom"].sudo()._bom_find(variant, bom_type="phantom").get(variant)
+    if phantom_boms is None:
+        bom = env["mrp.bom"].sudo()._bom_find(variant, bom_type="phantom").get(variant)
+    else:
+        bom = phantom_boms.get(variant)
     if not bom:
         return []
     try:
@@ -769,12 +776,18 @@ def _bundle_component_ids(env, variant):
     return component_ids
 
 
-def _serialize_planner_bundle(env, template):
+def _serialize_planner_bundle(env, template, tree_counts=None, phantom_boms=None):
     """One bundle row for the planner catalog feed (GOL-3379 §B).
 
     ``tree_count`` is the existing promo-engine count (``variant_tree_count``),
     emitted on every bundle so the shape is uniform; for a consult-built package
     with no BoM the engine's count is the only size signal the planner gets.
+
+    ``tree_counts`` (a ``promotions.variant_tree_counts`` result) and
+    ``phantom_boms`` (a ``{variant: bom}`` map) let the feed resolve every
+    bundle's BoM once up front and serve the count and components from memory
+    instead of a phantom-BoM search per bundle (GOL-3932, mirroring gom#412's
+    product-detail fix). Omit both and each bundle resolves itself.
     """
     variant = template.product_variant_id
     variant_price = variant.lst_price if variant else None
@@ -787,9 +800,11 @@ def _serialize_planner_bundle(env, template):
         "price": variant_price if variant_price is not None else template.list_price,
         "variant_id": variant.id if variant else None,
         "variant_price": variant_price,
-        "component_ids": _bundle_component_ids(env, variant),
+        "component_ids": _bundle_component_ids(env, variant, phantom_boms),
         "consult_built": bool(template.grove_consult_built),
-        "tree_count": promotions.variant_tree_count(variant),
+        "tree_count": (
+            tree_counts[variant.id] if tree_counts is not None else promotions.variant_tree_count(variant)
+        ),
     }
 
 
@@ -1548,7 +1563,18 @@ class GroveHeadlessAPI(http.Controller):
                 [("website_published", "=", True), ("public_categ_ids", "in", ff_category.ids)] + company_scope,
                 order="id asc",
             )
-            bundle_rows = [_serialize_planner_bundle(request.env, b) for b in bundles]
+            # Resolve every bundle's phantom BoM and tree count in one batched
+            # pass, then build each row from memory — otherwise each bundle runs
+            # its own phantom-BoM search twice (one for the count, one for the
+            # component ids), the same N+1 gom#412 removed from product detail
+            # (GOL-3932). _serialize_planner_bundle reads the default variant, so
+            # batch over `product_variant_id` (the exact variants it serializes).
+            bundle_variants = bundles.product_variant_id
+            phantom_boms = _phantom_kit_boms(bundle_variants)
+            tree_counts = promotions.variant_tree_counts(bundle_variants, phantom_boms)
+            bundle_rows = [
+                _serialize_planner_bundle(request.env, b, tree_counts, phantom_boms) for b in bundles
+            ]
 
         body = {
             "generated_at": _datetime.now(_timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
