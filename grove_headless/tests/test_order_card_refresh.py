@@ -19,6 +19,7 @@ from odoo.tests import TransactionCase, tagged
 
 ENV = {"ORDER_ALERT_SECRET": "s3cret", "DISCORD_BRIDGE_BASE_URL": "http://bridge.test"}
 EDIT_URL = "http://bridge.test/orders/alert/edit"
+NOTICE_URL = "http://bridge.test/orders/notice"
 POST_STATUS = "odoo.addons.grove_headless.models.sale_order_ops.SaleOrder._grove_post_notice_status"
 MESSAGE_ID = "1500000000000000001"
 
@@ -198,6 +199,56 @@ class TestCardRefreshAfterImport(_Fixture, TransactionCase):
         ):
             self.env["sale.order"]._cron_grove_order_ops(now=_at(START))
         self.assertFalse(order.grove_card_needs_refresh)
+
+    def _flagged(self, attempts, message_id=MESSAGE_ID):
+        """A flagged order sitting at ``attempts`` failed refreshes already."""
+        return self._order(
+            state="sale",
+            grove_card_message_id=message_id,
+            grove_card_needs_refresh=True,
+            grove_card_refresh_attempts=attempts,
+        )
+
+    def _notice_calls(self, post):
+        return [c for c in post.call_args_list if c.args and c.args[0] == NOTICE_URL]
+
+    def test_a_card_gives_up_after_the_attempt_cap_and_alerts_once(self):
+        cap = ops_module._CARD_REFRESH_MAX_ATTEMPTS
+        order = self._flagged(cap - 1)
+        # The cap-th failure: the edit fails (503), then the one give-up notice posts.
+        post = self._cron(_reply(503, {}), _reply(200, {"ok": True}))
+        self.assertFalse(order.grove_card_needs_refresh)
+        self.assertTrue(order.grove_card_needs_person)
+        self.assertEqual(order.grove_card_refresh_attempts, cap)
+        self.assertEqual(len(self._notice_calls(post)), 1)
+        # It has left the retry queue, so a later run neither edits nor alerts again.
+        post2 = self._cron()
+        post2.assert_not_called()
+
+    def test_a_chronic_failure_never_starves_a_fresh_flag(self):
+        cap = ops_module._CARD_REFRESH_MAX_ATTEMPTS
+        chronic = self.env["sale.order"]
+        for _ in range(3):
+            chronic |= self._flagged(cap - 1)
+        fresh = self._flagged(0)
+        # Fewest-attempts-first: the fresh card (0 attempts) is edited first and
+        # succeeds; then the three chronic cards each fail (503) and give up, each
+        # posting its one notice. 1 edit + 3*(edit + notice) = 7 bridge calls.
+        post = self._cron(
+            _reply(200, {"ok": True}),
+            _reply(503, {}),
+            _reply(200, {"ok": True}),
+            _reply(503, {}),
+            _reply(200, {"ok": True}),
+            _reply(503, {}),
+            _reply(200, {"ok": True}),
+        )
+        self.assertFalse(fresh.grove_card_needs_refresh)
+        self.assertFalse(fresh.grove_card_needs_person)
+        self.assertEqual(post.call_args_list[0].args[0], EDIT_URL)
+        self.assertEqual(set(chronic.mapped("grove_card_needs_refresh")), {False})
+        self.assertEqual(set(chronic.mapped("grove_card_needs_person")), {True})
+        self.assertEqual(len(self._notice_calls(post)), 3)
 
 
 @tagged("post_install", "-at_install")
