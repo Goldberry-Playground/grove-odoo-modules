@@ -85,6 +85,27 @@ def test_code_constant_alone_is_enough(tmp_path):
     assert code == mod.EXIT_OK
 
 
+def test_client_constant_name_is_discovered(tmp_path):
+    """The live-quote client (GOL-3927) names its pin PERSISTED_QUERY_HASH."""
+    root = tmp_path / "repo"
+    client = root / "grove_headless" / "models" / "pirateship_rates.py"
+    client.parent.mkdir(parents=True)
+    client.write_text(f'# bumped by the weekly drift workflow\nPERSISTED_QUERY_HASH = "{OTHER_HASH}"\n')
+    assert mod.find_local_pins(root) == {"grove_headless/models/pirateship_rates.py": OTHER_HASH}
+    code, _ = _run(root)
+    assert code == mod.EXIT_DRIFT, "a client pin that differs from upstream must alert"
+
+
+def test_repo_client_pin_is_watched():
+    """Once the client is in the tree, its constant must be one of the watched
+    pins: a rename the scan no longer matches would leave the watch comparing
+    only the pin file while checkout uses another hash."""
+    client = REPO / "grove_headless" / "models" / "pirateship_rates.py"
+    if not client.is_file():
+        pytest.skip("live-quote client not on this tree yet (GOL-3927)")
+    assert "grove_headless/models/pirateship_rates.py" in mod.find_local_pins(REPO)
+
+
 def test_unpinned_is_not_an_alert(tmp_path):
     code, out = _run(_repo(tmp_path))
     assert code == mod.EXIT_UNPINNED
