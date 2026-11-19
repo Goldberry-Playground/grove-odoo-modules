@@ -14,8 +14,9 @@ plus its SHA-256 and ships its own ``sync-query`` drift check.
 
 Where "our pin" comes from, in order (all that exist must agree):
 
-1. Any ``RATES_QUERY_HASH = "<64 hex>"`` constant under ``grove_headless/`` or
-   ``scripts/rate_check/`` (the client, once gom#347 step 1 lands).
+1. Any ``PERSISTED_QUERY_HASH = "<64 hex>"`` (the live-quote client,
+   ``grove_headless/models/pirateship_rates.py``) or ``RATES_QUERY_HASH``
+   (upstream's name) constant under ``grove_headless/`` or ``scripts/rate_check/``.
 2. ``scripts/ci/pirateship-rates-query.sha256`` (one line; the spec's pin, so
    this watch is live before the client exists).
 3. ``--expected HASH`` overrides both (used by the forced-mismatch QA gate).
@@ -55,8 +56,10 @@ _HEX64 = r"[0-9a-f]{64}"
 # Upstream: `export const RATES_QUERY =\n    '...'` (single-quoted, JS escapes).
 _RE_UPSTREAM_QUERY = re.compile(r"RATES_QUERY\s*=\s*'((?:[^'\\]|\\.)*)'", re.S)
 _RE_UPSTREAM_HASH = re.compile(rf"RATES_QUERY_HASH\s*=\s*['\"]({_HEX64})['\"]")
-# Ours: `RATES_QUERY_HASH = "..."` in Python (either quote style).
-_RE_LOCAL_CONST = re.compile(rf"""^\s*RATES_QUERY_HASH\s*=\s*['"]({_HEX64})['"]""", re.M)
+# Ours, in Python (either quote style): the client names it PERSISTED_QUERY_HASH
+# (GOL-3927); RATES_QUERY_HASH is upstream's name and stays accepted.
+LOCAL_CONST_NAMES = ("PERSISTED_QUERY_HASH", "RATES_QUERY_HASH")
+_RE_LOCAL_CONST = re.compile(rf"""^\s*(?:{"|".join(LOCAL_CONST_NAMES)})\s*=\s*['"]({_HEX64})['"]""", re.M)
 
 EXIT_OK, EXIT_DRIFT, EXIT_UNPINNED, EXIT_ERROR = 0, 1, 2, 3
 
@@ -175,7 +178,8 @@ def main(argv: list[str] | None = None) -> int:
         elif not pins:
             status, code = "unpinned", EXIT_UNPINNED
             detail = (
-                f"No `RATES_QUERY_HASH` constant under {', '.join(str(d) for d in PIN_SCAN_DIRS)} and no "
+                f"No `{'` / `'.join(LOCAL_CONST_NAMES)}` constant under "
+                f"{', '.join(str(d) for d in PIN_SCAN_DIRS)} and no "
                 f"`{PIN_FILE}`; nothing to compare."
             )
         elif len(set(pins.values())) > 1:
