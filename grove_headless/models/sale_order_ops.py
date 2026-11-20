@@ -15,7 +15,14 @@ from odoo import SUPERUSER_ID, api, fields, models
 from odoo.exceptions import AccessError, UserError
 from odoo.tools import config
 
-from .order_lanes import clean_tracking, lane_for, suggest_hold_date, tracking_token_set, wave_window_state, zone_alert_kind
+from .order_lanes import (
+    clean_tracking,
+    lane_for,
+    suggest_hold_date,
+    tracking_token_set,
+    wave_window_state,
+    zone_alert_kind,
+)
 from .shipping_boxes import dormancy_window
 from .shipping_calendar import (
     SPRING_BUILD_LEAD_DAYS,
