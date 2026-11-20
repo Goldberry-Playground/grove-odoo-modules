@@ -97,6 +97,15 @@ def clean_tracking(text):
     return re.sub(r"\s+", "", text or "")
 
 
+def tracking_token_set(text):
+    """The distinct tracking numbers in ``text`` as an upper-cased set, however
+    they are separated — spaces, newlines (how ``grove_tracking_numbers`` stores
+    several), or the ``", "`` the order card shows. Used to compare a refund
+    confirm's label against the order's current one so a stale confirm can be
+    told apart from a live one (GOL-3936)."""
+    return {token.upper() for token in re.split(r"[\s,]+", (text or "").strip()) if token}
+
+
 def parse_tracking(text):
     """Check a typed tracking number and return it in upper case, without spaces.
 

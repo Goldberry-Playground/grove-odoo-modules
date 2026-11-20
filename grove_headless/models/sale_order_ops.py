@@ -15,7 +15,14 @@ from odoo import SUPERUSER_ID, api, fields, models
 from odoo.exceptions import AccessError, UserError
 from odoo.tools import config
 
-from .order_lanes import clean_tracking, lane_for, suggest_hold_date, wave_window_state, zone_alert_kind
+from .order_lanes import (
+    clean_tracking,
+    lane_for,
+    suggest_hold_date,
+    tracking_token_set,
+    wave_window_state,
+    zone_alert_kind,
+)
 from .shipping_boxes import dormancy_window
 from .shipping_calendar import (
     SPRING_BUILD_LEAD_DAYS,
@@ -192,12 +199,24 @@ class SaleOrder(models.Model):
         self.message_post(body=f"{actor} snoozed the hold to {until.isoformat()}.")
         return True
 
-    def action_grove_label_refunded(self, actor):
+    def action_grove_label_refunded(self, actor, tracking=None):
         """The label was refunded: clear it and send the order back to needing a
         label (a wave order to Assigned to ship wave, any other to Paid, awaiting
-        label). Moves no money; the label can be recorded again afterwards."""
+        label). Moves no money; the label can be recorded again afterwards.
+
+        ``tracking`` is the label number the confirm was raised for (the Discord
+        bridge carries it in the confirm payload). When given, the row is locked
+        and the number is compared to the order's current label: a stale confirm
+        for a label that has since been refunded and replaced is refused and
+        nothing is cleared, so the newer label survives (GOL-3936)."""
         self._grove_require_order_operator()
         self.ensure_one()
+        # Lock the row before reading the label so a replacement bought between the
+        # card and this confirm is seen here, as the other order actions do
+        # (_grove_ship_with_label). A plain Odoo-side call (no ``tracking``) acts on
+        # live data, so it only needs the lock when it has a number to compare.
+        if tracking is not None:
+            self.env.cr.execute("SELECT id FROM sale_order WHERE id = %s FOR UPDATE", (self.id,))
         stage = self.grove_fulfillment_stage
         if stage in _ALREADY_SHIPPED_STAGES:
             raise UserError(
@@ -210,6 +229,17 @@ class SaleOrder(models.Model):
             )
         old = (self.grove_tracking_numbers or "").split()
         old_text = ", ".join(old) if old else "no number on file"
+        # The confirm carries the label it was raised for (the bridge sends the first
+        # number the card showed). A match — any overlap, so a multi-box order whose
+        # first number is carried still clears — means the label is still the live one.
+        # No overlap means it was refunded and replaced since the card, so refuse and
+        # leave the newer label alone. An empty number skips the check (a legacy confirm).
+        confirm_tokens = tracking_token_set(tracking) if tracking is not None else set()
+        if confirm_tokens and not (confirm_tokens & tracking_token_set(self.grove_tracking_numbers)):
+            raise UserError(
+                f"{self.name}'s label has already been replaced — it now has {old_text}, "
+                f"but this refund was for {tracking.strip()}. Nothing was changed."
+            )
         target = "wave_assigned" if self.grove_ship_wave else "awaiting_label"
         moved = self.sudo()._grove_advance_state(
             target,
