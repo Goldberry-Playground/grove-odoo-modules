@@ -59,6 +59,7 @@ from . import (
     test_pickup_settlement,  # noqa: F401
     test_pirateship_import,  # noqa: F401
     test_planner_catalog,  # noqa: F401
+    test_planner_catalog_queries,  # noqa: F401
     test_planner_facts,  # noqa: F401
     test_planner_learning,  # noqa: F401
     test_planner_routes,  # noqa: F401

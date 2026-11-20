@@ -7,8 +7,12 @@ reusing the grove.publish.event machinery — and that it emits on the *transiti
 (one event per template), never raises into the write, and caps a bulk storm.
 
 Runs in Odoo's TransactionCase harness (the install-smoke-test CI job). The
-transaction never commits, so the commit-time flush is invoked directly via
-`_flush_availability_events()` — exactly what `cr.precommit` would call.
+transaction never commits, so both commit phases are driven by hand: the
+pre-commit flush (`_flush_availability_events()`, what `cr.precommit` calls,
+which stages the pending ledger rows) and the post-commit delivery
+(`cr.postcommit.run()`, what `cr.commit()` calls, which fires the webhooks on a
+cursor of its own). GOL-3931 moved delivery off the pre-commit hook so the
+storefront re-reads committed data, and savepointed the signature read.
 """
 
 import os
@@ -66,8 +70,20 @@ class TestAvailabilityEvents(GroveTaxFixtureMixin, TransactionCase):
         product.invalidate_recordset(["qty_available", "free_qty"])
 
     def _flush(self):
-        """Invoke the commit-time flush directly (no commit in a TransactionCase)."""
+        """Drive both commit phases by hand (a TransactionCase never commits).
+
+        GOL-3931 split the work: `_flush_availability_events()` is what
+        `cr.precommit` runs — it stages the `pending` ledger rows — and
+        `cr.postcommit.run()` is what `cr.commit()` runs after the DB commit — it
+        delivers the webhooks on a cursor of its own. `enter_registry_test_mode()`
+        makes `registry.cursor()` a test cursor so that post-commit delivery sees
+        the rows the pre-commit phase just staged (mirrors the card-refresh
+        after-commit test, test_order_card_refresh._commit_import)."""
         self.Event._flush_availability_events()
+        self.env.flush_all()
+        with self.enter_registry_test_mode():
+            self.env.cr.postcommit.run()
+        self.env.invalidate_all()
 
     def _patch_env(self, env=None):
         return mock.patch.dict(os.environ, env or WEBHOOK_ENV, clear=False)
@@ -374,3 +390,105 @@ class TestAvailabilityEvents(GroveTaxFixtureMixin, TransactionCase):
             self._flush()
         self.assertEqual(len(fake.calls), 1)
         self.assertEqual(fake.calls[0]["timeout"], 3)
+
+    # ── commit ordering + savepoint (GOL-3931) ───────────────────────────
+    def test_delivery_happens_after_commit_not_in_precommit(self):
+        """The webhook must fire in cr.postcommit, never in the pre-commit flush,
+        so the storefront re-reads committed stock/price (GOL-3931)."""
+        product = self._make_product("Loquat")
+        self._stock_then_reset(product, 5)
+
+        fake = _FakePost()
+        with self._patch_env(), self._patch_post(fake):
+            self._add_stock(product, -5)
+            # Pre-commit phase: the flush stages the ledger row but delivers nothing.
+            self.Event._flush_availability_events()
+            self.env.flush_all()
+            events = self._availability_events(product.product_tmpl_id)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events.state, "pending")
+            self.assertEqual(len(fake.calls), 0, "no webhook may be sent before commit")
+            # Post-commit phase: now the webhook fires, against committed data.
+            with self.enter_registry_test_mode():
+                self.env.cr.postcommit.run()
+            self.assertEqual(len(fake.calls), 1)
+            events.invalidate_recordset()
+            self.assertEqual(events.state, "delivered")
+
+    def test_rolled_back_write_delivers_nothing(self):
+        """A write that rolls back leaves no ledger row and sends no webhook: the
+        row is staged inside the transaction and delivery is gated on commit."""
+        product = self._make_product("Damson")
+        self._stock_then_reset(product, 3)
+
+        fake = _FakePost()
+        with self._patch_env(), self._patch_post(fake):
+            try:
+                with self.env.cr.savepoint():
+                    self._add_stock(product, -3)
+                    self.Event._flush_availability_events()  # stages a pending row
+                    raise RuntimeError("user write fails after staging")
+            except RuntimeError:
+                pass
+            # The savepoint rolled the staged row back; even if cr.postcommit still
+            # holds the (now-stale) callback, .exists() filters the vanished ids.
+            self.env.flush_all()
+            with self.enter_registry_test_mode():
+                self.env.cr.postcommit.run()
+
+        self.assertFalse(self._availability_events(product.product_tmpl_id))
+        self.assertEqual(len(fake.calls), 0)
+
+    def test_sql_error_in_signature_does_not_abort_user_write(self):
+        """A SQL-level failure in the after-signature read must not abort the
+        cursor and roll back the user's write — the savepoint isolates it. Python
+        errors were already caught; this guards the SQL case (GOL-3931)."""
+        template = self._make_product("Sloe").product_tmpl_id
+        self._reset_buffer()
+
+        def bad_sql(_self, *args, **kwargs):
+            _self.env.cr.execute("SELECT 1 FROM grove_nonexistent_table_gol3931")
+
+        fake = _FakePost()
+        with self._patch_env(), self._patch_post(fake):
+            self.Event.note_availability_candidates(template)  # real before-signature
+            with (
+                mock.patch.object(type(self.Event), "_availability_signature", bad_sql),
+                self.assertLogs(grove_publish_event.__name__, level="ERROR"),
+            ):
+                self.Event._flush_availability_events()  # must not raise
+
+        # The cursor survived: raw SQL and a normal ORM write both still work.
+        # Without the savepoint, the aborted cursor would raise "current
+        # transaction is aborted" on the very next statement.
+        self.env.cr.execute("SELECT 1")
+        self.assertEqual(self.env.cr.fetchone()[0], 1)
+        template.write({"list_price": 42.0})
+        self.assertEqual(template.list_price, 42.0)
+        self.assertEqual(len(fake.calls), 0)
+
+    def test_bulk_reprice_logs_the_cap_warning(self):
+        """More templates than the cap in one transaction logs the cap warning and
+        emits only the capped count."""
+        templates = self.env["product.template"].browse(
+            [self._make_product(f"Capwarn {i}").product_tmpl_id.id for i in range(3)]
+        )
+        self._reset_buffer()
+
+        fake = _FakePost()
+        with (
+            mock.patch.object(grove_publish_event, "_AVAILABILITY_EMIT_CAP", 2),
+            self._patch_env(),
+            self._patch_post(fake),
+            self.assertLogs(grove_publish_event.__name__, level="WARNING") as logs,
+        ):
+            templates.write({"list_price": 55.0})
+            self._flush()
+
+        self.assertTrue(
+            any("leaving the remaining" in line for line in logs.output),
+            msg=f"cap warning not logged; got {logs.output}",
+        )
+        emitted = sum(len(self._availability_events(t)) for t in templates)
+        self.assertEqual(emitted, 2)
+        self.assertEqual(len(fake.calls), 2)
