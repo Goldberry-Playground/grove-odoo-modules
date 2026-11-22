@@ -43,6 +43,19 @@ class CalendarEvent(models.Model):
         readonly=True,
         help="Whether this event's organizer has the Discord publish switch on.",
     )
+    grove_milestone_id = fields.Many2one(
+        "project.milestone",
+        string="Grove Milestone",
+        ondelete="cascade",
+        index=True,
+        copy=False,
+        help=(
+            "The build/sprint project.milestone this all-day event mirrors "
+            "(GOL-4075). Set by the milestone -> calendar bridge; at most one "
+            "event per milestone. Cleared/removed when the milestone's deadline "
+            "goes away."
+        ),
+    )
 
     @api.depends("discord_event_id", "recurrence_id.discord_event_id")
     def _compute_discord_url(self):
