@@ -1,5 +1,5 @@
-# Pirate Ship persisted-query drift watch — Train #4 / gom#347 rollout step 4
-# (GOL-3303, owner devops-terra).
+# Pirate Ship persisted-query drift watch — gom#347 rollout step 4
+# (GOL-3303 Train #4, GOL-3930 Train #6; owner devops-terra).
 #
 # Live ZIP shipping quotes call Pirate Ship's GraphQL endpoint with a persisted
 # query identified by the SHA-256 of its text. If Pirate Ship changes its
@@ -13,13 +13,18 @@
 # unit-tested in scripts/tests/). Exit codes: 0 in sync / 1 drift /
 # 2 no local pin / 3 upstream unreachable or inconsistent.
 #
-# Forced-mismatch QA gate (Train #4 gate 5): dispatch with `expected_hash`
-# set to any other 64-hex value; the run must open the issue + ping Discord,
-# and the next plain run must close the issue again.
+# "Our pin" is the client's PERSISTED_QUERY_HASH constant
+# (grove_headless/models/pirateship_rates.py, GOL-3927) plus
+# scripts/ci/pirateship-rates-query.sha256; the two must agree.
 #
-# Discord goes through DISCORD_OPS_WEBHOOK_URL. That secret does NOT exist in
-# this repo yet (GOL-2642); until it does, the alert steps warn loudly on the
-# run summary and the GitHub issue is the only durable signal.
+# Forced-mismatch QA gate: dispatch with `expected_hash` set to any other
+# 64-hex value; the run must open the issue + ping Discord, and the next plain
+# run must close the issue again.
+#
+# Discord goes to the shipping channel (repo secret DISCORD_SHIPPING_WEBHOOK_URL,
+# the channel Odoo's own live-quote alerts use), falling back to
+# DISCORD_OPS_WEBHOOK_URL while that secret is not set. With neither, the alert
+# steps warn loudly on the run summary and the GitHub issue is the only signal.
 name: pirateship-query-drift
 
 on:
@@ -59,13 +64,16 @@ jobs:
         # visible on the run summary, never a silent short-circuit, and must
         # never fail the check itself. Only emptiness is tested; nothing is echoed.
         env:
-          HAS_WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK_URL != '' }}
+          HAS_SHIPPING: ${{ secrets.DISCORD_SHIPPING_WEBHOOK_URL != '' }}
+          HAS_OPS: ${{ secrets.DISCORD_OPS_WEBHOOK_URL != '' }}
         run: |
-          if [ "$HAS_WEBHOOK" != "true" ]; then
-            echo "::warning title=No Discord ops webhook::DISCORD_OPS_WEBHOOK_URL is not set in this repo - a drift alert will only surface as a GitHub issue (GOL-2642)."
-            echo "- :warning: **DISCORD_OPS_WEBHOOK_URL is missing** - drift Discord alerts are no-ops; the GitHub issue is the only signal (GOL-2642)." >> "$GITHUB_STEP_SUMMARY"
+          if [ "$HAS_SHIPPING" = "true" ]; then
+            echo "Discord shipping webhook present"
+          elif [ "$HAS_OPS" = "true" ]; then
+            echo "::notice title=Drift alerts go to the ops channel::DISCORD_SHIPPING_WEBHOOK_URL is not set in this repo - a drift alert falls back to DISCORD_OPS_WEBHOOK_URL (GOL-3930)."
           else
-            echo "Discord ops webhook present"
+            echo "::warning title=No Discord webhook::neither DISCORD_SHIPPING_WEBHOOK_URL nor DISCORD_OPS_WEBHOOK_URL is set in this repo - a drift alert will only surface as a GitHub issue (GOL-2642)."
+            echo "- :warning: **No Discord webhook secret** - drift Discord alerts are no-ops; the GitHub issue is the only signal (GOL-2642)." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -139,14 +147,14 @@ jobs:
       - name: Discord alert
         if: (steps.check.outputs.rc == '1' || steps.check.outputs.rc == '3') && inputs.dry_run != true
         env:
-          WEBHOOK: ${{ secrets.DISCORD_OPS_WEBHOOK_URL }}
+          WEBHOOK: ${{ secrets.DISCORD_SHIPPING_WEBHOOK_URL || secrets.DISCORD_OPS_WEBHOOK_URL }}
           RC: ${{ steps.check.outputs.rc }}
           ISSUE_URL: ${{ steps.issue.outputs.url }}
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ -z "$WEBHOOK" ]; then
-            echo "::warning title=Drift alert NOT delivered::DISCORD_OPS_WEBHOOK_URL is not configured - no Discord alert was sent (GOL-2642). See the GitHub issue / run summary instead."
-            echo "- :warning: **Discord alert NOT sent** - no DISCORD_OPS_WEBHOOK_URL in this repo (GOL-2642)." >> "$GITHUB_STEP_SUMMARY"
+            echo "::warning title=Drift alert NOT delivered::no Discord webhook secret is configured - no Discord alert was sent (GOL-2642). See the GitHub issue / run summary instead."
+            echo "- :warning: **Discord alert NOT sent** - no DISCORD_SHIPPING_WEBHOOK_URL or DISCORD_OPS_WEBHOOK_URL in this repo (GOL-2642)." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           if [ "$RC" = "1" ]; then
