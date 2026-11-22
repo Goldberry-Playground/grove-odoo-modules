@@ -41,8 +41,15 @@ class TestOrderAttributionWrite(GroveTaxFixtureMixin, TransactionCase):
     def setUp(self):
         super().setUp()
         self.product = self.env["product.product"].create(
-            {"name": "Pawpaw (potted)", "type": "consu", "list_price": 22.0}
+            {"name": "Pawpaw (bareroot)", "type": "consu", "list_price": 22.0}
         )
+        # A product defaults to the "potted" shipping tier, which only sells
+        # inside the leafed window (through Oct 15) — so a pickup checkout built
+        # any later in the year is rejected by the potted-season gate in
+        # _create_draft_order before attribution ever runs. Tag it bareroot so
+        # the checkout succeeds year-round and these tests exercise attribution,
+        # not the season gate.
+        self.product.product_tmpl_id.grove_shipping_tier = "bareroot"
 
     def _website(self):
         return self.env.ref("grove_headless.website_nursery")
