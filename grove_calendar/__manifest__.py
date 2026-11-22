@@ -1,6 +1,6 @@
 {
     "name": "Grove Calendar",
-    "version": "19.0.1.3.0",
+    "version": "19.0.1.4.0",
     "category": "Marketing/Calendar",
     "summary": "Public calendar events to Discord: weekly 'This week at the Grove' digest (GOL-3830)",
     "description": """
@@ -29,9 +29,22 @@
             read-only on the event form. Filled by the native-events sync in
             phase D (Train #6).
 
-        Depends on `calendar` ONLY. It must NOT depend on `google_calendar`, so
-        QA and the test runner install it without Google. The Google side is
-        Odoo's own google_calendar module, paired by Josh out of band.
+        Depends on `calendar` and core `project` only. It must NOT depend on
+        `google_calendar`, so QA and the test runner install it without Google.
+        The Google side is Odoo's own google_calendar module, paired by Josh out
+        of band.
+
+          - project.milestone -> calendar.event bridge (GOL-4075, farm-ops Phase
+            2 s8/s9): a milestone on a build (grove_ops `grove_is_build`) or the
+            "Grove Odoo" sprint project that carries a `deadline` is mirrored as
+            exactly one all-day calendar.event, titled `<project> — <milestone>`,
+            linked by calendar.event.grove_milestone_id. Moving the deadline
+            moves the event, clearing it removes the event, and a re-run never
+            duplicates. The mirror is privacy=public (shared internal calendar)
+            but has no organizer and no Website tag, so it is not force-pushed to
+            Discord or the open-web feed. `grove_is_build` is read defensively,
+            so the module installs/tests without grove_ops; the build path is
+            inert until grove_ops and its OCA chain (GOL-4072) are present.
 
           - Website tag + public feed (phase F, GOL-3842): a Public event also
             carrying the grove_calendar.tag_website tag is served read-only on
@@ -48,6 +61,7 @@
     "license": "LGPL-3",
     "depends": [
         "calendar",
+        "project",
     ],
     # Additive only: a cron (AbstractModel, no table/ACL), form-view inherits
     # exposing the read-only Discord group and the admin publish switch. The new
