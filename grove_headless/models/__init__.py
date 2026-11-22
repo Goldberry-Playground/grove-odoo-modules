@@ -17,6 +17,7 @@ from . import (
     mailgun_gateway,  # noqa: F401  pure HMAC verify + event parse (GOL-2903), no ORM models
     mailing_contact,  # noqa: F401  welcome-window gate on mailing.contact (GOL-3454)
     newsletter,  # noqa: F401  pure list/tag helpers (GOL-221, GOL-3454), no ORM models
+    order_attribution,  # noqa: F401  pure UTM/attribution validation (GOL-4077), no ORM models
     order_rollup,  # noqa: F401  weekly order/preorder digest cron (GOL-1978)
     planner_evidence,  # noqa: F401  planner fact evidence / disputes (GOL-3549)
     planner_plan,  # noqa: F401  saved plans + Approve as guild (GOL-3549)

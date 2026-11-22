@@ -153,6 +153,41 @@ class SaleOrder(models.Model):
         help="Human-readable summary of the carried planner plan (spec C.4).",
     )
 
+    # ── Order attribution (GOL-4077, part of the GOL-4074 analytics strategy) ──
+    # Where the buyer came from, captured at checkout so revenue by channel /
+    # campaign / post reads straight out of Odoo with no third party involved
+    # (the design of record is the GOL-4074 analytics-and-tracking note). Written
+    # once, best-effort, by controllers.main._apply_order_attribution from the
+    # storefront `attribution` payload — a malformed value is dropped, never a
+    # 400, because tracking metadata must never lose a sale. The five UTM values
+    # are lowercased + trimmed on write so "Email" and "email" don't split a
+    # report; landing page, referrer and the ad-platform ids keep their original
+    # case (URL paths and ids are case-sensitive). source / medium / campaign are
+    # ALSO mirrored onto Odoo's built-in utm.mixin m2o fields when this build
+    # exposes them on sale.order (website_sale + crm + mass_mailing all pull in
+    # `utm`), so native Odoo UTM pivots line up — but these dedicated Char fields
+    # stay the source of truth for the Sunday revenue read regardless of whether
+    # the built-ins are present. source + campaign are indexed because the read
+    # groups by them. copy=False so a duplicated order never inherits attribution.
+    grove_utm_source = fields.Char(string="UTM Source", readonly=True, copy=False, index=True)
+    grove_utm_medium = fields.Char(string="UTM Medium", readonly=True, copy=False)
+    grove_utm_campaign = fields.Char(string="UTM Campaign", readonly=True, copy=False, index=True)
+    grove_utm_content = fields.Char(string="UTM Content", readonly=True, copy=False)
+    grove_utm_term = fields.Char(string="UTM Term", readonly=True, copy=False)
+    grove_landing_page = fields.Char(string="Landing page", readonly=True, copy=False)
+    grove_referrer = fields.Char(string="Referrer", readonly=True, copy=False)
+    grove_ga_client_id = fields.Char(string="GA client id", readonly=True, copy=False)
+    grove_ga_session_id = fields.Char(string="GA session id", readonly=True, copy=False)
+    grove_fbp = fields.Char(string="Meta _fbp", readonly=True, copy=False)
+    grove_fbc = fields.Char(string="Meta _fbc", readonly=True, copy=False)
+    grove_marketing_tags_eligible = fields.Boolean(
+        string="Marketing tags eligible",
+        readonly=True,
+        copy=False,
+        help="The buyer consented to marketing tags at capture time. The "
+        "server-side purchase conversion (a later issue) only fires when true.",
+    )
+
     # Stripe Checkout linkage (GOL-642). Written when a checkout session is
     # created; read by the webhook to reconcile session.completed/expired back
     # to this order. copy=False so a duplicated order never inherits a payment.
