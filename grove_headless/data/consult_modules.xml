@@ -1,0 +1,133 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Consult goal modules (GOL-3977, GOL-3575 spec C.1).
+
+     The twelve named goal modules a consultant picks at intake. Keys and names
+     are fixed by spec C.1 and draft section 6.6. The draft gives each module a
+     client phrase and what it adds to the plan; it carries NO separate
+     objective / approach / expected_results / section_title / section_template
+     text, so those five fields are DERIVED from the draft row and the
+     plan-skeleton paragraph (GOL-3977). Every derived string is listed in the
+     PR body so Josh can edit it on the record. noupdate="1" so a module upgrade
+     never resets those edits. section_template holds {placeholders} the phase-3
+     generator fills in; consortium_rules stays empty until phase 3. -->
+<odoo noupdate="1">
+    <record id="consult_module_lifecycle" model="grove.consult.module">
+        <field name="key">lifecycle</field>
+        <field name="name">System architecture and lifecycle</field>
+        <field name="objective">Design a food forest or orchard that lasts, built as rows and consortia on the 8-by-4 grid.</field>
+        <field name="approach">Lay out rows and consortia on the 8-by-4 grid, then stage a three-part timeline: years 0–2 cover crops and nitrogen fixers for early cash, years 2–6 fruit and mid-story revenue, year 7 onward nuts and timber as the capital anchor.</field>
+        <field name="expected_results">A ready-to-plant row-and-consortium layout with a three-stage establishment timeline from early cover to long-term capital trees.</field>
+        <field name="section_title">System architecture and lifecycle</field>
+        <field name="section_template">{client_name}'s goal is a lasting {system_type}. The design places {row_count} rows of {consortia_count} consortia on the 8-by-4 grid. The timeline runs in three stages: years 0–2 {early_cover}, years 2–6 {midstory}, year 7+ {capital_trees}.</field>
+    </record>
+
+    <record id="consult_module_perennial_integration" model="grove.consult.module">
+        <field name="key">perennial_integration</field>
+        <field name="name">High-value perennial integration</field>
+        <field name="objective">Add high-value perennial income to an existing operation without disrupting its machinery flow or harvest rhythm.</field>
+        <field name="approach">Match perennials to the existing crop's equipment paths and harvest calendar, place them for spatial fit without light interference, and fold them into a year-round management cycle.</field>
+        <field name="expected_results">Perennial rows that slot into the current operation — no machinery conflict, no light competition, one combined management calendar.</field>
+        <field name="section_title">High-value perennial integration</field>
+        <field name="section_template">{client_name} already farms {existing_crop}. The plan adds {perennial_species} matched to its machinery flow and harvest rhythm, placed for {spatial_fit} without light interference, on a {management_cycle} cycle.</field>
+    </record>
+
+    <record id="consult_module_soil_and_carbon" model="grove.consult.module">
+        <field name="key">soil_and_carbon</field>
+        <field name="name">Soil and carbon</field>
+        <field name="objective">Rebuild poor or eroding soil and bank carbon through deep-rooted and fibrous plantings.</field>
+        <field name="approach">Assign deep-rooted and fibrous species by row, cycle nutrients through leaf-drop and root-pruning, and close the loop between tree biomass and crop needs.</field>
+        <field name="expected_results">Improving soil structure and organic matter, reduced erosion, and a closing nutrient loop between trees and crops.</field>
+        <field name="section_title">Soil and carbon</field>
+        <field name="section_template">{client_name}'s soil is {soil_problem}. The plan places {deep_rooted_species} and {fibrous_species} by row, cycles nutrients through leaf-drop and root-pruning, and closes the loop between tree biomass and {crop_needs}.</field>
+    </record>
+
+    <record id="consult_module_water_resilience" model="grove.consult.module">
+        <field name="key">water_resilience</field>
+        <field name="name">Water resilience</field>
+        <field name="objective">Even out a site that is wet in spring and dry in late summer.</field>
+        <field name="approach">Set rows on contour with keyline placement, filter species by drainage class, shade to cut evaporation, and combine complementary rooting profiles.</field>
+        <field name="expected_results">Water held and shed where it should be — less spring waterlogging, more late-summer reserve — with species matched to each drainage class.</field>
+        <field name="section_title">Water resilience</field>
+        <field name="section_template">{client_name}'s site runs {water_pattern}. The plan places rows on contour with {keyline_notes}, filters species by drainage class, shades {evaporation_zones}, and pairs {complementary_roots}.</field>
+    </record>
+
+    <record id="consult_module_microclimate_buffering" model="grove.consult.module">
+        <field name="key">microclimate_buffering</field>
+        <field name="name">Microclimate buffering</field>
+        <field name="objective">Buffer the site against wind, frost and heat.</field>
+        <field name="approach">Build multi-row staggered windbreaks, exclude planting from frost pockets, and choose protective species by exposure.</field>
+        <field name="expected_results">Calmer wind, fewer frost losses and reduced heat stress across the planted area.</field>
+        <field name="section_title">Microclimate buffering</field>
+        <field name="section_template">{client_name} faces {microclimate_stressors}. The plan sets multi-row staggered windbreaks across {wind_direction}, excludes {frost_pockets}, and places protective species by exposure.</field>
+    </record>
+
+    <record id="consult_module_habitat_and_pest_structuring" model="grove.consult.module">
+        <field name="key">habitat_and_pest_structuring</field>
+        <field name="name">Habitat and pest structuring</field>
+        <field name="objective">Control pests without spraying by building habitat that structures the pest-predator balance.</field>
+        <field name="approach">Plant insectary borders, add trap and repellent plantings, run flowering corridors, and stagger bloom for timing diversity.</field>
+        <field name="expected_results">A standing beneficial-insect population and structural pest-pressure relief with no spray program.</field>
+        <field name="section_title">Habitat and pest structuring</field>
+        <field name="section_template">{client_name} wants {pest_goal} without spraying. The plan adds insectary borders, {trap_repellent_plantings}, flowering corridors, and staggered bloom for timing diversity.</field>
+    </record>
+
+    <record id="consult_module_certification_readiness" model="grove.consult.module">
+        <field name="key">certification_readiness</field>
+        <field name="name">Certification readiness</field>
+        <field name="objective">Make the site ready for organic or regenerative certification.</field>
+        <field name="approach">Map the required buffer zones, set up input records, and install the farmOS log templates that assemble the audit file.</field>
+        <field name="expected_results">Mapped buffers, a working input-record system, and farmOS logs that produce an audit-ready file.</field>
+        <field name="section_title">Certification readiness</field>
+        <field name="section_template">{client_name} is pursuing {certification_type}. The plan maps {buffer_zones}, sets up input records, and installs the farmOS log templates that make the audit file.</field>
+    </record>
+
+    <record id="consult_module_monoculture_transition" model="grove.consult.module">
+        <field name="key">monoculture_transition</field>
+        <field name="name">Monoculture transition</field>
+        <field name="objective">Convert an existing orchard or vineyard monoculture into a layered system without losing yield in the transition.</field>
+        <field name="approach">Introduce inter-row and understory plantings in phases, sequenced so the existing crop keeps yielding through the transition years.</field>
+        <field name="expected_results">A layered system phased in over several seasons with the original crop's yield protected throughout.</field>
+        <field name="section_title">Monoculture transition</field>
+        <field name="section_template">{client_name} wants to layer an existing {monoculture_crop}. The plan phases in {inter_row_plantings} and {understory_plantings} over {transition_years} without yield loss.</field>
+    </record>
+
+    <record id="consult_module_nutrient_cycling" model="grove.consult.module">
+        <field name="key">nutrient_cycling</field>
+        <field name="name">Nutrient cycling and closed loop</field>
+        <field name="objective">Cut bought inputs by cycling nutrients and biomass on site.</field>
+        <field name="approach">Place chop-and-drop species by row, turn prunings into mulch and logs, and run a mushroom layer on the logs.</field>
+        <field name="expected_results">Lower input spend, on-site mulch and log yields, and a mushroom crop off the prunings.</field>
+        <field name="section_title">Nutrient cycling and closed loop</field>
+        <field name="section_template">{client_name} wants to cut bought inputs. The plan places chop-and-drop species by row, turns prunings into {mulch_and_logs}, and runs a mushroom layer on the logs.</field>
+    </record>
+
+    <record id="consult_module_climate_adaptation" model="grove.consult.module">
+        <field name="key">climate_adaptation</field>
+        <field name="name">Climate adaptation</field>
+        <field name="objective">Adapt the planting to the site's drought, heat or flood risk with minimal infrastructure.</field>
+        <field name="approach">Select species and placement for the dominant climate risk and keep the infrastructure minimal.</field>
+        <field name="expected_results">A planting matched to the site's climate risk that holds up with little added infrastructure.</field>
+        <field name="section_title">Climate adaptation</field>
+        <field name="section_template">{client_name}'s site carries {climate_risk}. The plan chooses {risk_matched_species} and placement for that risk with minimal infrastructure.</field>
+    </record>
+
+    <record id="consult_module_site_remediation" model="grove.consult.module">
+        <field name="key">site_remediation</field>
+        <field name="name">Site remediation</field>
+        <field name="objective">Bring degraded or marginal land back into production.</field>
+        <field name="approach">Start with pioneer consortia to build soil, then stage production species once the ground can carry them.</field>
+        <field name="expected_results">Soil rebuilt by pioneers first, with production species introduced on a staged schedule.</field>
+        <field name="section_title">Site remediation</field>
+        <field name="section_template">{client_name}'s land is {degradation_state}. The plan starts with pioneer consortia to build soil, then stages {production_species} once the ground can carry them.</field>
+    </record>
+
+    <record id="consult_module_wildlife_and_deer" model="grove.consult.module">
+        <field name="key">wildlife_and_deer</field>
+        <field name="name">Wildlife and deer</field>
+        <field name="objective">Bring in game by planting for deer and wildlife at consultant depth.</field>
+        <field name="approach">Run the retail planner's deer track at consultant depth — mast timing mapped by month, plus cover and water placement.</field>
+        <field name="expected_results">Year-round mast, cover and water that draw and hold game on the property.</field>
+        <field name="section_title">Wildlife and deer</field>
+        <field name="section_template">{client_name} wants to {wildlife_goal}. The plan runs the deer track at consultant depth: mast timing by month ({mast_calendar}), cover at {cover_locations}, and water at {water_points}.</field>
+    </record>
+</odoo>

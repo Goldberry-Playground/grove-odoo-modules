@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!-- Consult practices (GOL-3977, GOL-3575 spec C.2).
+
+     The seven syntropic practices from draft section 6.7 — five USDA
+     agroforestry practices plus two of ours (homestead food forest,
+     mycoforestry). Each record carries the layout defaults the phase-3
+     generator starts from and the consultant overrides per area.
+
+     Source mapping from the draft:
+       * strata                 — derived from the "Strata emphasis" column,
+                                  expressed over the eight-stratum vocabulary
+                                  overstory / understory / shrub / herb / ground
+                                  / root / vine / mushroom. Silvopasture lists no
+                                  shrub stratum; forest farming and mycoforestry
+                                  force shade-tolerant species (understory/ground
+                                  /mushroom only).
+       * site_needs             — the "Site needs" column, verbatim.
+       * infrastructure_defaults — the "Infrastructure defaults" column, as a
+                                  list of {key, unit, rate} entries. rate is a
+                                  0.0 PLACEHOLDER (the model's help calls it a
+                                  placeholder rate); the consultant sets the real
+                                  rate per area. Keys/units are derived, listed in
+                                  the PR for Josh to edit.
+       * retail_track / retail_subgoal — the "Retail counterpart" column.
+       * notes                  — layout archetype + strata emphasis prose.
+
+     The draft carries NO numeric row or in-row spacing, and the model does not
+     require it (both are optional Float, default 0.0). row_spacing_m and
+     in_row_spacing_m are left unset pending Josh's numbers on this card; the
+     consultant also overrides spacing per area. noupdate="1" so a module upgrade
+     never resets the consultant's edits. -->
+<odoo noupdate="1">
+    <record id="consult_practice_homestead_food_forest" model="grove.consult.practice">
+        <field name="key">homestead_food_forest</field>
+        <field name="name">Homestead food forest</field>
+        <field name="strata" eval="['overstory', 'understory', 'shrub', 'herb', 'ground', 'root', 'vine', 'mushroom']" />
+        <field name="site_needs">Any; closest to water and daily access.</field>
+        <field name="infrastructure_defaults" eval="[{'key': 'drip', 'unit': 'm', 'rate': 0.0}, {'key': 'deer_fence', 'unit': 'm', 'rate': 0.0}, {'key': 'paths', 'unit': 'm', 'rate': 0.0}]" />
+        <field name="retail_track">food_forest</field>
+        <field name="notes">Guild clusters and short rows around the house, dense, all eight strata. Full stack, heavy on understory and ground.</field>
+    </record>
+
+    <record id="consult_practice_alley_cropping" model="grove.consult.practice">
+        <field name="key">alley_cropping</field>
+        <field name="name">Alley cropping</field>
+        <field name="strata" eval="['overstory', 'understory']" />
+        <field name="site_needs">Workable alleys, equipment turning room at headlands.</field>
+        <field name="infrastructure_defaults" eval="[{'key': 'row_markers', 'unit': 'each', 'rate': 0.0}, {'key': 'drip', 'unit': 'm', 'rate': 0.0}, {'key': 'headland_access', 'unit': 'm', 'rate': 0.0}]" />
+        <field name="retail_track">agroforestry</field>
+        <field name="retail_subgoal">alley</field>
+        <field name="notes">Straight or contour tree rows with a crop alley between; alley width set by the equipment. Overstory anchors and companions in the row, understory only in the row.</field>
+    </record>
+
+    <record id="consult_practice_silvopasture" model="grove.consult.practice">
+        <field name="key">silvopasture</field>
+        <field name="name">Silvopasture</field>
+        <field name="strata" eval="['overstory', 'understory']" />
+        <field name="site_needs">Pasture, water for stock, fence lines.</field>
+        <field name="infrastructure_defaults" eval="[{'key': 'tree_protection', 'unit': 'stem', 'rate': 0.0}, {'key': 'paddock_fencing', 'unit': 'm', 'rate': 0.0}, {'key': 'water_points', 'unit': 'each', 'rate': 0.0}]" />
+        <field name="retail_track">agroforestry</field>
+        <field name="retail_subgoal">silvopasture</field>
+        <field name="notes">Widely spaced rows or clusters over pasture; stocking rate and shade target drive spacing. Overstory and high understory, nothing browse-height until established. No shrub stratum.</field>
+    </record>
+
+    <record id="consult_practice_forest_farming" model="grove.consult.practice">
+        <field name="key">forest_farming</field>
+        <field name="name">Forest farming</field>
+        <field name="strata" eval="['understory', 'ground', 'mushroom']" />
+        <field name="site_needs">Standing forest with canopy density known; shade-tolerant species only.</field>
+        <field name="infrastructure_defaults" eval="[{'key': 'access_trails', 'unit': 'm', 'rate': 0.0}, {'key': 'log_yards', 'unit': 'each', 'rate': 0.0}]" />
+        <field name="retail_track">forest_farming</field>
+        <field name="notes">Existing canopy kept; understory and floor crops planted beneath it. Shade-tolerant species only. Retail counterpart is the forest-farming category (coming soon).</field>
+    </record>
+
+    <record id="consult_practice_mycoforestry" model="grove.consult.practice">
+        <field name="key">mycoforestry</field>
+        <field name="name">Mycoforestry</field>
+        <field name="strata" eval="['mushroom', 'overstory']" />
+        <field name="site_needs">Hardwood canopy, moisture, shade.</field>
+        <field name="infrastructure_defaults" eval="[{'key': 'log_yard', 'unit': 'each', 'rate': 0.0}, {'key': 'soak_tank', 'unit': 'each', 'rate': 0.0}, {'key': 'chip_pile', 'unit': 'each', 'rate': 0.0}, {'key': 'shade_cloth', 'unit': 'm2', 'rate': 0.0}]" />
+        <field name="retail_track">mycoforestry</field>
+        <field name="notes">Managed woodland where the fungal layer is the crop; prunings and thinnings become substrate. Mushroom first, with the overstory managed as its log source. Retail counterpart is the mycoforestry category (coming soon).</field>
+    </record>
+
+    <record id="consult_practice_riparian_buffer" model="grove.consult.practice">
+        <field name="key">riparian_buffer</field>
+        <field name="name">Riparian buffer</field>
+        <field name="strata" eval="['overstory', 'understory', 'ground']" />
+        <field name="site_needs">Stream or pond edge, flood line mapped.</field>
+        <field name="infrastructure_defaults" eval="[{'key': 'livestock_exclusion_fence', 'unit': 'm', 'rate': 0.0}, {'key': 'crossings', 'unit': 'each', 'rate': 0.0}]" />
+        <field name="retail_track">agroforestry</field>
+        <field name="retail_subgoal">riparian</field>
+        <field name="notes">Three zones from the water out: unmanaged edge, managed trees and shrubs, grass filter. Wet-tolerant understory and overstory, living mulch.</field>
+    </record>
+
+    <record id="consult_practice_windbreak_hedgerow" model="grove.consult.practice">
+        <field name="key">windbreak_hedgerow</field>
+        <field name="name">Windbreak and hedgerow</field>
+        <field name="strata" eval="['overstory', 'understory']" />
+        <field name="site_needs">Wind direction and the fields or buildings protected.</field>
+        <field name="infrastructure_defaults" eval="[{'key': 'protection_stakes', 'unit': 'each', 'rate': 0.0}, {'key': 'snow_fence', 'unit': 'm', 'rate': 0.0}]" />
+        <field name="retail_track">agroforestry</field>
+        <field name="retail_subgoal">windbreak</field>
+        <field name="notes">Multi-row staggered belt across the prevailing wind, density by season. Overstory for height, understory for density, evergreens where winter wind matters.</field>
+    </record>
+</odoo>
