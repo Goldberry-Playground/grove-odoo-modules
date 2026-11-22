@@ -56,5 +56,91 @@ class TestPlatformAnalytic(unittest.TestCase):
         self.assertEqual(spec["company_key"], "farm")
 
 
+class TestAspectSpecs(unittest.TestCase):
+    def setUp(self):
+        self.specs = mod.aspect_specs()
+
+    def test_one_project_per_aspect_per_company(self):
+        # Nursery 6 + Farm 6 + Woodworking 2 = 14 (s8.1 starting list).
+        self.assertEqual(len(self.specs), 14)
+        by_company = {}
+        for s in self.specs:
+            by_company.setdefault(s["company_key"], []).append(s["name"])
+        self.assertEqual(len(by_company["nursery"]), 6)
+        self.assertEqual(len(by_company["farm"]), 6)
+        self.assertEqual(len(by_company["woodworking"]), 2)
+
+    def test_every_aspect_flagged_and_has_dedicated_analytic(self):
+        for s in self.specs:
+            self.assertTrue(s["grove_is_aspect"], s["name"])
+            self.assertFalse(s["grove_is_build"], s["name"])
+            self.assertTrue(s["analytic_name"], s["name"])
+
+    def test_company_keys_are_known(self):
+        self.assertTrue({s["company_key"] for s in self.specs} <= set(mod.COMPANY_NAMES))
+
+    def test_marketing_in_both_farm_and_nursery(self):
+        marketing = {s["company_key"] for s in self.specs if s["name"] == "Marketing"}
+        self.assertEqual(marketing, {"farm", "nursery"})
+
+    def test_catch_all_in_every_company(self):
+        catch = {s["company_key"] for s in self.specs if s["name"] == "Catch-all"}
+        self.assertEqual(catch, {"farm", "nursery", "woodworking"})
+
+    def test_specs_are_deterministic(self):
+        # Idempotency rests on a stable spec: same names, same order, every run.
+        self.assertEqual(self.specs, mod.aspect_specs())
+
+
+class TestFootpadBuildSpec(unittest.TestCase):
+    def setUp(self):
+        self.spec = mod.footpad_build_spec()
+
+    def test_build_under_the_nursery(self):
+        self.assertEqual(self.spec["company_key"], "nursery")
+        self.assertTrue(self.spec["grove_is_build"])
+        self.assertFalse(self.spec["grove_is_aspect"])
+
+    def test_exactly_seven_milestones(self):
+        self.assertEqual(len(self.spec["milestones"]), 7)
+
+    def test_has_its_own_analytic(self):
+        self.assertTrue(self.spec["analytic_name"])
+
+    def test_dates_and_budget_are_placeholders(self):
+        # Ship the structure; dates/budget fill on prod from Josh's doc.
+        self.assertTrue(all(m["deadline"] is None for m in self.spec["milestones"]))
+        self.assertIsNone(self.spec["budget_amount"])
+
+
+class TestGroveOdooSprintSpec(unittest.TestCase):
+    def setUp(self):
+        self.spec = mod.grove_odoo_sprint_spec()
+
+    def test_on_the_farm_with_platform_analytic(self):
+        self.assertEqual(self.spec["company_key"], "farm")
+        self.assertEqual(self.spec["analytic_name"], mod.platform_analytic_spec()["name"])
+
+    def test_neither_aspect_nor_build(self):
+        self.assertFalse(self.spec["grove_is_aspect"])
+        self.assertFalse(self.spec["grove_is_build"])
+
+    def test_tasks_carry_code_and_pull_request(self):
+        self.assertIn("code", self.spec["task_fields"])
+        self.assertIn("pull_request_url", self.spec["task_fields"])
+
+    def test_milestones_are_trains(self):
+        self.assertIn("Train #6", [m["name"] for m in self.spec["milestones"]])
+
+
+class TestProjectSeedRows(unittest.TestCase):
+    def test_rows_cover_aspects_plus_footpad_plus_sprint(self):
+        rows = mod.project_seed_rows()
+        # 14 aspects + footpad + sprint.
+        self.assertEqual(len(rows), 16)
+        self.assertEqual(rows[-2]["name"], mod.FOOTPAD_PROJECT_NAME)
+        self.assertEqual(rows[-1]["name"], mod.SPRINT_PROJECT_NAME)
+
+
 if __name__ == "__main__":
     unittest.main()
