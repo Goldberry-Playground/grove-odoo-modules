@@ -25,7 +25,8 @@ cd "$REPO_ROOT" || exit 1
 [ -d "$MODULE" ] || { echo "No such module directory: $MODULE" >&2; exit 2; }
 
 OCA_REPOS=(account-reconcile bank-statement-import account-financial-tools
-  account-financial-reporting reporting-engine server-ux mis-builder)
+  account-financial-reporting reporting-engine server-ux mis-builder
+  project web timesheet account-budgeting)
 
 mkdir -p .oca
 for r in "${OCA_REPOS[@]}"; do

@@ -44,6 +44,14 @@ sys.modules.setdefault("grove_calendar", _stub_pkg("grove_calendar", _gc_dir))
 sys.modules.setdefault("grove_calendar.models", _stub_pkg("grove_calendar.models", os.path.join(_gc_dir, "models")))
 sys.modules.setdefault("grove_calendar.tests", _stub_pkg("grove_calendar.tests", os.path.join(_gc_dir, "tests")))
 
+# Same for grove_ops (its real __init__ imports Odoo models). The pure spec
+# tests load scripts/setup_ops.py by file path, so they do not need the package
+# import; the stub just stops pytest from executing the real __init__ chain.
+_go_dir = os.path.join(_ROOT, "grove_ops")
+sys.modules.setdefault("grove_ops", _stub_pkg("grove_ops", _go_dir))
+sys.modules.setdefault("grove_ops.models", _stub_pkg("grove_ops.models", os.path.join(_go_dir, "models")))
+sys.modules.setdefault("grove_ops.tests", _stub_pkg("grove_ops.tests", os.path.join(_go_dir, "tests")))
+
 # The files below need a real Odoo runtime (TransactionCase etc.). They run
 # under Odoo's --test-enable runner, not pytest — exclude them from pytest
 # collection entirely so the odoo stubs above can't give them a confusing
@@ -145,4 +153,6 @@ collect_ignore_glob = [
     "grove_calendar/tests/test_discord_exceptions.py",
     "grove_calendar/tests/test_grove_website_domain.py",
     "grove_calendar/tests/test_events_feed_route.py",
+    "grove_ops/tests/test_projects.py",
+    "grove_ops/tests/test_aspect_coverage.py",
 ]
