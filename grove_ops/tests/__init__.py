@@ -7,5 +7,8 @@
 # test (test_hr_pure.py) is intentionally NOT listed here: it is a pytest file.
 from . import (
     test_aspect_coverage,  # noqa: F401
+    test_groups,  # noqa: F401
     test_projects,  # noqa: F401
+    test_register,  # noqa: F401
+    test_week_approval,  # noqa: F401
 )

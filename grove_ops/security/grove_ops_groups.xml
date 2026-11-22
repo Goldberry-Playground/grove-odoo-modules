@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <!--
+      Task 6 (GOL-4018, s11.2): the three farm-ops roles, designed rather than
+      defaulted. Worker < Lead < Owner, each implying the one below. They imply
+      ONLY base.group_user, so a member's access to tasks, hours, time off and
+      the transfers they pack comes solely from the grove record rules in
+      grove_ops_rules.xml — never from the broad project/timesheet app groups.
+      That is what keeps the worker scope tight (no accounting, no sales, no
+      other people's hours): absent the app groups, those models are simply out
+      of reach unless a grove rule opens a scoped row.
+
+      Installing these groups assigns NOBODY. The seven existing users keep
+      their current rights until Phase 2 assigns each a role from a list Josh
+      signs off on (s11.2), so nobody loses access as a side effect of install.
+    -->
+    <record id="module_category_grove_ops" model="ir.module.category">
+        <field name="name">Grove Operations</field>
+        <field name="description">Farm-ops roles: worker, lead, owner.</field>
+        <field name="sequence">90</field>
+    </record>
+
+    <record id="group_worker" model="res.groups">
+        <field name="name">Worker</field>
+        <field name="category_id" ref="module_category_grove_ops"/>
+        <field name="implied_ids" eval="[(4, ref('base.group_user'))]"/>
+        <field name="comment">Own tasks, own hours, own time off, and the transfers they pack. No accounting, no sales orders or prices, no other people's hours.</field>
+    </record>
+
+    <record id="group_lead" model="res.groups">
+        <field name="name">Lead</field>
+        <field name="category_id" ref="module_category_grove_ops"/>
+        <field name="implied_ids" eval="[(4, ref('group_worker'))]"/>
+        <field name="comment">Everything a worker sees, plus the crew's tasks and hours, the planner, and approval of the week and time off. Every owner-operator is a lead.</field>
+    </record>
+
+    <record id="group_owner" model="res.groups">
+        <field name="name">Owner</field>
+        <field name="category_id" ref="module_category_grove_ops"/>
+        <field name="implied_ids" eval="[(4, ref('group_lead'))]"/>
+        <field name="comment">Everything a lead sees. Owner-operators also hold the standard Odoo admin rights, assigned separately.</field>
+    </record>
+</odoo>

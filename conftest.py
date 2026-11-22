@@ -155,4 +155,7 @@ collect_ignore_glob = [
     "grove_calendar/tests/test_events_feed_route.py",
     "grove_ops/tests/test_projects.py",
     "grove_ops/tests/test_aspect_coverage.py",
+    "grove_ops/tests/test_groups.py",
+    "grove_ops/tests/test_week_approval.py",
+    "grove_ops/tests/test_register.py",
 ]

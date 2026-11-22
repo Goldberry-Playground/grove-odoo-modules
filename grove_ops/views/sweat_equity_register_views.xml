@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Task 7 (GOL-4018, s11.4): the register every member can read. -->
+    <record id="view_sweat_equity_register_pivot" model="ir.ui.view">
+        <field name="name">grove.sweat.equity.register.pivot</field>
+        <field name="model">grove.sweat.equity.register</field>
+        <field name="arch" type="xml">
+            <pivot string="Sweat-equity register" sample="0">
+                <field name="employee_id" type="row"/>
+                <field name="year" type="col"/>
+                <field name="hours" type="measure"/>
+                <field name="value" type="measure"/>
+            </pivot>
+        </field>
+    </record>
+
+    <record id="view_sweat_equity_register_list" model="ir.ui.view">
+        <field name="name">grove.sweat.equity.register.list</field>
+        <field name="model">grove.sweat.equity.register</field>
+        <field name="arch" type="xml">
+            <list string="Sweat-equity register" create="false" edit="false" delete="false">
+                <field name="year"/>
+                <field name="employee_id"/>
+                <field name="company_id"/>
+                <field name="hours" sum="Approved hours"/>
+                <field name="rate"/>
+                <field name="value" sum="Contribution value"/>
+                <field name="currency_id" column_invisible="1"/>
+            </list>
+        </field>
+    </record>
+
+    <record id="action_sweat_equity_register" model="ir.actions.act_window">
+        <field name="name">Sweat-equity register</field>
+        <field name="res_model">grove.sweat.equity.register</field>
+        <field name="view_mode">pivot,list</field>
+        <field name="help" type="html">
+            <p class="o_view_nocontent_smiley_face">Approved hours, valued at the co-op rate.</p>
+            <p>Hours show here once a week is approved. Approved hours by person, by company, by year — the legal record of contribution under the co-op agreement.</p>
+        </field>
+    </record>
+
+    <menuitem id="menu_grove_ops_root"
+              name="Grove Operations"
+              sequence="95"/>
+    <menuitem id="menu_sweat_equity_register"
+              name="Sweat-equity register"
+              parent="menu_grove_ops_root"
+              action="action_sweat_equity_register"
+              sequence="10"/>
+</odoo>

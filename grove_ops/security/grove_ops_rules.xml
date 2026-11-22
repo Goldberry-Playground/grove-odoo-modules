@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <!--
+      Task 6 (GOL-4018, s11.2): record rules that scope the worker to their own
+      rows. Each rule belongs to group_worker only. Because the worker group
+      does not imply the project/timesheet app groups, these rules are the sole
+      gate on the rows a worker can reach for each model — the access rights in
+      ir.model.access.csv open the table, these rules narrow it to "mine".
+
+      Lead and owner are granted the same models with NO restrictive rule (see
+      ir.model.access.csv), so for a lead the own-row rule is OR'd with an
+      unrestricted grant and the lead sees the whole crew. A plain worker, in
+      only group_worker, is held to their own rows.
+    -->
+
+    <!-- Own timesheets / analytic lines: a worker sees and edits only hours
+         they logged. No other person's hours (s11.2). -->
+    <record id="rule_worker_own_timesheet" model="ir.rule">
+        <field name="name">Worker: own timesheets only</field>
+        <field name="model_id" ref="analytic.model_account_analytic_line"/>
+        <field name="groups" eval="[(4, ref('group_worker'))]"/>
+        <field name="domain_force">[('user_id', '=', user.id)]</field>
+        <field name="perm_read" eval="True"/>
+        <field name="perm_write" eval="True"/>
+        <field name="perm_create" eval="True"/>
+        <field name="perm_unlink" eval="True"/>
+    </record>
+
+    <!-- Own tasks: a worker sees the tasks assigned to them, across all
+         projects (s11.2). -->
+    <record id="rule_worker_own_tasks" model="ir.rule">
+        <field name="name">Worker: own tasks only</field>
+        <field name="model_id" ref="project.model_project_task"/>
+        <field name="groups" eval="[(4, ref('group_worker'))]"/>
+        <field name="domain_force">[('user_ids', 'in', user.id)]</field>
+        <field name="perm_read" eval="True"/>
+        <field name="perm_write" eval="False"/>
+        <field name="perm_create" eval="False"/>
+        <field name="perm_unlink" eval="False"/>
+    </record>
+
+    <!-- Own weeks for editing; but every member can READ every week and its
+         history (s11.3: approvals are public to all). Two rules: a global read
+         rule opens all sheets to read for anyone with table access, and a
+         worker rule restricts write/create/submit to their own sheet. -->
+    <record id="rule_sheet_read_all" model="ir.rule">
+        <field name="name">Weeks are public to read</field>
+        <field name="model_id" ref="hr_timesheet_sheet.model_hr_timesheet_sheet"/>
+        <field name="groups" eval="[(4, ref('group_worker'))]"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+        <field name="perm_read" eval="True"/>
+        <field name="perm_write" eval="False"/>
+        <field name="perm_create" eval="False"/>
+        <field name="perm_unlink" eval="False"/>
+    </record>
+    <record id="rule_worker_own_sheet_write" model="ir.rule">
+        <field name="name">Worker: edit own week only</field>
+        <field name="model_id" ref="hr_timesheet_sheet.model_hr_timesheet_sheet"/>
+        <field name="groups" eval="[(4, ref('group_worker'))]"/>
+        <field name="domain_force">[('employee_id.user_id', '=', user.id)]</field>
+        <field name="perm_read" eval="False"/>
+        <field name="perm_write" eval="True"/>
+        <field name="perm_create" eval="True"/>
+        <field name="perm_unlink" eval="False"/>
+    </record>
+
+    <!-- The packing exception: a worker sees the transfers they are responsible
+         for packing, and nothing else in inventory (s11.2). -->
+    <record id="rule_worker_own_picking" model="ir.rule">
+        <field name="name">Worker: own transfers only</field>
+        <field name="model_id" ref="stock.model_stock_picking"/>
+        <field name="groups" eval="[(4, ref('group_worker'))]"/>
+        <field name="domain_force">[('user_id', '=', user.id)]</field>
+        <field name="perm_read" eval="True"/>
+        <field name="perm_write" eval="True"/>
+        <field name="perm_create" eval="False"/>
+        <field name="perm_unlink" eval="False"/>
+    </record>
+    <record id="rule_worker_own_picking_moves" model="ir.rule">
+        <field name="name">Worker: moves of own transfers</field>
+        <field name="model_id" ref="stock.model_stock_move"/>
+        <field name="groups" eval="[(4, ref('group_worker'))]"/>
+        <field name="domain_force">[('picking_id.user_id', '=', user.id)]</field>
+        <field name="perm_read" eval="True"/>
+        <field name="perm_write" eval="False"/>
+        <field name="perm_create" eval="False"/>
+        <field name="perm_unlink" eval="False"/>
+    </record>
+    <record id="rule_worker_own_picking_move_lines" model="ir.rule">
+        <field name="name">Worker: move lines of own transfers</field>
+        <field name="model_id" ref="stock.model_stock_move_line"/>
+        <field name="groups" eval="[(4, ref('group_worker'))]"/>
+        <field name="domain_force">[('picking_id.user_id', '=', user.id)]</field>
+        <field name="perm_read" eval="True"/>
+        <field name="perm_write" eval="True"/>
+        <field name="perm_create" eval="False"/>
+        <field name="perm_unlink" eval="False"/>
+    </record>
+
+    <!--
+      Lead sees the whole crew. Each lead rule is an unrestricted domain OR'd
+      (same user, group_lead implies group_worker) with the worker's own-row
+      rule above, so a lead sees every row while a plain worker stays scoped to
+      their own. Leads approve any week except their own (the non-self-approval
+      guard lives in Python, models/hr_timesheet_sheet.py, not here).
+    -->
+    <record id="rule_lead_all_timesheets" model="ir.rule">
+        <field name="name">Lead: crew timesheets</field>
+        <field name="model_id" ref="analytic.model_account_analytic_line"/>
+        <field name="groups" eval="[(4, ref('group_lead'))]"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+        <field name="perm_read" eval="True"/>
+        <field name="perm_write" eval="True"/>
+        <field name="perm_create" eval="True"/>
+        <field name="perm_unlink" eval="True"/>
+    </record>
+    <record id="rule_lead_all_tasks" model="ir.rule">
+        <field name="name">Lead: crew tasks</field>
+        <field name="model_id" ref="project.model_project_task"/>
+        <field name="groups" eval="[(4, ref('group_lead'))]"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+        <field name="perm_read" eval="True"/>
+        <field name="perm_write" eval="True"/>
+        <field name="perm_create" eval="True"/>
+        <field name="perm_unlink" eval="False"/>
+    </record>
+    <record id="rule_lead_all_sheets" model="ir.rule">
+        <field name="name">Lead: approve any week</field>
+        <field name="model_id" ref="hr_timesheet_sheet.model_hr_timesheet_sheet"/>
+        <field name="groups" eval="[(4, ref('group_lead'))]"/>
+        <field name="domain_force">[(1, '=', 1)]</field>
+        <field name="perm_read" eval="True"/>
+        <field name="perm_write" eval="True"/>
+        <field name="perm_create" eval="True"/>
+        <field name="perm_unlink" eval="False"/>
+    </record>
+</odoo>

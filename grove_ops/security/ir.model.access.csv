@@ -1,0 +1,12 @@
+id,name,model_id:id,group_id:id,perm_read,perm_write,perm_create,perm_unlink
+access_worker_analytic_line,worker.analytic.line,analytic.model_account_analytic_line,grove_ops.group_worker,1,1,1,0
+access_worker_project_task,worker.project.task,project.model_project_task,grove_ops.group_worker,1,0,0,0
+access_worker_project_project,worker.project.project,project.model_project_project,grove_ops.group_worker,1,0,0,0
+access_worker_timesheet_sheet,worker.timesheet.sheet,hr_timesheet_sheet.model_hr_timesheet_sheet,grove_ops.group_worker,1,1,1,0
+access_worker_stock_picking,worker.stock.picking,stock.model_stock_picking,grove_ops.group_worker,1,1,0,0
+access_worker_stock_move,worker.stock.move,stock.model_stock_move,grove_ops.group_worker,1,0,0,0
+access_worker_stock_move_line,worker.stock.move.line,stock.model_stock_move_line,grove_ops.group_worker,1,1,0,0
+access_lead_analytic_line,lead.analytic.line,analytic.model_account_analytic_line,grove_ops.group_lead,1,1,1,1
+access_lead_project_task,lead.project.task,project.model_project_task,grove_ops.group_lead,1,1,1,0
+access_lead_timesheet_sheet,lead.timesheet.sheet,hr_timesheet_sheet.model_hr_timesheet_sheet,grove_ops.group_lead,1,1,1,0
+access_register_all_members,sweat.equity.register.all,model_grove_sweat_equity_register,base.group_user,1,0,0,0

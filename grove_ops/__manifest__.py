@@ -8,6 +8,7 @@
     "license": "AGPL-3",
     "depends": [
         "project",
+        "stock",
         "hr_timesheet",
         "hr_holidays",
         "hr_expense",
@@ -21,9 +22,13 @@
         "account_budget_oca",
     ],
     "data": [
+        "security/grove_ops_groups.xml",
+        "security/grove_ops_rules.xml",
+        "security/ir.model.access.csv",
         "data/aspect_tags.xml",
         "views/project_views.xml",
         "views/hr_employee_views.xml",
+        "views/sweat_equity_register_views.xml",
     ],
     "installable": True,
     "application": False,
