@@ -1316,6 +1316,13 @@ class ProductTemplate(models.Model):
         default="none",
         help="Tracks the Paperclip content-drafter workflow (GOL-2384/C).",
     )
+    grove_consult_step_ok = fields.Boolean(
+        string="Consult service step",
+        default=False,
+        help="Tick to offer this service as a consult pipeline step in the "
+        "dashboard step picker (GOL-4093, spec C.6). Set on the seeded consult "
+        "menu products; add it to any new service Josh wants to appear there.",
+    )
 
     # Printify print-on-demand merch (spec 2026-10-13-printify-merch-design.md).
     # ``printify`` products skip every plant rule at checkout and are fulfilled by
