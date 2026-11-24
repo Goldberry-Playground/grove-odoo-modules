@@ -275,8 +275,10 @@ class ConsultController(http.Controller):
                     ("grove_consult_step_ok", "=", True),
                     ("company_id", "in", (company.id, False)),
                 ],
-                order="lst_price, name",
             )
+            # lst_price (and the related display name) are computed, not stored,
+            # so they cannot go in an SQL ORDER BY — sort the recordset in Python.
+            .sorted(key=lambda p: (p.lst_price, p.display_name))
         )
         return _json_response({"steps": [self._step_dict(s) for s in steps]})
 
