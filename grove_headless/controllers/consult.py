@@ -24,6 +24,7 @@ from odoo.exceptions import AccessError, UserError, ValidationError
 from odoo.http import request
 
 from ..models import consult_travel
+from ..models.shipping_calendar import usda_zone_for_zip
 from .main import _farm_pickup_zip, _json_response
 
 CONSULT_ENABLED_PARAM = "grove_headless.consult_enabled"
@@ -85,6 +86,16 @@ class ConsultController(http.Controller):
             "sequence": area.sequence,
         }
 
+    def _zone(self, lead):
+        """USDA hardiness zone for the lead's ZIP as a string, or ``None``.
+
+        The matrix carries integer zones only (no a/b suffix) and is pre-filtered
+        to the served green states, so a lead outside that span reads ``None`` and
+        the app simply shows no zone. Serving it here saves the app a ``/zone``
+        call per pipeline row (GOL-4093)."""
+        zone = usda_zone_for_zip(lead.zip or "")
+        return str(zone) if zone is not None else None
+
     def _lead_dict(self, lead, *, full=False):
         data = {
             "id": lead.id,
@@ -94,10 +105,15 @@ class ConsultController(http.Controller):
             "phone": lead.phone or None,
             "zip": lead.zip or None,
             "consult_stage": lead.grove_consult_stage or None,
+            "stage_since": lead.grove_stage_since.isoformat() if lead.grove_stage_since else None,
+            "zone": self._zone(lead),
             "hands_on": lead.grove_hands_on or None,
             "consult_step_id": lead.grove_consult_step.id or None,
             "module_ids": lead.grove_module_ids.ids,
             "travel_estimate": lead.grove_travel_estimate or None,
+            # Areas ride the pipeline brief too so the dashboard needs no extra
+            # read per lead to show them (GOL-4093).
+            "areas": [self._area_dict(a) for a in lead.grove_area_ids],
         }
         if full:
             data.update(
@@ -106,8 +122,10 @@ class ConsultController(http.Controller):
                     "existing": lead.grove_existing or None,
                     "property_uuid": lead.grove_property_uuid or None,
                     "stock_location_id": lead.grove_stock_location_id.id or None,
-                    "areas": [self._area_dict(a) for a in lead.grove_area_ids],
                     "module_keys": lead.grove_module_ids.mapped("key"),
+                    # Always an object once the field exists, so the app can tell
+                    # "supported, empty" from "not supported" (GOL-4093).
+                    "walk_checklist": lead.grove_walk_checklist or {},
                 }
             )
         return data
@@ -129,8 +147,33 @@ class ConsultController(http.Controller):
             "strata": practice.strata or [],
             "row_spacing_m": practice.row_spacing_m,
             "in_row_spacing_m": practice.in_row_spacing_m,
+            "site_needs": practice.site_needs or None,
             "infrastructure_defaults": practice.infrastructure_defaults or [],
             "retail_track": practice.retail_track or None,
+        }
+
+    def _step_dict(self, product):
+        return {
+            "id": product.id,
+            "name": product.display_name,
+            "price": product.lst_price,
+        }
+
+    def _section_dict(self, section):
+        """Full section shape for the Design tab (GOL-4093): the live body, the
+        machine draft kept beside it, the one-line edit note, who signed off (the
+        verified actor, not the API user) and when."""
+        return {
+            "id": section.id,
+            "key": section.key,
+            "title": section.title,
+            "status": section.status,
+            "module_id": section.module_id.id or None,
+            "body": section.body or "",
+            "draft_body": section.draft_body or "",
+            "edit_note": section.edit_note or "",
+            "by": section.by_actor or (section.by.name or ""),
+            "approved_at": section.approved_at.isoformat() if section.approved_at else None,
         }
 
     def _plan_dict(self, plan):
@@ -139,10 +182,7 @@ class ConsultController(http.Controller):
             "lead_id": plan.lead_id.id,
             "version": plan.version,
             "status": plan.status,
-            "section_ids": [
-                {"id": s.id, "key": s.key, "title": s.title, "status": s.status, "module_id": s.module_id.id or None}
-                for s in plan.section_ids
-            ],
+            "section_ids": [self._section_dict(s) for s in plan.section_ids],
         }
 
     # ── read routes ─────────────────────────────────────────────────────────
@@ -178,6 +218,30 @@ class ConsultController(http.Controller):
             return _json_response({"error": "lead not found"}, status=404)
         return _json_response({"lead": self._lead_dict(lead, full=True)})
 
+    @http.route(
+        "/grove/api/v1/consult/lead/<int:lead_id>/plans",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["GET"],
+        csrf=False,
+    )
+    def consult_plans(self, lead_id, **_kw):
+        """Every plan version for a lead with its full sections (GOL-4093), so the
+        Design tab can read a plan back after the generator or a human fills it."""
+        if not self._enabled():
+            return self._disabled_response()
+        lead = self._lead(lead_id)
+        if not lead:
+            return _json_response({"error": "lead not found"}, status=404)
+        plans = (
+            request.env["grove.consult.plan"]
+            .sudo()
+            .with_company(self._company())
+            .search([("lead_id", "=", lead.id)], order="version desc")
+        )
+        return _json_response({"plans": [self._plan_dict(p) for p in plans]})
+
     @http.route("/grove/api/v1/consult/modules", type="http", auth="bearer", website=True, methods=["GET"], csrf=False)
     def consult_modules(self, **_kw):
         if not self._enabled():
@@ -193,6 +257,30 @@ class ConsultController(http.Controller):
             return self._disabled_response()
         practices = request.env["grove.consult.practice"].sudo().search([])
         return _json_response({"practices": [self._practice_dict(p) for p in practices]})
+
+    @http.route("/grove/api/v1/consult/steps", type="http", auth="bearer", website=True, methods=["GET"], csrf=False)
+    def consult_steps(self, **_kw):
+        """The consult service menu (C.6): the service products the step picker
+        offers (GOL-4093). Scoped to the company and flagged with
+        ``grove_consult_step_ok`` so unrelated services (S&H, labor) never leak in."""
+        if not self._enabled():
+            return self._disabled_response()
+        company = self._company()
+        steps = (
+            request.env["product.product"]
+            .sudo()
+            .with_company(company)
+            .search(
+                [
+                    ("grove_consult_step_ok", "=", True),
+                    ("company_id", "in", (company.id, False)),
+                ],
+            )
+            # lst_price (and the related display name) are computed, not stored,
+            # so they cannot go in an SQL ORDER BY — sort the recordset in Python.
+            .sorted(key=lambda p: (p.lst_price, p.display_name))
+        )
+        return _json_response({"steps": [self._step_dict(s) for s in steps]})
 
     @http.route("/grove/api/v1/consult/travel", type="http", auth="bearer", website=True, methods=["GET"], csrf=False)
     def consult_travel(self, **kw):
@@ -215,6 +303,15 @@ class ConsultController(http.Controller):
         for field in _LEAD_SCALAR_FIELDS:
             if field in payload:
                 vals[field] = payload[field]
+        # Native lead fields the intake form also writes (GOL-4093): a client can
+        # be renamed and its ZIP set on an update, not just at create.
+        if "name" in payload and str(payload["name"]).strip():
+            vals["name"] = str(payload["name"]).strip()
+        if "zip" in payload:
+            vals["zip"] = payload["zip"] or False
+        if "walk_checklist" in payload:
+            walk = payload["walk_checklist"]
+            vals["grove_walk_checklist"] = walk if isinstance(walk, dict) else {}
         if "consult_step_id" in payload:
             vals["grove_consult_step"] = payload["consult_step_id"] or False
         if "stock_location_id" in payload:
@@ -336,7 +433,9 @@ class ConsultController(http.Controller):
     def consult_plan_section(self, lead_id, version, key, **_kw):
         """Write one section (C.7/C.8): ``body``, ``edit_note``, or ``approve: true``.
         All capture goes through the model's ``write``/``action_approve`` so the
-        snapshots are taken in one place."""
+        snapshots are taken in one place. An ``actor`` (the verified Cloudflare
+        Access email the app holds) is recorded as who signed off, not the API
+        user (GOL-4093)."""
         if not self._enabled():
             return self._disabled_response()
         lead = self._lead(lead_id)
@@ -354,6 +453,7 @@ class ConsultController(http.Controller):
         if not section:
             return _json_response({"error": "section not found"}, status=404)
         payload = self._body()
+        actor = (payload.get("actor") or "").strip()
         try:
             with request.env.cr.savepoint():
                 vals = {}
@@ -362,6 +462,8 @@ class ConsultController(http.Controller):
                     vals["status"] = "edited"
                 if "edit_note" in payload:
                     vals["edit_note"] = payload["edit_note"]
+                if actor:
+                    vals["by_actor"] = actor
                 if vals:
                     ctx = {}
                     if payload.get("draft_source"):
@@ -370,9 +472,63 @@ class ConsultController(http.Controller):
                         ctx["consult_draft_inputs"] = payload["draft_inputs"]
                     section.with_context(**ctx).write(vals)
                 if payload.get("approve") is True:
-                    section.action_approve()
+                    section.action_approve(actor=actor or None)
         except (AccessError, UserError, ValidationError) as err:
             return _json_response({"error": str(err)}, status=422)
-        return _json_response(
-            {"section": {"id": section.id, "key": section.key, "status": section.status, "title": section.title}}
+        return _json_response({"section": self._section_dict(section)})
+
+    @http.route(
+        "/grove/api/v1/consult/lead/<int:lead_id>/walk",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def consult_lead_walk(self, lead_id, **_kw):
+        """Save the site-walk checklist (GOL-4093). Body ``{"walk": {key: bool}}``;
+        a full replace of the stored map. (``POST /lead`` with ``walk_checklist``
+        writes the same field, so the app may use either.)"""
+        if not self._enabled():
+            return self._disabled_response()
+        lead = self._lead(lead_id)
+        if not lead:
+            return _json_response({"error": "lead not found"}, status=404)
+        walk = self._body().get("walk")
+        if not isinstance(walk, dict):
+            return _json_response({"error": "walk must be an object"}, status=422)
+        lead.write({"grove_walk_checklist": walk})
+        return _json_response({"lead": self._lead_dict(lead, full=True)})
+
+    @http.route(
+        "/grove/api/v1/consult/lead/<int:lead_id>/plan/<int:version>/approve",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["POST"],
+        csrf=False,
+    )
+    def consult_plan_approve(self, lead_id, version, **_kw):
+        """Approve a whole plan (C.4 / GOL-4093). Refuses with 422 unless every
+        section is approved; on success the plan is locked to ``approved`` and the
+        verified ``actor`` is recorded as approver."""
+        if not self._enabled():
+            return self._disabled_response()
+        lead = self._lead(lead_id)
+        if not lead:
+            return _json_response({"error": "lead not found"}, status=404)
+        plan = (
+            request.env["grove.consult.plan"]
+            .sudo()
+            .with_company(self._company())
+            .search([("lead_id", "=", lead.id), ("version", "=", version)], limit=1)
         )
+        if not plan:
+            return _json_response({"error": "plan not found"}, status=404)
+        actor = (self._body().get("actor") or "").strip()
+        try:
+            with request.env.cr.savepoint():
+                plan.action_approve(actor=actor or None)
+        except (AccessError, UserError, ValidationError) as err:
+            return _json_response({"error": str(err)}, status=422)
+        return _json_response({"plan": self._plan_dict(plan)})

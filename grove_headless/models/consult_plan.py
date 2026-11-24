@@ -40,6 +40,12 @@ class GroveConsultPlan(models.Model):
     plan_json = fields.Json(string="Plan", help="Rows and consortia, the planner-plan shape extended with areas.")
     approved_by = fields.Many2one("res.users", string="Approved by", readonly=True)
     approved_at = fields.Datetime(string="Approved at", readonly=True)
+    approved_actor = fields.Char(
+        string="Approved by (actor)",
+        readonly=True,
+        help="The verified Cloudflare Access email that approved the whole plan "
+        "(GOL-4093); the Odoo user that ran the call is in ``approved_by``.",
+    )
     sale_order_id = fields.Many2one("sale.order", string="Sale order", ondelete="set null")
     section_ids = fields.One2many("grove.consult.plan.section", "plan_id", string="Sections")
 
@@ -68,6 +74,20 @@ class GroveConsultPlan(models.Model):
             vals.setdefault("approved_by", self.env.user.id)
             vals.setdefault("approved_at", fields.Datetime.now())
         return super().write(vals)
+
+    def action_approve(self, actor=None):
+        """Approve the whole plan (C.4 / GOL-4093).
+
+        The ``status`` constraint refuses unless every section is already
+        approved; ``write`` stamps the approver and time. ``actor`` records the
+        verified person who approved from the dashboard (never the API user).
+        """
+        self.ensure_one()
+        vals = {"status": "approved"}
+        if actor:
+            vals["approved_actor"] = actor
+        self.write(vals)
+        return True
 
     def create_skeleton_sections(self, module_ids=None):
         """Create one empty skeleton section per module (spec C.4/C.8).
@@ -115,6 +135,12 @@ class GroveConsultPlanSection(models.Model):
         index=True,
     )
     by = fields.Many2one("res.users", string="By")
+    by_actor = fields.Char(
+        string="Signed off by (actor)",
+        help="The verified Cloudflare Access email that last saved or approved "
+        "this section from the dashboard (GOL-4093). The Odoo user that ran the "
+        "API call is in ``by``; the dashboard shows this.",
+    )
     sequence = fields.Integer(string="Sequence", default=10)
 
     # C.8 training-capture snapshots (read-only; written only by the paths below).
@@ -153,16 +179,22 @@ class GroveConsultPlanSection(models.Model):
 
         return super().write(vals)
 
-    def action_approve(self):
-        """Sign off the section: snapshot the approved body, approver and time."""
+    def action_approve(self, actor=None):
+        """Sign off the section: snapshot the approved body, approver and time.
+
+        ``actor`` is the verified person who signed off from the dashboard
+        (GOL-4093); it is recorded in ``by_actor`` and is what the app shows,
+        while ``by`` keeps the Odoo user that ran the call for the audit trail.
+        """
         now = fields.Datetime.now()
         for section in self:
-            section.with_context(consult_snapshot=True).write(
-                {
-                    "status": "approved",
-                    "approved_body": section.body,
-                    "approved_at": now,
-                    "by": self.env.user.id,
-                }
-            )
+            vals = {
+                "status": "approved",
+                "approved_body": section.body,
+                "approved_at": now,
+                "by": self.env.user.id,
+            }
+            if actor:
+                vals["by_actor"] = actor
+            section.with_context(consult_snapshot=True).write(vals)
         return True
