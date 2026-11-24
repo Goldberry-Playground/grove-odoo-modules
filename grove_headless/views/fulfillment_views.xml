@@ -149,6 +149,33 @@
                             groups="sales_team.group_sale_manager" />
                 </group>
             </xpath>
+            <!-- Order attribution (GOL-4077): where the buyer came from, captured
+                 at checkout from the storefront `attribution` payload. Read-only
+                 and shown only when the order actually carries attribution, so it
+                 never clutters a POS / walk-in order. Revenue-by-channel is read
+                 through the /orders/attribution endpoint; this is the per-order
+                 view the "shows them on the order in Odoo" acceptance reads. -->
+            <xpath expr="//field[@name='order_line']" position="after">
+                <group string="Attribution" name="grove_attribution"
+                       invisible="not grove_utm_source and not grove_utm_medium and not grove_utm_campaign and not grove_landing_page and not grove_referrer">
+                    <group>
+                        <field name="grove_utm_source" readonly="1" invisible="not grove_utm_source" />
+                        <field name="grove_utm_medium" readonly="1" invisible="not grove_utm_medium" />
+                        <field name="grove_utm_campaign" readonly="1" invisible="not grove_utm_campaign" />
+                        <field name="grove_utm_content" readonly="1" invisible="not grove_utm_content" />
+                        <field name="grove_utm_term" readonly="1" invisible="not grove_utm_term" />
+                    </group>
+                    <group>
+                        <field name="grove_landing_page" readonly="1" invisible="not grove_landing_page" />
+                        <field name="grove_referrer" readonly="1" invisible="not grove_referrer" />
+                        <field name="grove_marketing_tags_eligible" readonly="1" />
+                        <field name="grove_ga_client_id" readonly="1" invisible="not grove_ga_client_id" />
+                        <field name="grove_ga_session_id" readonly="1" invisible="not grove_ga_session_id" />
+                        <field name="grove_fbp" readonly="1" invisible="not grove_fbp" />
+                        <field name="grove_fbc" readonly="1" invisible="not grove_fbc" />
+                    </group>
+                </group>
+            </xpath>
         </field>
     </record>
 

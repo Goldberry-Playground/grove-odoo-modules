@@ -46,6 +46,8 @@ from . import (
     test_mark_shipped_tracking,  # noqa: F401
     test_migration_relink_xmlids,  # noqa: F401
     test_newsletter_subscribe,  # noqa: F401
+    test_order_attribution,  # noqa: F401  pure UTM/attribution sanitiser (GOL-4077)
+    test_order_attribution_flow,  # noqa: F401  attribution write + read endpoint (GOL-4077)
     test_order_card_refresh,  # noqa: F401
     test_order_digest,  # noqa: F401
     test_order_hold_nudge,  # noqa: F401

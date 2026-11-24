@@ -18,7 +18,7 @@ from odoo.exceptions import AccessError, UserError
 from odoo.http import Response, request
 
 from ..hooks import _get_company_wv_state_tax
-from ..models import bundle_substitution, capture_leads, printify_client, promotions, stripe_gateway
+from ..models import bundle_substitution, capture_leads, order_attribution, printify_client, promotions, stripe_gateway
 from ..models.discord_tag import tag_discord_message
 from ..models.image_resolution import GROVE_MIN_IMAGE_LONG_EDGE
 from ..models.label_batch import LabelBatchError
@@ -2163,6 +2163,67 @@ class GroveHeadlessAPI(http.Controller):
         )
 
     @http.route(
+        "/grove/api/v1/orders/attribution",
+        type="http",
+        auth="bearer",
+        website=True,
+        methods=["GET"],
+        csrf=False,
+    )
+    def order_attribution_report(self, **kwargs):
+        """Revenue grouped by storefront attribution for the Sunday insights routine (GOL-4077).
+
+        Bearer-auth'd read endpoint (same key class as /orders). Groups this
+        tenant's paid orders over a date range by one attribution dimension —
+        source / medium / campaign / content / term, default ``source`` — and
+        returns order_count + revenue per bucket plus the range totals. Read-only
+        and company-scoped. ``from`` / ``to`` are YYYY-MM-DD on date_order
+        (inclusive); default range is the trailing 7 days for the Sunday routine.
+        """
+        group_key = (kwargs.get("group_by") or "source").strip().lower()
+        field = order_attribution.GROUP_FIELDS.get(group_key)
+        if field is None:
+            return _json_response(
+                {"error": "group_by must be one of: %s" % ", ".join(sorted(order_attribution.GROUP_FIELDS))},
+                status=400,
+            )
+        today = _today_utc()
+        try:
+            date_to = _date.fromisoformat(kwargs["to"]) if kwargs.get("to") else today
+            date_from = _date.fromisoformat(kwargs["from"]) if kwargs.get("from") else date_to - timedelta(days=7)
+        except ValueError:
+            return _json_response({"error": "from/to must be ISO dates (YYYY-MM-DD)"}, status=400)
+        if date_from > date_to:
+            return _json_response({"error": "from must not be after to"}, status=400)
+
+        company = request.website.company_id
+        # date_order is a Datetime; bound it to the inclusive calendar range.
+        domain = [
+            ("company_id", "=", company.id),
+            ("grove_checkout_status", "in", list(order_attribution.REVENUE_STATUSES)),
+            ("date_order", ">=", f"{date_from.isoformat()} 00:00:00"),
+            ("date_order", "<=", f"{date_to.isoformat()} 23:59:59"),
+        ]
+        SaleOrder = request.env["sale.order"].sudo().with_company(company)
+        groups = SaleOrder._read_group(domain=domain, groupby=[field], aggregates=["__count", "amount_total:sum"])
+        rows = [
+            {group_key: value or None, "order_count": count, "revenue": round(revenue or 0.0, 2)}
+            for value, count, revenue in groups
+        ]
+        rows.sort(key=lambda r: r["revenue"], reverse=True)
+        return _json_response(
+            {
+                "from": date_from.isoformat(),
+                "to": date_to.isoformat(),
+                "group_by": group_key,
+                "currency": company.currency_id.name,
+                "order_count": sum(r["order_count"] for r in rows),
+                "revenue": round(sum(r["revenue"] for r in rows), 2),
+                "groups": rows,
+            }
+        )
+
+    @http.route(
         "/grove/api/v1/orders/<int:order_id>/mark-shipped",
         type="http",
         auth="bearer",
@@ -3579,6 +3640,47 @@ def _get_or_create_partner_categories(env, names):
         if name not in by_name:
             by_name[name] = Category.create({"name": name}).id
     return [by_name[name] for name in unique_names]
+
+
+def _mirror_builtin_utm(order, vals):
+    """Mirror source / medium / campaign onto Odoo's built-in utm.mixin m2o fields.
+
+    No-op on a build that doesn't expose the utm fields on sale.order (guarded by
+    a field-presence check, not a hard dependency). Reuses an existing utm record
+    case-insensitively — so the seeded "Email" medium absorbs our lowercased
+    "email" rather than spawning a duplicate — and only creates one when none
+    matches. Keeps native Odoo UTM pivots in step with the dedicated Char fields;
+    best-effort, so a utm write never fails an order.
+    """
+    for field, utm_model, m2o in order_attribution.UTM_MIRROR:
+        name = vals.get(field)
+        if not name or m2o not in order._fields:
+            continue
+        Model = order.env[utm_model].sudo()
+        record = Model.search([("name", "=ilike", name)], limit=1)
+        if not record:
+            record = Model.create({"name": name})
+        order[m2o] = record.id
+
+
+def _apply_order_attribution(order, payload):
+    """Stamp validated storefront attribution onto a freshly-created sale.order.
+
+    Shared by POST /orders and POST /checkout/session via _create_draft_order, so
+    both entry points capture attribution identically. Entirely best-effort: a
+    bad payload writes nothing, and any failure is swallowed so attribution can
+    never fail an order (GOL-4077). Returns the dict it wrote, for the caller's
+    tests / logs.
+    """
+    vals = order_attribution.sanitize_attribution(payload)
+    if not vals:
+        return {}
+    try:
+        order.write(vals)
+        _mirror_builtin_utm(order, vals)
+    except Exception:  # noqa: BLE001 — attribution capture is best-effort, never fatal
+        _logger.warning("Order attribution capture failed for order %s", order.id, exc_info=True)
+    return vals
 
 
 def _log_newsletter_attribution(partner, source, attribution):
@@ -5518,6 +5620,12 @@ def _create_draft_order(website, env, payload, discount_out=None):
         line.product_template_id.grove_consult_built for line in order.order_line if line.product_template_id
     ):
         order.grove_planner_plan = plan
+
+    # Order attribution (GOL-4077): capture where the buyer came from so revenue
+    # by channel / campaign / post reads straight out of Odoo. Best-effort and
+    # last, after every gate that could unlink the order — a malformed payload
+    # writes nothing and never fails the checkout.
+    _apply_order_attribution(order, payload)
 
     return order, None
 
