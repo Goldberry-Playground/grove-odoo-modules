@@ -22,6 +22,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">Strategy session, per hour. Two-hour minimum in person.</field>
@@ -34,6 +35,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">Basemaps prepared for a strategy session. Credited against a plan.</field>
@@ -46,6 +48,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">Whole-property plan. Fixed on the quote after the visit.</field>
@@ -58,6 +61,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">Implementation workbook. Replaces the plan fee.</field>
@@ -70,6 +74,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">Installation labor, per day. Bid per project.</field>
@@ -82,6 +87,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">A single stewardship visit.</field>
@@ -94,6 +100,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">A year of stewardship visits.</field>
@@ -106,6 +113,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">Consulting, per hour. For extras beyond the menu.</field>
@@ -118,6 +126,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">Top-working established trees. Case by case.</field>
@@ -130,6 +139,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">Living willow structure. Case by case.</field>
@@ -142,6 +152,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">Travel, per mile round trip. IRS rate; update yearly.</field>
@@ -154,6 +165,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">Travel, outbound beyond the first hour.</field>
@@ -166,6 +178,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field name="description_sale">Overnight allowance. Confirmed in writing.</field>

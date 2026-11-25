@@ -159,6 +159,113 @@ class TestConsultRoutes(GroveTaxFixtureMixin, HttpCase):
         plan2 = self._post(f"/lead/{lead.id}/plan", {})
         self.assertEqual(plan2.json()["plan"]["version"], 2)
 
+    # ── GOL-4093: pipeline areas / stage_since / zone ────────────────────────
+    def test_pipeline_carries_areas_stage_since_and_zone(self):
+        lead = self._lead(grove_consult_stage="intake", zip="26651")
+        self.env["grove.consult.area"].with_company(self.company).create(
+            {"lead_id": lead.id, "name": "North slope", "practice_id": self.practice.id, "acres": 2.5}
+        )
+        row = next(row for row in self._get("/pipeline").json()["leads"] if row["id"] == lead.id)
+        # Areas ride the brief, so the app needs no extra read per lead.
+        self.assertEqual([a["name"] for a in row["areas"]], ["North slope"])
+        # stage_since is stamped when the stage is set and is ISO-parseable.
+        self.assertTrue(row["stage_since"])
+        self.assertEqual(row["zone"], "6")  # 26651 -> USDA zone 6
+
+    def test_stage_since_moves_only_when_the_stage_changes(self):
+        lead = self._lead(grove_consult_stage="intake")
+        first = lead.grove_stage_since
+        self.assertTrue(first)
+        # A write that does not change the stage leaves the stamp alone.
+        self._post("/lead", {"id": lead.id, "grove_consult_stage": "intake", "grove_goals": "x"})
+        lead.invalidate_recordset()
+        self.assertEqual(lead.grove_stage_since, first)
+        # A real stage move advances it.
+        self._post(f"/lead/{lead.id}/stage", {"stage": "design"})
+        lead.invalidate_recordset()
+        self.assertGreaterEqual(lead.grove_stage_since, first)
+        self.assertEqual(lead.grove_consult_stage, "design")
+
+    # ── GOL-4093: name + zip on update, walk checklist ───────────────────────
+    def test_update_sets_name_and_zip(self):
+        lead = self._lead(grove_consult_stage="intake")
+        resp = self._post("/lead", {"id": lead.id, "name": "Renamed client", "zip": "26651"})
+        self.assertEqual(resp.status_code, 200, resp.text)
+        body = resp.json()["lead"]
+        self.assertEqual(body["name"], "Renamed client")
+        self.assertEqual(body["zip"], "26651")
+
+    def test_walk_checklist_get_set_and_dedicated_route(self):
+        lead = self._lead(grove_consult_stage="site")
+        # Empty-but-present on a fresh lead: the app can tell "supported" from "not".
+        got = self._get(f"/lead/{lead.id}")
+        self.assertEqual(got.json()["lead"]["walk_checklist"], {})
+        # Dedicated route saves the map.
+        saved = self._post(f"/lead/{lead.id}/walk", {"walk": {"access": True, "water": False}})
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["lead"]["walk_checklist"], {"access": True, "water": False})
+        # POST /lead with walk_checklist writes the same field (either path works).
+        self._post("/lead", {"id": lead.id, "walk_checklist": {"soil": True}})
+        self.assertEqual(self._get(f"/lead/{lead.id}").json()["lead"]["walk_checklist"], {"soil": True})
+
+    def test_walk_route_rejects_non_object(self):
+        lead = self._lead(grove_consult_stage="site")
+        self.assertEqual(self._post(f"/lead/{lead.id}/walk", {"walk": "nope"}).status_code, 422)
+
+    # ── GOL-4093: steps picker ───────────────────────────────────────────────
+    def test_steps_lists_only_flagged_service_products(self):
+        step = self.env["product.product"].create(
+            {
+                "name": "Whole-property plan",
+                "type": "service",
+                "list_price": 800.0,
+                "company_id": self.company.id,
+                "grove_consult_step_ok": True,
+            }
+        )
+        self.env["product.product"].create(
+            {"name": "Shipping & handling", "type": "service", "list_price": 5.0, "company_id": self.company.id}
+        )
+        resp = self._get("/steps")
+        self.assertEqual(resp.status_code, 200, resp.text)
+        steps = resp.json()["steps"]
+        self.assertIn(step.id, [s["id"] for s in steps])
+        self.assertNotIn("Shipping & handling", [s["name"] for s in steps])
+        picked = next(s for s in steps if s["id"] == step.id)
+        self.assertEqual(picked["price"], 800.0)
+
+    # ── GOL-4093: plans read + whole-plan approve + actor ─────────────────────
+    def test_plans_read_back_with_full_sections_and_actor(self):
+        lead = self._lead(grove_consult_stage="design", grove_module_ids=[(6, 0, [self.module.id])])
+        self._post(f"/lead/{lead.id}/plan", {})
+        key = self.env["grove.consult.plan"].search([("lead_id", "=", lead.id)]).section_ids.key
+        # Save a body with an actor, then approve with an actor.
+        self._post(f"/lead/{lead.id}/plan/1/section/{key}", {"body": "Draft text", "actor": "editor@grove.farm"})
+        approved = self._post(f"/lead/{lead.id}/plan/1/section/{key}", {"approve": True, "actor": "signer@grove.farm"})
+        self.assertEqual(approved.json()["section"]["by"], "signer@grove.farm")
+
+        plans = self._get(f"/lead/{lead.id}/plans")
+        self.assertEqual(plans.status_code, 200, plans.text)
+        section = plans.json()["plans"][0]["section_ids"][0]
+        self.assertEqual(section["body"], "Draft text")
+        self.assertEqual(section["draft_body"], "Draft text")
+        self.assertEqual(section["by"], "signer@grove.farm")
+        self.assertTrue(section["approved_at"])
+
+    def test_plan_approve_refuses_until_all_sections_approved(self):
+        lead = self._lead(grove_consult_stage="design", grove_module_ids=[(6, 0, [self.module.id])])
+        self._post(f"/lead/{lead.id}/plan", {})
+        key = self.env["grove.consult.plan"].search([("lead_id", "=", lead.id)]).section_ids.key
+        # No section approved yet -> 422.
+        self.assertEqual(self._post(f"/lead/{lead.id}/plan/1/approve", {}).status_code, 422)
+        # Approve the one section, then the whole plan locks.
+        self._post(f"/lead/{lead.id}/plan/1/section/{key}", {"body": "Body", "approve": True})
+        ok = self._post(f"/lead/{lead.id}/plan/1/approve", {"actor": "signer@grove.farm"})
+        self.assertEqual(ok.status_code, 200, ok.text)
+        self.assertEqual(ok.json()["plan"]["status"], "approved")
+        plan = self.env["grove.consult.plan"].search([("lead_id", "=", lead.id)])
+        self.assertEqual(plan.approved_actor, "signer@grove.farm")
+
     # ── travel ───────────────────────────────────────────────────────────────
     def test_travel_estimate(self):
         resp = self._get("/travel?zip=26651")  # farm ZIP -> itself: ~0 miles

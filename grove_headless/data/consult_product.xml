@@ -25,6 +25,7 @@
         <field name="purchase_ok" eval="False" />
         <field name="website_published" eval="False" />
         <field name="grove_gate_exempt" eval="True" />
+        <field name="grove_consult_step_ok" eval="True" />
         <field name="company_id" ref="company_nursery" />
         <field name="taxes_id" eval="[(6, 0, [])]" />
         <field

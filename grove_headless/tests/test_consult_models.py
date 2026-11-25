@@ -93,6 +93,26 @@ class TestConsultModels(TransactionCase):
         with self.assertRaises(ValidationError):
             self.plan.write({"status": "approved"})
 
+    # ── GOL-4093 actor on section / plan approval ────────────────────────────
+
+    def test_section_approve_records_the_actor_not_the_api_user(self):
+        section = self._section(body="Signed-off text")
+        section.action_approve(actor="signer@grove.farm")
+        # by keeps the Odoo user (audit); by_actor is the verified human.
+        self.assertEqual(section.by, self.env.user)
+        self.assertEqual(section.by_actor, "signer@grove.farm")
+
+    def test_plan_action_approve_records_actor_and_enforces_constraint(self):
+        section = self._section(body="Body")
+        # Cannot approve the plan while the section is unapproved.
+        with self.assertRaises(ValidationError):
+            self.plan.action_approve(actor="signer@grove.farm")
+        section.action_approve()
+        self.plan.action_approve(actor="signer@grove.farm")
+        self.assertEqual(self.plan.status, "approved")
+        self.assertEqual(self.plan.approved_actor, "signer@grove.farm")
+        self.assertEqual(self.plan.approved_by, self.env.user)
+
     # ── C.8 read-only snapshot fields ────────────────────────────────────────
 
     def test_snapshot_fields_refuse_a_direct_write(self):

@@ -15,4 +15,5 @@ from . import (
     test_events_feed_route,  # noqa: F401
     test_grove_public_domain,  # noqa: F401
     test_grove_website_domain,  # noqa: F401
+    test_milestone_calendar,  # noqa: F401
 )

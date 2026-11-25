@@ -119,6 +119,42 @@ class TestOrderLabelRefundedMove(GroveTaxFixtureMixin, TransactionCase):
         order.action_grove_label_refunded("Wes")
         self.assertEqual(order.grove_checkout_status, "settled")
 
+    def test_stale_refund_leaves_the_replacement_label_intact(self):
+        # Label A is refunded, a replacement B is bought, then a stale confirm for
+        # A fires. The order is still at label_purchased, so the stage check alone
+        # would clear B; the tracking compare refuses it instead (GOL-3936).
+        order = self._labelled()
+        order.action_grove_label_refunded("Wes")
+        order.action_grove_record_hand_label(UPS_2, actual_cost=7.0)
+        self.assertEqual(order.grove_tracking_numbers, UPS_2)
+        msgs = len(order.message_ids)
+        with self.assertRaises(UserError) as ctx:
+            order.action_grove_label_refunded("Wes", tracking=UPS)
+        self.assertIn("already been replaced", str(ctx.exception))
+        self.assertEqual(order.grove_tracking_numbers, UPS_2)
+        self.assertEqual(order.grove_fulfillment_stage, "label_purchased")
+        self.assertEqual(len(order.message_ids), msgs)
+
+    def test_refund_with_matching_tracking_still_clears_the_label(self):
+        order = self._labelled()
+        self.assertTrue(order.action_grove_label_refunded("Wes", tracking=UPS))
+        self.assertFalse(order.grove_tracking_numbers)
+        self.assertEqual(order.grove_fulfillment_stage, "awaiting_label")
+
+    def test_refund_matches_a_multi_box_label_by_its_first_number(self):
+        # The bridge carries only the first number the card showed; a multi-box order
+        # whose first number still matches is a live confirm and must clear every box.
+        order = self._labelled()
+        order.sudo().write({"grove_tracking_numbers": f"{UPS}\n{UPS_2}"})
+        self.assertTrue(order.action_grove_label_refunded("Wes", tracking=UPS))
+        self.assertFalse(order.grove_tracking_numbers)
+
+    def test_refund_with_a_blank_tracking_skips_the_check(self):
+        # A legacy confirm button carries no number: fall back to the old behaviour.
+        order = self._labelled()
+        self.assertTrue(order.action_grove_label_refunded("Wes", tracking=""))
+        self.assertFalse(order.grove_tracking_numbers)
+
     def test_refunded_order_can_be_labelled_again(self):
         for wave in (None, "fall"):
             order = self._labelled(wave=wave)
