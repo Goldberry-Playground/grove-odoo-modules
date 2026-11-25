@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo noupdate="1">
+    <!--
+        Shared location tags (project.tags) for aspect work (s8.1). noupdate so
+        Josh can rename or recolor them in production without a module upgrade
+        reverting the change. The starting set is editable; add locations as the
+        farm and nursery grow.
+    -->
+    <record id="tag_hoophouse" model="project.tags">
+        <field name="name">Hoophouse</field>
+    </record>
+    <record id="tag_orchard_block_2" model="project.tags">
+        <field name="name">Orchard block 2</field>
+    </record>
+    <record id="tag_road_stand" model="project.tags">
+        <field name="name">Road stand</field>
+    </record>
+    <record id="tag_nursery_yard" model="project.tags">
+        <field name="name">Nursery yard</field>
+    </record>
+    <record id="tag_pasture" model="project.tags">
+        <field name="name">Pasture and grounds</field>
+    </record>
+    <record id="tag_shop" model="project.tags">
+        <field name="name">Woodworking shop</field>
+    </record>
+</odoo>

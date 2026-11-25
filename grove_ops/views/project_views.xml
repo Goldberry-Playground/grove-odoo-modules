@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<odoo>
+    <!-- Expose the aspect / build flags on the project form. -->
+    <record id="view_project_form_grove_ops" model="ir.ui.view">
+        <field name="name">project.project.form.grove_ops</field>
+        <field name="model">project.project</field>
+        <field name="inherit_id" ref="project.edit_project"/>
+        <field name="arch" type="xml">
+            <xpath expr="//field[@name='company_id']" position="after">
+                <field name="grove_is_aspect"/>
+                <field name="grove_is_build"/>
+            </xpath>
+        </field>
+    </record>
+
+    <!-- Filters so the two seeded families are easy to find. -->
+    <record id="view_project_search_grove_ops" model="ir.ui.view">
+        <field name="name">project.project.search.grove_ops</field>
+        <field name="model">project.project</field>
+        <field name="inherit_id" ref="project.view_project_project_filter"/>
+        <field name="arch" type="xml">
+            <xpath expr="//search" position="inside">
+                <filter name="grove_aspects" string="Aspects"
+                        domain="[('grove_is_aspect', '=', True)]"/>
+                <filter name="grove_builds" string="Builds"
+                        domain="[('grove_is_build', '=', True)]"/>
+            </xpath>
+        </field>
+    </record>
+</odoo>
